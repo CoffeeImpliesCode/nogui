@@ -1,0 +1,11 @@
+.envrc
+.devenv/
+.direnv/
+notes/
+.zig-cache/
+zig-out/
+zig-pkg/
+codedb*
+graphify_out/
+
+
