@@ -52,9 +52,9 @@ pub fn main(init: std.process.Init) !void {
     defer gpu.deinit();
 
     // Surface
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.backend.instance.handle)), null);
+    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    _ = try gpu.addWindow(surface, .{ .width = 800, .height = 600 });
+    var gw = try noapi.Surface.init(&gpu, surface, .{ .width = 800, .height = 600 });
     const win_id = try sdl_win.getId();
 
     // Graphics shaders
@@ -62,8 +62,6 @@ pub fn main(init: std.process.Init) !void {
     defer gpu.shaderDestroy(grid_vert);
     const grid_frag = try gpu.shaderCreate(grid_frag_spirv, .fragment, "main", "grid_frag");
     defer gpu.shaderDestroy(grid_frag);
-
-    var gw = noapi.Window{ .gpu = &gpu, .index = 0 };
     var time_sec: f32 = 0;
 
     // Main loop
@@ -100,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
         const push = noapi.PushData{ .frag_data = time_bits };
         var cmd = gw.commandsBegin();
 
-        const sc = gw.currentSwapchainImage();
+        const sc = gw.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{
                 0.1 + @sin(time_sec * 0.5) * 0.05,

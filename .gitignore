@@ -6,6 +6,9 @@ notes/
 zig-out/
 zig-pkg/
 codedb*
-graphify_out/
-
+graphify-out/
+.goose/
+.omo/
+.playwright-mcp/
+*.json
 
