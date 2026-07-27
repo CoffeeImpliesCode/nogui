@@ -9,7 +9,7 @@ layout(location = 4) in vec2 origin;
 layout(location = 0) out vec2 vUv;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) flat out uint vMaterialIdx;
-layout(location = 3) flat out vec2 vOrigin;
+layout(location = 3) out vec2 vOrigin; // rect top-left in framebuffer px
 
 void main() {
     gl_Position = vec4(position, 0.0, 1.0);

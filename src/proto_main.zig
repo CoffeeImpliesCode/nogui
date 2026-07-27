@@ -27,7 +27,7 @@ fn getExts() []const [*:0]const u8 {
 fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]proto.Curve {
     const idx = c.FT_Get_Char_Index(face, @intCast(ch));
     if (idx == 0) return error.GlyphNotFound;
-    _ = c.FT_Load_Glyph(face, idx, c.FT_LOAD_NO_BITMAP);
+    if (c.FT_Load_Glyph(face, idx, c.FT_LOAD_NO_BITMAP) != 0) return error.GlyphLoadFailed;
     const outline = &face.*.glyph.*.outline;
 
     var buf: [4096]proto.Curve = undefined;
@@ -133,7 +133,7 @@ fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]prot
         .shift = 0,
         .delta = 0,
     };
-    _ = c.FT_Outline_Decompose(outline, &funcs, &ctx);
+    if (c.FT_Outline_Decompose(outline, &funcs, &ctx) != 0) return error.OutlineDecomposeFailed;
 
     const result = try alloc.dupe(proto.Curve, buf[0..count]);
     return result; // caller prints glyph info
@@ -155,29 +155,29 @@ const MyGui = struct {
         const bg_dark = [4]f32{ 0.516395, 0.0, 0.0, 1.0 };
 
         const children = try ctx.allocator.alloc(*proto.Widget, 12);
-        children[0] = try ctx.label("nogui prototype v0.1", .{ .sizing = .{ .x = .fit, .y = .fit } });
-        children[1] = try ctx.button("Click me!", .{ .sizing = .{ .x = .fit, .y = .fit }, .color = btn_blue, .corner_radius = 4 });
-        children[2] = try ctx.slider("Volume", &self.volume, 0, 1, .{ .sizing = .{ .x = .grow, .y = .fit }, .color = .{ 0.599211, -0.044541, 0.031354, 1.0 }, .corner_radius = 3 });
+        children[0] = try ctx.tempLabel("nogui prototype v0.1", .{ .sizing = .{ .x = .fit, .y = .fit } });
+        children[1] = try ctx.tempButton("Click me!", .{ .sizing = .{ .x = .fit, .y = .fit }, .color = btn_blue, .corner_radius = 4 });
+        children[2] = try ctx.tempSlider("Volume", &self.volume, 0, 1, .{ .sizing = .{ .x = .grow, .y = .fit }, .color = .{ 0.599211, -0.044541, 0.031354, 1.0 }, .corner_radius = 3 });
 
         const row_children = try ctx.allocator.alloc(*proto.Widget, 2);
-        row_children[0] = try ctx.label("Counter:", .{});
+        row_children[0] = try ctx.tempLabel("Counter:", .{});
         const counter_str = try std.fmt.allocPrint(ctx.allocator, "{}", .{self.counter});
-        row_children[1] = try ctx.label(counter_str, .{});
-        children[3] = try ctx.row(row_children, .{ .padding = 4, .gap = 8, .sizing = .{ .x = .grow, .y = .fit } });
+        row_children[1] = try ctx.tempLabel(counter_str, .{});
+        children[3] = try ctx.tempRow(row_children, .{ .padding = 4, .gap = 8, .sizing = .{ .x = .grow, .y = .fit } });
 
-        children[4] = try ctx.button("Quit", .{ .sizing = .{ .x = .fit, .y = .fit }, .color = btn_blue, .corner_radius = 4 });
+        children[4] = try ctx.tempButton("Quit", .{ .sizing = .{ .x = .fit, .y = .fit }, .color = btn_blue, .corner_radius = 4 });
 
-        children[5] = try ctx.label("The quick brown fox jumps over the lazy dog.", .{ .sizing = .{ .x = .grow, .y = .fit } });
-        children[6] = try ctx.label("ABCDEFGHIJKLMNOPQRSTUVWXYZ", .{ .sizing = .{ .x = .fit, .y = .fit } });
-        children[7] = try ctx.label("abcdefghijklmnopqrstuvwxyz 0123456789", .{ .sizing = .{ .x = .fit, .y = .fit } });
+        children[5] = try ctx.tempLabel("The quick brown fox jumps over the lazy dog.", .{ .sizing = .{ .x = .grow, .y = .fit } });
+        children[6] = try ctx.tempLabel("ABCDEFGHIJKLMNOPQRSTUVWXYZ", .{ .sizing = .{ .x = .fit, .y = .fit } });
+        children[7] = try ctx.tempLabel("abcdefghijklmnopqrstuvwxyz 0123456789", .{ .sizing = .{ .x = .fit, .y = .fit } });
 
         // Small font edge cases
-        children[8] = try ctx.label("The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.", .{ .sizing = .{ .x = .grow, .y = .fit } });
-        children[9] = try ctx.label("iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii", .{ .sizing = .{ .x = .fit, .y = .fit } });
-        children[10] = try ctx.label("gggggggggggggggggggggggggggggggggggggggggggggggggg", .{ .sizing = .{ .x = .fit, .y = .fit } });
-        children[11] = try ctx.label("MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM", .{ .sizing = .{ .x = .fit, .y = .fit } });
+        children[8] = try ctx.tempLabel("The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.", .{ .sizing = .{ .x = .grow, .y = .fit } });
+        children[9] = try ctx.tempLabel("iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii", .{ .sizing = .{ .x = .fit, .y = .fit } });
+        children[10] = try ctx.tempLabel("gggggggggggggggggggggggggggggggggggggggggggggggggg", .{ .sizing = .{ .x = .fit, .y = .fit } });
+        children[11] = try ctx.tempLabel("MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM", .{ .sizing = .{ .x = .fit, .y = .fit } });
 
-        return try ctx.column(children, .{ .padding = 16, .gap = 8, .sizing = .{
+        return try ctx.tempColumn(children, .{ .padding = 16, .gap = 8, .sizing = .{
             .x = .grow,
             .y = .grow,
         }, .color = bg_dark, .corner_radius = 8 });
@@ -241,9 +241,10 @@ pub fn main(init: std.process.Init) !void {
 
     const font_data = @embedFile("InterVariable.ttf");
     var face: c.FT_Face = undefined;
+    std.debug.assert(font_data.len <= std.math.maxInt(u32));
     if (c.FT_New_Memory_Face(ft_lib, font_data.ptr, @as(c.FT_Long, @intCast(font_data.len)), 0, &face) != 0) @panic("FT face");
     defer _ = c.FT_Done_Face(face);
-    _ = c.FT_Set_Pixel_Sizes(face, 0, 480);
+    if (c.FT_Set_Pixel_Sizes(face, 0, 480) != 0) @panic("FT_Set_Pixel_Sizes failed");
 
     // Extract glyph 'A' curves — renders as background sweep
     const a_curves = try extractCharCurves(gpa, face, 'A');
@@ -259,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
     win.sweeper = &a_sweeper;
 
     // Extract label glyphs
-    _ = c.FT_Set_Pixel_Sizes(face, 0, 12);
+    if (c.FT_Set_Pixel_Sizes(face, 0, 12) != 0) @panic("FT_Set_Pixel_Sizes failed");
     // Build string containing all unique chars from test texts
     const label_chars = "nogui prototype v0.1Click me!VolumeCounter:0QuitThe quick brown fox jumps over the lazy dog.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     var seen: [256]bool = .{false} ** 256;
@@ -273,8 +274,11 @@ pub fn main(init: std.process.Init) !void {
     @memset(&seen, false);
 
     const sweeper_arr = try gpa.alloc(proto.GlyphSweeper, unique_count);
-    defer gpa.free(sweeper_arr);
     var si: usize = 0;
+    defer {
+        for (sweeper_arr[0..si]) |*s| s.deinit();
+        gpa.free(sweeper_arr);
+    }
     for (label_chars) |ch| {
         if (seen[ch]) continue;
         seen[ch] = true;
@@ -293,7 +297,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Glyph '{c}': {d} curves, adv={d:.1} bx={d:.1} by={d:.1}\n", .{ ch, curves.len, advance, bx, by });
         si += 1;
     }
-    _ = c.FT_Set_Pixel_Sizes(face, 0, 480);
+    if (c.FT_Set_Pixel_Sizes(face, 0, 480) != 0) @panic("FT_Set_Pixel_Sizes failed");
 
     var gui = MyGui{};
     try win.run(&gui);

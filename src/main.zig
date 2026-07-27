@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     // Surface
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var gw = try noapi.Surface.init(&gpu, surface, .{ .width = 800, .height = 600 });
+    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 800, .height = 600 } });
     const win_id = try sdl_win.getId();
 
     // Graphics shaders
@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) gw.notifyResize(.{ .width = @intCast(we.width), .height = @intCast(we.height) });
+                    if (we.id == win_id) gw.notifyResize(.{ .width = @intCast(@max(0, we.width)), .height = @intCast(@max(0, we.height)) });
                 },
                 else => {},
             }
@@ -114,8 +114,9 @@ pub fn main(init: std.process.Init) !void {
 
         cmd.endRendering();
 
-        _ = gw.endFrame(.{ .blit_to_swapchain = true });
+        const frame_result = try gw.endFrame(.{ .blit_to_swapchain = true });
+        _ = frame_result;
     }
 
-    gpu.waitIdle();
+    try gpu.waitIdle();
 }

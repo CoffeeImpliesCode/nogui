@@ -11,7 +11,7 @@ const c = @cImport({
     @cInclude("freetype/ftglyph.h");
 });
 
-const QuadCurve = struct { ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32 };
+const QuadCurve = struct { p0x: f32, p0y: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32 };
 
 fn cubicToQuads(p0x: f32, p0y: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32, p3x: f32, p3y: f32, out: []QuadCurve) usize {
     const t: f32 = 0.5;
@@ -28,36 +28,36 @@ fn cubicToQuads(p0x: f32, p0y: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32, p3x:
     const c1y = mt * b1y + t * b2y;
     const dx = mt * c0x + t * c1x;
     const dy = mt * c0y + t * c1y;
-    out[0] = .{ .ax = p0x, .ay = p0y, .bx = b0x, .by = b0y, .cx = dx, .cy = dy };
-    out[1] = .{ .ax = dx, .ay = dy, .bx = c1x, .by = c1y, .cx = p3x, .cy = p3y };
+    out[0] = .{ .p0x = p0x, .p0y = p0y, .p1x = b0x, .p1y = b0y, .p2x = dx, .p2y = dy };
+    out[1] = .{ .p0x = dx, .p0y = dy, .p1x = c1x, .p1y = c1y, .p2x = p3x, .p2y = p3y };
     return 2;
 }
 
 fn isYMonotonic(q: QuadCurve) bool {
-    const denom = q.ay + q.cy - 2.0 * q.by;
+    const denom = q.p0y + q.p2y - 2.0 * q.p1y;
     if (@abs(denom) < 1e-6) return true;
-    const t0 = (q.ay - q.by) / denom;
+    const t0 = (q.p0y - q.p1y) / denom;
     return t0 <= 0.0 or t0 >= 1.0;
 }
 
 fn isXMonotonic(q: QuadCurve) bool {
-    const denom = q.ax + q.cx - 2.0 * q.bx;
+    const denom = q.p0x + q.p2x - 2.0 * q.p1x;
     if (@abs(denom) < 1e-6) return true;
-    const t0 = (q.ax - q.bx) / denom;
+    const t0 = (q.p0x - q.p1x) / denom;
     return t0 <= 0.0 or t0 >= 1.0;
 }
 
 fn subdivide(q: QuadCurve, t: f32) [2]QuadCurve {
     const mt = 1.0 - t;
-    const mid_x = mt * (mt * q.ax + t * q.bx) + t * (mt * q.bx + t * q.cx);
-    const mid_y = mt * (mt * q.ay + t * q.by) + t * (mt * q.by + t * q.cy);
-    const b1x = mt * q.ax + t * q.bx;
-    const b1y = mt * q.ay + t * q.by;
-    const b2x = mt * q.bx + t * q.cx;
-    const b2y = mt * q.by + t * q.cy;
+    const mid_x = mt * (mt * q.p0x + t * q.p1x) + t * (mt * q.p1x + t * q.p2x);
+    const mid_y = mt * (mt * q.p0y + t * q.p1y) + t * (mt * q.p1y + t * q.p2y);
+    const b1x = mt * q.p0x + t * q.p1x;
+    const b1y = mt * q.p0y + t * q.p1y;
+    const b2x = mt * q.p1x + t * q.p2x;
+    const b2y = mt * q.p1y + t * q.p2y;
     return .{
-        .{ .ax = q.ax, .ay = q.ay, .bx = b1x, .by = b1y, .cx = mid_x, .cy = mid_y },
-        .{ .ax = mid_x, .ay = mid_y, .bx = b2x, .by = b2y, .cx = q.cx, .cy = q.cy },
+        .{ .p0x = q.p0x, .p0y = q.p0y, .p1x = b1x, .p1y = b1y, .p2x = mid_x, .p2y = mid_y },
+        .{ .p0x = mid_x, .p0y = mid_y, .p1x = b2x, .p1y = b2y, .p2x = q.p2x, .p2y = q.p2y },
     };
 }
 
@@ -97,12 +97,12 @@ const OutlineCollector = struct {
     fn lineTo(self: *OutlineCollector, to_x: f32, to_y: f32) void {
         const mx = (self.last_x + to_x) * 0.5;
         const my = (self.last_y + to_y) * 0.5;
-        self.push(.{ .ax = self.last_x, .ay = self.last_y, .bx = mx, .by = my, .cx = to_x, .cy = to_y });
+        self.push(.{ .p0x = self.last_x, .p0y = self.last_y, .p1x = mx, .p1y = my, .p2x = to_x, .p2y = to_y });
         self.last_x = to_x;
         self.last_y = to_y;
     }
     fn conicTo(self: *OutlineCollector, cx: f32, cy: f32, to_x: f32, to_y: f32) void {
-        self.push(.{ .ax = self.last_x, .ay = self.last_y, .bx = cx, .by = cy, .cx = to_x, .cy = to_y });
+        self.push(.{ .p0x = self.last_x, .p0y = self.last_y, .p1x = cx, .p1y = cy, .p2x = to_x, .p2y = to_y });
         self.last_x = to_x;
         self.last_y = to_y;
     }
@@ -187,7 +187,7 @@ pub fn main() !void {
 
     std.debug.print("Curves: {d}\n", .{col.count});
     for (col.curves[0..@min(col.count, 8)], 0..) |q, i|
-        std.debug.print("  [{d}] ({d:.1},{d:.1})->({d:.1},{d:.1})->({d:.1},{d:.1})\n", .{ i, q.ax, q.ay, q.bx, q.by, q.cx, q.cy });
+        std.debug.print("  [{d}] ({d:.1},{d:.1})->({d:.1},{d:.1})->({d:.1},{d:.1})\n", .{ i, q.p0x, q.p0y, q.p1x, q.p1y, q.p2x, q.p2y });
     if (col.count > 8) std.debug.print("  ...\n", .{});
 
     var mono: [8192]QuadCurve = undefined;
@@ -208,11 +208,11 @@ pub fn main() !void {
     var max_x: f32 = -1e9;
     var max_y: f32 = -1e9;
     for (mono[0..mc]) |q| {
-        for ([_]f32{ q.ax, q.cx }) |x| {
+        for ([_]f32{ q.p0x, q.p2x }) |x| {
             min_x = @min(min_x, x);
             max_x = @max(max_x, x);
         }
-        for ([_]f32{ q.ay, q.cy }) |y| {
+        for ([_]f32{ q.p0y, q.p2y }) |y| {
             min_y = @min(min_y, y);
             max_y = @max(max_y, y);
         }

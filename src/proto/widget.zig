@@ -3,10 +3,56 @@
 //! PROTOTYPE — throwaway design exploration.
 
 const std = @import("std");
+const IdInner = @import("id.zig");
 
-/// Widget identity. In production this would be a u64 hash of
-/// @src() + optional scope. For the prototype we use a plain u64.
-pub const Id = u64;
+/// Widget identity — deterministic u64 FNV-1a hash of
+/// @src() + parent ID + optional extra discriminator.
+/// See `id.zig` for construction.
+pub const Id = IdInner.Id;
+
+// ─── Event types (shared across event.zig and context.zig) ──
+
+/// Widget interaction state machine.
+pub const InteractionState = enum(u8) {
+    inactive = 0,
+    hot = 1,
+    active = 2,
+    focused = 3,
+};
+
+/// Mouse buttons.
+pub const MouseButton = enum(u8) {
+    left = 1,
+    middle = 2,
+    right = 3,
+    x1 = 4,
+    x2 = 5,
+};
+
+/// Key codes — a subset of common keys.
+pub const Key = enum(u32) {
+    unknown = 0,
+    lshift, rshift, lctrl, rctrl, lalt, ralt, lgui, rgui,
+    escape, enter, tab, backspace, delete, home, end, page_up, page_down,
+    left, right, up, down,
+    space, caps_lock, insert, print_screen, pause,
+    a, b, c, d, e, f, g, h, i, j, k, l, m,
+    n, o, p, q, r, s, t, u, v, w, x, y, z,
+    k0, k1, k2, k3, k4, k5, k6, k7, k8, k9,
+    f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12,
+    f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24,
+    minus, equals, left_bracket, right_bracket,
+    semicolon, quote, comma, period, slash, backslash, grave,
+};
+
+/// Keyboard modifier mask.
+pub const KeyMods = packed struct(u8) {
+    shift: bool = false,
+    ctrl: bool = false,
+    alt: bool = false,
+    gui: bool = false,
+    _padding: u4 = 0,
+};
 
 /// 2D size.
 pub const Size = struct {
@@ -127,3 +173,70 @@ pub const Widget = struct {
         };
     }
 };
+
+const testing = std.testing;
+
+test "Size.max: returns max of each axis" {
+    const a = Size{ .width = 10, .height = 20 };
+    const b = Size{ .width = 30, .height = 5 };
+    const result = Size.max(a, b);
+    try testing.expectEqual(@as(f32, 30), result.width);
+    try testing.expectEqual(@as(f32, 20), result.height);
+}
+
+test "Size.max: with zero" {
+    const a = Size{ .width = 0, .height = 0 };
+    const b = Size{ .width = 10, .height = 10 };
+    const result = Size.max(a, b);
+    try testing.expectEqual(@as(f32, 10), result.width);
+    try testing.expectEqual(@as(f32, 10), result.height);
+}
+
+test "Direction.isVertical" {
+    try testing.expect(Direction.column.isVertical());
+    try testing.expect(!Direction.row.isVertical());
+}
+
+test "Direction.isHorizontal" {
+    try testing.expect(Direction.row.isHorizontal());
+    try testing.expect(!Direction.column.isHorizontal());
+}
+
+fn testId(n: usize) Id {
+    return @enumFromInt(n + 100);
+}
+
+test "Widget.isContainer: container kinds" {
+    const child_id = testId(0);
+    const parent_id = testId(1);
+    var child = Widget{ .id = child_id, .sizing = .{}, .kind = .{ .label = .{ .text = "" } } };
+    var col = Widget{ .id = parent_id, .sizing = .{}, .kind = .{ .column = .{ .children = &.{&child} } } };
+    var row = Widget{ .id = parent_id, .sizing = .{}, .kind = .{ .row = .{ .children = &.{&child} } } };
+    try testing.expect(col.isContainer());
+    try testing.expect(row.isContainer());
+}
+
+test "Widget.isContainer: leaf kinds" {
+    const id0 = testId(2);
+    const id1 = testId(3);
+    var btn = Widget{ .id = id0, .sizing = .{}, .kind = .{ .button = .{ .label = "" } } };
+    var lbl = Widget{ .id = id1, .sizing = .{}, .kind = .{ .label = .{ .text = "" } } };
+    try testing.expect(!btn.isContainer());
+    try testing.expect(!lbl.isContainer());
+}
+
+test "Widget.children" {
+    const child_id = testId(4);
+    const parent_id = testId(5);
+    const btn_id = testId(6);
+    var child = Widget{ .id = child_id, .sizing = .{}, .kind = .{ .label = .{ .text = "c" } } };
+    var col = Widget{ .id = parent_id, .sizing = .{}, .kind = .{ .column = .{ .children = &.{&child} } } };
+    var btn = Widget{ .id = btn_id, .sizing = .{}, .kind = .{ .button = .{ .label = "b" } } };
+
+    const got = col.children();
+    try testing.expect(got != null);
+    try testing.expectEqual(@as(usize, 1), got.?.len);
+    try testing.expect(got.?[0].id == child_id);
+
+    try testing.expect(btn.children() == null);
+}

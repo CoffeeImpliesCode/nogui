@@ -1,7 +1,14 @@
 //! Window — owns the SDL window, the GPU window, the ping-pong
 //! frame arenas, the event loop, and the 9-slice batch renderer.
 //!
-//! PROTOTYPE — throwaway design exploration.
+//! Rendering pipeline:
+//!   1. collectWidgetRects(RectCollectCtx) → []RenderCommand
+//!   2. processRenderCommands() → SliceRect[] + GPU material writes
+//!   3. Batch9Slice.draw() → GPU indexed draw
+//!   4. Blit pass: Oklab → sRGB
+//!
+//! PROTOTYPE — throwaway design exploration but the pipeline contract
+//! (RenderCommand enum → processRenderCommands → Batch9Slice) is final.
 
 const std = @import("std");
 const sdl3 = @import("sdl3");
@@ -10,13 +17,18 @@ const vk = noapi.vk;
 
 const Widget = @import("widget.zig").Widget;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
-const Size = @import("widget.zig").Size;
 const Context = @import("context.zig").Context;
 const Batch9Slice = @import("render_9slice.zig").Batch9Slice;
+const Event = @import("event.zig").Event;
+const dispatchEvents = @import("event.zig").dispatchEvents;
 const SliceRect = @import("render_9slice.zig").SliceRect;
 const GlyphSweeper = @import("sweeper.zig").GlyphSweeper;
-const Curve = @import("sweeper.zig").Curve;
+const GlyphMaterial = @import("sweeper.zig").GlyphMaterial;
 const MATERIAL_SIZE = @import("sweeper.zig").MATERIAL_SIZE;
+const RenderCommand = @import("render_command.zig").RenderCommand;
+const RenderCommandList = @import("render_command.zig").RenderCommandList;
+const RectCollectCtx = @import("render_command.zig").RectCollectCtx;
+const processRenderCommands = @import("render_command.zig").processRenderCommands;
 
 const FRAME_ARENAS = 2;
 const MAX_MATERIALS = 128;
@@ -33,12 +45,89 @@ const GlyphEntry = struct {
     glyph_h: f32 = 0,
 };
 
+// ─── SDL3 → nogui event translation helpers ──────────
+
+const kc = sdl3.keycode;
+const mouse = sdl3.mouse;
+
+/// Translate SDL3 keycode (nullable) to our Key enum.
+fn sdlKey(sdl_key: ?kc.Keycode) @import("widget.zig").Key {
+    const k = sdl_key orelse return .unknown;
+    return switch (k) {
+        .escape => .escape,
+        .return_key => .enter,
+        .tab => .tab,
+        .backspace => .backspace,
+        .delete => .delete,
+        .home => .home,
+        .end => .end,
+        .page_up => .page_up,
+        .page_down => .page_down,
+        .left => .left,
+        .right => .right,
+        .up => .up,
+        .down => .down,
+        .space => .space,
+        .a => .a, .b => .b, .c => .c, .d => .d, .e => .e,
+        .f => .f, .g => .g, .h => .h, .i => .i, .j => .j,
+        .k => .k, .l => .l, .m => .m, .n => .n, .o => .o,
+        .p => .p, .q => .q, .r => .r, .s => .s, .t => .t,
+        .u => .u, .v => .v, .w => .w, .x => .x, .y => .y, .z => .z,
+        .zero => .k0, .one => .k1, .two => .k2, .three => .k3, .four => .k4,
+        .five => .k5, .six => .k6, .seven => .k7, .eight => .k8, .nine => .k9,
+        .func1 => .f1, .func2 => .f2, .func3 => .f3, .func4 => .f4, .func5 => .f5,
+        .func6 => .f6, .func7 => .f7, .func8 => .f8, .func9 => .f9, .func10 => .f10,
+        .func11 => .f11, .func12 => .f12, .func13 => .f13, .func14 => .f14,
+        .func15 => .f15, .func16 => .f16, .func17 => .f17, .func18 => .f18,
+        .func19 => .f19, .func20 => .f20, .func21 => .f21, .func22 => .f22,
+        .func23 => .f23, .func24 => .f24,
+        .left_shift => .lshift, .right_shift => .rshift,
+        .left_ctrl => .lctrl, .right_ctrl => .rctrl,
+        .left_alt => .lalt, .right_alt => .ralt,
+        .left_gui => .lgui, .right_gui => .rgui,
+        .minus => .minus, .equals => .equals,
+        .left_bracket => .left_bracket, .right_bracket => .right_bracket,
+        .semicolon => .semicolon, .apostrophe => .quote,
+        .comma => .comma, .period => .period,
+        .slash => .slash, .backslash => .backslash,
+        .grave => .grave,
+        .insert => .insert,
+        .print_screen => .print_screen,
+        .pause => .pause,
+        .caps_lock => .caps_lock,
+        else => .unknown,
+    };
+}
+
+/// Translate SDL3 key modifier mask.
+fn sdlMods(sdl_mod: kc.KeyModifier) @import("widget.zig").KeyMods {
+    return .{
+        .shift = sdl_mod.left_shift or sdl_mod.right_shift,
+        .ctrl = sdl_mod.left_control or sdl_mod.right_control,
+        .alt = sdl_mod.left_alt or sdl_mod.right_alt,
+        .gui = sdl_mod.left_gui or sdl_mod.right_gui,
+    };
+}
+
+/// Translate SDL3 mouse button.
+fn sdlMouseButton(sdl_btn: mouse.Button) @import("widget.zig").MouseButton {
+    return switch (sdl_btn) {
+        .left => .left,
+        .right => .right,
+        .middle => .middle,
+        .x1 => .x1,
+        .x2 => .x2,
+        else => .left,
+    };
+}
+
 /// Represents a single OS window with its own GPU swapchain.
 pub const Window = struct {
     context: *Context,
     sdl_window: sdl3.video.Window,
     gpu_window: noapi.Surface,
     sdl_win_id: u32,
+    sdl_vk_surface: sdl3.vulkan.Surface,
     batch: Batch9Slice,
     sweeper: ?*GlyphSweeper = null, // 'A' background glyph
     should_close: bool = false,
@@ -55,6 +144,10 @@ pub const Window = struct {
     arenas: [FRAME_ARENAS]std.heap.ArenaAllocator,
     current_arena: usize = 0,
 
+    /// Per-frame event queue. Populated by pollEvents(), consumed by
+    /// dispatchEvents() after layout. Cleared each frame.
+    event_queue: std.ArrayListUnmanaged(Event) = .empty,
+
     /// Offscreen R32G32B32A32_SFLOAT render target for Oklab rendering.
     render_target: noapi.TextureHandle = .{},
     rt_width: u32 = 0,
@@ -64,6 +157,9 @@ pub const Window = struct {
     blit_vert: noapi.Shader,
     blit_frag: noapi.Shader,
     blit_heap: noapi.DescriptorHeap,
+
+    /// Per-frame RenderCommand buffer (frame-arena allocated).
+    cmd_buf: RenderCommandList = undefined,
 
     /// Register a glyph sweeper for an ASCII character.
     pub fn addGlyph(self: *@This(), char: u8, sweeper: *GlyphSweeper, advance: f32, bearing_x: f32, bearing_y: f32, glyph_w: f32, glyph_h: f32) void {
@@ -104,13 +200,14 @@ pub const Window = struct {
         const sdl_win = try sdl3.video.Window.init(title, w, h, .{ .resizable = true });
         try sdl_win.show();
 
-        const sdl_surface = try sdl3.vulkan.Surface.init(
+        var sdl_surface = try sdl3.vulkan.Surface.init(
             sdl_win,
             @ptrFromInt(@intFromEnum(context.gpu.instanceHandle())),
             null,
         );
         const surface: noapi.vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-        const gpu_window = try noapi.Surface.init(&context.gpu, surface, .{ .width = w, .height = h });
+        sdl_surface.surface = null;
+        const gpu_window = try noapi.Surface.init(&context.gpu, surface, .{ .extent = .{ .width = w, .height = h } });
         const win_id = try sdl_win.getId();
 
         var arenas: [FRAME_ARENAS]std.heap.ArenaAllocator = undefined;
@@ -130,7 +227,6 @@ pub const Window = struct {
         const bf = try context.gpu.shaderCreate(blit_frag_spv, .fragment, "main", "blit_oklab");
         const bh = try context.gpu.descHeapCreate(8, 0, 1);
 
-        // Create a sampler for the blit (texelFetch doesn't use filter modes)
         const blit_sampler = context.gpu.samplerDescriptor(.{
             .min_filter = .nearest,
             .mag_filter = .nearest,
@@ -141,6 +237,7 @@ pub const Window = struct {
         var self = @This(){
             .context = context,
             .sdl_window = sdl_win,
+            .sdl_vk_surface = sdl_surface,
             .gpu_window = gpu_window,
             .sdl_win_id = win_id,
             .batch = batch,
@@ -156,7 +253,12 @@ pub const Window = struct {
     }
 
     pub fn deinit(self: *@This()) void {
-        self.context.gpu.waitIdle();
+        self.event_queue.deinit(self.context.gpa);
+        self.context.gpu.waitIdle() catch {};
+        self.gpu_window.deinit();
+        self.sdl_vk_surface.deinit();
+        self.sdl_window.deinit();
+        self.context.gpu.gpuFree(self.material_buf);
         self.batch.deinit();
         self.context.gpu.shaderDestroy(self.blit_vert);
         self.context.gpu.shaderDestroy(self.blit_frag);
@@ -166,21 +268,89 @@ pub const Window = struct {
     }
 
     pub fn pollEvents(self: *@This()) void {
+        self.event_queue.clearRetainingCapacity();
+        const alloc = self.context.gpa;
+
         while (sdl3.events.poll()) |ev| {
             switch (ev) {
                 .quit => self.should_close = true,
                 .window_close_requested => |we| {
                     if (we.id == self.sdl_win_id) self.should_close = true;
                 },
-                .key_down => |ke| {
-                    if (ke.key == .escape) self.should_close = true;
-                },
                 .window_resized => |we| {
                     if (we.id == self.sdl_win_id) {
                         self.gpu_window.notifyResize(.{
-                            .width = @intCast(we.width),
-                            .height = @intCast(we.height),
+                            .width = @intCast(@max(0, we.width)),
+                            .height = @intCast(@max(0, we.height)),
                         });
+                    }
+                    self.event_queue.append(alloc, .{ .window_resized = .{
+                        .win_id = we.id,
+                        .width = @intCast(@max(0, we.width)),
+                        .height = @intCast(@max(0, we.height)),
+                    } }) catch {};
+                },
+                .mouse_motion => |mm| {
+                    self.event_queue.append(alloc, .{ .mouse_move = .{
+                        .x = mm.x,
+                        .y = mm.y,
+                        .rel_x = mm.x_rel,
+                        .rel_y = mm.y_rel,
+                    } }) catch {};
+                },
+                .mouse_button_down => |mb| {
+                    self.event_queue.append(alloc, .{ .mouse_button_down = .{
+                        .button = sdlMouseButton(mb.button),
+                        .x = mb.x,
+                        .y = mb.y,
+                        .clicks = mb.clicks,
+                    } }) catch {};
+                },
+                .mouse_button_up => |mb| {
+                    self.event_queue.append(alloc, .{ .mouse_button_up = .{
+                        .button = sdlMouseButton(mb.button),
+                        .x = mb.x,
+                        .y = mb.y,
+                        .clicks = mb.clicks,
+                    } }) catch {};
+                },
+                .mouse_wheel => |mw| {
+                    self.event_queue.append(alloc, .{ .mouse_wheel = .{
+                        .scroll_x = mw.x,
+                        .scroll_y = mw.y,
+                    } }) catch {};
+                },
+                .key_down => |ke| {
+                    if (ke.key == .escape) {
+                        self.should_close = true;
+                    } else {
+                        self.event_queue.append(alloc, .{ .key_down = .{
+                            .key = sdlKey(ke.key),
+                            .mods = sdlMods(ke.mod),
+                            .repeat = ke.repeat,
+                        } }) catch {};
+                    }
+                },
+                .key_up => |ke| {
+                    self.event_queue.append(alloc, .{ .key_up = .{
+                        .key = sdlKey(ke.key),
+                        .mods = sdlMods(ke.mod),
+                    } }) catch {};
+                },
+                .window_focus_gained => |we| {
+                    if (we.id == self.sdl_win_id) {
+                        self.event_queue.append(alloc, .{ .window_focus = .{
+                            .win_id = we.id,
+                            .focused = true,
+                        } }) catch {};
+                    }
+                },
+                .window_focus_lost => |we| {
+                    if (we.id == self.sdl_win_id) {
+                        self.event_queue.append(alloc, .{ .window_focus = .{
+                            .win_id = we.id,
+                            .focused = false,
+                        } }) catch {};
                     }
                 },
                 else => {},
@@ -190,6 +360,7 @@ pub const Window = struct {
 
     pub fn beginFrame(self: *@This()) !DrawCtx {
         self.current_arena = (self.current_arena + 1) % FRAME_ARENAS;
+        @import("drawctx.zig").resetTempId();
         const arena = &self.arenas[self.current_arena];
         _ = arena.reset(.retain_capacity);
 
@@ -208,8 +379,11 @@ pub const Window = struct {
         _ = schedule;
 
         const surface_size = self.gpu_window.surfaceSize();
-        // Recreate render target if size changed
         try self.createRenderTarget(surface_size.width, surface_size.height);
+
+        // Allocate RenderCommand buffer from frame arena
+        const cmd_buf_slice = try arena.allocator().alloc(RenderCommand, 2048);
+        self.cmd_buf = RenderCommandList.init(cmd_buf_slice);
 
         return DrawCtx{
             .allocator = arena.allocator(),
@@ -217,67 +391,50 @@ pub const Window = struct {
         };
     }
 
-    /// End the frame: render to offscreen Oklab target, then blit to swapchain with Oklab→sRGB.
-    pub fn endFrame(self: *@This(), root: *Widget) void {
+    /// End the frame: collect RenderCommands → process → draw → blit.
+    pub fn endFrame(self: *@This(), root: *Widget) !void {
         const surface_size = self.gpu_window.surfaceSize();
         const sw = @as(f32, @floatFromInt(surface_size.width));
         const sh = @as(f32, @floatFromInt(surface_size.height));
+
+        // ── Phase 1: Collect RenderCommands from widget tree ──
+        const ctx = RectCollectCtx{ .windowed = .{
+            .window_ptr = @ptrCast(self),
+            .material_buf_cpu = @ptrCast(self.material_buf.cpu),
+        } };
+        collectWidgetRects(self, root, &self.cmd_buf, &ctx);
+
+        // Always end with a blit command
+        self.cmd_buf.push(.blit_oklab);
+
+        // ── Phase 2: Process RenderCommands → SliceRects ──
+        var slice_rects: [4096]SliceRect = undefined;
+        const rect_count = processRenderCommands(
+            self.cmd_buf.slice(),
+            &slice_rects,
+            self.material_buf_bda,
+            @as(?[]u8, @ptrCast(@alignCast(self.material_buf.cpu[0..MAX_MATERIALS * MATERIAL_SIZE]))),
+            &self.next_material_slot,
+            self,
+        );
+
+        // ── Phase 3: GPU render ──
         var cmd = self.gpu_window.commandsBegin();
 
-        // ── Pass 1: render GUI to offscreen R32G32B32A32_SFLOAT (Oklab space) ──
+        // Pass 1: render GUI to offscreen R32G32B32A32_SFLOAT (Oklab space)
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = self.render_target, .load_op = .clear, .store_op = .store, .clear_color = .{ 0.516395, 0.0, 0.0, 1.0 } },
         }, .render_area_size = .{ surface_size.width, surface_size.height } });
 
-        // Material + widget rects
-        var mat_slot: u32 = 0;
-        if (self.sweeper) |s| {
-            const glyph_size = @min(sw, sh) * 0.5;
-            GlyphSweeper.writeMaterial(s.curve_buf_bda, self.material_buf, mat_slot, s.bearing_y, glyph_size, glyph_size, glyph_size, glyph_size);
-            mat_slot += 1;
-        }
-        self.next_material_slot = mat_slot;
-
-        var all_rects: [1024]SliceRect = undefined;
-        const widget_count = collectWidgetRects(self, root, &all_rects, sw, sh);
-        var total_rects = widget_count;
-
-        var bg_cl: f32 = 0;
-        var bg_cw: f32 = 0;
-        var bg_ch: f32 = 0;
-        if (self.sweeper) |s| {
-            bg_cl = s.curve_left;
-            bg_cw = s.curve_w;
-            bg_ch = s.curve_h;
-        }
-        if (self.sweeper != null) {
-            const glyph_size = @min(sw, sh) * 0.5;
-            const rx = sw - glyph_size;
-            const ry = sh - glyph_size;
-            all_rects[total_rects] = .{
-                .dst_x = rx,
-                .dst_y = ry,
-                .dst_w = glyph_size,
-                .dst_h = glyph_size,
-                .color = .{ 0.516395, 0.0, 0.0, 1.0 },
-                .material_index = 1,
-                .curve_left = bg_cl,
-                .curve_bottom = if (self.sweeper) |s| s.curve_bottom else 0,
-                .curve_w = bg_cw,
-                .curve_h = bg_ch,
-            };
-            total_rects += 1;
-        }
-
         cmd.setBlendEnable(true);
-        self.batch.draw(&cmd, all_rects[0..total_rects], sw, sh);
+        try self.batch.draw(&cmd, slice_rects[0..rect_count], sw, sh);
         cmd.setBlendEnable(false);
         cmd.endRendering();
 
         // Barrier: transition render target from GENERAL to SHADER_READ_ONLY_OPTIMAL
         cmd.barrier(.{ .color_output = true }, .{ .fragment = true }, .{});
 
-        // ── Pass 2: blit render target → swapchain with Oklab→sRGB ──
+        // Pass 2: blit render target → swapchain with Oklab→sRGB
         const sc = self.gpu_window.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
@@ -290,7 +447,7 @@ pub const Window = struct {
         cmd.draw(noapi.PushData{}, 3, 1);
         cmd.endRendering();
 
-        _ = self.gpu_window.endFrame(.{ .blit_to_swapchain = true });
+        _ = try self.gpu_window.endFrame(.{ .blit_to_swapchain = true });
     }
 
     /// Run the event loop.
@@ -307,54 +464,54 @@ pub const Window = struct {
             const root = try gui.draw(&dc);
             dc.layoutAndRender(root);
 
+            dispatchEvents(self.context, root, self.event_queue.items);
+
             if (@import("builtin").mode == .Debug) {
                 debugPrintTree(root, 0);
             }
 
-            self.endFrame(root);
+            try self.endFrame(root);
             self.context.frame_count += 1;
         }
     }
 };
 
-/// Flatten the widget tree into 9-slice rects (stack-based DFS).
-/// Labels emit per-character glyph rects referencing label_slot material.
-fn collectWidgetRects(win: *Window, root: *Widget, rects: []SliceRect, sw: f32, sh: f32) u32 {
-    _ = sw;
-    _ = sh;
-    var ri: u32 = 0;
+// ─── Shared widget tree → RenderCommand collector ──────────────
+
+/// Walk the widget tree and emit RenderCommands via the provided context.
+/// This is the SINGLE shared collector — used by both Window (GPU) and
+/// HeadlessWindow (JSON capture). The RectCollectCtx union parameterizes
+/// the material write path without code duplication.
+///
+/// DFS order ensures parents are emitted before children (back-to-front
+/// for opaque widgets, though the 9-slice batcher doesn't sort).
+pub fn collectWidgetRects(
+    win: *Window,
+    root: *Widget,
+    cmds: *RenderCommandList,
+    ctx: *const RectCollectCtx,
+) void {
     var stack: [512]*Widget = undefined;
     var sp: u32 = 0;
     stack[sp] = root;
     sp += 1;
 
-    while (sp > 0 and ri < 1024) {
+    while (sp > 0) {
         sp -= 1;
         const w = stack[sp];
 
         // Emit background rect if widget has a color or border
         if (w.color[3] > 0 or w.border > 0) {
-            if (w.border > 0) {
-                // Border rect (behind fill)
-                rects[ri] = .{
-                    .dst_x = w.rect.x,
-                    .dst_y = w.rect.y,
-                    .dst_w = w.rect.w,
-                    .dst_h = w.rect.h,
-                    .color = w.border_color,
-                };
-                ri += 1;
-            }
-            // Fill rect (inset by border if present)
-            const b = w.border;
-            rects[ri] = .{
-                .dst_x = w.rect.x + b,
-                .dst_y = w.rect.y + b,
-                .dst_w = w.rect.w - 2 * b,
-                .dst_h = w.rect.h - 2 * b,
+            cmds.push(.{ .solid_rect = .{
+                .rect = .{ .x = w.rect.x, .y = w.rect.y, .w = w.rect.w, .h = w.rect.h },
                 .color = w.color,
-            };
-            ri += 1;
+                .border = w.border,
+                .border_color = w.border_color,
+                .corner_l = w.corner_radius,
+                .corner_r = w.corner_radius,
+                .corner_t = w.corner_radius,
+                .corner_b = w.corner_radius,
+            } });
         }
 
         if (w.isContainer()) {
@@ -368,98 +525,84 @@ fn collectWidgetRects(win: *Window, root: *Widget, rects: []SliceRect, sw: f32, 
             }
         } else {
             switch (w.kind) {
-                .button => |btn| {
-                    // Glyph rendering for button label
-                    const baseline_y = w.rect.y + w.rect.h * 0.75;
-                    var cursor_x = w.rect.x + 8;
-                    for (btn.label) |ch| {
-                        const idx = ch -% 32;
-                        if (idx >= NUM_GLYPH_SLOTS) continue;
-                        const entry = &win.glyphs[idx];
-                        const gs = entry.sweeper orelse continue;
-                        const ch_x = cursor_x + entry.bearing_x;
-                        const ch_y = baseline_y - entry.bearing_y;
-                        const ch_w = entry.glyph_w;
-                        const ch_h = entry.glyph_h;
-                        GlyphSweeper.writeMaterial(gs.curve_buf_bda, win.material_buf, entry.material_slot, gs.bearing_y, gs.curve_w, gs.curve_h, ch_w, ch_h);
-                        if (ch_w > 0 and ch_h > 0) {
-                            rects[ri] = .{
-                                .dst_x = ch_x,
-                                .dst_y = ch_y,
-                                .dst_w = ch_w,
-                                .dst_h = ch_h,
-                                .color = .{ 0, 0, 0, 0 },
-                                .material_index = entry.material_slot + 1,
-                                .curve_left = gs.curve_left,
-                                .curve_bottom = gs.curve_bottom,
-                                .curve_w = gs.curve_w,
-                                .curve_h = gs.curve_h,
-                            };
-                            ri += 1;
-                            if (ri >= rects.len) break;
-                        }
-                        cursor_x += entry.advance;
-                    }
-                },
+                .button => |btn| emitGlyphCommands(win, btn.label, w.rect, cmds, ctx),
                 .slider => |s| {
-                    // Slider track already rendered as background rect above
-                    const frac = @max(0, @min(1, (s.value.* - s.min) / (s.max - s.min)));
+                    const frac = if (s.max == s.min) @as(f32, 0.5) else @max(0, @min(1, (s.value.* - s.min) / (s.max - s.min)));
                     const fill_w = @max(4, w.rect.w * frac);
                     const b = w.border;
-                    rects[ri] = .{
-                        .dst_x = w.rect.x + b,
-                        .dst_y = w.rect.y + b,
-                        .dst_w = fill_w - 2 * b,
-                        .dst_h = w.rect.h - 2 * b,
+                    cmds.push(.{ .solid_rect = .{
+                        .rect = .{ .x = w.rect.x + b, .y = w.rect.y + b, .w = fill_w - 2 * b, .h = w.rect.h - 2 * b },
                         .color = .{ 0.824501, -0.095832, 0.068573, 1.0 },
-                    };
-                    ri += 1;
+                    } });
                 },
-                .label => |lbl| {
-                    // Render each character with proper metrics
-                    // Baseline at ~3/4 of label height (rough typographic baseline)
-                    const baseline_y = w.rect.y + w.rect.h * 0.75;
-                    var cursor_x = w.rect.x;
-                    for (lbl.text) |ch| {
-                        const idx = ch -% 32;
-                        if (idx >= NUM_GLYPH_SLOTS) continue;
-                        const entry = &win.glyphs[idx];
-                        const gs = entry.sweeper orelse continue;
-
-                        // Glyph rect positioned by metrics
-                        const ch_x = cursor_x + entry.bearing_x;
-                        const ch_y = baseline_y - entry.bearing_y;
-                        const ch_w = entry.glyph_w;
-                        const ch_h = entry.glyph_h;
-
-                        GlyphSweeper.writeMaterial(gs.curve_buf_bda, win.material_buf, entry.material_slot, gs.bearing_y, gs.curve_w, gs.curve_h, ch_w, ch_h);
-
-                        if (ch_w > 0 and ch_h > 0) {
-                            rects[ri] = .{
-                                .dst_x = ch_x,
-                                .dst_y = ch_y,
-                                .dst_w = ch_w,
-                                .dst_h = ch_h,
-                                .color = .{ 0, 0, 0, 0 },
-                                .material_index = entry.material_slot + 1,
-                                .curve_left = gs.curve_left,
-                                .curve_bottom = gs.curve_bottom,
-                                .curve_w = gs.curve_w,
-                                .curve_h = gs.curve_h,
-                            };
-                            ri += 1;
-                            if (ri >= rects.len) break;
-                        }
-                        cursor_x += entry.advance;
-                    }
-                },
-                else => {
-                    // No extra rendering beyond background rect
-                },
+                .label => |lbl| emitGlyphCommands(win, lbl.text, w.rect, cmds, ctx),
+                else => {},
             }
         }
     }
-    return ri;
+}
+
+/// Emit glyph RenderCommands for each character in text.
+/// In windowed mode, writes GPU material via GlyphSweeper.writeMaterial.
+/// In headless mode, records material_refs for JSON serialization.
+fn emitGlyphCommands(
+    win: *Window,
+    text: []const u8,
+    widget_rect: @import("widget.zig").Rect,
+    cmds: *RenderCommandList,
+    ctx: *const RectCollectCtx,
+) void {
+    const baseline_y = widget_rect.y + widget_rect.h * 0.75;
+    var cursor_x = widget_rect.x;
+
+    for (text) |ch| {
+        const idx = ch -% 32;
+        if (idx >= NUM_GLYPH_SLOTS) continue;
+        const entry = &win.glyphs[idx];
+        const gs = entry.sweeper orelse continue;
+
+        const ch_x = cursor_x + entry.bearing_x;
+        const ch_y = baseline_y - entry.bearing_y;
+        const ch_w = entry.glyph_w;
+        const ch_h = entry.glyph_h;
+
+        // Context-specific material write
+        switch (ctx.*) {
+            .windowed => |wc| {
+                const mat_buf: noapi.GpuPtr = .{ .cpu = wc.material_buf_cpu, .gpu = 0 };
+                GlyphSweeper.writeMaterial(
+                    gs.curve_buf_bda,
+                    mat_buf,
+                    entry.material_slot,
+                    gs.bearing_y,
+                    gs.curve_w,
+                    gs.curve_h,
+                    ch_w,
+                    ch_h,
+                );
+            },
+            .headless => |hc| {
+                hc.material_refs.append(hc.gpa, .{
+                    .mat_type = "glyph",
+                    .slot = entry.material_slot + 1,
+                    .curve_ref = &.{ch},
+                }) catch {};
+            },
+        }
+
+        if (ch_w > 0 and ch_h > 0) {
+            cmds.push(.{ .glyph = .{
+                .rect = .{ .x = ch_x, .y = ch_y, .w = ch_w, .h = ch_h },
+                .color = .{ 0, 0, 0, 0 },
+                .material_index = entry.material_slot + 1,
+                .curve_left = gs.curve_left,
+                .curve_bottom = gs.curve_bottom,
+                .curve_w = gs.curve_w,
+                .curve_h = gs.curve_h,
+            } });
+        }
+        cursor_x += entry.advance;
+    }
 }
 
 fn debugPrintTree(w: *Widget, depth: u32) void {

@@ -9,7 +9,6 @@
 const std = @import("std");
 const noapi = @import("noapi");
 
-pub const MAX_RECTS = 1024;
 pub const VERTS_PER_RECT = 36; // 9 quads × 4 verts
 pub const IDX_PER_RECT = 54; // 9 quads × 6 indices
 pub const VERTEX_STRIDE = @sizeOf(Vertex);
@@ -63,17 +62,23 @@ pub const Batch9Slice = struct {
     const QUAD_INDICES: [6]u32 = .{ 0, 1, 2, 0, 2, 3 };
 
     pub fn init(gpu: *noapi.Gpu, vert_spv: []const u32, frag_spv: []const u32) !@This() {
+        const vert = try gpu.shaderCreate(vert_spv, .vertex, "main", "quad_vert");
+        errdefer gpu.shaderDestroy(vert);
+        const frag = try gpu.shaderCreate(frag_spv, .fragment, "main", "quad_frag");
         return .{
             .gpu = gpu,
-            .vert_shader = try gpu.shaderCreate(vert_spv, .vertex, "main", "quad_vert"),
-            .frag_shader = try gpu.shaderCreate(frag_spv, .fragment, "main", "quad_frag"),
+            .vert_shader = vert,
+            .frag_shader = frag,
         };
     }
 
     pub fn deinit(self: *@This()) void {
+        if (self.capacity > 0) {
+            self.gpu.gpuFree(self.vert_buf);
+            self.gpu.gpuFree(self.idx_buf);
+        }
         self.gpu.shaderDestroy(self.vert_shader);
         self.gpu.shaderDestroy(self.frag_shader);
-        // GPU buffers freed by gpu.deinit()
     }
 
     fn ensureCapacity(self: *@This(), rect_count: u32) !void {
@@ -83,16 +88,22 @@ pub const Batch9Slice = struct {
         const vert_bytes = needed * VERTS_PER_RECT * VERTEX_STRIDE;
         const idx_bytes = needed * IDX_PER_RECT * @sizeOf(u32);
 
-        // Free old buffers — skip for prototype, gpu.deinit() handles it
+        // Free old buffers before allocating new ones
+        if (self.capacity > 0) {
+            self.gpu.gpuFree(self.vert_buf);
+            self.gpu.gpuFree(self.idx_buf);
+        }
+
         self.vert_buf = try self.gpu.gpuMalloc(vert_bytes, 64, .default);
         self.idx_buf = try self.gpu.gpuMalloc(idx_bytes, 16, .default);
         self.capacity = needed;
     }
 
     /// Expand slice rects into vertex/index buffers and draw.
-    pub fn draw(self: *@This(), cmd: anytype, rects: []const SliceRect, screen_w: f32, screen_h: f32) void {
+    pub fn draw(self: *@This(), cmd: anytype, rects: []const SliceRect, screen_w: f32, screen_h: f32) !void {
         if (rects.len == 0) return;
-        self.ensureCapacity(@intCast(rects.len)) catch @panic("OOM in Batch9Slice");
+        std.debug.assert(rects.len <= std.math.maxInt(u32));
+        try self.ensureCapacity(@intCast(rects.len));
 
         // Write vertices and indices
         const verts: [*]Vertex = @ptrCast(@alignCast(self.vert_buf.cpu));
@@ -126,7 +137,9 @@ pub const Batch9Slice = struct {
             .vert_data = self.material_buf_bda,
             .frag_data = 0,
         };
-        cmd.drawIndexed(push, self.idx_buf, @intCast(rects.len * IDX_PER_RECT), 1, 0, 0);
+        const idx_count = rects.len * IDX_PER_RECT;
+        std.debug.assert(idx_count <= std.math.maxInt(u32));
+        cmd.drawIndexed(push, self.idx_buf, @intCast(idx_count), 1, 0, 0);
     }
 
     fn emitSliceRect(self: *@This(), verts: []Vertex, idxs: []u32, r: *const SliceRect, base_vert: u32, sw: f32, sh: f32) void {

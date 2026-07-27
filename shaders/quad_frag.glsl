@@ -5,12 +5,14 @@
 layout(location = 0) in vec2 vUv;
 layout(location = 1) in vec4 vColor;
 layout(location = 2) flat in uint vMaterialIdx;
+layout(location = 3) in vec2 vOrigin; // rect top-left in framebuffer px
 
 layout(location = 0) out vec4 fragColor;
 
 const int TYPE_SOLID = 0;
 const int TYPE_GLYPH = 1;
 const int TYPE_ROUNDED_RECT = 2;
+const int TYPE_SHADOW = 3;
 
 struct GlyphMaterial {
     int type;
@@ -20,6 +22,7 @@ struct GlyphMaterial {
     float win_w;
     float win_h;
     uint64_t curve_bda;
+    vec4 gradient_to; // gradient bottom color (Oklab); .w > 0 enables the gradient
 };
 
 layout(buffer_reference, buffer_reference_align = 8) buffer MaterialBuf {
@@ -36,6 +39,10 @@ layout(buffer_reference, buffer_reference_align = 16) buffer CurveBuf {
     uint num_curves;
     uint pad;
     QuadCurve curves[];
+};
+
+layout(buffer_reference, buffer_reference_align = 4) buffer ByteBuf {
+    uint data[];
 };
 
 layout(push_constant) uniform Push {
@@ -115,7 +122,7 @@ float scanlineSweep(vec2 size, vec2 offset, vec2 p0, vec2 p1, vec2 p2) {
 void main() {
     if (vMaterialIdx == 0u) { fragColor = vColor; return; }
 
-    uint mat_idx = vMaterialIdx - 1u;
+    uint mat_idx = vMaterialIdx; // writeMaterial stores glyph materials at their slot
     MaterialBuf buf = MaterialBuf(pc.material_buf_bda);
     GlyphMaterial mat = buf.materials[mat_idx];
 
@@ -125,53 +132,110 @@ void main() {
         CurveBuf curves = CurveBuf(mat.curve_bda);
         uint n = curves.num_curves;
 
-        // Pixel window in curve space: center from interpolated UV,
-        // size from dFdx/dFdy (UV change per screen pixel).
-        vec2 win_size = vec2(abs(dFdx(vUv).x), abs(dFdy(vUv).y));
-        vec2 offset = vUv - 0.5 * win_size;
+        // Coverage bitmap: pre-rasterized on the CPU (per-pixel sweep at
+        // glyph load). mat.win_w/win_h carry the bitmap dimensions.
+        // Cell position from gl_FragCoord - vOrigin (vOrigin = rect origin).
+        vec2 cell = gl_FragCoord.xy - vOrigin;
+        float bmp_w = mat.win_w;
+        float bmp_h = mat.win_h;
+        if (bmp_w <= 0.0 || bmp_h <= 0.0) { fragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
+        int bx = int(clamp(cell.x, 0.0, bmp_w - 1.0));
+        // Bitmap row 0 = glyph top; cell.y = 0 at the rect top (framebuffer
+        // y is down), so no flip.
+        int by = int(clamp(cell.y, 0.0, bmp_h - 1.0));
+        // Bitmap bytes follow the curve array (8 + n*24 bytes in).
+        ByteBuf bytes = ByteBuf(mat.curve_bda);
+        uint bit_off = 8u + n * 24u + uint(by) * uint(bmp_w) + uint(bx);
+        uint word = bytes.data[bit_off / 4u];
+        uint byte_val = (word >> (8u * (bit_off % 4u))) & 0xFFu;
+        float coverage = clamp(float(byte_val) / 255.0, 0.0, 1.0);
+        fragColor = vec4(vColor.rgb, coverage * vColor.a);
+        return;
+    }
 
-        // Subpixel AA: 7 Harmony-style evaluations (full pixel width)
-        // shifted by -1/3, 0, +1/3, ... for adjacent pixel subpixel
-        // positions, then ClearType 5-tap per-channel filter.
-        bool saa = false;
-        if (saa) {
-            float third_x = win_size.x / 3.0;
-
-            // 7 evaluations with full pixel width at shifted positions
-            float c[7];
-            for (int k = 0; k < 7; k++) {
-                vec2 o = offset;
-                o.x += float(k - 1) * third_x;
-                float t = 0.0;
-                for (uint i = 0u; i < n; i++)
-                    t += scanlineSweep(win_size, o, curves.curves[i].p0,
-                                                      curves.curves[i].p1,
-                                                      curves.curves[i].p2);
-                float area = win_size.x * win_size.y;
-                c[k] = area > 0.0 ? clamp(t / area, 0.0, 1.0) : 0.0;
+    if (mat.type == TYPE_ROUNDED_RECT) {
+        // Rounded-rect fill (border == 0) or ring (border > 0). Material
+        // fields: win_w/win_h = rect size, curve_w/curve_h = corner radii
+        // (x/y), bearing_y = border width. vOrigin = the rect top-left in
+        // framebuffer px, so gl_FragCoord - vOrigin = position in the rect.
+        vec2 size = vec2(mat.win_w, mat.win_h);
+        vec2 radius = max(vec2(mat.curve_w, mat.curve_h), vec2(0.0));
+        // Clamp radii to half the box so the SDF never inverts.
+        radius = min(radius, size * 0.5);
+        vec2 p = gl_FragCoord.xy - vOrigin - size * 0.5;
+        vec2 hbox = size * 0.5 - radius;
+        vec2 q = abs(p) - hbox;
+        float d;
+        if (q.x <= 0.0 && q.y <= 0.0) {
+            // Inside the box: the classic SDF distance -min(radius) is 0
+            // for radius-0 rects, which halves the coverage of fills and
+            // rings. Use the true distance: the nearest flat edge, or the
+            // corner arc when both projections pass its endpoints.
+            float ex = hbox.x - abs(p.x);
+            float ey = hbox.y - abs(p.y);
+            float r = min(radius.x, radius.y);
+            if (abs(p.x) >= hbox.x - r && abs(p.y) >= hbox.y - r) {
+                float cx = abs(p.x) - (hbox.x - r);
+                float cy = abs(p.y) - (hbox.y - r);
+                d = -sqrt(cx * cx + cy * cy);
+            } else {
+                d = -min(ex, ey);
             }
-
-            // ClearType 5-tap per-channel filter
-            const float w_a = 0.03125;
-            const float w_b = 0.30078125;
-            const float w_c = 0.3359375;
-
-            float r = w_a*c[0] + w_b*c[1] + w_c*c[2] + w_b*c[3] + w_a*c[4];
-            float g = w_a*c[1] + w_b*c[2] + w_c*c[3] + w_b*c[4] + w_a*c[5];
-            float b = w_a*c[2] + w_b*c[3] + w_c*c[4] + w_b*c[5] + w_a*c[6];
-            float luma = (r + g + b) / 3.0;
-            fragColor = vec4(r, g, b, luma);
         } else {
-            float total = 0.0;
-            for (uint i = 0u; i < n; i++) {
-                total += scanlineSweep(win_size, offset, curves.curves[i].p0,
-                                                        curves.curves[i].p1,
-                                                        curves.curves[i].p2);
-            }
-            float win_area = win_size.x * win_size.y;
-            float coverage = win_area > 0.0 ? clamp(total / win_area, 0.0, 1.0) : 0.0;
-            fragColor = vec4(0.0, 0.0, 0.0, coverage);
+            d = length(max(q, vec2(0.0))) - min(radius.x, radius.y);
         }
+        float outer = clamp(0.5 - d, 0.0, 1.0);
+        float coverage = outer;
+        float border = mat.bearing_y;
+        if (border > 0.0 && border < min(size.x, size.y) * 0.5) {
+            // Ring: subtract the inner rounded rect (box inset by the
+            // border, corner radius reduced by the border).
+            vec2 inner_radius = max(radius - border, vec2(0.0));
+            vec2 hbox_inner = size * 0.5 - border - inner_radius;
+            vec2 iq = abs(p) - hbox_inner;
+            float id;
+            if (iq.x <= 0.0 && iq.y <= 0.0) {
+                float ex = hbox_inner.x - abs(p.x);
+                float ey = hbox_inner.y - abs(p.y);
+                float r = min(inner_radius.x, inner_radius.y);
+                if (abs(p.x) >= hbox_inner.x - r && abs(p.y) >= hbox_inner.y - r) {
+                    float cx = abs(p.x) - (hbox_inner.x - r);
+                    float cy = abs(p.y) - (hbox_inner.y - r);
+                    id = -sqrt(cx * cx + cy * cy);
+                } else {
+                    id = -min(ex, ey);
+                }
+            } else {
+                id = length(max(iq, vec2(0.0))) - min(inner_radius.x, inner_radius.y);
+            }
+            float inner = clamp(0.5 - id, 0.0, 1.0);
+            coverage = clamp(outer - inner, 0.0, 1.0);
+        }
+        // Vertical gradient: gradient_to.w > 0 enables the mix. vUv.y = 0
+        // at the top, 1 at the bottom; vColor.rgb is the gradient top.
+        vec3 rgb = vColor.rgb;
+        if (mat.gradient_to.w > 0.0) {
+            rgb = mix(vColor.rgb, mat.gradient_to.rgb, clamp(vUv.y, 0.0, 1.0));
+        }
+        fragColor = vec4(rgb, coverage * vColor.a);
+        return;
+    }
+
+    if (mat.type == TYPE_SHADOW) {
+        // Feathered rounded-rect shadow. win_w/win_h = the shadow rect size,
+        // curve_w/curve_h = the widget's corner radii, bearing_y = the
+        // feather (px, soft-edge width). Same SDF shape as ROUNDED_RECT, but
+        // the coverage fades out over the feather instead of the hard 0.5px
+        // edge; no ring subtraction.
+        vec2 size = vec2(mat.win_w, mat.win_h);
+        vec2 radius = max(vec2(mat.curve_w, mat.curve_h), vec2(0.0));
+        radius = min(radius, size * 0.5);
+        vec2 p = gl_FragCoord.xy - vOrigin - size * 0.5;
+        vec2 hbox = size * 0.5 - radius;
+        vec2 q = abs(p) - hbox;
+        float d = length(max(q, vec2(0.0))) - min(radius.x, radius.y);
+        float coverage = clamp(0.5 - d / max(mat.bearing_y, 0.5), 0.0, 1.0);
+        fragColor = vec4(vColor.rgb, coverage * vColor.a);
         return;
     }
     fragColor = vColor;
