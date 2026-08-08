@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = release_safe });
     const noapi_dep = b.dependency("noapi", .{ .target = target, .optimize = optimize });
     const freetype_dep = b.dependency("freetype", .{ .target = target, .optimize = optimize });
+    const harfbuzz_dep = b.dependency("harfbuzz", .{ .target = target, .optimize = optimize });
 
     // ── noapi module (borrowed from dependency) ────────────
     const noapi_mod = noapi_dep.module("noapi");
@@ -182,10 +183,12 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
             },
         }),
     });
     v7_demo.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_demo.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     b.installArtifact(v7_demo);
 
     const v7_run_step = b.step("v7", "Run the v7 demo (add -- --window for graphical mode)");
@@ -214,10 +217,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
             },
         }),
     });
     v7_text_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_text_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     const run_v7_text_tests = b.addRunArtifact(v7_text_tests);
     test_step.dependOn(&run_v7_text_tests.step);
 
@@ -226,10 +231,13 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/v7_demo/ui.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{},
+            .imports = &.{
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+            },
         }),
     });
     v7_ui_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_ui_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     const run_v7_ui_tests = b.addRunArtifact(v7_ui_tests);
     test_step.dependOn(&run_v7_ui_tests.step);
 

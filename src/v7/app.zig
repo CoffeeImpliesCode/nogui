@@ -75,6 +75,10 @@ pub const App = struct {
     /// Time (ms) of the last .frame event — the driver clock. 0 = no
     /// frame yet; the first frame's dt is 0, not the whole clock value.
     last_time_ms: u64 = 0,
+    /// The hovered node of the last presented frame — the fade resets
+    /// when the hovered node CHANGES (not just on leave/re-enter), so the
+    /// ring re-fades as the cursor travels between widgets.
+    last_hover_id: ?Id = null,
     /// The @typeName of the registered root component, recorded by
     /// register(). present() refuses to draw with a caller type that
     /// differs — the component vtable is type-erased, so a mismatch would
@@ -400,18 +404,32 @@ pub const App = struct {
         const focus = self.focus;
         const pressed = self.pressed;
 
-        // Time-driven eased visual states (one-pole smoother, tau = 60ms).
-        // The driver clock (Event.frame.time_ms) is the ONLY clock; input
-        // events between frames use the last frame's time. dt is clamped
-        // to [0, 250]ms so a driver pause (no .frame events) cannot jump
+        // Time-driven eased visual states (one-pole smoothers). Hover is
+        // deliberately slow (tau 180ms — a perceivable ring fade), press is
+        // snappier (tau 100ms — responsive but not instant). The driver
+        // clock (Event.frame.time_ms) is the ONLY clock; input events
+        // between frames use the last frame's time. dt is clamped to
+        // [0, 250]ms so a driver pause (no .frame events) cannot jump
         // the fade, and the first frame (last_time_ms = 0) yields dt = 0.
         const dt: u64 = @min(time_ms -| self.last_time_ms, 250);
         self.last_time_ms = time_ms;
-        const k = 1.0 - std.math.exp(-@as(f32, @floatFromInt(dt)) / 60.0);
+        const dt_f: f32 = @floatFromInt(dt);
+        const k_press = 1.0 - std.math.exp(-dt_f / 100.0);
+        const k_hover = 1.0 - std.math.exp(-dt_f / 180.0);
         const press_target: f32 = if (pressed != null) 1.0 else 0.0;
-        self.press_alpha += (press_target - self.press_alpha) * k;
+        self.press_alpha += (press_target - self.press_alpha) * k_press;
+        // Hover: the fade replays on WIDGET-TO-WIDGET transitions — a
+        // binary target would only fade on leave/re-enter, leaving the
+        // ring solid while the cursor travels between widgets. Leave
+        // (→ null) and re-enter (null →) keep the natural ramp, so the
+        // ring still fades out on exit.
+        const hover_changed = (hover != null) and
+            (self.last_hover_id != null) and
+            !std.meta.eql(hover, self.last_hover_id);
+        self.last_hover_id = hover;
         const hover_target: f32 = if (hover != null) 1.0 else 0.0;
-        self.hover_alpha += (hover_target - self.hover_alpha) * k;
+        if (hover_changed) self.hover_alpha = 0;
+        self.hover_alpha += (hover_target - self.hover_alpha) * k_hover;
 
         const json = try headless.treeToJson(tree, self.gpa);
         // Swap the state directory: next frame seeds from THIS frame's
@@ -1083,9 +1101,10 @@ test "present: press_alpha ramps over time and decays" {
     const Comp = struct {
         pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
             _ = self;
-            _ = try ctx.column(.{});
+            _ = try ctx.column(.{ .gap = 8 });
             defer ctx.pop();
             _ = try ctx.button(.{ .label = "go" });
+            _ = try ctx.label(.{ .text = "x" });
         }
     };
     var comp = Comp{};
@@ -1109,42 +1128,61 @@ test "present: press_alpha ramps over time and decays" {
     };
 
     // Press the button: mouse_down sets pressed; the ramp starts from the
-    // current press_alpha (near 0). dt = 100ms -> k = 1-exp(-100/60) ≈
-    // 0.811, one pole from 0.
+    // current press_alpha (near 0). dt = 100ms -> k_press =
+    // 1-exp(-100/100) ≈ 0.632, one pole from 0 (tau 100ms).
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = center[0], .y = center[1] } });
     _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = center[0], .y = center[1] } });
     const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 100 } })).?;
     defer std.testing.allocator.free(out2.json);
     try std.testing.expect(out2.pressed != null);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.811), out2.press_alpha, 0.05);
-    try std.testing.expect(out2.press_alpha > 0.7 and out2.press_alpha < 0.95);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.632), out2.press_alpha, 0.05);
+    try std.testing.expect(out2.press_alpha > 0.5 and out2.press_alpha < 0.8);
 
-    // A second pole at the same dt: 0.811 + (1-0.811)*0.811 ≈ 0.964.
+    // A second pole at the same dt: 0.632 + (1-0.632)*0.632 ≈ 0.865.
     const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 200 } })).?;
     defer std.testing.allocator.free(out3.json);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.964), out3.press_alpha, 0.05);
-    try std.testing.expect(out3.press_alpha > 0.95);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.865), out3.press_alpha, 0.05);
+    try std.testing.expect(out3.press_alpha > 0.8);
 
     // Release: the target drops to 0 and press_alpha decays one pole
-    // toward it: 0.964 * exp(-100/60) ≈ 0.182.
+    // toward it: 0.865 * exp(-100/100) ≈ 0.318.
     _ = try app.handle(Comp, &comp, .{ .mouse_up = .{ .button = .left, .x = center[0], .y = center[1] } });
     const out4 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 4, .time_ms = 300 } })).?;
     defer std.testing.allocator.free(out4.json);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.182), out4.press_alpha, 0.05);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.318), out4.press_alpha, 0.05);
     try std.testing.expect(out4.press_alpha < 0.35);
 
-    // The pointer leaves the window: hover_alpha (ramped to ≈0.993 while
-    // hovering) decays one pole toward 0: ≈0.188.
+    // The pointer leaves the window: hover_alpha (ramped to ≈0.811 while
+    // hovering, tau 180ms) decays one pole toward 0: ≈0.465 — the fade
+    // must still be mid-flight, not snapped.
     _ = try app.handle(Comp, &comp, .{ .mouse_leave = {} });
     const out5 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 5, .time_ms = 400 } })).?;
     defer std.testing.allocator.free(out5.json);
-    try std.testing.expect(out5.hover_alpha < 0.35);
+    try std.testing.expect(out5.hover_alpha > 0.3 and out5.hover_alpha < 0.6);
 
-    // Move back over the button: hover ramps up again past 0.7.
+    // Move back over the button: re-enter (null → node) is NOT a reset —
+    // the fade ramps from the decayed value: 0.465 + (1-0.465)*0.426 ≈
+    // 0.693 (past the midpoint, still easing).
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = center[0], .y = center[1] } });
     const out6 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 6, .time_ms = 500 } })).?;
     defer std.testing.allocator.free(out6.json);
-    try std.testing.expect(out6.hover_alpha > 0.7);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.693), out6.hover_alpha, 0.05);
+    try std.testing.expect(out6.hover_alpha > 0.65);
+
+    // Moving to a DIFFERENT node (still inside the window) resets the
+    // fade again: the ring re-fades as the cursor travels between widgets.
+    // The label below the button is a distinct node.
+    const label_center = blk: {
+        for (out6.tree.nodes.items) |*n| {
+            if (n.kind == .label) break :blk .{ n.rect.x + n.rect.w / 2, n.rect.y + n.rect.h / 2 };
+        }
+        unreachable;
+    };
+    _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = label_center[0], .y = label_center[1] } });
+    const out7 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 7, .time_ms = 600 } })).?;
+    defer std.testing.allocator.free(out7.json);
+    try std.testing.expect(!std.meta.eql(out7.hover, out6.hover));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.426), out7.hover_alpha, 0.05);
 
     // Monotone per pole — no overshoot: each alpha strictly moves toward
     // its current target, and every value stays in [0, 1].
@@ -1152,6 +1190,7 @@ test "present: press_alpha ramps over time and decays" {
     try std.testing.expect(out4.press_alpha < out3.press_alpha);
     try std.testing.expect(out5.hover_alpha < out4.hover_alpha);
     try std.testing.expect(out6.hover_alpha > out5.hover_alpha);
+    try std.testing.expect(out7.hover_alpha > 0.3 and out7.hover_alpha < 0.55);
     try std.testing.expect(out6.press_alpha >= 0 and out6.press_alpha <= 1);
     try std.testing.expect(out6.hover_alpha >= 0 and out6.hover_alpha <= 1);
 }

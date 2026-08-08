@@ -1,9 +1,11 @@
-//! FreeType glyph text engine for the v7 demo.
+//! HarfBuzz-shaped text engine for the v7 demo.
 //!
-//! Port of v4's glyph pipeline (src/proto_main.zig + src/proto/sweeper.zig):
-//! lazily rasterizes glyphs with FreeType into curve outlines, stores each
-//! glyph as a GPU material (GlyphMaterial) plus a GPU curve buffer, and emits
-//! one SliceRect per character into the caller's rect list.
+//! EXPERIMENT: the per-codepoint FreeType iteration (FT_Get_Char_Index +
+//! advance sums, no kerning) is replaced with HarfBuzz shaping (hb_shape:
+//! kerning, ligatures, mark positioning). FreeType remains as the rasterizer
+//! backend ONLY — the hb-ft font delegates outline extraction to it, and we
+//! load the shaped glyph ids from the shared face. All layout decisions
+//! (glyph selection, advances, offsets) come from HarfBuzz.
 //!
 //! Demo-side only: the v7 CORE (src/v7/) stays pure; this file MAY import
 //! noapi.
@@ -14,18 +16,17 @@ const proto = @import("proto/sweeper.zig");
 const SliceRect = @import("proto/render_9slice.zig").SliceRect;
 const WidgetSize = @import("v7/widget.zig").Size;
 
-const c = @cImport({
-    @cDefine("FT2_BUILD_LIBRARY", "1");
-    @cInclude("freetype/freetype.h");
-    @cInclude("freetype/ftoutln.h");
-    @cInclude("freetype/ftglyph.h");
-});
+// One C import, owned by the HarfBuzz binding: hb.h + hb-ft.h pull in
+// freetype.h, so this exposes the full FreeType API we still need for
+// outline extraction.
+const hb = @import("harfbuzz");
+const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
 
 pub const MAX_MATERIALS: u32 = 128; // slot 0 = solid; glyphs start at 1
 pub const FONT_SIZE_PX: u32 = 20;
 
 pub const GlyphEntry = struct {
-    ch: u21, // Unicode code point (UTF-8 decoded, not a raw byte)
+    gid: u32, // shaped glyph id (the shaper resolved the codepoint)
     slot: u32, // material slot
     advance: f32,
     bearing_x: f32,
@@ -36,49 +37,6 @@ pub const GlyphEntry = struct {
     curve_bottom: f32,
     curve_w: f32,
     curve_h: f32,
-};
-
-/// Tolerant UTF-8 code-point iterator. std.unicode.Utf8Iterator panics
-/// (`catch unreachable`) on malformed input, which would crash the demo on
-/// label text with invalid bytes. This one skips invalid bytes instead and
-/// only returns null at end of input, so `while (it.nextCodepoint()) |cp|`
-/// never terminates early on a bad byte.
-const CodepointIterator = struct {
-    bytes: []const u8,
-    i: usize,
-
-    fn nextCodepoint(it: *CodepointIterator) ?u21 {
-        while (it.i < it.bytes.len) {
-            const first = it.bytes[it.i];
-            const seq_len = std.unicode.utf8ByteSequenceLength(first) catch {
-                it.i += 1; // invalid leading byte: skip it
-                continue;
-            };
-            if (it.i + seq_len > it.bytes.len) {
-                it.i += 1; // truncated sequence: skip the leading byte
-                continue;
-            }
-            const cp = switch (seq_len) {
-                1 => it.bytes[it.i], // ASCII: the byte is the codepoint
-                2 => std.unicode.utf8Decode2(it.bytes[it.i..][0..2].*) catch {
-                    it.i += 1; // bad continuation / overlong: skip the leading byte
-                    continue;
-                },
-                3 => std.unicode.utf8Decode3(it.bytes[it.i..][0..3].*) catch {
-                    it.i += 1; // bad continuation / overlong / surrogate: skip the leading byte
-                    continue;
-                },
-                4 => std.unicode.utf8Decode4(it.bytes[it.i..][0..4].*) catch {
-                    it.i += 1; // bad continuation / overlong / surrogate: skip the leading byte
-                    continue;
-                },
-                else => unreachable, // leading byte validated: 1..4 only
-            };
-            it.i += seq_len;
-            return cp;
-        }
-        return null;
-    }
 };
 
 pub const TextEngine = struct {
@@ -95,17 +53,21 @@ pub const TextEngine = struct {
     gpa: std.mem.Allocator,
     ft_lib: c.FT_Library,
     face: c.FT_Face,
-    // Parallel arrays, one element per rasterized char:
+    /// HarfBuzz font over the shared FT face (hb_ft_font_create_referenced).
+    /// The shaper owns all glyph selection/positioning; FT only rasterizes.
+    hb_font: hb.Font,
+    // Parallel arrays, one element per rasterized glyph:
     // sweepers[i] owns the GPU curve buffer backing entries[i].
-    sweepers: std.ArrayList(proto.GlyphSweeper) = .empty, // per char
-    entries: std.ArrayList(GlyphEntry) = .empty, // per char
+    sweepers: std.ArrayList(proto.GlyphSweeper) = .empty, // per glyph
+    entries: std.ArrayList(GlyphEntry) = .empty, // per glyph
     materials: noapi.GpuPtr, // MAX_MATERIALS * MATERIAL_SIZE, .default
     next_slot: u32 = 1,
     material_bda: u64 = 0,
 
-    /// Init FreeType, load the embedded Inter font at FONT_SIZE_PX, and
-    /// allocate the material buffer. Returns errors (not panics) on FT
-    /// failures; on partial failure everything allocated so far is released.
+    /// Init FreeType, load the embedded Inter font at FONT_SIZE_PX, wrap it
+    /// in a HarfBuzz font, and allocate the material buffer. Returns errors
+    /// (not panics) on FT/HB failures; on partial failure everything
+    /// allocated so far is released.
     pub fn init(gpu: *noapi.Gpu, gpa: std.mem.Allocator) !TextEngine {
         // SAFETY: assigned by FT_Init/FT_New before any use; failures return errors.
         var ft_lib: c.FT_Library = undefined;
@@ -121,6 +83,16 @@ pub const TextEngine = struct {
         errdefer _ = c.FT_Done_Face(face);
         if (c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX) != 0) return error.FreeTypeSetPixelSizesFailed;
 
+        // hb-ft over the shared FT face. NOTE: we build the Font directly
+        // from the binding's `c` (hb.c) rather than hb.freetype.createFont —
+        // the binding's freetype.zig uses the freetype PACKAGE's separate
+        // translate-c of freetype.h, whose FT_Face type is incompatible with
+        // the one in hb.c (two cimport instances of the same header).
+        const hb_handle = hb.c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+        var hb_font = hb.Font{ .handle = hb_handle };
+        hb.c.hb_ft_font_set_funcs(hb_handle);
+        errdefer hb_font.destroy();
+
         const materials = try gpu.gpuMalloc(MAX_MATERIALS * proto.MATERIAL_SIZE, 64, .default);
         errdefer gpu.gpuFree(materials);
 
@@ -129,6 +101,7 @@ pub const TextEngine = struct {
             .gpa = gpa,
             .ft_lib = ft_lib,
             .face = face,
+            .hb_font = hb_font,
             .materials = materials,
             .material_bda = materials.gpu,
         };
@@ -138,6 +111,7 @@ pub const TextEngine = struct {
         for (self.sweepers.items) |*s| s.deinit(); // frees each GPU curve buffer
         self.sweepers.deinit(self.gpa);
         self.entries.deinit(self.gpa);
+        self.hb_font.destroy();
         self.gpu.gpuFree(self.materials);
         _ = c.FT_Done_Face(self.face);
         _ = c.FT_Done_FreeType(self.ft_lib);
@@ -147,18 +121,32 @@ pub const TextEngine = struct {
         return self.material_bda;
     }
 
-    /// Rasterize `ch` on demand: extract curves → sweeper (GPU curve buffer)
-    /// → glyph material → entry. Chars absent from the font and chars whose
-    /// outline extraction fails are skipped (no entry, no error). Returns
-    /// error.TooManyGlyphs once the MAX_MATERIALS slot budget is exhausted
-    /// (checked only for chars that would actually consume a new slot).
-    fn ensureGlyph(self: *TextEngine, ch: u21) !void {
-        for (self.entries.items) |e| {
-            if (e.ch == ch) return; // already rasterized
-        }
+    /// Shape a UTF-8 run with HarfBuzz, returning the owning buffer. The
+    /// caller reads getGlyphInfos()/getGlyphPositions() and MUST destroy the
+    /// buffer when done. hb's addUTF8 never panics on invalid bytes (it
+    /// substitutes .notdef, which the gid-0 skip drops) — the old tolerant
+    /// iterator is gone.
+    fn shapeRun(self: *TextEngine, text: []const u8) !hb.Buffer {
+        var buf = try hb.Buffer.create();
+        errdefer buf.destroy();
+        buf.addUTF8(text);
+        buf.setDirection(.ltr);
+        buf.setScript(.latin);
+        hb.shape(self.hb_font, buf, null);
+        return buf;
+    }
 
-        // Char not present in the font → skip silently.
-        if (c.FT_Get_Char_Index(self.face, ch) == 0) return;
+    /// Rasterize glyph `gid` on demand: extract curves → sweeper (GPU curve
+    /// buffer) → glyph material → entry. Glyph id 0 (.notdef, from chars
+    /// absent in the font) and glyphs whose outline extraction fails are
+    /// skipped (no entry, no error). Returns error.TooManyGlyphs once the
+    /// MAX_MATERIALS slot budget is exhausted (checked only for glyphs that
+    /// would actually consume a new slot).
+    fn ensureGlyph(self: *TextEngine, gid: u32) !void {
+        if (gid == 0) return; // .notdef: missing glyph, skip
+        for (self.entries.items) |e| {
+            if (e.gid == gid) return; // already rasterized
+        }
 
         // Slot budget exhausted: fail with a real error instead of writing
         // OOB into the GPU material heap — a debug-only assert would compile
@@ -166,21 +154,25 @@ pub const TextEngine = struct {
         std.debug.assert(self.next_slot < MAX_MATERIALS); // slot 0 reserved for solid
         if (self.next_slot >= MAX_MATERIALS) return error.TooManyGlyphs;
 
-        // Extraction failures (missing outline, decompose error) → skip char.
-        const curves = extractCharCurves(self.gpa, self.face, ch) catch return;
+        // Extraction failures (missing outline, draw error) → skip glyph.
+        const curves = extractGlyphCurves(self.gpa, self.hb_font, gid) catch return;
         defer self.gpa.free(curves);
 
         var sweeper = try proto.GlyphSweeper.init(self.gpu, curves);
 
-        // FT_Load_Glyph already ran inside extractCharCurves, so
-        // face.*.glyph.*.metrics is current. Metrics are 26.6 fixed point;
-        // /64.0 converts to pixels.
-        const m = self.face.*.glyph.*.metrics;
-        const advance = @as(f32, @floatFromInt(m.horiAdvance)) / 64.0;
-        const bearing_x = @as(f32, @floatFromInt(m.horiBearingX)) / 64.0;
-        const bearing_y = @as(f32, @floatFromInt(m.horiBearingY)) / 64.0;
-        const glyph_w = @as(f32, @floatFromInt(m.width)) / 64.0;
-        const glyph_h = @as(f32, @floatFromInt(m.height)) / 64.0;
+        // Metrics from HarfBuzz (the same 26.6 fixed-point scale as the
+        // shaped positions; /64.0 → pixels). No FreeType in our code.
+        const advance = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(self.hb_font.handle, gid))) / 64.0;
+        // SAFETY: assigned by hb_font_get_glyph_extents before any read; a
+        // zero return (no ink) skips the glyph.
+        var ext: c.hb_glyph_extents_t = undefined;
+        if (c.hb_font_get_glyph_extents(self.hb_font.handle, gid, &ext) == 0) return; // no ink
+        const bearing_x = @as(f32, @floatFromInt(ext.x_bearing)) / 64.0;
+        const bearing_y = @as(f32, @floatFromInt(ext.y_bearing)) / 64.0;
+        const glyph_w = @as(f32, @floatFromInt(ext.width)) / 64.0;
+        // hb extents: height is NEGATIVE for y-up fonts (the box extends
+        // downward from the top bearing) — the magnitude is the ink height.
+        const glyph_h = @as(f32, @floatFromInt(@abs(ext.height))) / 64.0;
 
         // Rasterize the coverage bitmap (per-pixel sweep — provably correct,
         // see the sweep tests) and append it to the curve buffer. The shader
@@ -232,7 +224,7 @@ pub const TextEngine = struct {
             return e;
         };
         self.entries.append(self.gpa, .{
-            .ch = ch,
+            .gid = gid,
             .slot = slot,
             .advance = advance,
             .bearing_x = bearing_x,
@@ -250,30 +242,45 @@ pub const TextEngine = struct {
         };
     }
 
-    /// Ensure glyphs for every char in `text` exist (lazy), then append one
-    /// SliceRect per char to `out` at (x, baseline_y). `baseline_y` is the
-    /// font baseline (the caller computes it from the widget rect). Text is
-    /// decoded as UTF-8 code points, so multi-byte chars yield one glyph
-    /// each; invalid bytes are skipped. Unknown chars are skipped. Cursor
-    /// advances by each glyph's horiAdvance. Propagates error.TooManyGlyphs
-    /// if the material slot budget is exhausted.
+    /// Shape `text` (kerning/ligatures included), ensure the glyphs exist
+    /// (lazy), then append one SliceRect per glyph to `out` at (x,
+    /// baseline_y). `baseline_y` is the font baseline (the caller computes
+    /// it from the widget rect). Advances and per-glyph offsets come from
+    /// the shaper (26.6 fixed-point, /64.0 → px; y offsets are y-up, so the
+    /// y-down framebuffer subtracts them). Glyph id 0 (.notdef: chars
+    /// missing from the font or invalid UTF-8) is skipped WITHOUT advancing,
+    /// matching the pre-shaping behavior. Propagates error.TooManyGlyphs if
+    /// the material slot budget is exhausted.
     pub fn emitText(self: *TextEngine, text: []const u8, x: f32, baseline_y: f32, out: *std.ArrayList(SliceRect)) !void {
+        var buf = try self.shapeRun(text);
+        defer buf.destroy();
+        const infos = buf.getGlyphInfos();
+        const positions = buf.getGlyphPositions() orelse &.{};
         var cursor = x;
-        var it = CodepointIterator{ .bytes = text, .i = 0 };
-        while (it.nextCodepoint()) |cp| {
-            try self.ensureGlyph(cp);
-            const entry = self.entryFor(cp) orelse continue; // unknown char → skip
-            const ch_x = cursor + entry.bearing_x;
-            const ch_y = baseline_y - entry.bearing_y;
+        for (infos, positions) |info, pos| {
+            try self.ensureGlyph(info.codepoint);
+            const entry = self.entryFor(info.codepoint) orelse continue; // gid 0 → skip
+            // Canonical HarfBuzz placement: the glyph sits at the pen plus
+            // its x/y offsets, then the pen advances by x_advance. No
+            // snapping — the shader bilinearly filters the coverage bitmap
+            // at the fractional positions, so sub-pixel kerning survives
+            // and moving text stays smooth. (y offsets are y-up font
+            // units; the framebuffer is y-down, hence the minus.)
+            const ch_x = cursor + @as(f32, @floatFromInt(pos.x_offset)) / 64.0 + entry.bearing_x;
+            const ch_y = baseline_y - entry.bearing_y - @as(f32, @floatFromInt(pos.y_offset)) / 64.0;
             if (entry.glyph_w <= 0 or entry.glyph_h <= 0) {
-                cursor += entry.advance; // zero-size glyph (e.g. space): advance only
+                cursor += @as(f32, @floatFromInt(pos.x_advance)) / 64.0; // zero-size glyph (e.g. space): advance only
                 continue;
             }
             try out.append(self.gpa, .{
                 .dst_x = ch_x,
                 .dst_y = ch_y,
-                .dst_w = entry.glyph_w,
-                .dst_h = entry.glyph_h,
+                // The quad must cover the full bitmap (ceil'd): a
+                // fractional glyph_h would leave the bottom bitmap row —
+                // the ink's tip (descenders) — sampled at a reduced
+                // weight, visually clipping the glyph's low part.
+                .dst_w = @ceil(entry.glyph_w),
+                .dst_h = @ceil(entry.glyph_h),
                 .src_u = 0,
                 .src_v = 0,
                 .src_w = 1,
@@ -289,46 +296,45 @@ pub const TextEngine = struct {
                 .curve_w = entry.curve_w,
                 .curve_h = entry.curve_h,
             });
-            cursor += entry.advance;
+            cursor += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
         }
     }
 
-    /// Measure a text run's content size only: the sum of per-glyph
-    /// advances, 24px tall (20px cap height + descender room); padding and
-    /// border come from the widget box (flex), not from the measurement.
-    /// Lazily rasterizes like emitText; later emitText calls are no-ops for
-    /// already-loaded glyphs.
+    /// Measure a text run's content size only: the SHAPED width (the sum of
+    /// the shaper's advances — kerning and ligatures included), 24px tall
+    /// (20px cap height + descender room); padding and border come from the
+    /// widget box (flex), not from the measurement. Shapes only — no glyph
+    /// rasterization (unlike the pre-shaping measure, which forced the
+    /// atlas to fill). On shape failure falls back to the baked estimate.
     pub fn measureText(self: *TextEngine, text: []const u8) WidgetSize {
+        var buf = self.shapeRun(text) catch return .{
+            .width = @as(f32, @floatFromInt(text.len)) * 10,
+            .height = 24,
+        };
+        defer buf.destroy();
         var w: f32 = 0;
-        var it = CodepointIterator{ .bytes = text, .i = 0 };
-        while (it.nextCodepoint()) |cp| {
-            // Unrenderable chars are skipped, exactly like unknown chars:
-            // rasterization failures and the TooManyGlyphs slot cap silently
-            // contribute no advance instead of erroring out of layout.
-            self.ensureGlyph(cp) catch continue;
-            const e = self.entryFor(cp) orelse continue;
-            w += e.advance;
+        for (buf.getGlyphPositions() orelse &.{}) |pos| {
+            w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
         }
         return .{ .width = w, .height = 24 };
     }
 
-    fn entryFor(self: *const TextEngine, ch: u21) ?GlyphEntry {
+    fn entryFor(self: *const TextEngine, gid: u32) ?GlyphEntry {
         for (self.entries.items) |e| {
-            if (e.ch == ch) return e;
+            if (e.gid == gid) return e;
         }
         return null;
     }
 };
 
-/// Extract glyph curves for a specific character using FreeType.
-/// Ported from src/proto_main.zig: FT_Outline_Funcs callbacks fill a
-/// 4096-curve stack buffer (cubic segments split into two conics at t=0.5),
-/// then the caller-owned slice is dupe'd via `alloc`.
-fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]proto.Curve {
-    const idx = c.FT_Get_Char_Index(face, @intCast(ch));
-    if (idx == 0) return error.GlyphNotFound;
-    if (c.FT_Load_Glyph(face, idx, c.FT_LOAD_NO_BITMAP) != 0) return error.GlyphLoadFailed;
-    const outline = &face.*.glyph.*.outline;
+/// Extract glyph curves for a specific SHAPED glyph id via HarfBuzz's
+/// draw API (hb_font_draw_glyph — the hb-ft backend emits the outline in
+/// the font's scale, 26.6 fixed-point px; /64 → px). No FreeType calls in
+/// our code: the face exists only as the hb-ft backend. Callbacks fill a
+/// 4096-curve stack buffer (cubic segments split into two conics at
+/// t=0.5), then the caller-owned slice is dupe'd via `alloc`.
+fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]proto.Curve {
+    if (gid == 0) return error.GlyphNotFound;
 
     var buf: [4096]proto.Curve = undefined;
     var count: u32 = 0;
@@ -355,85 +361,97 @@ fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]prot
         .last_y = &last_y,
     };
 
-    const funcs = c.FT_Outline_Funcs{
-        .move_to = struct {
-            fn cb(to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
-                const p: *Ctx = @ptrCast(@alignCast(user));
-                p.first_x.* = @as(f32, @floatFromInt(to.*.x)) / 64;
-                p.first_y.* = @as(f32, @floatFromInt(to.*.y)) / 64;
-                p.last_x.* = p.first_x.*;
-                p.last_y.* = p.first_y.*;
-                return 0;
+    const move_cb = struct {
+        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+            _ = dfuncs;
+            _ = draw_data;
+            _ = st;
+            const p: *Ctx = @ptrCast(@alignCast(user_data));
+            p.first_x.* = to_x / 64;
+            p.first_y.* = to_y / 64;
+            p.last_x.* = p.first_x.*;
+            p.last_y.* = p.first_y.*;
+        }
+    }.cb;
+    const line_cb = struct {
+        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+            _ = dfuncs;
+            _ = draw_data;
+            _ = st;
+            const p: *Ctx = @ptrCast(@alignCast(user_data));
+            const tx = to_x / 64;
+            const ty = to_y / 64;
+            if (p.count.* < 4096) {
+                p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = (p.last_x.* + tx) * 0.5, .p1y = (p.last_y.* + ty) * 0.5, .p2x = tx, .p2y = ty };
+                p.count.* += 1;
             }
-        }.cb,
-        .line_to = struct {
-            fn cb(to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
-                const p: *Ctx = @ptrCast(@alignCast(user));
-                const tx = @as(f32, @floatFromInt(to.*.x)) / 64;
-                const ty = @as(f32, @floatFromInt(to.*.y)) / 64;
-                if (p.count.* < 4096) {
-                    p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = (p.last_x.* + tx) * 0.5, .p1y = (p.last_y.* + ty) * 0.5, .p2x = tx, .p2y = ty };
-                    p.count.* += 1;
-                }
-                p.last_x.* = tx;
-                p.last_y.* = ty;
-                return 0;
+            p.last_x.* = tx;
+            p.last_y.* = ty;
+        }
+    }.cb;
+    const quad_cb = struct {
+        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, control_x: f32, control_y: f32, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+            _ = dfuncs;
+            _ = draw_data;
+            _ = st;
+            const p: *Ctx = @ptrCast(@alignCast(user_data));
+            const cx = control_x / 64;
+            const cy = control_y / 64;
+            const tx = to_x / 64;
+            const ty = to_y / 64;
+            if (p.count.* < 4096) {
+                p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = cx, .p1y = cy, .p2x = tx, .p2y = ty };
+                p.count.* += 1;
             }
-        }.cb,
-        .conic_to = struct {
-            fn cb(control: [*c]const c.FT_Vector, to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
-                const p: *Ctx = @ptrCast(@alignCast(user));
-                const cx = @as(f32, @floatFromInt(control.*.x)) / 64;
-                const cy = @as(f32, @floatFromInt(control.*.y)) / 64;
-                const tx = @as(f32, @floatFromInt(to.*.x)) / 64;
-                const ty = @as(f32, @floatFromInt(to.*.y)) / 64;
-                if (p.count.* < 4096) {
-                    p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = cx, .p1y = cy, .p2x = tx, .p2y = ty };
-                    p.count.* += 1;
-                }
-                p.last_x.* = tx;
-                p.last_y.* = ty;
-                return 0;
+            p.last_x.* = tx;
+            p.last_y.* = ty;
+        }
+    }.cb;
+    const cubic_cb = struct {
+        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, c1x: f32, c1y: f32, c2x: f32, c2y: f32, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+            _ = dfuncs;
+            _ = draw_data;
+            _ = st;
+            const p: *Ctx = @ptrCast(@alignCast(user_data));
+            const c1x_px = c1x / 64;
+            const c1y_px = c1y / 64;
+            const c2x_px = c2x / 64;
+            const c2y_px = c2y / 64;
+            const tx = to_x / 64;
+            const ty = to_y / 64;
+            if (p.count.* + 1 < 4096) {
+                const t: f32 = 0.5;
+                const mt = 1 - t;
+                const b0x = mt * p.last_x.* + t * c1x_px;
+                const b0y = mt * p.last_y.* + t * c1y_px;
+                const b1x = mt * c1x_px + t * c2x_px;
+                const b1y = mt * c1y_px + t * c2y_px;
+                const b2x = mt * c2x_px + t * tx;
+                const b2y = mt * c2y_px + t * ty;
+                const cx1 = mt * b0x + t * b1x;
+                const cy1 = mt * b0y + t * b1y;
+                const cx2 = mt * b1x + t * b2x;
+                const cy2 = mt * b1y + t * b2y;
+                const dx = mt * cx1 + t * cx2;
+                const dy = mt * cy1 + t * cy2;
+                p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = b0x, .p1y = b0y, .p2x = dx, .p2y = dy };
+                p.count.* += 1;
+                p.curves[p.count.*] = .{ .p0x = dx, .p0y = dy, .p1x = cx2, .p1y = cy2, .p2x = tx, .p2y = ty };
+                p.count.* += 1;
             }
-        }.cb,
-        .cubic_to = struct {
-            fn cb(c1: [*c]const c.FT_Vector, c2: [*c]const c.FT_Vector, to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
-                const p: *Ctx = @ptrCast(@alignCast(user));
-                const c1x = @as(f32, @floatFromInt(c1.*.x)) / 64;
-                const c1y = @as(f32, @floatFromInt(c1.*.y)) / 64;
-                const c2x = @as(f32, @floatFromInt(c2.*.x)) / 64;
-                const c2y = @as(f32, @floatFromInt(c2.*.y)) / 64;
-                const tx = @as(f32, @floatFromInt(to.*.x)) / 64;
-                const ty = @as(f32, @floatFromInt(to.*.y)) / 64;
-                if (p.count.* + 1 < 4096) {
-                    const t: f32 = 0.5;
-                    const mt = 1 - t;
-                    const b0x = mt * p.last_x.* + t * c1x;
-                    const b0y = mt * p.last_y.* + t * c1y;
-                    const b1x = mt * c1x + t * c2x;
-                    const b1y = mt * c1y + t * c2y;
-                    const b2x = mt * c2x + t * tx;
-                    const b2y = mt * c2y + t * ty;
-                    const cx1 = mt * b0x + t * b1x;
-                    const cy1 = mt * b0y + t * b1y;
-                    const cx2 = mt * b1x + t * b2x;
-                    const cy2 = mt * b1y + t * b2y;
-                    const dx = mt * cx1 + t * cx2;
-                    const dy = mt * cy1 + t * cy2;
-                    p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = b0x, .p1y = b0y, .p2x = dx, .p2y = dy };
-                    p.count.* += 1;
-                    p.curves[p.count.*] = .{ .p0x = dx, .p0y = dy, .p1x = cx2, .p1y = cy2, .p2x = tx, .p2y = ty };
-                    p.count.* += 1;
-                }
-                p.last_x.* = tx;
-                p.last_y.* = ty;
-                return 0;
-            }
-        }.cb,
-        .shift = 0,
-        .delta = 0,
-    };
-    if (c.FT_Outline_Decompose(outline, &funcs, &ctx) != 0) return error.OutlineDecomposeFailed;
+            p.last_x.* = tx;
+            p.last_y.* = ty;
+        }
+    }.cb;
+
+    const funcs = c.hb_draw_funcs_create();
+    if (funcs == null) return error.GlyphDrawFailed;
+    defer _ = c.hb_draw_funcs_destroy(funcs);
+    c.hb_draw_funcs_set_move_to_func(funcs, move_cb, &ctx, null);
+    c.hb_draw_funcs_set_line_to_func(funcs, line_cb, &ctx, null);
+    c.hb_draw_funcs_set_quadratic_to_func(funcs, quad_cb, &ctx, null);
+    c.hb_draw_funcs_set_cubic_to_func(funcs, cubic_cb, &ctx, null);
+    c.hb_font_draw_glyph(font.handle, gid, funcs, &ctx);
 
     return alloc.dupe(proto.Curve, buf[0..count]);
 }
@@ -604,7 +622,9 @@ test "glyph sweep: real 'n' curves give full coverage at stroke centers" {
     defer _ = c.FT_Done_Face(face);
     try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, 20));
 
-    const curves = try extractCharCurves(std.testing.allocator, face, 'n');
+    const n_idx = c.FT_Get_Char_Index(face, 'n');
+    const h = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+    const curves = try extractGlyphCurves(std.testing.allocator, .{ .handle = h }, n_idx);
     defer std.testing.allocator.free(curves);
     // curve extent
     var min_x: f32 = 1e9;
@@ -644,4 +664,149 @@ test "glyph sweep: real 'n' curves give full coverage at stroke centers" {
     try std.testing.expect(max_cov > 0.8);
     // Ink: a 20px 'n' covers ~45 px of stroke.
     try std.testing.expect(ink > 30);
+}
+
+test "shaping: the hb-ft font scale is 26.6 fixed-point pixels" {
+    // Standalone FT + hb setup (no GPU): a shaped 'A' at 20px must advance
+    // ~13px = 832 in 26.6 units — the shaper positions are /64.0 → px.
+    var ft_lib: c.FT_Library = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Init_FreeType(&ft_lib));
+    defer _ = c.FT_Done_FreeType(ft_lib);
+    const font_data = @embedFile("InterVariable.ttf");
+    var face: c.FT_Face = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    defer _ = c.FT_Done_Face(face);
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+    var font = hb.Font{ .handle = handle };
+    defer font.destroy();
+
+    var buf = try hb.Buffer.create();
+    defer buf.destroy();
+    buf.addUTF8("A");
+    buf.setDirection(.ltr);
+    buf.setScript(.latin);
+    hb.shape(font, buf, null);
+    const positions = buf.getGlyphPositions() orelse return error.NoPositions;
+    try std.testing.expectEqual(@as(usize, 1), positions.len);
+    // 20px Inter 'A': horiAdvance ≈ 13px → 26.6 units ≈ 800-900.
+    try std.testing.expect(positions[0].x_advance > 700 and positions[0].x_advance < 1000);
+}
+
+test "shaping: kerned AV pair is narrower than the advance sum" {
+    var ft_lib: c.FT_Library = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Init_FreeType(&ft_lib));
+    defer _ = c.FT_Done_FreeType(ft_lib);
+    const font_data = @embedFile("InterVariable.ttf");
+    var face: c.FT_Face = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    defer _ = c.FT_Done_Face(face);
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+    var font = hb.Font{ .handle = handle };
+    defer font.destroy();
+
+    const width = struct {
+        fn w(fnt: hb.Font, text: []const u8) !f32 {
+            var buf = try hb.Buffer.create();
+            defer buf.destroy();
+            buf.addUTF8(text);
+            buf.setDirection(.ltr);
+            buf.setScript(.latin);
+            hb.shape(fnt, buf, null);
+            var total: f32 = 0;
+            for (buf.getGlyphPositions() orelse &.{}) |p| total += @as(f32, @floatFromInt(p.x_advance)) / 64.0;
+            return total;
+        }
+    }.w;
+
+    const av = try width(font, "AV");
+    const a = try width(font, "A");
+    const v = try width(font, "V");
+    // The classic AV pair is GPOS-kerned in Inter: AV < A + V.
+    try std.testing.expect(av < a + v - 0.5);
+    // H-H is not kerned: the shaped width equals the naive sum.
+    const hh = try width(font, "HH");
+    const h = try width(font, "H");
+    try std.testing.expectApproxEqAbs(hh, h + h, 0.01);
+}
+
+test "shaping: invalid UTF-8 substitutes .notdef, never panics" {
+    var ft_lib: c.FT_Library = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Init_FreeType(&ft_lib));
+    defer _ = c.FT_Done_FreeType(ft_lib);
+    const font_data = @embedFile("InterVariable.ttf");
+    var face: c.FT_Face = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    defer _ = c.FT_Done_Face(face);
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+    var font = hb.Font{ .handle = handle };
+    defer font.destroy();
+
+    var buf = try hb.Buffer.create();
+    defer buf.destroy();
+    buf.addUTF8("a\xFF\xFEb");
+    hb.shape(font, buf, null);
+    const infos = buf.getGlyphInfos();
+    // Every input byte maps to a glyph (2 .notdef for the invalid pair);
+    // the run stays bounded.
+    try std.testing.expect(infos.len == 3 or infos.len == 4);
+}
+
+test "shaping: the kern feature applies GPOS pair adjustments in px" {
+    // hb-ft runs with FT_LOAD_NO_HINTING: advances, extents and outlines
+    // are the UNHINTED (true) values in the 26.6-px hb scale — consistent
+    // with the shaped positions. The old pipeline mixed the shaper's
+    // unhinted advances with the HINTED FT metrics, which is what made
+    // "reset" look unevenly spaced.
+    var ft_lib: c.FT_Library = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Init_FreeType(&ft_lib));
+    defer _ = c.FT_Done_FreeType(ft_lib);
+    const font_data = @embedFile("InterVariable.ttf");
+    var face: c.FT_Face = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    defer _ = c.FT_Done_Face(face);
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+    var font = hb.Font{ .handle = handle };
+    defer font.destroy();
+
+    const kern_off = [_]hb.Feature{.{ .tag = 0x6b65726e, .value = 0, .start = 0, .end = std.math.maxInt(c_uint) }};
+
+    const width = struct {
+        fn w(fnt: hb.Font, text: []const u8, features: ?[]const hb.Feature) !f32 {
+            var buf = try hb.Buffer.create();
+            defer buf.destroy();
+            buf.addUTF8(text);
+            buf.setDirection(.ltr);
+            buf.setScript(.latin);
+            hb.shape(fnt, buf, features);
+            var total: f32 = 0;
+            for (buf.getGlyphPositions() orelse &.{}) |p| total += @as(f32, @floatFromInt(p.x_advance)) / 64.0;
+            return total;
+        }
+    }.w;
+
+    // The classic AV pair tightens by the font's real GPOS value.
+    const av = try width(font, "AV", null);
+    const av_off = try width(font, "AV", &kern_off);
+    try std.testing.expect(av < av_off - 0.3);
+
+    // Inter has NO s->e GPOS pair: the kern feature changes nothing.
+    // ("res et" was a hinting artifact of the old pipeline, not kerning.)
+    const se = try width(font, "se", null);
+    const se_off = try width(font, "se", &kern_off);
+    try std.testing.expectApproxEqAbs(se, se_off, 0.01);
+
+    // The base advances are the UNHINTED ones — they differ from the
+    // hinted FT metrics the old pipeline used for the bitmaps.
+    const s_gid = c.FT_Get_Char_Index(face, 's');
+    const e_gid = c.FT_Get_Char_Index(face, 'e');
+    const s_adv = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(handle, s_gid))) / 64.0;
+    const e_adv = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(handle, e_gid))) / 64.0;
+    try std.testing.expectApproxEqAbs(se_off, s_adv + e_adv, 0.01);
+    _ = c.FT_Load_Glyph(face, s_gid, c.FT_LOAD_DEFAULT);
+    const ft_hinted = @as(f32, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0;
+    try std.testing.expect(@abs(s_adv - ft_hinted) > 0.1); // unhinted ≠ hinted
 }

@@ -45,6 +45,35 @@ layout(buffer_reference, buffer_reference_align = 4) buffer ByteBuf {
     uint data[];
 };
 
+// Coverage bitmap texel (1 byte, row-major, row 0 = glyph top).
+float texelCoverage(uint64_t bda, uint n, uint x, uint y, uint bmp_w) {
+    ByteBuf bytes = ByteBuf(bda);
+    uint bit_off = 8u + n * 24u + y * bmp_w + x;
+    uint word = bytes.data[bit_off / 4u];
+    uint byte_val = (word >> (8u * (bit_off % 4u))) & 0xFFu;
+    return clamp(float(byte_val) / 255.0, 0.0, 1.0);
+}
+
+// Bilinear reconstruction of the pre-AA'd coverage bitmap. Glyph quads sit
+// at fractional (sub-pixel) pen positions — the canonical HarfBuzz output —
+// so nearest sampling would snap each glyph's ink to the pixel grid
+// independently: uneven gaps, jitter on moving text, lost kerning.
+float sampleCoverage(uint64_t bda, uint n, float bmp_w, float bmp_h, vec2 cell) {
+    float cx = clamp(cell.x - 0.5, 0.0, bmp_w - 1.0);
+    float cy = clamp(cell.y - 0.5, 0.0, bmp_h - 1.0);
+    float fx = fract(cx);
+    float fy = fract(cy);
+    uint x = uint(cx);
+    uint y = uint(cy);
+    uint x1 = min(x + 1u, uint(bmp_w) - 1u);
+    uint y1 = min(y + 1u, uint(bmp_h) - 1u);
+    float c00 = texelCoverage(bda, n, x, y, uint(bmp_w));
+    float c10 = texelCoverage(bda, n, x1, y, uint(bmp_w));
+    float c01 = texelCoverage(bda, n, x, y1, uint(bmp_w));
+    float c11 = texelCoverage(bda, n, x1, y1, uint(bmp_w));
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
 layout(push_constant) uniform Push {
     uint64_t material_buf_bda;
     uint64_t vp_h_packed;
@@ -134,21 +163,14 @@ void main() {
 
         // Coverage bitmap: pre-rasterized on the CPU (per-pixel sweep at
         // glyph load). mat.win_w/win_h carry the bitmap dimensions.
-        // Cell position from gl_FragCoord - vOrigin (vOrigin = rect origin).
+        // Cell position from gl_FragCoord - vOrigin (vOrigin = rect origin;
+        // cell.y = 0 at the rect top — framebuffer y is down, matching the
+        // bitmap's row 0 = glyph top, no flip).
         vec2 cell = gl_FragCoord.xy - vOrigin;
         float bmp_w = mat.win_w;
         float bmp_h = mat.win_h;
         if (bmp_w <= 0.0 || bmp_h <= 0.0) { fragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
-        int bx = int(clamp(cell.x, 0.0, bmp_w - 1.0));
-        // Bitmap row 0 = glyph top; cell.y = 0 at the rect top (framebuffer
-        // y is down), so no flip.
-        int by = int(clamp(cell.y, 0.0, bmp_h - 1.0));
-        // Bitmap bytes follow the curve array (8 + n*24 bytes in).
-        ByteBuf bytes = ByteBuf(mat.curve_bda);
-        uint bit_off = 8u + n * 24u + uint(by) * uint(bmp_w) + uint(bx);
-        uint word = bytes.data[bit_off / 4u];
-        uint byte_val = (word >> (8u * (bit_off % 4u))) & 0xFFu;
-        float coverage = clamp(float(byte_val) / 255.0, 0.0, 1.0);
+        float coverage = sampleCoverage(mat.curve_bda, n, bmp_w, bmp_h, cell);
         fragColor = vec4(vColor.rgb, coverage * vColor.a);
         return;
     }
