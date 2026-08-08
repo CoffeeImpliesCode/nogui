@@ -55,6 +55,7 @@ Immediate-mode GUI toolkit prototyping on top of `noapi` (Vulkan GPU abstraction
 
 - Use tools, always use `edit` instead of rewriting the file
 - Using shell for large edits is unadvised
+- **MANDATORY — tools over shell**: file changes go through `edit`/`write` only. NEVER patch files with inline python/perl/sed/awk scripts, heredocs, or `echo >` redirection — this corrupts files and bypasses review. Read with `read`, search with `grep`/`glob`. Shell is for builds/tests and one-shot fact queries only. If an `edit` fails, read and retry with exact text — never fall back to scripting.
 - Delegate, Delegate, Delegate
 - Be as parallel as possible: 20 files to edit → 20 workers, 8 files touched → 8 workers, 3 research topics → 3 librarians, 5 hard problems → 5 oracles
 - Break tasks down, assume subagents are dumb, give full instruction, use many subagents with small tasks each

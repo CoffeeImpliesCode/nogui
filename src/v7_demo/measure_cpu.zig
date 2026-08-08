@@ -11,12 +11,15 @@ const WidgetSize = @import("v7/widget.zig").Size;
 const hb = @import("harfbuzz");
 const c = hb.c;
 
-const FONT_SIZE_PX: u32 = 20; // must match TextEngine.FONT_SIZE_PX
+const FONT_SIZE_PX: u32 = 16; // must match TextEngine.FONT_SIZE_PX
 
 const State = struct {
     ft_lib: c.FT_Library,
     face: c.FT_Face,
     hb_font: hb.Font,
+    /// Font line metrics at FONT_SIZE_PX (26.6 → px).
+    ascent: f32,
+    descent: f32,
 };
 
 var state: ?State = null;
@@ -44,8 +47,19 @@ pub fn init() !void {
     const hb_handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
     const hb_font = hb.Font{ .handle = hb_handle };
     c.hb_ft_font_set_funcs(hb_handle);
+    _ = c.hb_ft_font_set_load_flags(hb_handle, c.FT_LOAD_DEFAULT);
 
-    state = .{ .ft_lib = ft_lib, .face = face, .hb_font = hb_font };
+    // SAFETY: assigned by hb_font_get_extents_for_direction before any read.
+    var font_ext: c.hb_font_extents_t = undefined;
+    _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
+
+    state = .{
+        .ft_lib = ft_lib,
+        .face = face,
+        .hb_font = hb_font,
+        .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
+        .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
+    };
 }
 
 pub fn deinit() void {
@@ -70,7 +84,7 @@ pub fn measure(text: []const u8) WidgetSize {
         for (buf.getGlyphPositions() orelse &.{}) |pos| {
             w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
         }
-        return .{ .width = w, .height = 24 };
+        return .{ .width = w, .height = s.ascent - s.descent };
     }
     return fallback(text);
 }

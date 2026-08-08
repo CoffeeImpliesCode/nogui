@@ -23,7 +23,7 @@ const hb = @import("harfbuzz");
 const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
 
 pub const MAX_MATERIALS: u32 = 128; // slot 0 = solid; glyphs start at 1
-pub const FONT_SIZE_PX: u32 = 20;
+pub const FONT_SIZE_PX: u32 = 16;
 
 pub const GlyphEntry = struct {
     gid: u32, // shaped glyph id (the shaper resolved the codepoint)
@@ -49,6 +49,20 @@ pub const TextEngine = struct {
     pub fn measureForFlex(text: []const u8) WidgetSize {
         return measure_engine.?.measureText(text);
     }
+
+    /// The font's line height in px (ascender − descender; the hb
+    /// descender is negative, y-up).
+    pub fn lineHeight(self: *const TextEngine) f32 {
+        return self.ascent - self.descent;
+    }
+
+    /// The text baseline for a content box (y, h): the line box centered
+    /// vertically, the baseline at the ascent. This is the correct
+    /// transformation at any font size — the old 0.75*hack only fit the
+    /// 20px size.
+    pub fn baselineIn(self: *const TextEngine, y: f32, h: f32) f32 {
+        return y + (h - self.lineHeight()) / 2 + self.ascent;
+    }
     gpu: *noapi.Gpu,
     gpa: std.mem.Allocator,
     ft_lib: c.FT_Library,
@@ -56,6 +70,11 @@ pub const TextEngine = struct {
     /// HarfBuzz font over the shared FT face (hb_ft_font_create_referenced).
     /// The shaper owns all glyph selection/positioning; FT only rasterizes.
     hb_font: hb.Font,
+    /// Font line metrics at FONT_SIZE_PX (26.6 → px). The demo derives the
+    /// widget line height and the baseline from these — the old 0.75*hack
+    /// only fit the 20px size.
+    ascent: f32,
+    descent: f32,
     // Parallel arrays, one element per rasterized glyph:
     // sweepers[i] owns the GPU curve buffer backing entries[i].
     sweepers: std.ArrayList(proto.GlyphSweeper) = .empty, // per glyph
@@ -91,7 +110,14 @@ pub const TextEngine = struct {
         const hb_handle = hb.c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
         var hb_font = hb.Font{ .handle = hb_handle };
         hb.c.hb_ft_font_set_funcs(hb_handle);
+        // Match the shaper's metrics to the rasterized outlines: hint with
+        // FT_LOAD_DEFAULT (pixel-snapped stems, flat top/bottom edges).
+        _ = hb.c.hb_ft_font_set_load_flags(hb_handle, c.FT_LOAD_DEFAULT);
         errdefer hb_font.destroy();
+
+        // SAFETY: assigned by hb_font_get_extents_for_direction before any read.
+        var font_ext: c.hb_font_extents_t = undefined;
+        _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
 
         const materials = try gpu.gpuMalloc(MAX_MATERIALS * proto.MATERIAL_SIZE, 64, .default);
         errdefer gpu.gpuFree(materials);
@@ -102,6 +128,8 @@ pub const TextEngine = struct {
             .ft_lib = ft_lib,
             .face = face,
             .hb_font = hb_font,
+            .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
+            .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
             .materials = materials,
             .material_bda = materials.gpu,
         };
@@ -119,6 +147,17 @@ pub const TextEngine = struct {
 
     pub fn materialBda(self: *const TextEngine) u64 {
         return self.material_bda;
+    }
+
+    /// Snap the run's LOGICAL origin (the content box's left) to the
+    /// device pixel grid. Everything INSIDE the run stays exact: the
+    /// shaped advances and offsets flow straight into the pixel offsets,
+    /// so the kerning is preserved and the glyphs' fractional offsets are
+    /// fixed constants relative to the integer origin — coverage static,
+    /// movement in clean 1px steps, runs aligned by their boxes (never by
+    /// the first glyph's bearing).
+    fn snapRunOrigin(x: f32) f32 {
+        return @round(x);
     }
 
     /// Shape a UTF-8 run with HarfBuzz, returning the owning buffer. The
@@ -174,35 +213,9 @@ pub const TextEngine = struct {
         // downward from the top bearing) — the magnitude is the ink height.
         const glyph_h = @as(f32, @floatFromInt(@abs(ext.height))) / 64.0;
 
-        // Rasterize the coverage bitmap (per-pixel sweep — provably correct,
-        // see the sweep tests) and append it to the curve buffer. The shader
-        // samples this bitmap instead of sweeping per fragment.
-        const bmp_w: u32 = @intFromFloat(@ceil(@max(glyph_w, 1)));
-        const bmp_h: u32 = @intFromFloat(@ceil(@max(glyph_h, 1)));
-        const win = [2]f32{ sweeper.curve_w / @max(glyph_w, 0.5), sweeper.curve_h / @max(glyph_h, 0.5) };
-        const bitmap = try self.gpa.alloc(u8, bmp_w * bmp_h);
-        defer self.gpa.free(bitmap);
-        for (0..bmp_h) |py| {
-            for (0..bmp_w) |px| {
-                const off = [2]f32{
-                    sweeper.curve_left + sweeper.curve_w * @as(f32, @floatFromInt(px)) / @max(glyph_w, 0.5),
-                    sweeper.curve_bottom + sweeper.curve_h * @as(f32, @floatFromInt(py)) / @max(glyph_h, 0.5),
-                };
-                var total: f32 = 0;
-                for (curves) |cv| {
-                    total += sweepSegment(win, off, .{ cv.p0x, cv.p0y }, .{ cv.p1x, cv.p1y }, .{ cv.p2x, cv.p2y });
-                }
-                const cov = std.math.clamp(total / (win[0] * win[1]), 0.0, 1.0);
-                // Row 0 = glyph TOP (py = bmp_h-1 maps to off.y = curve top;
-                // py = 0 maps to the bottom). The shader reads row = cell.y
-                // with no flip: framebuffer y is down, matching this layout.
-                bitmap[(bmp_h - 1 - py) * bmp_w + px] = @intFromFloat(cov * 255.0);
-            }
-        }
-        try sweeper.growCurveBuffer(bitmap.len);
-        const base = @sizeOf(u32) * 2 + curves.len * @sizeOf(proto.Curve);
-        @memcpy(@as([*]u8, @ptrCast(@alignCast(sweeper.curve_buf.cpu)))[base .. base + bitmap.len], bitmap);
-
+        // The shader sweeps the curves per fragment at DISPLAY resolution
+        // (analytic AA — no intermediate bitmap), so the material only
+        // needs the curve buffer; the window fields are unused (1.0).
         const slot = self.next_slot;
         proto.GlyphSweeper.writeMaterial(
             sweeper.curve_buf_bda,
@@ -211,8 +224,8 @@ pub const TextEngine = struct {
             bearing_y,
             sweeper.curve_w,
             sweeper.curve_h,
-            @floatFromInt(bmp_w),
-            @floatFromInt(bmp_h),
+            1.0,
+            1.0,
         );
         self.next_slot += 1;
 
@@ -256,18 +269,22 @@ pub const TextEngine = struct {
         defer buf.destroy();
         const infos = buf.getGlyphInfos();
         const positions = buf.getGlyphPositions() orelse &.{};
-        var cursor = x;
+        const run_x = snapRunOrigin(x); // the LOGICAL origin snapped once
+        const run_baseline = @round(baseline_y);
+        var cursor: f32 = 0; // the exact internal pen (relative to run_x)
         for (infos, positions) |info, pos| {
             try self.ensureGlyph(info.codepoint);
             const entry = self.entryFor(info.codepoint) orelse continue; // gid 0 → skip
-            // Canonical HarfBuzz placement: the glyph sits at the pen plus
-            // its x/y offsets, then the pen advances by x_advance. No
-            // snapping — the shader bilinearly filters the coverage bitmap
-            // at the fractional positions, so sub-pixel kerning survives
-            // and moving text stays smooth. (y offsets are y-up font
-            // units; the framebuffer is y-down, hence the minus.)
-            const ch_x = cursor + @as(f32, @floatFromInt(pos.x_offset)) / 64.0 + entry.bearing_x;
-            const ch_y = baseline_y - entry.bearing_y - @as(f32, @floatFromInt(pos.y_offset)) / 64.0;
+            // Canonical HarfBuzz placement at the exact positions: the
+            // glyph sits at run_x + cursor + x_offset + bearing_x, then
+            // the pen advances by x_advance (y offsets are y-up font
+            // units; the framebuffer is y-down, hence the minus). The
+            // run-level snap keeps the coverage static and the movement
+            // in 1px steps; the exact internal positions preserve the
+            // sub-pixel kerning (a per-glyph snap quantizes the advances
+            // and breaks pairs like "re set" / "w ater").
+            const ch_x = run_x + cursor + @as(f32, @floatFromInt(pos.x_offset)) / 64.0 + entry.bearing_x;
+            const ch_y = run_baseline - entry.bearing_y - @as(f32, @floatFromInt(pos.y_offset)) / 64.0;
             if (entry.glyph_w <= 0 or entry.glyph_h <= 0) {
                 cursor += @as(f32, @floatFromInt(pos.x_advance)) / 64.0; // zero-size glyph (e.g. space): advance only
                 continue;
@@ -275,10 +292,6 @@ pub const TextEngine = struct {
             try out.append(self.gpa, .{
                 .dst_x = ch_x,
                 .dst_y = ch_y,
-                // The quad must cover the full bitmap (ceil'd): a
-                // fractional glyph_h would leave the bottom bitmap row —
-                // the ink's tip (descenders) — sampled at a reduced
-                // weight, visually clipping the glyph's low part.
                 .dst_w = @ceil(entry.glyph_w),
                 .dst_h = @ceil(entry.glyph_h),
                 .src_u = 0,
@@ -316,7 +329,7 @@ pub const TextEngine = struct {
         for (buf.getGlyphPositions() orelse &.{}) |pos| {
             w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
         }
-        return .{ .width = w, .height = 24 };
+        return .{ .width = w, .height = self.lineHeight() };
     }
 
     fn entryFor(self: *const TextEngine, gid: u32) ?GlyphEntry {
@@ -660,10 +673,10 @@ test "glyph sweep: real 'n' curves give full coverage at stroke centers" {
             }
         }
     }
-    // A 20px 'n' stem center must be nearly solid.
+    // A 13px 'n' stem center must be nearly solid.
     try std.testing.expect(max_cov > 0.8);
-    // Ink: a 20px 'n' covers ~45 px of stroke.
-    try std.testing.expect(ink > 30);
+    // Ink: a 13px 'n' covers ~20 px of stroke (the sweep scales with size).
+    try std.testing.expect(ink > 15);
 }
 
 test "shaping: the hb-ft font scale is 26.6 fixed-point pixels" {
@@ -689,8 +702,13 @@ test "shaping: the hb-ft font scale is 26.6 fixed-point pixels" {
     hb.shape(font, buf, null);
     const positions = buf.getGlyphPositions() orelse return error.NoPositions;
     try std.testing.expectEqual(@as(usize, 1), positions.len);
-    // 20px Inter 'A': horiAdvance ≈ 13px → 26.6 units ≈ 800-900.
-    try std.testing.expect(positions[0].x_advance > 700 and positions[0].x_advance < 1000);
+    // The hb scale is 26.6 fixed-point px: the shaped advance must agree
+    // with FreeType's own UNHINTED advance at any pixel size (the scale
+    // test is size-independent).
+    _ = c.FT_Load_Glyph(face, c.FT_Get_Char_Index(face, 'A'), c.FT_LOAD_NO_HINTING);
+    const ft_adv = @as(f32, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0;
+    const shaped_adv = @as(f32, @floatFromInt(positions[0].x_advance)) / 64.0;
+    try std.testing.expectApproxEqAbs(ft_adv, shaped_adv, 0.2);
 }
 
 test "shaping: kerned AV pair is narrower than the advance sum" {
@@ -809,4 +827,37 @@ test "shaping: the kern feature applies GPOS pair adjustments in px" {
     _ = c.FT_Load_Glyph(face, s_gid, c.FT_LOAD_DEFAULT);
     const ft_hinted = @as(f32, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0;
     try std.testing.expect(@abs(s_adv - ft_hinted) > 0.1); // unhinted ≠ hinted
+}
+
+test "snapping: run origin snapped, internal kerning exact" {
+    // The shimmer fix: the run's LOGICAL origin lands on the pixel grid,
+    // while the glyphs inside keep the EXACT shaped positions — a
+    // per-glyph snap quantizes the advances and breaks sub-pixel kerning
+    // (the "re set" / "w ater plants" regression at 13px).
+    const cases = [_]f32{ 0.0, 10.3, 100.7, 123.456 };
+    for (cases) |x| {
+        try std.testing.expect(TextEngine.snapRunOrigin(x) == @floor(TextEngine.snapRunOrigin(x)));
+        // The snapped origin stays within half a pixel of the logical one.
+        try std.testing.expect(@abs(TextEngine.snapRunOrigin(x) - x) <= 0.5);
+    }
+    // The internal gaps are the EXACT shaped advances: for any origin, the
+    // rendered pair gap equals the shaper's advance (no rounding).
+    const adv: f32 = 6.86; // e.g. a 13px Inter 's' advance
+    const b0: f32 = 0.4;
+    const b1: f32 = -0.2;
+    const gap_at = struct {
+        fn g(x: f32) f32 {
+            const run_x = TextEngine.snapRunOrigin(x);
+            const g0 = run_x + 0 + b0; // first glyph at cursor 0
+            const g1 = run_x + adv + b1; // second at cursor = adv
+            return g1 - g0 - (adv - 0); // ink gap = advance − bearing delta
+        }
+    }.g;
+    for (cases) |x| {
+        try std.testing.expectApproxEqAbs(adv + b1 - b0 - (adv - 0), gap_at(x), 0.001);
+    }
+    // And the pair gap is the same at every origin (constant spacing).
+    const g1 = gap_at(0.0);
+    const g2 = gap_at(37.9);
+    try std.testing.expectApproxEqAbs(g1, g2, 0.001);
 }

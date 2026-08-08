@@ -145,7 +145,7 @@ fn ensureRenderTarget(
 ///    they never overdraw text at the box edges).
 /// 4. Every label-bearing node (label/button/slider) emits one glyph
 ///    SliceRect per character at the node's ABSOLUTE content box
-///    (x = content.x, baseline = content.y + content.h*0.75), appended
+///    (x = content.x, baseline = the font-derived baseline), appended
 ///    LAST so text paints on top of every widget decoration.
 fn buildSliceRects(
     text_engine: *TextEngine,
@@ -321,7 +321,7 @@ fn buildSliceRects(
         if (t.len == 0) continue;
         const content = contentRect(tree, n.id);
         if (content.w == 0 or content.h == 0) continue;
-        const baseline_y = content.y + content.h * 0.75;
+        const baseline_y = text_engine.baselineIn(content.y, content.h);
         try text_engine.emitText(t, content.x, baseline_y, out);
     }
 }

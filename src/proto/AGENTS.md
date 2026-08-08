@@ -40,6 +40,7 @@ proto_main.zig
 
 ## Conventions
 
+- **MANDATORY — tools over shell**: file changes go through `edit`/`write` only. NEVER patch files with inline python/perl/sed/awk scripts, heredocs, or `echo >` redirection — this corrupts files and bypasses review. Read with `read`, search with `grep`/`glob`. Shell is for builds/tests and one-shot fact queries only. If an `edit` fails, read and retry with exact text — never fall back to scripting.
 - All widgets allocated into `DrawCtx.allocator` (frame arena) — reset every frame
 - `StyleOpts` pattern: shared styling param struct for all widget constructors
 - Two-phase layout: measure returns content size, position distributes space

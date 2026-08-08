@@ -45,6 +45,92 @@ layout(buffer_reference, buffer_reference_align = 4) buffer ByteBuf {
     uint data[];
 };
 
+// ── Analytic curve sweep (per-fragment coverage) ────────────────────────
+// The glyph outlines are swept at DISPLAY resolution: each fragment is a
+// 1x1 window at (gl_FragCoord - vOrigin), the coverage is the summed fill
+// of the glyph's quadratics. No intermediate bitmap — the AA is exact at
+// any (sub-pixel) placement, which the CPU-bitmap path could never match.
+// (This is the v4 pipeline's scanlineSweep, ported back into the shader.)
+float sweepIntersect(float qa, float c0, float c1, float c2, float target) {
+    if (abs(qa) < 1e-3) return (target - c0) / (c2 - c0);
+    float qb = 2.0 * (c1 - c0);
+    float qc = c0 - target;
+    float d = qb * qb - 4.0 * qa * qc;
+    float sqrt_d = (d < 0.0) ? 0.0 : sqrt(d);
+    float inv_2a = 0.5 / qa;
+    float sgn = (c2 - c0 > 0.0) ? 1.0 : -1.0;
+    return -qb * inv_2a + sgn * sqrt_d * inv_2a;
+}
+
+vec2 sweepEval(vec2 p0, vec2 p1, vec2 p2, float t) {
+    float mt = 1.0 - t;
+    return vec2(mt * mt * p0.x + 2.0 * mt * t * p1.x + t * t * p2.x,
+                mt * mt * p0.y + 2.0 * mt * t * p1.y + t * t * p2.y);
+}
+
+float sweepSegment(vec2 size, vec2 offset, vec2 p0, vec2 p1, vec2 p2) {
+    if (max(p0.y, p2.y) <= offset.y || min(p0.y, p2.y) >= offset.y + size.y) return 0.0;
+    vec2 delta = p2 - p0;
+    vec2 t0 = p0 - offset;
+    vec2 t1 = p1 - offset;
+    vec2 t2 = p2 - offset;
+    if (t0.x == t1.x && t0.x == t2.x) {
+        if (t0.x >= size.x) return 0.0;
+        float top = min(max(t0.y, t2.y), size.y);
+        float bottom = max(min(t0.y, t2.y), 0.0);
+        float b = min(size.x, size.x - t0.x);
+        float sgn = (delta.y > 0.0) ? 1.0 : -1.0;
+        return sgn * b * (top - bottom);
+    }
+    float qa_y = t0.y + t2.y - 2.0 * t1.y;
+    float bt = sweepIntersect(qa_y, t0.y, t1.y, t2.y, 0.0);
+    float tt = sweepIntersect(qa_y, t0.y, t1.y, t2.y, size.y);
+    float v_min_t = (delta.y > 0.0) ? bt : tt;
+    float v_max_t = (delta.y > 0.0) ? tt : bt;
+    vec2 v_min = sweepEval(t0, t1, t2, clamp(v_min_t, 0.0, 1.0));
+    vec2 v_max = sweepEval(t0, t1, t2, clamp(v_max_t, 0.0, 1.0));
+    if (max(v_min.x, v_max.x) <= 0.0) return (v_max.y - v_min.y) * size.x;
+    if (min(v_min.x, v_max.x) >= size.x) return 0.0;
+    float qa_x = t0.x + t2.x - 2.0 * t1.x;
+    float h_min_t = 0.0;
+    float h_max_t = 0.0;
+    vec4 h_check = (delta.x > 0.0) ? vec4(t0.x, t2.x, 0.0, 0.0) : vec4(t2.x, t0.x, size.x, 1.0);
+    if (h_check.x >= h_check.z) {
+        h_min_t = h_check.w;
+    } else if (h_check.y <= h_check.z) {
+        h_min_t = 1.0 - h_check.w;
+    } else {
+        h_min_t = sweepIntersect(qa_x, t0.x, t1.x, t2.x, h_check.z);
+    }
+    h_check.z = size.x - h_check.z;
+    if (h_check.x >= h_check.z) {
+        h_max_t = h_check.w;
+    } else if (h_check.y <= h_check.z) {
+        h_max_t = 1.0 - h_check.w;
+    } else {
+        h_max_t = sweepIntersect(qa_x, t0.x, t1.x, t2.x, h_check.z);
+    }
+    float min_t = clamp(max(v_min_t, h_min_t), 0.0, 1.0);
+    float max_t = clamp(min(v_max_t, h_max_t), 0.0, 1.0);
+    if (min_t >= max_t) return 0.0;
+    vec2 q0 = (v_min_t >= h_min_t) ? v_min : sweepEval(t0, t1, t2, min_t);
+    vec2 q1 = (v_max_t <= h_max_t) ? v_max : sweepEval(t0, t1, t2, max_t);
+    float area = 0.0;
+    float sgn_y = (delta.y > 0.0) ? 1.0 : -1.0;
+    if (min_t > 0.0 && delta.x > 0.0) {
+        float h_ = (delta.y > 0.0) ? q0.y - max(0.0, t0.y) : min(size.y, t0.y) - q0.y;
+        area += sgn_y * h_ * size.x;
+    }
+    if (max_t < 1.0 && delta.x < 0.0) {
+        float h_ = (delta.y > 0.0) ? min(size.y, t2.y) - q1.y : q1.y - max(0.0, t2.y);
+        area += sgn_y * h_ * size.x;
+    }
+    float h_trap = q1.y - q0.y;
+    float b_trap = size.x - 0.5 * (q0.x + q1.x);
+    area += b_trap * h_trap;
+    return area;
+}
+
 // Coverage bitmap texel (1 byte, row-major, row 0 = glyph top).
 float texelCoverage(uint64_t bda, uint n, uint x, uint y, uint bmp_w) {
     ByteBuf bytes = ByteBuf(bda);
@@ -161,16 +247,21 @@ void main() {
         CurveBuf curves = CurveBuf(mat.curve_bda);
         uint n = curves.num_curves;
 
-        // Coverage bitmap: pre-rasterized on the CPU (per-pixel sweep at
-        // glyph load). mat.win_w/win_h carry the bitmap dimensions.
-        // Cell position from gl_FragCoord - vOrigin (vOrigin = rect origin;
-        // cell.y = 0 at the rect top — framebuffer y is down, matching the
-        // bitmap's row 0 = glyph top, no flip).
-        vec2 cell = gl_FragCoord.xy - vOrigin;
-        float bmp_w = mat.win_w;
-        float bmp_h = mat.win_h;
-        if (bmp_w <= 0.0 || bmp_h <= 0.0) { fragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
-        float coverage = sampleCoverage(mat.curve_bda, n, bmp_w, bmp_h, cell);
+        // Analytic per-fragment coverage: each fragment is a 1x1 window;
+        // the coverage is the summed fill of the glyph's quadratics at
+        // DISPLAY resolution — exact AA at any (sub-pixel) placement, no
+        // intermediate bitmap. The outline curves are in y-UP font space,
+        // so the cell's y is flipped about the bearing (the glyph's top
+        // distance above the baseline): framebuffer cell.y = 0 at the top
+        // maps to curve y = bearing_y.
+        vec2 cell = vec2(gl_FragCoord.x - vOrigin.x,
+                         mat.bearing_y - (gl_FragCoord.y - vOrigin.y) - 1.0);
+        float total = 0.0;
+        for (uint i = 0u; i < n; i++) {
+            QuadCurve cv = curves.curves[i];
+            total += sweepSegment(vec2(1.0), cell, cv.p0, cv.p1, cv.p2);
+        }
+        float coverage = clamp(total, 0.0, 1.0);
         fragColor = vec4(vColor.rgb, coverage * vColor.a);
         return;
     }

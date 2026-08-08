@@ -146,7 +146,7 @@ pub const TodoApp = struct {
             // one squished line — the frame counter now sits below.)
             _ = try ctx.column(.{ .gap = 6 });
             defer ctx.pop();
-            _ = try label(ctx, "nogui v 7 demo");
+            _ = try label(ctx, "nogui v7 demo");
             _ = try label(ctx, frame_text);
         }
 
@@ -348,7 +348,7 @@ test "draw: tree contains the expected button labels and title" {
     // Default visible_count of 2 -> exactly two toggle rows, all undone.
     try std.testing.expectEqual(@as(usize, 2), countButtonLabelsWithPrefix(&tree, "toggle"));
 
-    try expectLabel(&tree, "nogui v 7 demo");
+    try expectLabel(&tree, "nogui v7 demo");
     try expectLabel(&tree, "Frame: 7");
 }
 
