@@ -4,6 +4,23 @@
 //!   zig build v7 -- --window    # graphical: SDL3 + noapi window, mouse-driven
 const std = @import("std");
 const Io = std.Io;
+/// Enables the Tracy profiler client (the "tracy" module's zones emit only
+/// when the root declares this). Selects the enabled impl + links the C
+/// client library via build.zig.
+pub const tracy = @import("tracy");
+pub const tracy_impl = @import("tracy_impl");
+pub const tracy_options: tracy.Options = .{
+    .on_demand = false,
+    .no_broadcast = false,
+    .only_localhost = false,
+    .only_ipv4 = false,
+    .delayed_init = false,
+    .manual_lifetime = false,
+    .verbose = false,
+    .data_port = null,
+    .broadcast_port = null,
+    .default_callstack_depth = 8,
+};
 const Id = @import("v7/id.zig").Id;
 const ui = @import("ui.zig");
 const window_backend = @import("window.zig");
@@ -21,9 +38,10 @@ fn errMissingArg(flag: []const u8) error{MissingArg} {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+    var alloc = init.gpa;
+    // var gpa = std.heap.DebugAllocator(.{}){};
+    // defer _ = gpa.deinit();
+    // const alloc = gpa.allocator();
 
     var app = App.init(alloc);
     defer app.deinit();
@@ -33,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
     var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, alloc);
     defer args_it.deinit();
     var window_mode = false;
+    var frames: ?u32 = null;
     var shot_path: ?[]const u8 = null;
     var shot_hover: ?[2]f32 = null;
     var layout_path: ?[]const u8 = null;
@@ -56,6 +75,11 @@ pub fn main(init: std.process.Init) !void {
             subpixel = true;
         } else if (std.mem.eql(u8, arg, "--no-subpixel")) {
             subpixel = false;
+        } else if (std.mem.eql(u8, arg, "--frames")) {
+            // Headless profiling: render N frames without the swapchain
+            // present (tracy-capture needs a cycling loop; the interactive
+            // loop stalls when no compositor consumes the presents).
+            frames = std.fmt.parseUnsigned(u32, args_it.next() orelse return errMissingArg("--frames"), 10) catch return error.BadFramesArg;
         } else if (std.mem.eql(u8, arg, "--shot")) {
             shot_path = args_it.next() orelse return errMissingArg("--shot");
         } else if (std.mem.eql(u8, arg, "--layout")) {
@@ -87,6 +111,7 @@ pub fn main(init: std.process.Init) !void {
     // TigerBeetle-style full testing — the system is a pure function of the
     // input stream.
     if (sim_path) |sp| {
+        app.serialize_json = true;
         defer measure_cpu.deinit();
         app.measure = measure_cpu.measure;
 
@@ -118,11 +143,11 @@ pub fn main(init: std.process.Init) !void {
                     if (o.focus) |f| f.index() else 0,
                     if (o.hover) |h| h.index() else 0,
                     if (o.pressed) |p| p.index() else 0,
-                    o.json,
+                    if (o.json) |j| j else "",
                 });
                 defer alloc.free(dump);
                 try stdout.writeStreamingAll(io, dump);
-                alloc.free(o.json);
+                if (o.json) |j| alloc.free(j);
             }
         }
         return;
@@ -133,8 +158,19 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (frames) |n| {
+        window_backend.runFrames(&app, ui.TodoApp, &todo, n, subpixel, quad_debug, bgr, damp) catch |e| {
+            std.log.err("runFrames failed: {s}", .{@errorName(e)});
+            return e;
+        };
+        return;
+    }
+
     if (shot_path) |p| {
-        try window_backend.runShot(&app, ui.TodoApp, &todo, p, shot_hover, subpixel, quad_debug, bgr, damp);
+        window_backend.runShot(&app, ui.TodoApp, &todo, p, shot_hover, subpixel, quad_debug, bgr, damp) catch |e| {
+            std.log.err("runShot failed: {s}", .{@errorName(e)});
+            return e;
+        };
         return;
     }
 
@@ -143,11 +179,12 @@ pub fn main(init: std.process.Init) !void {
     // layout invariants, and renders an ASCII map (with the optional
     // --hover outline) to the file or stdout.
     if (layout_path) |lp| {
+        app.serialize_json = true;
         defer measure_cpu.deinit();
         app.measure = measure_cpu.measure;
         todo.frame_count = 1;
         const out = try app.frame(ui.TodoApp, &todo, 1, .{ .width = 1100, .height = 1160 });
-        defer alloc.free(out.json);
+        defer if (out.json) |j| alloc.free(j);
 
         var io_impl = std.Io.Threaded.init(alloc, .{});
         defer io_impl.deinit();
@@ -192,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
             try stdout.writeStreamingAll(io, msg);
         } else {
             try stdout.writeStreamingAll(io, map);
-            const msg = try std.fmt.allocPrint(alloc, "-- (layout JSON follows)\n{s}\n", .{out.json});
+            const msg = try std.fmt.allocPrint(alloc, "-- (layout JSON follows)\n{s}\n", .{out.json orelse ""});
             defer alloc.free(msg);
             try stdout.writeStreamingAll(io, msg);
         }
@@ -204,13 +241,14 @@ pub fn main(init: std.process.Init) !void {
 
     // Headless: 6 frames with injected clicks to demonstrate interaction.
     // Uses the same CPU measure so the layout matches the windowed mode.
+    app.serialize_json = true;
     defer measure_cpu.deinit();
     app.measure = measure_cpu.measure;
     for (0..6) |i| {
         todo.frame_count = @intCast(i + 1);
         const out = try app.frame(ui.TodoApp, &todo, @intCast(i + 1), .{ .width = 800, .height = 600 });
-        defer alloc.free(out.json);
-        std.log.info("frame {d}: {s}", .{ i + 1, out.json });
+        defer if (out.json) |j| alloc.free(j);
+        std.log.info("frame {d}: {s}", .{ i + 1, out.json orelse "" });
 
         const click_label: ?[]const u8 = switch (i) {
             1 => "inc",

@@ -11,9 +11,10 @@
 //! noapi.
 
 const std = @import("std");
+const tracy = @import("tracy");
 const noapi = @import("noapi");
 const proto = @import("proto/sweeper.zig");
-const SliceRect = @import("proto/render_9slice.zig").SliceRect;
+const SceneRect = @import("proto/render_9slice.zig").SceneRect;
 const WidgetSize = @import("v7/widget.zig").Size;
 
 // One C import, owned by the HarfBuzz binding: hb.h + hb-ft.h pull in
@@ -23,6 +24,9 @@ const hb = @import("harfbuzz");
 const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
 
 pub const MAX_MATERIALS: u32 = 1024; // slot 0 = solid; glyphs start at 1, decorations from the top. Demo needs ~52 glyphs x 2 fonts x 6 sizes = ~620; 1024 leaves headroom.
+/// Max cached shaped runs (generation-clock eviction). The demo has ~32
+/// unique runs; 256 leaves ample headroom for the churning dynamic text.
+pub const RUN_CACHE_CAPACITY: u32 = 256;
 pub const FONT_SIZE_PX: u32 = 16;
 
 /// The demo's live toggle state — the window writes it per frame, the UI
@@ -61,6 +65,27 @@ const FontState = struct {
     size: u32,
     ascent: f32,
     descent: f32,
+};
+
+/// Cache key for a shaped run: hash of the text + the font size + font id.
+const RunKey = struct { hash: u64, size: u32, font_id: u8 };
+
+/// Compact per-glyph shaped data (px floats — the hb 26.6 fixed-point
+/// values divided by 64.0), copied OUT of the hb.Buffer before it is
+/// destroyed; the cache never keeps hb.Buffer objects.
+const GlyphPos = struct { gid: u32, x_advance: f32, y_advance: f32, x_offset: f32, y_offset: f32 };
+
+/// A shaped text run: the measure result (width, line_height) plus the
+/// per-glyph data emit needs. `text` is a dupe used for the exact-equality
+/// check against an (astronomically rare) hash collision; `generation` is
+/// the LRU clock stamp for eviction.
+const TextRun = struct {
+    key: RunKey,
+    text: []u8, // dupe for the exact-equality check
+    width: f32, // sum of x_advances in px
+    line_height: f32, // ascent - descent
+    glyphs: []GlyphPos, // the compact shaped data (px floats, 26.6/64)
+    generation: u32, // the LRU clock stamp
 };
 
 /// The embedded font sources: 0 = InterVariable, 1 = Fira Code Nerd Font.
@@ -113,6 +138,16 @@ pub const TextEngine = struct {
     materials: noapi.GpuPtr, // MAX_MATERIALS * MATERIAL_SIZE, .default
     next_slot: u32 = 1,
     material_bda: u64 = 0,
+
+    /// Shaped-run cache: (hash(text), size, font_id) → TextRun. The run's
+    /// text dupe and glyph arrays are engine-owned (freed on eviction and
+    /// in deinit). Unmanaged map — initialized `.empty`, methods take gpa.
+    run_cache: std.AutoHashMapUnmanaged(RunKey, TextRun) = .empty,
+    /// Generation clock for LRU eviction: every cache hit stamps the run;
+    /// on a full cache the minimum-generation entry is evicted. Wraps
+    /// after 2^32 stamps — stale stamps are just old values, the min-scan
+    /// still works.
+    run_clock: u32 = 0,
 
     /// How many glyph material slots are live (slots 1..next_slot-1 from
     /// the bottom of the buffer). window.zig allocates its per-frame
@@ -243,6 +278,10 @@ pub const TextEngine = struct {
                 _ = c.FT_Done_Face(fs.face);
             }
         }
+        // Free each cached run's text dupe + glyph array, then the map.
+        var cache_it = self.run_cache.iterator();
+        while (cache_it.next()) |kv| self.freeRun(kv.value_ptr.*);
+        self.run_cache.deinit(self.gpa);
         self.gpu.gpuFree(self.materials);
         _ = c.FT_Done_FreeType(self.ft_lib);
     }
@@ -276,6 +315,93 @@ pub const TextEngine = struct {
         buf.setScript(.latin);
         hb.shape(font.hb_font, buf, null);
         return buf;
+    }
+
+    /// Free a cached run's engine-owned allocations (text dupe + glyphs).
+    fn freeRun(self: *TextEngine, run: TextRun) void {
+        self.gpa.free(run.text);
+        self.gpa.free(run.glyphs);
+    }
+
+    /// Get the shaped run for (text, size, font_id), shaping on a miss and
+    /// caching the compact copy. Returns a pointer INTO the run_cache map —
+    /// callers must not hold it across another map mutation (put/remove/
+    /// evict). The shape-once guarantee: measure and emit both go through
+    /// here, so a static label is shaped once per lifetime, not twice per
+    /// frame.
+    fn getOrShape(self: *TextEngine, font: *FontState, text: []const u8) !*TextRun {
+        const zone = tracy.Zone.begin(.{ .name = "getOrShape", .src = @src() });
+        defer zone.end();
+        const key = RunKey{ .hash = std.hash.Wyhash.hash(0, text), .size = font.size, .font_id = font.font_id };
+        if (self.run_cache.getPtr(key)) |run| {
+            if (std.mem.eql(u8, run.text, text)) {
+                run.generation = self.run_clock; // LRU stamp on hit
+                return run;
+            }
+            // Hash collision (astronomically rare): drop the stale entry
+            // and re-shape below — never return a wrong width.
+            self.freeRun(run.*);
+            _ = self.run_cache.remove(key);
+        }
+
+        var buf = try self.shapeRun(font, text);
+        defer buf.destroy();
+        const infos = buf.getGlyphInfos();
+        const positions = buf.getGlyphPositions() orelse &.{};
+
+        // The measure width is the sum of ALL shaper advances (the infos
+        // and positions arrays are equal-length in practice; if positions
+        // is empty the width is 0 and no glyphs are copied — no crash).
+        var w: f32 = 0;
+        for (positions) |pos| {
+            w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
+        }
+        const glyphs = try self.gpa.alloc(GlyphPos, @min(infos.len, positions.len));
+        errdefer self.gpa.free(glyphs);
+        for (glyphs, 0..) |*g, i| {
+            const pos = positions[i];
+            g.* = .{
+                .gid = infos[i].codepoint,
+                .x_advance = @as(f32, @floatFromInt(pos.x_advance)) / 64.0,
+                .y_advance = @as(f32, @floatFromInt(pos.y_advance)) / 64.0,
+                .x_offset = @as(f32, @floatFromInt(pos.x_offset)) / 64.0,
+                .y_offset = @as(f32, @floatFromInt(pos.y_offset)) / 64.0,
+            };
+        }
+
+        const text_dup = try self.gpa.dupe(u8, text);
+        errdefer self.gpa.free(text_dup);
+
+        self.run_clock += 1; // bump BEFORE stamping
+        if (self.run_cache.count() >= RUN_CACHE_CAPACITY) {
+            // Evict the entry with the oldest generation stamp (an O(n)
+            // scan of ≤256 entries is fine).
+            // SAFETY: only read if the scan finds a victim (victim_found);
+            // the undefined is never dereferenced otherwise.
+            var victim_key: RunKey = undefined;
+            var victim_gen: u32 = std.math.maxInt(u32);
+            var it = self.run_cache.iterator();
+            while (it.next()) |kv| {
+                if (kv.value_ptr.generation < victim_gen) {
+                    victim_gen = kv.value_ptr.generation;
+                    victim_key = kv.key_ptr.*;
+                }
+            }
+            if (self.run_cache.getPtr(victim_key)) |victim| {
+                self.freeRun(victim.*);
+                _ = self.run_cache.remove(victim_key);
+            }
+        }
+        try self.run_cache.put(self.gpa, key, .{
+            .key = key,
+            .text = text_dup,
+            .width = w,
+            .line_height = font.ascent - font.descent,
+            .glyphs = glyphs,
+            .generation = self.run_clock,
+        });
+        // Fetch the ptr AFTER the put — never hold a map ptr across a put.
+        return self.run_cache.getPtr(key).?;
     }
 
     /// Rasterize glyph `gid` on demand: extract curves → sweeper (GPU curve
@@ -367,26 +493,30 @@ pub const TextEngine = struct {
     }
 
     /// Shape `text` (kerning/ligatures included), ensure the glyphs exist
-    /// (lazy), then append one SliceRect per glyph to `out` at (x,
+    /// (lazy), then append one SceneRect per glyph to `out` at (x,
     /// baseline_y). `baseline_y` is the font baseline (the caller computes
-    /// it from the widget rect). Advances and per-glyph offsets come from
-    /// the shaper (26.6 fixed-point, /64.0 → px; y offsets are y-up, so the
-    /// y-down framebuffer subtracts them). Glyph id 0 (.notdef: chars
-    /// missing from the font or invalid UTF-8) is skipped WITHOUT advancing,
-    /// matching the pre-shaping behavior. Propagates error.TooManyGlyphs if
-    /// the material slot budget is exhausted.
-    pub fn emitText(self: *TextEngine, text: []const u8, x: f32, baseline_y: f32, size: u32, font_id: u8, out: *std.ArrayList(SliceRect)) !void {
+    /// it from the widget rect). `clip_id` is the node's clip rect index
+    /// (0xFFFFFFFF = no clip): glyphs inside a `.clip` container are
+    /// clipped to its rect like any other SceneRect. Advances and per-glyph
+    /// offsets come from the shaper (26.6 fixed-point, /64.0 → px; y
+    /// offsets are y-up, so the y-down framebuffer subtracts them). Glyph
+    /// id 0 (.notdef: chars missing from the font or invalid UTF-8) is
+    /// skipped WITHOUT advancing, matching the pre-shaping behavior.
+    /// Propagates error.TooManyGlyphs if the material slot budget is
+    /// exhausted.
+    /// `color` is the glyph color in Oklab (the pipeline space — the
+    /// caller converts the sRGB-authored widget color via srgbToOklab).
+    pub fn emitText(self: *TextEngine, text: []const u8, x: f32, baseline_y: f32, size: u32, font_id: u8, clip_id: u32, color: [4]f32, out: *std.ArrayList(SceneRect)) !void {
+        const zone = tracy.Zone.begin(.{ .name = "emitText", .src = @src() });
+        defer zone.end();
         const font = try self.fontFor(font_id, size);
-        var buf = try self.shapeRun(font, text);
-        defer buf.destroy();
-        const infos = buf.getGlyphInfos();
-        const positions = buf.getGlyphPositions() orelse &.{};
+        const run = try self.getOrShape(font, text);
         const run_x = snapRunOrigin(x); // the LOGICAL origin snapped once
         const run_baseline = @round(baseline_y);
         var cursor: f32 = 0; // the exact internal pen (relative to run_x)
-        for (infos, positions) |info, pos| {
-            try self.ensureGlyph(font, info.codepoint);
-            const entry = self.entryFor(font.font_id, font.size, info.codepoint) orelse continue; // gid 0 → skip
+        for (run.glyphs) |g| {
+            try self.ensureGlyph(font, g.gid);
+            const entry = self.entryFor(font.font_id, font.size, g.gid) orelse continue; // gid 0 → skip
             // Canonical HarfBuzz placement at the exact positions: the
             // glyph sits at run_x + cursor + x_offset + bearing_x, then
             // the pen advances by x_advance (y offsets are y-up font
@@ -395,10 +525,10 @@ pub const TextEngine = struct {
             // in 1px steps; the exact internal positions preserve the
             // sub-pixel kerning (a per-glyph snap quantizes the advances
             // and breaks pairs like "re set" / "w ater").
-            const ch_x = run_x + cursor + @as(f32, @floatFromInt(pos.x_offset)) / 64.0 + entry.bearing_x;
-            const ch_y = run_baseline - entry.bearing_y - @as(f32, @floatFromInt(pos.y_offset)) / 64.0;
+            const ch_x = run_x + cursor + g.x_offset + entry.bearing_x;
+            const ch_y = run_baseline - entry.bearing_y - g.y_offset;
             if (entry.glyph_w <= 0 or entry.glyph_h <= 0) {
-                cursor += @as(f32, @floatFromInt(pos.x_advance)) / 64.0; // zero-size glyph (e.g. space): advance only
+                cursor += g.x_advance; // zero-size glyph (e.g. space): advance only
                 continue;
             }
             try out.append(self.gpa, .{
@@ -410,31 +540,20 @@ pub const TextEngine = struct {
                 // never touches the quad's own edge (the original 1px was
                 // enough for integer extents but left the sliver's edge
                 // pixel adjacent to the quad boundary).
-                .dst_x = ch_x - 2,
-                .dst_y = ch_y - 2,
-                .dst_w = @ceil(entry.glyph_w) + 4,
-                .dst_h = @ceil(entry.glyph_h) + 4,
-                .src_u = 0,
-                .src_v = 0,
-                .src_w = 1,
-                .src_h = 1,
-                .corner_l = 0,
-                .corner_r = 0,
-                .corner_t = 0,
-                .corner_b = 0,
-                .color = .{ 1, 0, 0, 1 }, // OKLAB white (L=1, a=0, b=0)
+                .dst = .{ ch_x - 2, ch_y - 2, @ceil(entry.glyph_w) + 4, @ceil(entry.glyph_h) + 4 },
+                .src = .{ 0, 0, 1, 1 },
+                .corners = .{ 0, 0, 0, 0 },
+                .color = color, // the node's text color in Oklab
                 .material_index = entry.slot,
-                .curve_left = entry.curve_left,
-                .curve_bottom = entry.curve_bottom,
-                .curve_w = entry.curve_w,
-                .curve_h = entry.curve_h,
+                .curve = .{ entry.curve_left, entry.curve_bottom, entry.curve_w, entry.curve_h },
                 // The PEN (the outline origin): the sweep windows must be
                 // anchored in the same space as the curves. x = the exact
                 // shaper pen, y = the baseline (y offsets are y-up: a
                 // raised glyph moves its baseline UP the framebuffer).
-                .glyph_pen = .{ run_x + cursor + @as(f32, @floatFromInt(pos.x_offset)) / 64.0, run_baseline - @as(f32, @floatFromInt(pos.y_offset)) / 64.0 },
+                .clip_id = clip_id,
+                .origin = .{ run_x + cursor + g.x_offset, run_baseline - g.y_offset },
             });
-            cursor += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
+            cursor += g.x_advance;
         }
     }
 
@@ -445,20 +564,17 @@ pub const TextEngine = struct {
     /// rasterization (unlike the pre-shaping measure, which forced the
     /// atlas to fill). On shape failure falls back to the baked estimate.
     pub fn measureText(self: *TextEngine, text: []const u8, size: u32, font_id: u8) WidgetSize {
+        const zone = tracy.Zone.begin(.{ .name = "measureText", .src = @src() });
+        defer zone.end();
         const font = self.fontFor(font_id, size) catch return .{
             .width = @as(f32, @floatFromInt(text.len)) * 10,
             .height = 24,
         };
-        var buf = self.shapeRun(font, text) catch return .{
+        const run = self.getOrShape(font, text) catch return .{
             .width = @as(f32, @floatFromInt(text.len)) * 10,
             .height = 24,
         };
-        defer buf.destroy();
-        var w: f32 = 0;
-        for (buf.getGlyphPositions() orelse &.{}) |pos| {
-            w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
-        }
-        return .{ .width = w, .height = font.ascent - font.descent };
+        return .{ .width = run.width, .height = run.line_height };
     }
 
     fn entryFor(self: *const TextEngine, font_id: u8, size: u32, gid: u32) ?GlyphEntry {

@@ -16,6 +16,7 @@
 //! user text is never emitted raw.
 
 const std = @import("std");
+const tracy = @import("tracy");
 
 const Id = @import("id.zig").Id;
 const widget = @import("widget.zig");
@@ -35,8 +36,10 @@ pub const FrameOutput = struct {
     /// The driver's clock at this frame (from the .frame event).
     time_ms: u64,
     /// JSON document, allocated with the allocator passed to `treeToJson`
-    /// (App uses the gpa). Caller frees it with that allocator.
-    json: []u8,
+    /// (App uses the gpa). Null when the App's serialize_json flag is off
+    /// (the windowed/frames modes don't need it). Caller frees it with
+    /// that allocator.
+    json: ?[]const u8 = null,
     /// This frame's widget tree. App double-buffers its frame arenas: the
     /// pointer stays valid until the frame AFTER next (the arena is reset
     /// by the frame after that), so the presented tree can be read while
@@ -64,6 +67,8 @@ pub const FrameOutput = struct {
 /// comment for the shape). The returned slice is allocator-owned; the
 /// caller frees it with `allocator`.
 pub fn treeToJson(tree: *const WidgetTree, allocator: std.mem.Allocator) ![]u8 {
+    const zone = tracy.Zone.begin(.{ .name = "treeToJson", .src = @src() });
+    defer zone.end();
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     const w = &out.writer;

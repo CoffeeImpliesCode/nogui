@@ -11,6 +11,7 @@
 //! until then — FrameOutput.tree documents this lifetime, and it is the
 //! handle `click` dispatches against.
 const std = @import("std");
+const tracy = @import("tracy");
 
 const Id = @import("id.zig").Id;
 const Component = @import("component.zig").Component;
@@ -30,6 +31,11 @@ const FrameOutput = headless.FrameOutput;
 
 pub const App = struct {
     gpa: std.mem.Allocator,
+    /// Serialize the frame tree to JSON (FrameOutput.json). OFF by
+    /// default — the windowed + frames modes never read the JSON, and the
+    /// serialization is a measurable per-frame cost. The headless drivers
+    /// (--sim, --layout, the demo frames) turn it on.
+    serialize_json: bool = false,
     components: std.AutoHashMapUnmanaged(Id, Component) = .empty,
     /// Double-buffered frame arenas. Frame N builds into arenas[1-current]
     /// (resetting the tree from two frames ago) while arenas[current] keeps
@@ -348,7 +354,11 @@ pub const App = struct {
         const build_idx: u32 = 1 - self.current;
         // Reset the arena holding the tree from two frames ago. The other
         // arena keeps the previous frame's tree alive during this build.
-        _ = self.arenas[build_idx].reset(.retain_capacity);
+        {
+            const zone = tracy.Zone.begin(.{ .name = "arenaReset", .src = @src() });
+            defer zone.end();
+            _ = self.arenas[build_idx].reset(.retain_capacity);
+        }
 
         if (@hasField(T, "frame_count")) root.frame_count = frame_number;
         const surface = self.surface;
@@ -431,7 +441,11 @@ pub const App = struct {
         if (hover_changed) self.hover_alpha = 0;
         self.hover_alpha += (hover_target - self.hover_alpha) * k_hover;
 
-        const json = try headless.treeToJson(tree, self.gpa);
+        const json: ?[]const u8 = if (self.serialize_json) blk: {
+            const zone = tracy.Zone.begin(.{ .name = "treeToJson", .src = @src() });
+            defer zone.end();
+            break :blk try headless.treeToJson(tree, self.gpa);
+        } else null;
         // Swap the state directory: next frame seeds from THIS frame's
         // live values (their arena survives the next build).
         self.state_prev = state_dir;
@@ -496,6 +510,7 @@ fn firstButton(tree: *const WidgetTree) ?Id {
 test "App: three frames with click injection persist state across frames" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
+    app.serialize_json = true;
 
     var counter = Counter{};
     _ = try app.register(Counter, &counter);
@@ -503,20 +518,20 @@ test "App: three frames with click injection persist state across frames" {
     // Frame 1: find the first .button node in the frame tree and click it
     // while the tree is still valid (dies at the next frame's arena reset).
     const out1 = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out1.json);
-    try std.testing.expect(std.mem.indexOf(u8, out1.json, "Count: 0") != null);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, out1.json.?, "Count: 0") != null);
 
     const btn = firstButton(out1.tree).?;
     app.click(out1.tree, btn);
 
     // Frames 2-3: the incremented count persists — no dirty tracking.
     const out2 = try app.frame(Counter, &counter, 2, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out2.json);
-    try std.testing.expect(std.mem.indexOf(u8, out2.json, "Count: 1") != null);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, out2.json.?, "Count: 1") != null);
 
     const out3 = try app.frame(Counter, &counter, 3, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out3.json);
-    try std.testing.expect(std.mem.indexOf(u8, out3.json, "Count: 1") != null);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, out3.json.?, "Count: 1") != null);
 }
 
 test "App: frame tree exposes button nodes owned by the registered root" {
@@ -527,7 +542,7 @@ test "App: frame tree exposes button nodes owned by the registered root" {
     _ = try app.register(Counter, &counter);
 
     const out = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out.json);
+    defer if (out.json) |j| std.testing.allocator.free(j);
 
     // Scan by kind; every .button node binds its owner to the registered
     // root component (id 1), so click dispatch can reach it.
@@ -543,18 +558,19 @@ test "App: frame tree exposes button nodes owned by the registered root" {
 test "App: click on an unknown id is a no-op and the next frame still renders" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
+    app.serialize_json = true;
 
     var counter = Counter{};
     _ = try app.register(Counter, &counter);
 
     const out1 = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
 
     app.click(out1.tree, @enumFromInt(999)); // no such node in the tree
 
     const out2 = try app.frame(Counter, &counter, 2, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out2.json);
-    try std.testing.expect(std.mem.indexOf(u8, out2.json, "Count: 0") != null);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, out2.json.?, "Count: 0") != null);
 }
 
 /// Text of the first .label node with the given id (null when missing).
@@ -590,25 +606,25 @@ test "App: ctx.state persists per node across frames, resets after unmount" {
 
     // Frame 1: fresh node -> init 0, incremented to 1.
     const out1 = try app.frame(Comp, &comp, 1, .{ .width = 100, .height = 100 });
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(u32, 1), comp.last.?.*);
 
     // Frame 2: the last version (1) was copied over -> 2.
     const out2 = try app.frame(Comp, &comp, 2, .{ .width = 100, .height = 100 });
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(u32, 2), comp.last.?.*);
 
     // Frame 3: unmount — the node is not drawn; its state directory entry
     // dies with the frame.
     comp.show = false;
     const out3 = try app.frame(Comp, &comp, 3, .{ .width = 100, .height = 100 });
-    defer std.testing.allocator.free(out3.json);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?*u32, null), comp.last);
 
     // Frame 4: remount -> fresh init again (0 -> 1), not 3.
     comp.show = true;
     const out4 = try app.frame(Comp, &comp, 4, .{ .width = 100, .height = 100 });
-    defer std.testing.allocator.free(out4.json);
+    defer if (out4.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(u32, 1), comp.last.?.*);
 }
 
@@ -620,7 +636,7 @@ test "App: double-buffer — prev_tree is the previous frame's tree with stable 
 
     // Frame 1: no previous tree yet.
     const out1 = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?*const WidgetTree, null), out1.prev_tree);
 
     var label1: ?Id = null;
@@ -641,7 +657,7 @@ test "App: double-buffer — prev_tree is the previous frame's tree with stable 
     // Frame 2: the label text changed; ids and rects did not.
     counter.count += 1;
     const out2 = try app.frame(Counter, &counter, 2, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
 
     // prev_tree IS frame 1's tree — still fully readable after the swap.
     try std.testing.expect(out2.prev_tree == out1.tree);
@@ -660,7 +676,7 @@ test "App: double-buffer — prev_tree is the previous frame's tree with stable 
 
     // Frame 3: the swap advanced — prev_tree is now frame 2's tree.
     const out3 = try app.frame(Counter, &counter, 3, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out3.json);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out3.prev_tree == out2.tree);
 
     // Frame 1's tree is gone (its arena was reset) — but frame 2's tree
@@ -694,13 +710,13 @@ test "App: driver — hover, click and slider drag through handle()" {
     // The driver sizes the surface first; then frame 1 draws at 200x200.
     _ = try app.handle(Widgets, &widgets, .{ .resize = .{ .width = 200, .height = 200 } });
     const out1 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // The layout: column at (0,0,200,?): slider (h 20) then button (h 32).
     // Hover the button center: (20, 36) -> out.hover = the button id.
     _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = 20, .y = 36 } });
     const out2 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
     const button_id = blk: {
         for (out2.tree.nodes.items) |*n| {
             if (n.kind == .button) break :blk n.id;
@@ -751,7 +767,7 @@ test "App: keyboard — focus traversal, activate, slider arrows, escape" {
 
     _ = try app.handle(Widgets, &widgets, .{ .resize = .{ .width = 200, .height = 200 } });
     const out1 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // Focusable order (append order): slider, button a, button b.
     const ids = blk: {
@@ -776,7 +792,7 @@ test "App: keyboard — focus traversal, activate, slider arrows, escape" {
     // Tab: focus the first focusable (the slider); frame 2 reports it.
     _ = try app.handle(Widgets, &widgets, .{ .key_down = .{ .key = .tab, .shift = false } });
     const out2 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(ids[0], out2.focus.?);
 
     // Tab: focus button a. Space: activate it -> clicks.
@@ -794,7 +810,7 @@ test "App: keyboard — focus traversal, activate, slider arrows, escape" {
     // Escape clears focus.
     _ = try app.handle(Widgets, &widgets, .{ .key_down = .{ .key = .escape, .shift = false } });
     const out3 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
-    defer std.testing.allocator.free(out3.json);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?Id, null), out3.focus);
 }
 
@@ -823,13 +839,13 @@ test "App: focus/pressed cleared when a draw-order change renumbers ids" {
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
     const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // The button is the column's first child at (0,0,...); press it:
     // mouse_down focuses AND presses.
     _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = 5, .y = 5 } });
     const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out2.focus != null);
     try std.testing.expect(out2.pressed != null);
     const stale = out2.focus.?;
@@ -839,7 +855,7 @@ test "App: focus/pressed cleared when a draw-order change renumbers ids" {
     // never re-bound to the new occupant of the old position.
     comp.show_extra = true;
     const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
-    defer std.testing.allocator.free(out3.json);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?Id, null), out3.focus);
     try std.testing.expectEqual(@as(?Id, null), out3.pressed);
 
@@ -872,7 +888,7 @@ test "App: keyboard — no focus: Tab lands on the first, Shift-Tab on the last"
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
     const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
 
     const ids = blk: {
         var found: [3]Id = undefined;
@@ -889,7 +905,7 @@ test "App: keyboard — no focus: Tab lands on the first, Shift-Tab on the last"
     // No focus + Tab -> the FIRST focusable.
     _ = try app.handle(Comp, &comp, .{ .key_down = .{ .key = .tab, .shift = false } });
     const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(ids[0], out2.focus.?);
 
     // No focus + Shift-Tab -> the LAST focusable (the old @mod(-2, count)
@@ -897,7 +913,7 @@ test "App: keyboard — no focus: Tab lands on the first, Shift-Tab on the last"
     _ = try app.handle(Comp, &comp, .{ .key_down = .{ .key = .escape, .shift = false } });
     _ = try app.handle(Comp, &comp, .{ .key_down = .{ .key = .tab, .shift = true } });
     const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
-    defer std.testing.allocator.free(out3.json);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(ids[2], out3.focus.?);
 }
 
@@ -920,20 +936,20 @@ test "App: mouse_leave clears pressed and drag_slider without a mouse_up" {
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
     const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // Press the button (layout: slider h 20 at y 0..20, button h 20 at
     // y 20..40 — hit at (5, 30)).
     _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = 5, .y = 30 } });
     const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out2.pressed != null);
 
     // The pointer leaves the window with the button still held; no mouse_up
     // ever arrives (Alt-Tab, WM grab, release outside). pressed clears.
     _ = try app.handle(Comp, &comp, .{ .mouse_leave = {} });
     const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
-    defer std.testing.allocator.free(out3.json);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?Id, null), out3.pressed);
 
     // Same for a slider drag: leaving the window ends the drag, and a
@@ -970,7 +986,7 @@ test "App: keyboard — Space on a focused slider jumps to max; Enter stays butt
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
     const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // Tab -> focus the slider (first focusable); Space = End: value to max,
     // no click dispatched (sliders have no handler).
@@ -1004,7 +1020,7 @@ test "App: keyboard — focus traversal reaches the 70th focusable (no 64 cap)" 
 
     _ = try app.handle(Many, &comp, .{ .resize = .{ .width = 200, .height = 600 } });
     const out = (try app.handle(Many, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out.json);
+    defer if (out.json) |j| std.testing.allocator.free(j);
 
     var button_ids: [70]Id = undefined;
     var n: usize = 0;
@@ -1022,7 +1038,7 @@ test "App: keyboard — focus traversal reaches the 70th focusable (no 64 cap)" 
     for (0..70) |i| {
         _ = try app.handle(Many, &comp, .{ .key_down = .{ .key = .tab, .shift = false } });
         const f = (try app.handle(Many, &comp, .{ .frame = .{ .tick = @intCast(2 + i), .time_ms = 0 } })).?;
-        defer std.testing.allocator.free(f.json);
+        defer if (f.json) |j| std.testing.allocator.free(j);
         last_focus = f.focus;
     }
     try std.testing.expectEqual(button_ids[69], last_focus.?);
@@ -1031,6 +1047,7 @@ test "App: keyboard — focus traversal reaches the 70th focusable (no 64 cap)" 
 test "App: register records the root type name — the present() type guard" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
+    app.serialize_json = true;
 
     var counter = Counter{};
     _ = try app.register(Counter, &counter);
@@ -1045,8 +1062,8 @@ test "App: register records the root type name — the present() type guard" {
     // @compileError is impossible because the registered type lives only
     // in the runtime registry). Matching types compile and run normally.
     const out = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out.json);
-    try std.testing.expect(std.mem.indexOf(u8, out.json, "Count: 0") != null);
+    defer if (out.json) |j| std.testing.allocator.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, out.json.?, "Count: 0") != null);
 }
 
 test "App: persistent registries stay bounded across many frames (flat memory)" {
@@ -1070,19 +1087,20 @@ test "App: persistent registries stay bounded across many frames (flat memory)" 
     // frame's component() puts overwrite the same 1 entry.
     var out: ?headless.FrameOutput = null;
     for (0..150) |i| {
-        if (out) |o| std.testing.allocator.free(o.json);
+        if (out) |o| if (o.json) |j| std.testing.allocator.free(j);
         out = try app.handle(Comp, &comp, .{ .frame = .{ .tick = @intCast(i + 1), .time_ms = @intCast(i * 16) } });
     }
-    if (out) |o| std.testing.allocator.free(o.json);
+    if (out) |o| if (o.json) |j| std.testing.allocator.free(j);
 
     // Exactly the root (id 1) — the two buttons are leaves, not components.
     try std.testing.expectEqual(@as(usize, 1), app.components.count());
 
     // The tree's node count is stable across frames (the last frame's tree
-    // has the same shape as every other).
+    // has the same shape as every other): column + 2 buttons + each
+    // button's child label.
     const last = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 151, .time_ms = 2400 } })).?;
-    defer std.testing.allocator.free(last.json);
-    try std.testing.expectEqual(@as(usize, 3), last.tree.nodes.items.len); // column + 2 buttons
+    defer if (last.json) |j| std.testing.allocator.free(j);
+    try std.testing.expectEqual(@as(usize, 5), last.tree.nodes.items.len); // column + 2 buttons + 2 labels
 }
 
 test "App: deinit frees the component registry" {
@@ -1112,7 +1130,7 @@ test "present: press_alpha ramps over time and decays" {
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
     const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
-    defer std.testing.allocator.free(out1.json);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
     // First frame: dt = 0 (nothing happened between frames), so both
     // alphas sit exactly at 0.
     try std.testing.expectEqual(@as(f32, 0), out1.press_alpha);
@@ -1133,14 +1151,14 @@ test "present: press_alpha ramps over time and decays" {
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = center[0], .y = center[1] } });
     _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = center[0], .y = center[1] } });
     const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 100 } })).?;
-    defer std.testing.allocator.free(out2.json);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out2.pressed != null);
     try std.testing.expectApproxEqAbs(@as(f32, 0.632), out2.press_alpha, 0.05);
     try std.testing.expect(out2.press_alpha > 0.5 and out2.press_alpha < 0.8);
 
     // A second pole at the same dt: 0.632 + (1-0.632)*0.632 ≈ 0.865.
     const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 200 } })).?;
-    defer std.testing.allocator.free(out3.json);
+    defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectApproxEqAbs(@as(f32, 0.865), out3.press_alpha, 0.05);
     try std.testing.expect(out3.press_alpha > 0.8);
 
@@ -1148,7 +1166,7 @@ test "present: press_alpha ramps over time and decays" {
     // toward it: 0.865 * exp(-100/100) ≈ 0.318.
     _ = try app.handle(Comp, &comp, .{ .mouse_up = .{ .button = .left, .x = center[0], .y = center[1] } });
     const out4 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 4, .time_ms = 300 } })).?;
-    defer std.testing.allocator.free(out4.json);
+    defer if (out4.json) |j| std.testing.allocator.free(j);
     try std.testing.expectApproxEqAbs(@as(f32, 0.318), out4.press_alpha, 0.05);
     try std.testing.expect(out4.press_alpha < 0.35);
 
@@ -1157,7 +1175,7 @@ test "present: press_alpha ramps over time and decays" {
     // must still be mid-flight, not snapped.
     _ = try app.handle(Comp, &comp, .{ .mouse_leave = {} });
     const out5 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 5, .time_ms = 400 } })).?;
-    defer std.testing.allocator.free(out5.json);
+    defer if (out5.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out5.hover_alpha > 0.3 and out5.hover_alpha < 0.6);
 
     // Move back over the button: re-enter (null → node) is NOT a reset —
@@ -1165,22 +1183,43 @@ test "present: press_alpha ramps over time and decays" {
     // 0.693 (past the midpoint, still easing).
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = center[0], .y = center[1] } });
     const out6 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 6, .time_ms = 500 } })).?;
-    defer std.testing.allocator.free(out6.json);
+    defer if (out6.json) |j| std.testing.allocator.free(j);
     try std.testing.expectApproxEqAbs(@as(f32, 0.693), out6.hover_alpha, 0.05);
     try std.testing.expect(out6.hover_alpha > 0.65);
 
     // Moving to a DIFFERENT node (still inside the window) resets the
     // fade again: the ring re-fades as the cursor travels between widgets.
-    // The label below the button is a distinct node.
+    // The button's own label child is at the same position as the button —
+    // scan for a label that is NOT inside the button's subtree.
     const label_center = blk: {
+        const btn_id: Id = out6.hover.?;
         for (out6.tree.nodes.items) |*n| {
-            if (n.kind == .label) break :blk .{ n.rect.x + n.rect.w / 2, n.rect.y + n.rect.h / 2 };
+            if (n.kind != .label) continue;
+            if (n.id == btn_id) continue;
+            var par = n.parent;
+            var inside_button = false;
+            while (par != .root) {
+                if (par == btn_id) {
+                    inside_button = true;
+                    break;
+                }
+                var found: Id = .root;
+                for (out6.tree.nodes.items) |*pn| {
+                    if (pn.id == par) {
+                        found = pn.parent;
+                        break;
+                    }
+                }
+                par = found;
+            }
+            if (inside_button) continue;
+            break :blk .{ n.rect.x + n.rect.w / 2, n.rect.y + n.rect.h / 2 };
         }
         unreachable;
     };
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = label_center[0], .y = label_center[1] } });
     const out7 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 7, .time_ms = 600 } })).?;
-    defer std.testing.allocator.free(out7.json);
+    defer if (out7.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(!std.meta.eql(out7.hover, out6.hover));
     try std.testing.expectApproxEqAbs(@as(f32, 0.426), out7.hover_alpha, 0.05);
 

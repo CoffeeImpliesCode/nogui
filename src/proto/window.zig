@@ -3,7 +3,7 @@
 //!
 //! Rendering pipeline:
 //!   1. collectWidgetRects(RectCollectCtx) → []RenderCommand
-//!   2. processRenderCommands() → SliceRect[] + GPU material writes
+//!   2. processRenderCommands() → SceneRect[] + GPU material writes
 //!   3. Batch9Slice.draw() → GPU indexed draw
 //!   4. Blit pass: Oklab → sRGB
 //!
@@ -21,7 +21,7 @@ const Context = @import("context.zig").Context;
 const Batch9Slice = @import("render_9slice.zig").Batch9Slice;
 const Event = @import("event.zig").Event;
 const dispatchEvents = @import("event.zig").dispatchEvents;
-const SliceRect = @import("render_9slice.zig").SliceRect;
+const SceneRect = @import("render_9slice.zig").SceneRect;
 const GlyphSweeper = @import("sweeper.zig").GlyphSweeper;
 const GlyphMaterial = @import("sweeper.zig").GlyphMaterial;
 const MATERIAL_SIZE = @import("sweeper.zig").MATERIAL_SIZE;
@@ -68,28 +68,84 @@ fn sdlKey(sdl_key: ?kc.Keycode) @import("widget.zig").Key {
         .up => .up,
         .down => .down,
         .space => .space,
-        .a => .a, .b => .b, .c => .c, .d => .d, .e => .e,
-        .f => .f, .g => .g, .h => .h, .i => .i, .j => .j,
-        .k => .k, .l => .l, .m => .m, .n => .n, .o => .o,
-        .p => .p, .q => .q, .r => .r, .s => .s, .t => .t,
-        .u => .u, .v => .v, .w => .w, .x => .x, .y => .y, .z => .z,
-        .zero => .k0, .one => .k1, .two => .k2, .three => .k3, .four => .k4,
-        .five => .k5, .six => .k6, .seven => .k7, .eight => .k8, .nine => .k9,
-        .func1 => .f1, .func2 => .f2, .func3 => .f3, .func4 => .f4, .func5 => .f5,
-        .func6 => .f6, .func7 => .f7, .func8 => .f8, .func9 => .f9, .func10 => .f10,
-        .func11 => .f11, .func12 => .f12, .func13 => .f13, .func14 => .f14,
-        .func15 => .f15, .func16 => .f16, .func17 => .f17, .func18 => .f18,
-        .func19 => .f19, .func20 => .f20, .func21 => .f21, .func22 => .f22,
-        .func23 => .f23, .func24 => .f24,
-        .left_shift => .lshift, .right_shift => .rshift,
-        .left_ctrl => .lctrl, .right_ctrl => .rctrl,
-        .left_alt => .lalt, .right_alt => .ralt,
-        .left_gui => .lgui, .right_gui => .rgui,
-        .minus => .minus, .equals => .equals,
-        .left_bracket => .left_bracket, .right_bracket => .right_bracket,
-        .semicolon => .semicolon, .apostrophe => .quote,
-        .comma => .comma, .period => .period,
-        .slash => .slash, .backslash => .backslash,
+        .a => .a,
+        .b => .b,
+        .c => .c,
+        .d => .d,
+        .e => .e,
+        .f => .f,
+        .g => .g,
+        .h => .h,
+        .i => .i,
+        .j => .j,
+        .k => .k,
+        .l => .l,
+        .m => .m,
+        .n => .n,
+        .o => .o,
+        .p => .p,
+        .q => .q,
+        .r => .r,
+        .s => .s,
+        .t => .t,
+        .u => .u,
+        .v => .v,
+        .w => .w,
+        .x => .x,
+        .y => .y,
+        .z => .z,
+        .zero => .k0,
+        .one => .k1,
+        .two => .k2,
+        .three => .k3,
+        .four => .k4,
+        .five => .k5,
+        .six => .k6,
+        .seven => .k7,
+        .eight => .k8,
+        .nine => .k9,
+        .func1 => .f1,
+        .func2 => .f2,
+        .func3 => .f3,
+        .func4 => .f4,
+        .func5 => .f5,
+        .func6 => .f6,
+        .func7 => .f7,
+        .func8 => .f8,
+        .func9 => .f9,
+        .func10 => .f10,
+        .func11 => .f11,
+        .func12 => .f12,
+        .func13 => .f13,
+        .func14 => .f14,
+        .func15 => .f15,
+        .func16 => .f16,
+        .func17 => .f17,
+        .func18 => .f18,
+        .func19 => .f19,
+        .func20 => .f20,
+        .func21 => .f21,
+        .func22 => .f22,
+        .func23 => .f23,
+        .func24 => .f24,
+        .left_shift => .lshift,
+        .right_shift => .rshift,
+        .left_ctrl => .lctrl,
+        .right_ctrl => .rctrl,
+        .left_alt => .lalt,
+        .right_alt => .ralt,
+        .left_gui => .lgui,
+        .right_gui => .rgui,
+        .minus => .minus,
+        .equals => .equals,
+        .left_bracket => .left_bracket,
+        .right_bracket => .right_bracket,
+        .semicolon => .semicolon,
+        .apostrophe => .quote,
+        .comma => .comma,
+        .period => .period,
+        .slash => .slash,
+        .backslash => .backslash,
         .grave => .grave,
         .insert => .insert,
         .print_screen => .print_screen,
@@ -407,13 +463,13 @@ pub const Window = struct {
         // Always end with a blit command
         self.cmd_buf.push(.blit_oklab);
 
-        // ── Phase 2: Process RenderCommands → SliceRects ──
-        var slice_rects: [4096]SliceRect = undefined;
+        // ── Phase 2: Process RenderCommands → SceneRects ──
+        var slice_rects: [4096]SceneRect = undefined;
         const rect_count = processRenderCommands(
             self.cmd_buf.slice(),
             &slice_rects,
             self.material_buf_bda,
-            @as(?[]u8, @ptrCast(@alignCast(self.material_buf.cpu[0..MAX_MATERIALS * MATERIAL_SIZE]))),
+            @as(?[]u8, @ptrCast(@alignCast(self.material_buf.cpu[0 .. MAX_MATERIALS * MATERIAL_SIZE]))),
             &self.next_material_slot,
             self,
         );
@@ -427,7 +483,9 @@ pub const Window = struct {
         }, .render_area_size = .{ surface_size.width, surface_size.height } });
 
         cmd.setBlendEnable(true);
-        try self.batch.draw(&cmd, slice_rects[0..rect_count], sw, sh);
+        // The prototype driver has no clip stack — pass an empty clip list
+        // (all SceneRect clip_ids are ~0 → the shader test is a no-op).
+        try self.batch.draw(&cmd, slice_rects[0..rect_count], &.{}, sw, sh);
         cmd.setBlendEnable(false);
         cmd.endRendering();
 

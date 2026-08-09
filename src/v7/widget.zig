@@ -19,6 +19,18 @@ pub const Rect = struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 };
 /// Available / required space.
 pub const Size = struct { width: f32, height: f32 };
 
+/// A clip rectangle in layout (framebuffer px) space. The GPU clip
+/// buffer stores these verbatim (four f32, 16 bytes — the fragment
+/// shader's `pc.indirect + 16 * clip_id` stride); the shader discards
+/// fragments outside the rect indexed by a vertex's clip_id.
+/// 0xFFFFFFFF (no clip id) = no clip.
+pub const ClipRect = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+};
+
 /// Per-side box extents (CSS: margin, border width, padding, radius).
 /// Order: top, right, bottom, left.
 pub const Sides = struct {
@@ -43,7 +55,7 @@ pub const Box = struct {
     border: Sides = .{}, // widths only; color/radius are paint
     border_color: [4]f32 = .{ 0, 0, 0, 1 },
     /// Per-axis corner radii (l/r/t/b) of the OUTER border edge, matching
-    /// SliceRect's corner_l/r/t/b geometry (each corner = l|r x t|b). The
+    /// SceneRect's corners[0..4] geometry (each corner = l|r x t|b). The
     /// inner (fill) radius = max(0, radius - border) per axis.
     radius: Sides = .{},
     padding: Sides = .{},
@@ -55,6 +67,24 @@ pub const Box = struct {
     /// fill). The vertex color is the gradient's top. Excluded from the
     /// layout fingerprint.
     gradient: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Paint-only: the node's FLAT fill color in sRGB (alpha 0 = the
+    /// renderer's palette fallback). The gradient's top vertex color —
+    /// set it to the same color as the gradient for a flat fill. Excluded
+    /// from the layout fingerprint.
+    color: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Paint-only: this container clips its own + descendants' content to
+    /// its border box (collectDrawCmds stamps a clip id on the subtree's
+    /// draw commands; the fragment shader discards outside the rect).
+    /// Never affects layout; excluded from the layout fingerprint.
+    clip: bool = false,
+    /// Paint-only: the bindless texture heap index of a texture registered
+    /// by the host (the `.texture` box option). When set, the node's FILL
+    /// samples the texture instead of the flat color (the fragment shader's
+    /// TYPE_TEXTURE branch, before the material dispatch); the border ring
+    /// and shadow stay untextured. Null = flat fill. The fill's vColor is
+    /// white (identity tint) so the texture's own pixels show through.
+    /// Never affects layout; excluded from the layout fingerprint.
+    texture: ?u32 = null,
 };
 
 /// Horizontal+vertical sums of a Sides (for content-box derivation).
@@ -74,13 +104,22 @@ pub const FlexChild = struct {
 pub const WidgetKind = union(enum) {
     column: struct { gap: f32 = 0 },
     row: struct { gap: f32 = 0 },
-    label: struct { text: []const u8 },
+    /// `color` is the text color in sRGB (converted to Oklab by the
+    /// renderer, like every widget color); default = white.
+    label: struct { text: []const u8, color: [4]f32 = .{ 1, 1, 1, 1 } },
     button: struct {
         label: []const u8,
+        color: [4]f32 = .{ 1, 1, 1, 1 },
         on_click: ?*const fn (*anyopaque) void = null, // set via callback.wrap()
         owner: Id = .root, // component_id at creation time
     },
-    slider: struct { label: []const u8, value: *f32, min: f32, max: f32 },
+    slider: struct {
+        label: []const u8,
+        color: [4]f32 = .{ 1, 1, 1, 1 },
+        value: *f32,
+        min: f32,
+        max: f32,
+    },
     spacer: struct { size: f32 = 0 },
 };
 
@@ -105,6 +144,10 @@ pub const WidgetNode = struct {
     font_id: u8 = 0,
     flex: FlexChild = .{}, // per-child sizing
     style: FlexStyle = .{}, // per-container layout style (justify/align); direction+gap come from kind
+    /// The clip rect id (index into WidgetTree.clip_rects) enclosing this
+    /// node, stamped by collectDrawCmds during its walk; 0xFFFFFFFF = no
+    /// clip. The renderer clips the node's glyphs to that rect.
+    clip_id: u32 = 0xFFFFFFFF,
 };
 
 /// The per-frame widget tree.
@@ -119,9 +162,27 @@ pub const WidgetTree = struct {
     nodes: std.ArrayListUnmanaged(WidgetNode) = .empty,
     allocator: std.mem.Allocator,
     next_id: u32 = 1,
+    /// Per-frame clip-rect list (cap 64 = the GPU clip buffer's size). Clip
+    /// ids are indices into this list; 0xFFFFFFFF = no clip. The core
+    /// appends here (DrawCtx.pushClip + drawcmd's clip-stack walk); the
+    /// renderer copies the list into the GPU clip buffer each frame.
+    /// Append-only per frame — ids must stay stable for the frame.
+    // SAFETY: written only via pushClipRect before any read; clip_count tracks the filled count
+    clip_rects: [64]ClipRect = undefined,
+    clip_count: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) WidgetTree {
         return .{ .allocator = allocator };
+    }
+
+    /// Append a clip rect, returning its id (the index into clip_rects).
+    /// Null when the list is full (64): the caller then skips clipping.
+    pub fn pushClipRect(self: *WidgetTree, r: ClipRect) ?u32 {
+        if (self.clip_count >= self.clip_rects.len) return null;
+        const id = self.clip_count;
+        self.clip_rects[id] = r;
+        self.clip_count += 1;
+        return id;
     }
 
     /// Linear scan by id. Null if absent.

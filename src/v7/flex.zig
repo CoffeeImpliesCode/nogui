@@ -85,7 +85,7 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
     // size and position children relative to the container's content box.
     for (tree.nodes.items) |*node| {
         switch (node.kind) {
-            .column, .row => placeContainer(tree, node, available),
+            .column, .row, .button => placeContainer(tree, node, available),
             else => measureLeaf(node, measure),
         }
     }
@@ -115,7 +115,7 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
 fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
     const parent = if (parent_id == .root) null else tree.node(parent_id).?;
     if (parent) |p| {
-        if (p.kind != .column and p.kind != .row) return;
+        if (p.kind != .column and p.kind != .row and p.kind != .button) return;
         const b = p.box;
         const content_w = @max(0, p.rect.w - b.border.left - b.border.right - b.padding.left - b.padding.right);
         const content_h = @max(0, p.rect.h - b.border.top - b.border.bottom - b.padding.top - b.padding.bottom);
@@ -171,15 +171,17 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
 fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
     const parent = if (parent_id == .root) null else tree.node(parent_id).?;
     if (parent) |p| {
-        if (p.kind != .column and p.kind != .row) return;
+        if (p.kind != .column and p.kind != .row and p.kind != .button) return;
         const dir: Direction = switch (p.kind) {
             .column => .column,
             .row => .row,
+            .button => .row,
             else => unreachable,
         };
         const gap: f32 = switch (p.kind) {
             .column => |c| c.gap,
             .row => |r| r.gap,
+            .button => 0,
             else => unreachable,
         };
         const justify = p.style.justify;
@@ -219,11 +221,14 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
             const overflow = -free;
             for (0..count) |i| {
                 const child = tree.node(p.children.items[i]) orelse continue;
-                // Clamp at 0: a child whose shrink share exceeds its main
-                // keeps zero (the container then overflows visibly) — never
-                // a negative main or an inverted rect.
+                // Canonical automatic minimum (CSS flexbox §4.5): a flex
+                // item's default min-main is its CONTENT-based minimum —
+                // shrink can never cross the item's natural size, or the
+                // text spills out of the box. The container then overflows
+                // visibly instead of crushing its content.
+                const natural = mains[i]; // the measured natural main
                 if (child.flex.shrink > 0)
-                    mains[i] = @max(0, mains[i] - overflow * child.flex.shrink / total_shrink);
+                    mains[i] = @max(natural, mains[i] - overflow * child.flex.shrink / total_shrink);
             }
         }
 
@@ -285,7 +290,9 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
             if (grew and n.flex.grow > 0) {
                 main += free * n.flex.grow / total_grow;
             } else if (shrank and n.flex.shrink > 0) {
-                main = @max(0, main - (-free) * n.flex.shrink / total_shrink);
+                // Canonical automatic minimum (§4.5): never below the
+                // natural main (the content-based floor).
+                main = @max(main, main - (-free) * n.flex.shrink / total_shrink);
             }
             n.rect.h = main;
             n.rect.y = y + m.top;
@@ -303,11 +310,13 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     const dir: Direction = switch (node.kind) {
         .column => .column,
         .row => .row,
+        .button => .row, // the label child is centered on the button's main axis
         else => unreachable,
     };
     const gap: f32 = switch (node.kind) {
         .column => |c| c.gap,
         .row => |r| r.gap,
+        .button => 0,
         else => unreachable,
     };
     const justify = node.style.justify;
@@ -374,11 +383,11 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         const overflow = -free;
         for (0..count) |i| {
             const child = tree.node(node.children.items[i]) orelse continue;
-            // Clamp at 0: a child whose shrink share exceeds its main keeps
-            // zero (the container then overflows visibly) — never a negative
-            // main or an inverted rect.
+            // Canonical automatic minimum (§4.5): never shrink below the
+            // item's natural main (the content-based floor).
+            const natural = mains[i];
             if (child.flex.shrink > 0)
-                mains[i] = @max(0, mains[i] - overflow * child.flex.shrink / total_shrink);
+                mains[i] = @max(natural, mains[i] - overflow * child.flex.shrink / total_shrink);
         }
     }
 
@@ -472,14 +481,6 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
             else
                 // Approximate FreeType text at 20px: ~10px advance, 20px tall.
                 Size{ .width = @as(f32, @floatFromInt(l.text.len)) * 10, .height = 20 };
-            node.rect.w = s.width + border.w + padding.w;
-            node.rect.h = s.height + border.h + padding.h;
-        },
-        .button => |b| {
-            const s = if (measure) |m|
-                m(b.label, node.font_size, node.font_id)
-            else
-                Size{ .width = @as(f32, @floatFromInt(b.label.len)) * 10, .height = 20 };
             node.rect.w = s.width + border.w + padding.w;
             node.rect.h = s.height + border.h + padding.h;
         },
@@ -684,11 +685,14 @@ test "column shrink: fixed children reduced proportionally to shrink weight" {
 
     layout(&tree, .{ .width = 100, .height = 24 });
 
-    // Content 60, overflow 36 over 24; weights 1/1/2 -> cuts 9, 9, 18.
-    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 11 }, tree.node(id1).?.rect);
-    try testing.expectEqual(Rect{ .x = 0, .y = 11, .w = 100, .h = 11 }, tree.node(id2).?.rect);
-    try testing.expectEqual(Rect{ .x = 0, .y = 22, .w = 100, .h = 2 }, tree.node(id3).?.rect);
-    // Total height == available.h.
+    // Content 60, overflow 36 over 24 — but the canonical automatic
+    // minimum (§4.5) floors the shrink at each item's CONTENT size (the
+    // labels' natural 20px), so nothing shrinks and the container
+    // overflows visibly instead of crushing the text.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 20 }, tree.node(id1).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 20, .w = 100, .h = 20 }, tree.node(id2).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 40, .w = 100, .h = 20 }, tree.node(id3).?.rect);
+    // The container still takes the available height.
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 24 }, tree.node(id4).?.rect);
 }
 
@@ -898,13 +902,13 @@ test "column shrink clamps at zero: no negative mains, no inverted rects" {
 
     layout(&tree, .{ .width = 100, .height = 10 });
 
-    // Content 60 vs 10 available: the bottom-up cut is 5/5/40, so the third
-    // label would go to -20 and clamps to 0. The top-down pass then re-runs
-    // shrink against the FINAL main (10): 2/2/16 more -> 13/13/0. The
-    // container keeps 10 and overflows visibly instead of inverting a rect.
-    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 13 }, tree.node(id1).?.rect);
-    try testing.expectEqual(Rect{ .x = 0, .y = 13, .w = 100, .h = 13 }, tree.node(id2).?.rect);
-    try testing.expectEqual(Rect{ .x = 0, .y = 26, .w = 100, .h = 0 }, tree.node(id3).?.rect);
+    // Content 60 vs 10 available: the canonical automatic minimum (§4.5)
+    // floors the shrink at each item's CONTENT size (the labels' natural
+    // 20px) — the items hold their content and the container overflows
+    // visibly instead of crushing the text to zero.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 20 }, tree.node(id1).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 20, .w = 100, .h = 20 }, tree.node(id2).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 40, .w = 100, .h = 20 }, tree.node(id3).?.rect);
     // No negative mains, and positions never go backwards.
     try testing.expect(tree.node(id1).?.rect.h >= 0);
     try testing.expect(tree.node(id2).?.rect.h >= 0);

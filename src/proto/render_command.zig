@@ -3,7 +3,7 @@
 //! Architecture
 //! ────────────
 //! Widget tree → collectWidgetRects(RectCollectCtx) → []RenderCommand
-//!   → processRenderCommands() → SliceRect[] + GPU material writes
+//!   → processRenderCommands() → SceneRect[] + GPU material writes
 //!   → Batch9Slice.draw()
 //!
 //! WHY a lightweight tagged union instead of gpui-style Scene IR:
@@ -20,7 +20,7 @@
 //!   - dvui's RenderCommand has 23+ variants (Circle, Path, Text, Image,
 //!     Mesh, Callback, ClipPush, ClipPop, PushStack, PopStack, etc.)
 //!     spread across dvui/renderer.zig and dvui/Backend.zig.
-//!   - nogui renders ONE primitive (SliceRect) with material-index dispatch.
+//!   - nogui renders ONE primitive (SceneRect) with material-index dispatch.
 //!     dvui's 23-way dispatch would be 23x dead code paths.
 //!   - When a 2nd primitive class arrives, promote to tagged union —
 //!     the simplest thing that could possibly work.
@@ -38,7 +38,7 @@
 //! PROTOTYPE — but the enum contract is final.
 
 const std = @import("std");
-const SliceRect = @import("render_9slice.zig").SliceRect;
+const SceneRect = @import("render_9slice.zig").SceneRect;
 const Widget = @import("widget.zig").Widget;
 const Rect = @import("widget.zig").Rect;
 
@@ -50,7 +50,7 @@ const Rect = @import("widget.zig").Rect;
 pub const RenderCommand = union(enum) {
     /// Opaque colored rectangle (no texture, no material).
     /// Per-vertex color is written directly; no GPU material slot consumed.
-    /// Border > 0 emits two SliceRects: border background + inset fill.
+    /// Border > 0 emits two SceneRects: border background + inset fill.
     solid_rect: struct {
         rect: Rect,
         color: [4]f32,
@@ -167,87 +167,84 @@ pub const RectCollectCtx = union(enum) {
     },
 };
 
-// ─── Conversion: RenderCommand → SliceRect ───────────────────
+// ─── Conversion: RenderCommand → SceneRect ───────────────────
 
-/// Convert one RenderCommand to a SliceRect for the Batch9Slice pipeline.
+/// Convert one RenderCommand to a SceneRect for the Batch9Slice pipeline.
 /// Called by processRenderCommands() for each non-blit command.
-pub fn commandToSliceRect(cmd: *const RenderCommand) SliceRect {
+pub fn commandToSliceRect(cmd: *const RenderCommand) SceneRect {
     return switch (cmd.*) {
         .solid_rect => |s| {
             const b = s.border;
-            return SliceRect{
-                .dst_x = s.rect.x + b,
-                .dst_y = s.rect.y + b,
-                .dst_w = s.rect.w - 2 * b,
-                .dst_h = s.rect.h - 2 * b,
+            return SceneRect{
+                .dst = .{ s.rect.x + b, s.rect.y + b, s.rect.w - 2 * b, s.rect.h - 2 * b },
+                .src = .{ 0, 0, 1, 1 },
+                .corners = .{ s.corner_l, s.corner_r, s.corner_t, s.corner_b },
                 .color = s.color,
-                .corner_l = s.corner_l,
-                .corner_r = s.corner_r,
-                .corner_t = s.corner_t,
-                .corner_b = s.corner_b,
+                .curve = .{ 0, 0, 0, 0 },
                 .material_index = 0, // solid: per-vertex color
+                // Old SliceRect glyph_pen was always null here, so the
+                // emitter fell back to the rect top-left.
+                .origin = .{ s.rect.x + b, s.rect.y + b },
             };
         },
-        .nine_slice => |n| SliceRect{
-            .dst_x = n.rect.x,
-            .dst_y = n.rect.y,
-            .dst_w = n.rect.w,
-            .dst_h = n.rect.h,
-            .src_u = n.src_u,
-            .src_v = n.src_v,
-            .src_w = n.src_w,
-            .src_h = n.src_h,
+        .nine_slice => |n| SceneRect{
+            .dst = .{ n.rect.x, n.rect.y, n.rect.w, n.rect.h },
+            .src = .{ n.src_u, n.src_v, n.src_w, n.src_h },
+            .corners = .{ n.corner_l, n.corner_r, n.corner_t, n.corner_b },
             .color = n.color,
-            .corner_l = n.corner_l,
-            .corner_r = n.corner_r,
-            .corner_t = n.corner_t,
-            .corner_b = n.corner_b,
+            .curve = .{ 0, 0, 0, 0 },
             .material_index = n.material_index,
+            // Old SliceRect glyph_pen was always null here, so the
+            // emitter fell back to the rect top-left.
+            .origin = .{ n.rect.x, n.rect.y },
         },
         .glyph => |g| {
             // Glyph draws use curve-space UV encoding.
-            // The SliceRect carries curve metadata so emitSliceRect
+            // The SceneRect carries curve metadata so emitSceneRect
             // can compute per-vertex curve UVs instead of texture UVs.
-            return SliceRect{
-                .dst_x = g.rect.x,
-                .dst_y = g.rect.y,
-                .dst_w = g.rect.w,
-                .dst_h = g.rect.h,
+            return SceneRect{
+                .dst = .{ g.rect.x, g.rect.y, g.rect.w, g.rect.h },
+                .src = .{ 0, 0, 1, 1 },
+                .corners = .{ 0, 0, 0, 0 },
                 .color = g.color,
+                .curve = .{ g.curve_left, g.curve_bottom, g.curve_w, g.curve_h },
                 .material_index = g.material_index,
-                .curve_left = g.curve_left,
-                .curve_bottom = g.curve_bottom,
-                .curve_w = g.curve_w,
-                .curve_h = g.curve_h,
+                // This proto path never set glyph_pen: the emitter's old
+                // fallback anchored the origin at the rect top-left.
+                .origin = .{ g.rect.x, g.rect.y },
             };
         },
         .blit_oklab => unreachable, // handled separately, never converted
     };
 }
 
-/// Convert a border+fill RenderCommand pair into two SliceRects.
+/// Convert a border+fill RenderCommand pair into two SceneRects.
 /// Widgets with border > 0 emit two solid_rect commands: border first, fill second.
-pub fn borderCommandToSliceRects(cmd: *const RenderCommand, buf: *[2]SliceRect) u32 {
+pub fn borderCommandToSliceRects(cmd: *const RenderCommand, buf: *[2]SceneRect) u32 {
     const s = cmd.solid_rect;
     if (s.border <= 0) {
         buf[0] = commandToSliceRect(cmd);
         return 1;
     }
     // Border rect (full extents, border color)
-    buf[0] = SliceRect{
-        .dst_x = s.rect.x,
-        .dst_y = s.rect.y,
-        .dst_w = s.rect.w,
-        .dst_h = s.rect.h,
+    buf[0] = SceneRect{
+        .dst = .{ s.rect.x, s.rect.y, s.rect.w, s.rect.h },
+        .src = .{ 0, 0, 1, 1 },
+        .corners = .{ 0, 0, 0, 0 },
         .color = s.border_color, // border uses a separate color field
+        .curve = .{ 0, 0, 0, 0 },
+        .material_index = 0,
+        .origin = .{ s.rect.x, s.rect.y },
     };
     // Fill rect (inset by border)
-    buf[1] = SliceRect{
-        .dst_x = s.rect.x + s.border,
-        .dst_y = s.rect.y + s.border,
-        .dst_w = s.rect.w - 2 * s.border,
-        .dst_h = s.rect.h - 2 * s.border,
+    buf[1] = SceneRect{
+        .dst = .{ s.rect.x + s.border, s.rect.y + s.border, s.rect.w - 2 * s.border, s.rect.h - 2 * s.border },
+        .src = .{ 0, 0, 1, 1 },
+        .corners = .{ 0, 0, 0, 0 },
         .color = s.color,
+        .curve = .{ 0, 0, 0, 0 },
+        .material_index = 0,
+        .origin = .{ s.rect.x + s.border, s.rect.y + s.border },
     };
     return 2;
 }
@@ -255,14 +252,14 @@ pub fn borderCommandToSliceRects(cmd: *const RenderCommand, buf: *[2]SliceRect) 
 // ─── Process pipeline ───────────────────────────────────────
 
 /// Process a RenderCommand array into the output buffers Batch9Slice needs.
-/// Returns the count of SliceRects written to slice_rects_out.
+/// Returns the count of SceneRects written to slice_rects_out.
 ///
 /// This is the ONLY place dispatch logic lives. Adding a new primitive
 /// means adding a variant to RenderCommand + a case here — no other
 /// code changes (unless the primitive needs a new shader/pipeline state).
 pub fn processRenderCommands(
     cmds: []const RenderCommand,
-    slice_rects_out: []SliceRect,
+    slice_rects_out: []SceneRect,
     material_buf_bda: u64,
     material_cpu: ?[]u8,
     next_material_slot: *u32,
@@ -279,11 +276,11 @@ pub fn processRenderCommands(
             .blit_oklab => {
                 // blit is handled at the render-pass level by Window.endFrame().
                 // The RenderCommand records that a blit is needed (always yes).
-                // No SliceRect emitted.
+                // No SceneRect emitted.
             },
             .solid_rect => {
                 if (ri + 2 > slice_rects_out.len) break;
-                var pair: [2]SliceRect = undefined;
+                var pair: [2]SceneRect = undefined;
                 const n = borderCommandToSliceRects(&cmd, &pair);
                 for (pair[0..n]) |sr| {
                     slice_rects_out[ri] = sr;

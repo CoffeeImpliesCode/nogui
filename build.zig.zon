@@ -44,12 +44,19 @@
             .hash = "freetype-2.14.3-C3-WdXSKAAB-kHs4qgRoeoFnRkNQn6M_SSlUGZ6ywgBQ",
         },
         .tracy = .{
-            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#4921b7dec5e665793f9f87d6ec9336ad450543a4",
-            .hash = "tracy-0.0.0-R7l8BVhNAQBAcLUKg_R72dyRyWRhzTLf1lTvcqVTb9Nc",
+            .url = "git+https://codeberg.org/Games-by-Mason/tracy_zig#39cf5b557438bafb64513e4f02546daaa1240599",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BWxQAQB36bRaCuUfFu77XFrBOE2rTMRYTOjX574F",
         },
         .harfbuzz = .{
             .url = "git+https://github.com/allyourcodebase/harfbuzz#d055840ecefefcd57f5ddeb2fa8c83fafed1a40b",
             .hash = "harfbuzz-14.1.0-Ip1VAuGZAAC1jdxPHOMPoHyi-50Hm_q4bveaVflELHGw",
+        },
+        // SVG reading (the demo's svg parser XML layer): builds libxml2
+        // 2.12.6 from a pinned source (hermetic); the consumer @cImports
+        // the emitted include tree (the freetype/harfbuzz precedent).
+        .libxml2 = .{
+            .url = "git+https://github.com/ianprime0509/zig-libxml2#5cf16c3c5abb110721d45fdcbe957c5651ecff2a",
+            .hash = "libxml2-2.12.6-0-_uu2QSRdAAA_t8w7V8hSK4N9tTNknkoMN5GucTaUG2ec",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "shaders", "src/InterVariable.ttf" },

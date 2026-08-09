@@ -35,7 +35,7 @@ proto_main.zig
        │              ├── layout.measure(root, available)   # bottom-up
        │              └── layout.layout(root, pos, size)    # top-down
        └── endFrame(root)
-            └── window.zig: widget tree → Batch9Slice.emitSliceRect → GPU draw
+            └── window.zig: widget tree → Batch9Slice.emitSceneRect → GPU draw
 ```
 
 ## Conventions

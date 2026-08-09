@@ -81,8 +81,14 @@ fn boxFromOpts(opts: anytype) Box {
     if (@hasField(T, "box_sizing")) box.box_sizing = @as(BoxSizing, opts.box_sizing);
     // Paint-only fields (absent keeps the Box defaults).
     if (@hasField(T, "shadow")) box.shadow = opts.shadow;
+    if (@hasField(T, "clip")) box.clip = opts.clip;
+    // texture is an optional u32 — copy the optional directly.
+    if (@hasField(T, "texture")) box.texture = opts.texture;
     // gradient is a [4]f32 like a color — copy element-wise via indexing.
     if (@hasField(T, "gradient")) box.gradient = asColor(opts.gradient);
+    // fill = the flat fill color (the gradient's top vertex color; pair
+    // with the same gradient for a flat fill).
+    if (@hasField(T, "fill")) box.color = asColor(opts.fill);
     return box;
 }
 
@@ -108,6 +114,10 @@ pub const DrawCtx = struct {
     parent_stack: [64]Id = .{.root} ** 64,
     depth: u32 = 0,
     component_id: Id = .root,
+    /// Nesting depth of pushClip()/popClip() calls. The clip rects
+    /// themselves live in the tree's per-frame list (WidgetTree.
+    /// clip_rects); this only balances the stack.
+    clip_depth: u32 = 0,
 
     /// Create a node under the cursor. Container kinds do NOT descend here.
     /// The node's `.box` (CSS box model: margin/border/padding/radius) is
@@ -162,6 +172,9 @@ pub const DrawCtx = struct {
         var grow: f32 = 0;
         if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
         if (grow > 0) self.tree.node(id).?.flex.grow = grow;
+        var basis: f32 = 0;
+        if (@hasField(@TypeOf(opts), "basis")) basis = opts.basis;
+        if (basis > 0) self.tree.node(id).?.flex.basis = basis;
         applyFlexStyle(self, id, opts);
         self.descend(id);
         return id;
@@ -175,6 +188,9 @@ pub const DrawCtx = struct {
         var grow: f32 = 0;
         if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
         if (grow > 0) self.tree.node(id).?.flex.grow = grow;
+        var basis: f32 = 0;
+        if (@hasField(@TypeOf(opts), "basis")) basis = opts.basis;
+        if (basis > 0) self.tree.node(id).?.flex.basis = basis;
         applyFlexStyle(self, id, opts);
         self.descend(id);
         return id;
@@ -212,34 +228,60 @@ pub const DrawCtx = struct {
     /// id-keyed dirty diffing.
     pub fn label(self: *DrawCtx, opts: anytype) !Id {
         const text = try self.arena.dupe(u8, opts.text);
-        return self.create(.{ .label = .{ .text = text } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        var kind: WidgetKind = .{ .label = .{ .text = text } };
+        if (@hasField(@TypeOf(opts), "color")) kind.label.color = asColor(opts.color);
+        return self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
     }
 
     /// A clickable button. `owner` binds the click to the component that
     /// created it (`component_id`); `on_click` is wrapped into a type-erased
     /// callback when `opts.on_click` is present. Label text is duplicated
     /// into the frame arena (see label()).
+    ///
+    /// The label is a CHILD label node, centered by the button's flex style
+    /// — the text pipeline (measure + emission + color) is shared with
+    /// plain labels, one path instead of a second kind arm in the
+    /// renderer. The kind's `label` field still carries the text (the
+    /// click-injection + hit-testing scan it).
     pub fn button(self: *DrawCtx, opts: anytype) !Id {
         var on_click: ?*const fn (*anyopaque) void = null;
         if (@hasField(@TypeOf(opts), "on_click")) on_click = callback.wrap(opts.on_click);
         const label_copy = try self.arena.dupe(u8, opts.label);
-        return self.create(.{ .button = .{
+        var kind: WidgetKind = .{ .button = .{
             .label = label_copy,
             .on_click = on_click,
             .owner = self.component_id,
-        } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        } };
+        if (@hasField(@TypeOf(opts), "color")) kind.button.color = asColor(opts.color);
+        const font_size = optsFontSize(opts);
+        const font_id = optsFontId(opts);
+        const id = try self.create(kind, boxFromOpts(opts), font_size, font_id);
+        const node = self.tree.node(id).?;
+        node.style.justify = .center;
+        node.style.@"align" = .center;
+        self.descend(id);
+        _ = try self.label(.{
+            .text = label_copy,
+            .color = kind.button.color,
+            .font_size = font_size,
+            .font_id = font_id,
+        });
+        self.pop();
+        return id;
     }
 
     /// A slider bound to a live f32. Label text is duplicated into the
     /// frame arena (see label()).
     pub fn slider(self: *DrawCtx, opts: anytype) !Id {
         const label_copy = try self.arena.dupe(u8, opts.label);
-        return self.create(.{ .slider = .{
+        var kind: WidgetKind = .{ .slider = .{
             .label = label_copy,
             .value = opts.value,
             .min = opts.min,
             .max = opts.max,
-        } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        } };
+        if (@hasField(@TypeOf(opts), "color")) kind.slider.color = asColor(opts.color);
+        return self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
     }
 
     /// An empty spacer of the given size (`opts.size`, default 0). Box
@@ -248,6 +290,28 @@ pub const DrawCtx = struct {
         var size: f32 = 0;
         if (@hasField(@TypeOf(opts), "size")) size = opts.size;
         return self.create(.{ .spacer = .{ .size = size } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+    }
+
+    /// Push a clip rect onto the frame's clip-rect list, returning its
+    /// clip id (or 0xFFFFFFFF when the list is full — the clip is then
+    /// skipped). The id stamps onto the clip-marked container's draw
+    /// commands: the `.clip` box option wires this automatically (the
+    /// declarative path the demo uses); pushClip is the programmatic API
+    /// for widgets that know their rect at draw time (scroll containers).
+    /// popClip() balances the push. The list is append-only — ids stay
+    /// valid for the frame.
+    pub fn pushClip(self: *DrawCtx, x: f32, y: f32, w: f32, h: f32) u32 {
+        const id = self.tree.pushClipRect(.{ .x = x, .y = y, .w = w, .h = h }) orelse return 0xFFFFFFFF;
+        self.clip_depth += 1;
+        return id;
+    }
+
+    /// Balance a pushClip(): restores the clip nesting depth. Rects are
+    /// never removed from the list (ids must stay stable), so pop only
+    /// tracks the stack.
+    pub fn popClip(self: *DrawCtx) void {
+        std.debug.assert(self.clip_depth > 0);
+        self.clip_depth -= 1;
     }
 
     /// Nest a sub-component: its draw() runs with `component_id` set to a
@@ -343,17 +407,29 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
     try std.testing.expectEqual(col, tree.node(inner_button).?.parent);
     try std.testing.expectEqual(Id.root, tree.node(outer_label).?.parent);
 
-    // Children adjacency, in creation order.
+    // Children adjacency, in creation order. The button's label is the
+    // BUTTON's child, not the column's.
     const col_node = tree.node(col).?;
     try std.testing.expectEqual(@as(u8, 2), col_node.children.len);
     try std.testing.expectEqual(inner_label, col_node.children.items[0]);
     try std.testing.expectEqual(inner_button, col_node.children.items[1]);
 
+    // The button's child is its label (a label node with the button's text).
+    const btn_node = tree.node(inner_button).?;
+    try std.testing.expectEqual(@as(u8, 1), btn_node.children.len);
+    const btn_label_id = btn_node.children.items[0];
+    const btn_label = tree.node(btn_label_id).?;
+    try std.testing.expectEqual(inner_button, btn_label.parent);
+    try std.testing.expectEqualStrings("B", btn_label.kind.label.text);
+
     // Post-order: children first, then their container, then the root label.
+    // The button's pop moved it past its child label, so the child precedes
+    // it.
     try std.testing.expectEqual(inner_label, tree.nodes.items[0].id);
-    try std.testing.expectEqual(inner_button, tree.nodes.items[1].id);
-    try std.testing.expectEqual(col, tree.nodes.items[2].id);
-    try std.testing.expectEqual(outer_label, tree.nodes.items[3].id);
+    try std.testing.expectEqual(btn_label_id, tree.nodes.items[1].id);
+    try std.testing.expectEqual(inner_button, tree.nodes.items[2].id);
+    try std.testing.expectEqual(col, tree.nodes.items[3].id);
+    try std.testing.expectEqual(outer_label, tree.nodes.items[4].id);
 }
 
 test "DrawCtx: pop() restores the cursor" {
@@ -401,10 +477,11 @@ test "DrawCtx: button owner binds to component_id, incl. inside component()" {
     var child = Child{};
     try ctx.component(Child, &child);
 
-    // The component took the next id (2); the inner button (id 3) is owned
-    // by the child component, and component_id was restored afterwards.
-    const inner: Id = @enumFromInt(3);
-    try std.testing.expectEqual(@as(Id, @enumFromInt(2)), tree.node(inner).?.kind.button.owner);
+    // The component took the next id (3 — 2 was the root button's child
+    // label); the inner button (id 4) is owned by the child component,
+    // and component_id was restored afterwards.
+    const inner: Id = @enumFromInt(4);
+    try std.testing.expectEqual(@as(Id, @enumFromInt(3)), tree.node(inner).?.kind.button.owner);
     try std.testing.expectEqual(Id.root, ctx.component_id);
 
     // A later button is owned by the root component again.
@@ -587,4 +664,28 @@ test "DrawCtx: absent box fields leave Box defaults" {
     try std.testing.expectEqual(Box{}, tree.node(plain_slider).?.box);
     try std.testing.expectEqual(Box{}, tree.node(plain_spacer).?.box);
     try std.testing.expectEqual(Box{}, tree.node(plain_col).?.box);
+}
+
+test "DrawCtx: the .clip opt lands on the container box; pushClip appends to the tree's clip list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+
+    const card = try ctx.column(.{ .clip = true });
+    ctx.pop();
+    try std.testing.expect(tree.node(card).?.box.clip);
+
+    // Programmatic clips append to the SAME list the declarative path
+    // uses (collectDrawCmds reads it); ids are stable indices.
+    const id0 = ctx.pushClip(10, 20, 30, 40);
+    const id1 = ctx.pushClip(50, 60, 70, 80);
+    ctx.popClip();
+    ctx.popClip();
+    try std.testing.expectEqual(@as(u32, 0), id0);
+    try std.testing.expectEqual(@as(u32, 1), id1);
+    try std.testing.expectEqual(@as(u32, 2), tree.clip_count);
+    try std.testing.expectEqual(@as(f32, 30), tree.clip_rects[0].w);
+    try std.testing.expectEqual(@as(f32, 80), tree.clip_rects[1].h);
 }

@@ -20,7 +20,7 @@ const Id = @import("widget.zig").Id;
 const Rect = @import("widget.zig").Rect;
 const Sizing = @import("widget.zig").Sizing;
 const SizingAxis = @import("widget.zig").SizingAxis;
-const SliceRect = @import("render_9slice.zig").SliceRect;
+const SceneRect = @import("render_9slice.zig").SceneRect;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
 const GlyphSweeper = @import("sweeper.zig").GlyphSweeper;
 const Curve = @import("sweeper.zig").Curve;
@@ -87,7 +87,7 @@ pub const HeadlessWindow = struct {
     should_close: bool = false,
 
     /// Pre-allocated rect buffer for draw list collection.
-    rect_buf: []SliceRect,
+    rect_buf: []SceneRect,
 
     /// Per-frame RenderCommand buffer (arena-allocated).
     cmd_buf: RenderCommandList = undefined,
@@ -101,7 +101,7 @@ pub const HeadlessWindow = struct {
         for (&arenas) |*a| {
             a.* = std.heap.ArenaAllocator.init(ctx.gpa);
         }
-        const rect_buf = try ctx.gpa.alloc(SliceRect, 1024);
+        const rect_buf = try ctx.gpa.alloc(SceneRect, 1024);
         return .{
             .context = ctx,
             .size = size,
@@ -148,7 +148,7 @@ pub const HeadlessWindow = struct {
         collectWidgetRectsHeadless(self, root, &self.cmd_buf, &ctx);
         self.cmd_buf.push(.blit_oklab);
 
-        // Phase 2: Process RenderCommands → SliceRects
+        // Phase 2: Process RenderCommands → SceneRects
         const rect_count = processRenderCommands(
             self.cmd_buf.slice(),
             self.rect_buf,
@@ -222,12 +222,10 @@ pub const FrameOutput = struct {
         try writer.writeAll("{");
 
         try writer.writeAll("\"meta\":{");
-        try writer.print("\"frame\":{d},\"ts\":{d},\"win_w\":{d},\"win_h\":{d}",
-            .{ self.frame_number, self.timestamp_ms, self.window_size.width, self.window_size.height });
+        try writer.print("\"frame\":{d},\"ts\":{d},\"win_w\":{d},\"win_h\":{d}", .{ self.frame_number, self.timestamp_ms, self.window_size.width, self.window_size.height });
         try writer.print(",\"test\":\"{s}\"", .{self.test_name});
         if (self.debug_info) |di| {
-            try writer.print(",\"commit\":\"{s}\",\"build_mode\":\"{s}\"",
-                .{ di.commit_hash, di.build_mode });
+            try writer.print(",\"commit\":\"{s}\",\"build_mode\":\"{s}\"", .{ di.commit_hash, di.build_mode });
         }
         try writer.writeAll("}");
 
@@ -285,8 +283,7 @@ pub const WidgetNode = struct {
     pub fn writeJson(self: *const WidgetNode, writer: anytype) !void {
         try writer.writeAll("{");
         try writer.print("\"id\":{d},\"kind\":\"{s}\"", .{ self.id, self.kind });
-        try writer.print(",\"rect\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}",
-            .{ self.rect.x, self.rect.y, self.rect.w, self.rect.h });
+        try writer.print(",\"rect\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ self.rect.x, self.rect.y, self.rect.w, self.rect.h });
         try writer.print(",\"sizing\":{{\"x\":\"{s}\",\"y\":\"{s}\"", .{
             @tagName(self.sizing.x),
             @tagName(self.sizing.y),
@@ -397,7 +394,7 @@ fn allocChildren(kids: []const *Widget, allocator: std.mem.Allocator) ![]const W
 
 // ─── Draw List Serialization ───────────────────────────────────────
 
-/// One draw command — JSON-friendly representation of a SliceRect.
+/// One draw command — JSON-friendly representation of a SceneRect.
 pub const DrawCommand = struct {
     cmd_type: []const u8, // "fill_rect" | "border_rect" | "glyph"
 
@@ -417,26 +414,20 @@ pub const DrawCommand = struct {
     pub fn writeJson(self: *const DrawCommand, writer: anytype) !void {
         try writer.writeAll("{");
         try writer.print("\"cmd\":\"{s}\"", .{self.cmd_type});
-        try writer.print(",\"dst\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}",
-            .{ self.dst.x, self.dst.y, self.dst.w, self.dst.h });
-        try writer.print(",\"color\":[{d},{d},{d},{d}]",
-            .{ self.color[0], self.color[1], self.color[2], self.color[3] });
+        try writer.print(",\"dst\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ self.dst.x, self.dst.y, self.dst.w, self.dst.h });
+        try writer.print(",\"color\":[{d},{d},{d},{d}]", .{ self.color[0], self.color[1], self.color[2], self.color[3] });
 
         if (self.corners) |c| {
-            try writer.print(",\"corners\":{{\"l\":{d},\"r\":{d},\"t\":{d},\"b\":{d}}}",
-                .{ c.l, c.r, c.t, c.b });
+            try writer.print(",\"corners\":{{\"l\":{d},\"r\":{d},\"t\":{d},\"b\":{d}}}", .{ c.l, c.r, c.t, c.b });
         }
         if (self.src_uv) |uv| {
-            try writer.print(",\"src_uv\":{{\"u\":{d},\"v\":{d},\"w\":{d},\"h\":{d}}}",
-                .{ uv.u, uv.v, uv.w, uv.h });
+            try writer.print(",\"src_uv\":{{\"u\":{d},\"v\":{d},\"w\":{d},\"h\":{d}}}", .{ uv.u, uv.v, uv.w, uv.h });
         }
         if (self.glyph) |g| {
-            try writer.print(",\"glyph\":{{\"char\":\"{c}\",\"advance\":{d},\"bearing\":[{d},{d}]}}",
-                .{ g.char, g.advance, g.bearing_x, g.bearing_y });
+            try writer.print(",\"glyph\":{{\"char\":\"{c}\",\"advance\":{d},\"bearing\":[{d},{d}]}}", .{ g.char, g.advance, g.bearing_x, g.bearing_y });
         }
         if (self.material) |m| {
-            try writer.print(",\"material\":{{\"type\":\"{s}\",\"slot\":{d}}}",
-                .{ m.mat_type, m.slot });
+            try writer.print(",\"material\":{{\"type\":\"{s}\",\"slot\":{d}}}", .{ m.mat_type, m.slot });
             if (m.curve_ref) |cr| {
                 try writer.print(",\"curve\":\"{s}\"", .{cr});
             }
@@ -461,9 +452,9 @@ pub const MaterialRef = struct {
     curve_ref: ?[]const u8 = null,
 };
 
-/// Convert SliceRect array into DrawCommand array.
+/// Convert SceneRect array into DrawCommand array.
 pub fn collectDrawCommands(
-    rects: []const SliceRect,
+    rects: []const SceneRect,
     allocator: std.mem.Allocator,
     ctx: *const HeadlessContext,
 ) ![]const DrawCommand {
@@ -474,10 +465,10 @@ pub fn collectDrawCommands(
     return cmds;
 }
 
-fn sliceRectToCommand(r: SliceRect, ctx: *const HeadlessContext) DrawCommand {
+fn sliceRectToCommand(r: SceneRect, ctx: *const HeadlessContext) DrawCommand {
     // Determine command type
-    const is_glyph = r.material_index > 0 and r.curve_w > 0 and r.curve_h > 0;
-    const is_border = r.color[3] > 0 and (r.corner_l > 0 or r.corner_r > 0 or r.corner_t > 0 or r.corner_b > 0);
+    const is_glyph = r.material_index > 0 and r.curve[2] > 0 and r.curve[3] > 0;
+    const is_border = r.color[3] > 0 and (r.corners[0] > 0 or r.corners[1] > 0 or r.corners[2] > 0 or r.corners[3] > 0);
 
     const cmd_type: []const u8 = if (is_glyph)
         "glyph"
@@ -517,14 +508,14 @@ fn sliceRectToCommand(r: SliceRect, ctx: *const HeadlessContext) DrawCommand {
 
     return DrawCommand{
         .cmd_type = cmd_type,
-        .dst = .{ .x = r.dst_x, .y = r.dst_y, .w = r.dst_w, .h = r.dst_h },
+        .dst = .{ .x = r.dst[0], .y = r.dst[1], .w = r.dst[2], .h = r.dst[3] },
         .color = r.color,
-        .corners = if (r.corner_l > 0 or r.corner_r > 0 or r.corner_t > 0 or r.corner_b > 0)
-            .{ .l = r.corner_l, .r = r.corner_r, .t = r.corner_t, .b = r.corner_b }
+        .corners = if (r.corners[0] > 0 or r.corners[1] > 0 or r.corners[2] > 0 or r.corners[3] > 0)
+            .{ .l = r.corners[0], .r = r.corners[1], .t = r.corners[2], .b = r.corners[3] }
         else
             null,
-        .src_uv = if (r.src_w < 1.0 or r.src_h < 1.0 or r.src_u > 0 or r.src_v > 0)
-            .{ .u = r.src_u, .v = r.src_v, .w = r.src_w, .h = r.src_h }
+        .src_uv = if (r.src[2] < 1.0 or r.src[3] < 1.0 or r.src[0] > 0 or r.src[1] > 0)
+            .{ .u = r.src[0], .v = r.src[1], .w = r.src[2], .h = r.src[3] }
         else
             null,
         .glyph = glyph,
@@ -534,7 +525,7 @@ fn sliceRectToCommand(r: SliceRect, ctx: *const HeadlessContext) DrawCommand {
 
 // ─── Draw List Collection (widget tree → RenderCommands) ─────────
 
-/// Headless widget tree walker. Mirrors Window.collectWidgetRects() 
+/// Headless widget tree walker. Mirrors Window.collectWidgetRects()
 /// but sources glyph data from HeadlessContext.glyph_entries instead
 /// of Window.glyphs[]. Both write RenderCommands to the same list type.
 ///
@@ -695,10 +686,7 @@ pub fn diffSnapshots(
     if (baseline.window_size.width != current.window_size.width or
         baseline.window_size.height != current.window_size.height)
     {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-            "window_size: baseline={d}x{d} current={d}x{d}",
-            .{ baseline.window_size.width, baseline.window_size.height,
-                current.window_size.width, current.window_size.height }));
+        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "window_size: baseline={d}x{d} current={d}x{d}", .{ baseline.window_size.width, baseline.window_size.height, current.window_size.width, current.window_size.height }));
     }
 
     // Widget tree diff
@@ -706,32 +694,22 @@ pub fn diffSnapshots(
 
     // Draw list count
     if (baseline.draw_list.len != current.draw_list.len) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-            "draw_list length: baseline={d} current={d}",
-            .{ baseline.draw_list.len, current.draw_list.len }));
+        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw_list length: baseline={d} current={d}", .{ baseline.draw_list.len, current.draw_list.len }));
     } else if (mode == .exact) {
         // Per-command diff (only for exact mode)
         for (baseline.draw_list, current.draw_list, 0..) |bl, cur, i| {
             if (!std.mem.eql(u8, bl.cmd_type, cur.cmd_type)) {
-                try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-                    "draw[{d}].cmd_type: baseline={s} current={s}",
-                    .{ i, bl.cmd_type, cur.cmd_type }));
+                try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw[{d}].cmd_type: baseline={s} current={s}", .{ i, bl.cmd_type, cur.cmd_type }));
             }
             if (!floatsEqual(bl.dst.x, cur.dst.x) or !floatsEqual(bl.dst.y, cur.dst.y) or
                 !floatsEqual(bl.dst.w, cur.dst.w) or !floatsEqual(bl.dst.h, cur.dst.h))
             {
-                try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-                    "draw[{d}].dst: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})",
-                    .{ i, bl.dst.x, bl.dst.y, bl.dst.w, bl.dst.h,
-                        cur.dst.x, cur.dst.y, cur.dst.w, cur.dst.h }));
+                try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw[{d}].dst: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})", .{ i, bl.dst.x, bl.dst.y, bl.dst.w, bl.dst.h, cur.dst.x, cur.dst.y, cur.dst.w, cur.dst.h }));
             }
             if (!floatsEqual(bl.color[0], cur.color[0]) or !floatsEqual(bl.color[1], cur.color[1]) or
                 !floatsEqual(bl.color[2], cur.color[2]) or !floatsEqual(bl.color[3], cur.color[3]))
             {
-                try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-                    "draw[{d}].color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]",
-                    .{ i, bl.color[0], bl.color[1], bl.color[2], bl.color[3],
-                        cur.color[0], cur.color[1], cur.color[2], cur.color[3] }));
+                try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw[{d}].color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]", .{ i, bl.color[0], bl.color[1], bl.color[2], bl.color[3], cur.color[0], cur.color[1], cur.color[2], cur.color[3] }));
             }
         }
     }
@@ -748,39 +726,28 @@ fn diffWidgetNodes(
     path: []const u8,
 ) !void {
     if (!std.mem.eql(u8, bl.kind, cur.kind)) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-            "{s}.kind: baseline={s} current={s}", .{ path, bl.kind, cur.kind }));
+        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.kind: baseline={s} current={s}", .{ path, bl.kind, cur.kind }));
         return; // different kind = different structure, stop recursing
     }
 
     if (mode == .exact) {
         if (bl.id != cur.id) {
-            try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-                "{s}.id: baseline={d} current={d}", .{ path, bl.id, cur.id }));
+            try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.id: baseline={d} current={d}", .{ path, bl.id, cur.id }));
         }
         if (!rectEqual(bl.rect, cur.rect)) {
-            try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-                "{s}.rect: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})",
-                .{ path, bl.rect.x, bl.rect.y, bl.rect.w, bl.rect.h,
-                    cur.rect.x, cur.rect.y, cur.rect.w, cur.rect.h }));
+            try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.rect: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})", .{ path, bl.rect.x, bl.rect.y, bl.rect.w, bl.rect.h, cur.rect.x, cur.rect.y, cur.rect.w, cur.rect.h }));
         }
         if (!colorEqual(bl.color, cur.color)) {
-            try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-                "{s}.color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]",
-                .{ path, bl.color[0], bl.color[1], bl.color[2], bl.color[3],
-                    cur.color[0], cur.color[1], cur.color[2], cur.color[3] }));
+            try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]", .{ path, bl.color[0], bl.color[1], bl.color[2], bl.color[3], cur.color[0], cur.color[1], cur.color[2], cur.color[3] }));
         }
     }
 
     // Leaf payload comparison (all modes)
     if (!std.mem.eql(u8, bl.label orelse "", cur.label orelse "")) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-            "{s}.label: baseline=\"{s}\" current=\"{s}\"",
-            .{ path, bl.label orelse "", cur.label orelse "" }));
+        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.label: baseline=\"{s}\" current=\"{s}\"", .{ path, bl.label orelse "", cur.label orelse "" }));
     }
     if (bl.value != null and cur.value != null and !floatsEqual(bl.value.?, cur.value.?)) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-            "{s}.value: baseline={d} current={d}", .{ path, bl.value.?, cur.value.? }));
+        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.value: baseline={d} current={d}", .{ path, bl.value.?, cur.value.? }));
     }
 
     // Recursive children comparison
@@ -789,9 +756,7 @@ fn diffWidgetNodes(
     const min_kids = @min(bl_kids.len, cur_kids.len);
 
     if (bl_kids.len != cur_kids.len and mode != .semantic) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator,
-            "{s}.children count: baseline={d} current={d}",
-            .{ path, bl_kids.len, cur_kids.len }));
+        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.children count: baseline={d} current={d}", .{ path, bl_kids.len, cur_kids.len }));
     }
 
     for (0..min_kids) |i| {
@@ -973,15 +938,18 @@ test "WidgetNode: leaf widget serialization" {
 
 test "WidgetNode: container with children" {
     var child1 = Widget{
-        .id = testId(1), .sizing = .{},
+        .id = testId(1),
+        .sizing = .{},
         .kind = .{ .label = .{ .text = "a" } },
     };
     var child2 = Widget{
-        .id = testId(2), .sizing = .{},
+        .id = testId(2),
+        .sizing = .{},
         .kind = .{ .label = .{ .text = "b" } },
     };
     var col = Widget{
-        .id = testId(0), .sizing = .{},
+        .id = testId(0),
+        .sizing = .{},
         .kind = .{ .column = .{
             .children = &.{ &child1, &child2 },
             .padding = 8,

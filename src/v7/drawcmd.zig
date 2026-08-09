@@ -30,8 +30,15 @@
 //! `gradient` fields.
 //!
 //! Nodes whose rect has w == 0 or h == 0 are skipped: nothing to paint.
+//!
+//! A node with the `.texture` box option (a bindless heap index) emits its
+//! FILL with that tex_idx: the fragment shader's TYPE_TEXTURE branch samples
+//! the texture before the material dispatch, so the fill ignores the flat
+//! color (painted white = identity tint) and the gradient. The ring and
+//! shadow cmds stay untextured.
 
 const std = @import("std");
+const tracy = @import("tracy");
 
 const Id = @import("id.zig").Id;
 const Rect = @import("widget.zig").Rect;
@@ -56,6 +63,16 @@ pub const DrawCmd = struct {
     /// Paint-only: the gradient's bottom color in Oklab (all-zero = flat
     /// fill). Copied from the node's box onto every cmd the node emits.
     gradient: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Clip id: index into the frame's clip-rect list (WidgetTree.
+    /// clip_rects); 0xFFFFFFFF = no clip. Stamped by collectDrawCmds from
+    /// the enclosing `.clip` containers (a container's own cmds carry its
+    /// own clip; descendants carry the deepest enclosing one).
+    clip_id: u32 = 0xFFFFFFFF,
+    /// Bindless texture heap index (the node's `.texture` box option):
+    /// 0xFFFFFFFF = flat fill. Only the FILL cmd carries it — the fragment
+    /// shader's TYPE_TEXTURE branch samples the texture before the material
+    /// dispatch; ring and shadow cmds never carry a texture.
+    tex_idx: u32 = 0xFFFFFFFF,
 };
 
 const palette = struct {
@@ -65,31 +82,85 @@ const palette = struct {
     const slider: [4]f32 = .{ 0.2, 0.2, 0.22, 1 };
 };
 
+/// One clip-stack entry: a `.clip` container that is currently open
+/// (its subtree is being walked) and the clip id stamped on its cmds.
+const ClipStackEntry = struct { container: Id, clip_id: u32 };
+
+/// The no-clip sentinel (matches the shader's `vClipId != 0xFFFFFFFFu`).
+const NO_CLIP: u32 = 0xFFFFFFFF;
+
+/// Is `container` an ancestor of `node_id` (or `node_id` itself)? Walks
+/// the parent chain — the clip stack pops a container once the walk
+/// leaves its subtree (reversed post-order visits a container before its
+/// descendants, so the pop is detected on the first node outside it).
+fn clipContains(tree: *const WidgetTree, container: Id, node_id: Id) bool {
+    var cur = node_id;
+    while (cur != .root) {
+        if (cur == container) return true;
+        const n = tree.nodeConst(cur) orelse return false;
+        cur = n.parent;
+    }
+    return false;
+}
+
 /// Convert a laid-out tree into paint-ordered DrawCmds (parents BEFORE
 /// children — iterate the post-order array REVERSED). Each node's RELATIVE
 /// rect is resolved to its ABSOLUTE border box first. Bordered nodes emit
 /// their ring before their fill. Returns a slice allocated from
 /// `allocator`; caller frees.
-pub fn collectDrawCmds(tree: *const WidgetTree, pressed_id: ?Id, allocator: std.mem.Allocator, press_alpha: f32) ![]DrawCmd {
+///
+/// The clip pass: `.clip` containers push their absolute border box onto
+/// the tree's per-frame clip-rect list; every cmd emitted inside the
+/// container (its own + its descendants') carries the container's clip id
+/// (the deepest enclosing one for nesting). The tree must be mutable:
+/// the walk appends clip rects and stamps each node's `clip_id` (the
+/// renderer clips the node's glyphs with it).
+pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Allocator, press_alpha: f32) ![]DrawCmd {
+    const zone = tracy.Zone.begin(.{ .name = "collectDrawCmds", .src = @src() });
+    defer zone.end();
     var list: std.ArrayList(DrawCmd) = .empty;
     defer list.deinit(allocator);
+
+    // Clip stack: mirrors the enclosing clip-marked containers. The
+    // reversed walk meets a container before its subtree, so a clip
+    // container's entry is pushed when the container is reached and
+    // popped once the walk leaves its subtree (the pop loop below).
+    var clip_stack: [64]ClipStackEntry = undefined; // SAFETY: entries are written before any read; clip_len tracks the filled count
+    var clip_len: u32 = 0;
 
     const nodes = tree.nodes.items;
     var i: usize = nodes.len;
     while (i > 0) {
         i -= 1;
         const node = &nodes[i];
+        const abs = absoluteRect(tree, node.id);
+
+        // Pop enclosing clip containers that no longer contain this node.
+        while (clip_len > 0 and !clipContains(tree, clip_stack[clip_len - 1].container, node.id)) {
+            clip_len -= 1;
+        }
+        // A clip-marked container opens a clip for itself and its subtree.
+        if (node.box.clip and abs.w > 0 and abs.h > 0) {
+            if (tree.pushClipRect(.{ .x = abs.x, .y = abs.y, .w = abs.w, .h = abs.h })) |cid| {
+                std.debug.assert(clip_len < clip_stack.len); // nesting beyond 64 clip containers
+                clip_stack[clip_len] = .{ .container = node.id, .clip_id = cid };
+                clip_len += 1;
+            }
+        }
+        const clip_id: u32 = if (clip_len > 0) clip_stack[clip_len - 1].clip_id else NO_CLIP;
+        node.clip_id = clip_id;
 
         // Node rects are parent-relative; resolve to surface space. Skip
         // non-positive rects (negative rects are rare — the shrink-clamp
         // fix upstream — but the renderer must never emit them).
-        const abs = absoluteRect(tree, node.id);
         if (abs.w <= 0 or abs.h <= 0) continue;
 
         const b = node.box;
         const base_color: ?[4]f32 = switch (node.kind) {
             .column, .row => palette.container,
-            .button => palette.button,
+            // The button's fill: the box's flat fill when set (alpha > 0),
+            // else the palette fallback.
+            .button => if (b.color[3] > 0) b.color else palette.button,
             .slider => palette.slider,
             .label => null, // no fill — the glyph strokes carry the label
             .spacer => null, // spacer paints nothing
@@ -104,12 +175,13 @@ pub fn collectDrawCmds(tree: *const WidgetTree, pressed_id: ?Id, allocator: std.
         if (painted and b.shadow > 0) {
             try list.append(allocator, .{
                 .rect = Rect{ .x = abs.x + 2, .y = abs.y + 3, .w = abs.w, .h = abs.h },
-                .color = .{ 0, 0, 0, 0.28 },
+                .color = .{ 0, 0, 0, 0.45 },
                 .kind = .solid,
                 .box = b,
                 .ring = false,
                 .shadow = b.shadow,
                 .gradient = b.gradient,
+                .clip_id = clip_id,
             });
         }
 
@@ -126,15 +198,23 @@ pub fn collectDrawCmds(tree: *const WidgetTree, pressed_id: ?Id, allocator: std.
                 .ring = true,
                 .shadow = b.shadow,
                 .gradient = b.gradient,
+                .clip_id = clip_id,
             });
         }
 
         const c = base_color orelse continue;
+        // A textured fill shows the texture's own pixels: the fragment
+        // branch multiplies the sample by vColor (the tint), so the fill
+        // color is Oklab white (L=1, a=0, b=0) — the identity tint. The
+        // texture rect carries the registered heap index.
+        const tex_idx: u32 = b.texture orelse 0xFFFFFFFF;
         // The held-down button eases from its normal fill to the darker
         // pressed palette color by press_alpha (1 = fully pressed; the
         // core drives the eased value, so the fill tracks the press-in
         // animation instead of snapping).
-        const color: [4]f32 = if (pressed_id != null and pressed_id.? == node.id and node.kind == .button)
+        const color: [4]f32 = if (tex_idx != 0xFFFFFFFF)
+            .{ 1, 0, 0, 1 } // OKLAB white — identity tint for the texture
+        else if (pressed_id != null and pressed_id.? == node.id and node.kind == .button)
             lerp4(c, palette.button_pressed, press_alpha)
         else
             c;
@@ -156,6 +236,8 @@ pub fn collectDrawCmds(tree: *const WidgetTree, pressed_id: ?Id, allocator: std.
             .ring = false,
             .shadow = b.shadow,
             .gradient = b.gradient,
+            .clip_id = clip_id,
+            .tex_idx = tex_idx,
         });
     }
     return list.toOwnedSlice(allocator);
@@ -505,4 +587,113 @@ test "collectDrawCmds: bordered label emits exactly one ring cmd" {
     try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 24 }, cmds[0].rect);
     try expectColor(cmds[0].color, .{ 0.42, 0.42, 0.48, 1 });
     try std.testing.expectEqual(box, cmds[0].box);
+}
+
+test "collectDrawCmds: a .clip container stamps its clip id on its own and descendants' cmds, then pops for siblings" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    // Post-order: children before containers. A clip-marked column holds
+    // a button; a sibling button sits outside the clip.
+    const inner_btn: Id = @enumFromInt(1);
+    const card: Id = @enumFromInt(2);
+    const sibling_btn: Id = @enumFromInt(3);
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = inner_btn,
+        .kind = .{ .button = .{ .label = "in" } },
+        .parent = card,
+        .rect = .{ .x = 0, .y = 0, .w = 40, .h = 20 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = card,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 10, .y = 10, .w = 60, .h = 40 },
+        .box = .{ .clip = true },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = sibling_btn,
+        .kind = .{ .button = .{ .label = "out" } },
+        .parent = .root,
+        .rect = .{ .x = 100, .y = 10, .w = 40, .h = 20 },
+    });
+
+    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    defer std.testing.allocator.free(cmds);
+
+    // The clip list holds the card's absolute border box as id 0.
+    try std.testing.expectEqual(@as(u32, 1), tree.clip_count);
+    try std.testing.expectEqual(@as(f32, 10), tree.clip_rects[0].x);
+    try std.testing.expectEqual(@as(f32, 10), tree.clip_rects[0].y);
+    try std.testing.expectEqual(@as(f32, 60), tree.clip_rects[0].w);
+    try std.testing.expectEqual(@as(f32, 40), tree.clip_rects[0].h);
+
+    // Three fills: the card (at 10,10), the inner button (at 10,10 too —
+    // the card's content origin), and the sibling (at 100). The card's own
+    // fill and the inner button carry clip id 0; the sibling is ~0.
+    try std.testing.expectEqual(@as(usize, 3), cmds.len);
+    for (cmds) |c| {
+        if (c.rect.x == 100) {
+            try std.testing.expectEqual(NO_CLIP, c.clip_id);
+        } else {
+            try std.testing.expectEqual(@as(u32, 0), c.clip_id);
+        }
+    }
+
+    // Node clip ids (the glyph path reads these): inside = 0, sibling = ~0.
+    try std.testing.expectEqual(@as(u32, 0), tree.node(inner_btn).?.clip_id);
+    try std.testing.expectEqual(@as(u32, 0), tree.node(card).?.clip_id);
+    try std.testing.expectEqual(NO_CLIP, tree.node(sibling_btn).?.clip_id);
+}
+
+test "collectDrawCmds: nested clip containers stamp the deepest enclosing clip" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    // outer (clip) → inner (clip) → button. The button's cmds carry the
+    // INNER clip id; both rects are appended (outer id 0, inner id 1).
+    const btn: Id = @enumFromInt(1);
+    const inner: Id = @enumFromInt(2);
+    const outer: Id = @enumFromInt(3);
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = btn,
+        .kind = .{ .button = .{ .label = "go" } },
+        .parent = inner,
+        .rect = .{ .x = 0, .y = 0, .w = 40, .h = 20 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = inner,
+        .kind = .{ .column = .{} },
+        .parent = outer,
+        .rect = .{ .x = 5, .y = 5, .w = 60, .h = 40 },
+        .box = .{ .clip = true },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = outer,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
+        .box = .{ .clip = true },
+    });
+
+    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    defer std.testing.allocator.free(cmds);
+
+    try std.testing.expectEqual(@as(u32, 2), tree.clip_count);
+    try std.testing.expectEqual(@as(f32, 0), tree.clip_rects[0].x);
+    try std.testing.expectEqual(@as(f32, 5), tree.clip_rects[1].x);
+
+    // The button's fill (absolute 5,5 — inside the inner clip) carries the
+    // inner id; the outer's own fill (0,0) carries the outer id.
+    for (cmds) |c| {
+        if (c.rect.x == 5) {
+            try std.testing.expectEqual(@as(u32, 1), c.clip_id);
+        } else {
+            try std.testing.expectEqual(@as(u32, 0), c.clip_id);
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 1), tree.node(btn).?.clip_id);
+    try std.testing.expectEqual(@as(u32, 0), tree.node(outer).?.clip_id);
 }

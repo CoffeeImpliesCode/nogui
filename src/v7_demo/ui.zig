@@ -22,24 +22,138 @@ const WidgetTree = @import("v7/widget.zig").WidgetTree;
 const App = @import("v7/app.zig").App;
 const Id = @import("v7/id.zig").Id;
 
+/// The demo texture's bindless heap index, set by the window backend after
+/// it creates + registers the procedural texture (the demo UI cannot touch
+/// the GPU). Null = not registered (headless/sim runs) — the textured card
+/// then renders as a plain fill. Same driver→UI channel as text_mod.
+pub var texture_idx: ?u32 = null;
+
+/// The mandelbrot compute target's bindless heap index (set by the window
+/// backend, like texture_idx) and the view the window dispatches the
+/// compute with — center/scale are the pan/zoom knobs Part B will drive;
+/// the window feeds the frame time into the shader's hue animation itself.
+pub var mandelbrot_idx: ?u32 = null;
+pub var mandelbrot_center: [2]f64 = .{ -0.5, 0 };
+pub var mandelbrot_scale: f64 = 300;
+
+/// The mandelbrot compute precision mode: 0 f32, 1 f64, 2 adaptive (default).
+pub var mandelbrot_precision: u32 = 2;
+
+/// Frames per second (a rolling average), set by the window driver each frame.
+pub var fps: f32 = 0;
+
+/// A pill-click toggle request, applied by the window driver before the
+/// next frame (the window owns the batch state the pills mirror; the UI
+/// cannot reach the batch, so the click sets a request the window honors).
+pub const ToggleKind = enum { subpixel, bgr, damp, debug };
+pub var toggle_request: ?ToggleKind = null;
+
+/// ── Modern dark palette (sRGB-authored; the pipeline converts to Oklab) ──
+/// Surfaces: canvas → card → raised. One violet-indigo accent owns the
+/// interactive bits (primary buttons, slider, numerals, active pills).
+const C_CARD_DEEP: [4]f32 = .{ 0.16, 0.17, 0.22, 1 }; // raised chip surface (buttons/pills — LIGHTER than the card so they read as controls, not shadows)
+const C_BORDER: [4]f32 = .{ 0.24, 0.25, 0.33, 0.55 }; // soft card border
+const C_BORDER_STRONG: [4]f32 = .{ 0.34, 0.35, 0.46, 0.75 };
+const C_TEXT: [4]f32 = .{ 0.87, 0.87, 0.92, 1 }; // primary text
+const C_TEXT_SEC: [4]f32 = .{ 0.60, 0.61, 0.70, 1 }; // secondary text
+const C_TEXT_MUTED: [4]f32 = .{ 0.46, 0.47, 0.56, 1 }; // captions/stats
+const C_ACCENT: [4]f32 = .{ 0.40, 0.34, 0.78, 1 }; // violet-indigo (dark enough to match the neutral buttons' visual weight)
+const C_ACCENT_DIM: [4]f32 = .{ 0.24, 0.21, 0.47, 1 }; // accent-tinted surface
+const C_ON_ACCENT: [4]f32 = .{ 0.95, 0.94, 1, 1 }; // text on the accent
+
 /// Label with the demo's baked 6px side padding, now carried by the widget
 /// box instead of hard-coded text offsets.
 fn label(ctx: *DrawCtx, text: []const u8) !Id {
     return ctx.label(.{ .text = text, .padding = .{ .left = 6, .right = 6 } });
 }
 
-/// Demo button: rounded corners + the standard padding (the old baked
-/// +16/+8), so every button exercises radius + padding + the ring-free
-/// fill path.
+/// A colored label (text color, not the box).
+fn labelColor(ctx: *DrawCtx, text: []const u8, color: [4]f32) !Id {
+    return ctx.label(.{ .text = text, .color = color, .padding = .{ .left = 6, .right = 6 } });
+}
+
+/// A muted caption (section headers, stat lines).
+fn caption(ctx: *DrawCtx, text: []const u8) !Id {
+    return ctx.label(.{ .text = text, .color = C_TEXT_MUTED, .font_size = 11, .padding = .{ .left = 6, .right = 6 } });
+}
+
+/// Secondary (ghost) button: a flat card-deep fill + a soft border (the
+/// fill = the box's flat color, the gradient = the same → no two-tone).
+/// The text inherits the node's color (default near-white).
 fn btn(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
     return ctx.button(.{
         .label = text,
         .on_click = on_click,
-        .padding = .{ .left = 6, .right = 10, .top = 4, .bottom = 4 },
-        .radius = .{ .top = 6, .right = 6, .bottom = 6, .left = 6 },
-        // Gradient bottom: a lighter steel blue in sRGB, converted to Oklab
-        // (the pipeline's color space) like every other color.
-        .gradient = srgbToOklab(.{ 0.44, 0.56, 0.76, 1 }),
+        .color = C_TEXT,
+        .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
+        .radius = .{ .top = 7, .right = 7, .bottom = 7, .left = 7 },
+        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .border_color = C_BORDER_STRONG,
+        .fill = C_CARD_DEEP,
+        .gradient = srgbToOklab(C_CARD_DEEP),
+    });
+}
+
+/// Primary button: a flat accent fill + the light text (the demo's "go"
+/// verbs: inc, add). Same padding as the ghost button — and a 1px border
+/// in the accent color, so its fill insets exactly like the ghost's (the
+/// ghost's border insets its fill; a borderless accent fill reads 2px
+/// taller than its siblings).
+fn btnPrimary(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
+    return ctx.button(.{
+        .label = text,
+        .on_click = on_click,
+        .color = C_ON_ACCENT,
+        .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
+        .radius = .{ .top = 7, .right = 7, .bottom = 7, .left = 7 },
+        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .border_color = C_ACCENT,
+        .fill = C_ACCENT,
+        .gradient = srgbToOklab(C_ACCENT),
+    });
+}
+
+/// A card: rounded surface + soft border + a gentle shadow + the standard
+/// padding. `grow` spreads the card in its flex parent (the counter and
+/// volume cards side by side).
+fn card(ctx: *DrawCtx, comptime grow: bool, clip: bool) !Id {
+    return ctx.column(.{
+        .gap = 8,
+        .grow = if (grow) 1 else 0,
+        .clip = clip,
+        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .border_color = C_BORDER,
+        .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
+        .padding = .{ .top = 14, .right = 14, .bottom = 14, .left = 14 },
+        .shadow = 4,
+    });
+}
+
+/// A toggle pill: rounded chip, on = accent-tinted fill + accent text,
+/// off = ghost (card-deep fill + a soft border + muted text). A button
+/// node (labels never paint their box); the click flips the toggle.
+fn pill(ctx: *DrawCtx, text: []const u8, on: bool, on_click: anytype) !Id {
+    if (on) {
+        return ctx.button(.{
+            .label = text,
+            .on_click = on_click,
+            .color = C_ACCENT,
+            .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
+            .radius = .{ .top = 9, .right = 9, .bottom = 9, .left = 9 },
+            .fill = C_ACCENT_DIM,
+            .gradient = srgbToOklab(C_ACCENT_DIM),
+        });
+    }
+    return ctx.button(.{
+        .label = text,
+        .on_click = on_click,
+        .color = C_TEXT_MUTED,
+        .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
+        .radius = .{ .top = 9, .right = 9, .bottom = 9, .left = 9 },
+        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .border_color = C_BORDER,
+        .fill = C_CARD_DEEP,
+        .gradient = srgbToOklab(C_CARD_DEEP),
     });
 }
 
@@ -51,34 +165,20 @@ const VolumeSlider = struct {
 
     pub fn draw(self: *VolumeSlider, ctx: *DrawCtx) !void {
         const text = try std.fmt.allocPrint(ctx.arena, "Volume: {d:.1}", .{self.volume});
-        _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 }, .border_color = .{ 0.42, 0.42, 0.48, 1 }, .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 }, .shadow = 3 });
+        _ = try card(ctx, true, false);
         defer ctx.pop();
-        _ = try ctx.slider(.{ .label = "volume-slider", .value = &self.volume, .min = 0, .max = 1, .padding = .{ .left = 6, .right = 10 } });
-        _ = try btn(ctx, "mute", VolumeSlider.mute);
-        _ = try label(ctx, text);
+        _ = try caption(ctx, "VOLUME");
+        _ = try ctx.slider(.{ .label = "volume-slider", .value = &self.volume, .min = 0, .max = 1, .color = C_ACCENT, .padding = .{ .left = 6, .right = 10 } });
+        {
+            _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
+            defer ctx.pop();
+            _ = try btn(ctx, "mute", VolumeSlider.mute);
+            _ = try labelColor(ctx, text, C_TEXT_SEC);
+        }
     }
 
     pub fn mute(self: *VolumeSlider) void {
         self.volume = 0;
-    }
-};
-
-/// Second slider component: exercises a NON-ZERO [min, max] range and a
-/// per-component reset handler (its own component id).
-const GainSlider = struct {
-    gain: f32 = 0.5,
-
-    pub fn draw(self: *GainSlider, ctx: *DrawCtx) !void {
-        const text = try std.fmt.allocPrint(ctx.arena, "Gain: {d:.1}", .{self.gain});
-        _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.35, 0.45, 0.55, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 }, .shadow = 3 });
-        defer ctx.pop();
-        _ = try ctx.slider(.{ .label = "gain-slider", .value = &self.gain, .min = 0, .max = 10, .padding = .{ .left = 6, .right = 10 } });
-        _ = try btn(ctx, "reset-gain", GainSlider.reset);
-        _ = try label(ctx, text);
-    }
-
-    pub fn reset(self: *GainSlider) void {
-        self.gain = 0;
     }
 };
 
@@ -114,7 +214,6 @@ pub const TodoApp = struct {
     frame_count: u32 = 0, // the App loop sets this before each frame
     counter: u32 = 0, // 0..99
     volume: VolumeSlider = .{},
-    gain_slider: GainSlider = .{},
     showcase: Showcase = .{},
     done: [4]bool = .{ false, false, false, false },
     visible_count: u8 = 2, // how many of the 4 pool items are shown (1..4)
@@ -123,7 +222,7 @@ pub const TodoApp = struct {
     pub const ITEMS = [4][]const u8{ "buy milk", "water plants", "write docs", "exercise" };
 
     pub fn draw(self: *TodoApp, ctx: *DrawCtx) !void {
-        const frame_text = try std.fmt.allocPrint(ctx.arena, "Frame: {d}", .{self.frame_count});
+        const frame_text = try std.fmt.allocPrint(ctx.arena, "Frame: {d}   FPS: {d:.0}", .{ self.frame_count, fps });
         const counter_text = try std.fmt.allocPrint(ctx.arena, "Counter: {d}", .{self.counter});
 
         var done_count: u32 = 0;
@@ -137,89 +236,95 @@ pub const TodoApp = struct {
         // free space to distribute (a nested row would hug its content).
         try ctx.component(Showcase, &self.showcase);
 
-        // Root column: every block stacked with a 12px gap; the root's own
+        // Root column: every block stacked with a 16px gap; the root's own
         // padding insets the whole UI from the window edges.
-        _ = try ctx.column(.{ .gap = 12, .grow = 1, .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 } });
+        _ = try ctx.column(.{ .gap = 16, .grow = 1, .padding = .{ .top = 20, .right = 20, .bottom = 20, .left = 20 } });
         defer ctx.pop();
 
         {
-            // Title + live frame counter + the toggle-state line, stacked.
+            // App header: the title, the live stat line, and the toggle
+            // state as accent pills.
             _ = try ctx.column(.{ .gap = 6 });
             defer ctx.pop();
-            _ = try label(ctx, "nogui v7 demo");
-            _ = try label(ctx, frame_text);
-            const st = text_mod.debug_state;
-            const state_text = try std.fmt.allocPrint(ctx.arena, "subpixel:{s} order:{s} damp:{s} debug:{s}", .{
-                if (st.subpixel) "on" else "off",
-                if (st.bgr) "BGR" else "RGB",
-                if (st.damp) "on" else "off",
-                if (st.quad_debug) "on" else "off",
-            });
-            _ = try label(ctx, state_text);
+            _ = try ctx.label(.{ .text = "nogui v7 demo", .font_size = 20, .padding = .{ .left = 6, .right = 6 } });
+            _ = try labelColor(ctx, frame_text, C_TEXT_SEC);
+            {
+                _ = try ctx.row(.{ .gap = 6 });
+                defer ctx.pop();
+                const st = text_mod.debug_state;
+                _ = try pill(ctx, "subpixel", st.subpixel, TodoApp.toggleSubpixel);
+                _ = try pill(ctx, if (st.bgr) "BGR" else "RGB", st.bgr, TodoApp.toggleBgr);
+                _ = try pill(ctx, "damp", st.damp, TodoApp.toggleDamp);
+                _ = try pill(ctx, "debug", st.quad_debug, TodoApp.toggleDebug);
+            }
         }
 
         {
             // Font-sizes showcase: labels at 10/13/16/20/24/32 px. The
             // per-node font_size selects the matching font state; S toggles
             // the subpixel AA for comparison at every size.
-            _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.4, 0.4, 0.46, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 } });
+            _ = try card(ctx, false, false);
             defer ctx.pop();
-            _ = try label(ctx, "Font sizes (S toggles subpixel AA):");
+            _ = try caption(ctx, "FONT SIZES — S TOGGLES SUBPIXEL AA");
             _ = try ctx.label(.{ .text = "10px: The quick brown fox jumps over the lazy dog", .font_size = 10, .padding = .{ .left = 6, .right = 6 } });
             _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .padding = .{ .left = 6, .right = 6 } });
             _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .padding = .{ .left = 6, .right = 6 } });
             _ = try ctx.label(.{ .text = "20px: The quick brown fox jumps over the lazy dog", .font_size = 20, .padding = .{ .left = 6, .right = 6 } });
             _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "32px: The quick brown fox jumps over the lazy dog", .font_size = 32, .padding = .{ .left = 6, .right = 6 } });
         }
 
-        {
-            // The ghostty font (Fira Code Nerd Font) at the same sizes.
-            _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.4, 0.4, 0.46, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 } });
-            defer ctx.pop();
-            _ = try label(ctx, "Fira Code Nerd Font (ghostty):");
-            _ = try ctx.label(.{ .text = "10px: The quick brown fox jumps over the lazy dog", .font_size = 10, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "20px: The quick brown fox jumps over the lazy dog", .font_size = 20, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "32px: The quick brown fox jumps over the lazy dog", .font_size = 32, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-        }
+        // The ghostty font (Fira Code Nerd Font) at the same sizes — commented
+        // out for now (the multi-font showcase is redundant; keep it for later).
+        // _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.4, 0.4, 0.46, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 } });
+        // defer ctx.pop();
+        // _ = try label(ctx, "Fira Code Nerd Font (ghostty):");
+        // _ = try ctx.label(.{ .text = "10px: The quick brown fox jumps over the lazy dog", .font_size = 10, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+        // _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+        // _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+        // _ = try ctx.label(.{ .text = "20px: The quick brown fox jumps over the lazy dog", .font_size = 20, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+        // _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+        // }
 
+        // Counter + volume side by side in a horizontal flex box. The row's
+        // pop MUST be explicit (not deferred) — a deferred pop fires at the
+        // end of the whole draw and collects every following block into the
+        // row. The two cards' own pops are deferred; the row pops here.
+        _ = try ctx.row(.{ .gap = 12 });
         {
-            // Counter block: a bordered card (radius 8, padding 8) holding
-            // the value label + dec/reset/inc row.
-            _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.4, 0.4, 0.46, 1 }, .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 }, .shadow = 3 });
+            // Counter block: a card holding the value as a big accent
+            // numeral + dec/reset/inc row (inc = the primary action).
+            _ = try card(ctx, true, false);
             defer ctx.pop();
-            _ = try label(ctx, counter_text);
+            _ = try caption(ctx, "COUNTER");
+            _ = try ctx.label(.{ .text = counter_text, .font_size = 28, .color = C_ACCENT, .padding = .{ .left = 6, .right = 6 } });
             {
                 _ = try ctx.row(.{ .gap = 6 });
                 defer ctx.pop();
                 _ = try btn(ctx, "dec", TodoApp.dec);
                 _ = try btn(ctx, "reset", TodoApp.reset);
-                _ = try btn(ctx, "inc", TodoApp.inc);
+                _ = try btnPrimary(ctx, "inc", TodoApp.inc);
             }
         }
 
-        // Volume block: nested sub-component (its own card + slider).
+        // Volume block: nested sub-component (its own card + slider), beside
+        // the counter in the same row.
         try ctx.component(VolumeSlider, &self.volume);
+        ctx.pop(); // the horizontal row — explicit, NOT deferred
 
         // Spacer: reserves 8px of empty main-axis space (paints nothing).
         _ = try ctx.spacer(.{ .size = 8 });
 
-        // Gain block: nested sub-component with a non-zero slider range.
-        try ctx.component(GainSlider, &self.gain_slider);
-
         {
-            // Todo block: bordered card with the add/remove header + one
-            // toggle row per visible item.
-            _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.38, 0.38, 0.44, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 }, .shadow = 3 });
+            // Todo block: a card with the add/remove header + one toggle
+            // row per visible item.
+            _ = try card(ctx, false, false);
             defer ctx.pop();
+            _ = try caption(ctx, "TODOS");
             {
                 _ = try ctx.row(.{ .gap = 6 });
                 defer ctx.pop();
                 _ = try btn(ctx, "remove", TodoApp.remove);
-                _ = try btn(ctx, "add", TodoApp.add);
+                _ = try btnPrimary(ctx, "add", TodoApp.add);
             }
             // Unrolled so each toggle button can bind its own comptime
             // handler; the runtime check hides rows beyond visible_count.
@@ -238,7 +343,7 @@ pub const TodoApp = struct {
                         (try std.fmt.allocPrint(ctx.arena, "DONE: {s}", .{ITEMS[i]}))
                     else
                         ITEMS[i];
-                    _ = try ctx.row(.{ .gap = 6 });
+                    _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
                     defer ctx.pop();
                     _ = try btn(ctx, toggle_text, comptime switch (i) {
                         0 => TodoApp.onToggle0,
@@ -246,16 +351,102 @@ pub const TodoApp = struct {
                         2 => TodoApp.onToggle2,
                         else => TodoApp.onToggle3,
                     });
-                    _ = try label(ctx, item_text);
+                    _ = try labelColor(ctx, item_text, if (self.done[i]) C_TEXT_MUTED else C_TEXT);
                 }
             }
         }
 
         // Footer: done count over the visible items.
-        _ = try label(ctx, footer_text);
+        _ = try labelColor(ctx, footer_text, C_TEXT_SEC);
+
+        {
+            // Clipped showcase: a `.clip = true` card. The card hugs its
+            // content, so the button row sits flush at the card's CONTENT
+            // bottom — but the card's 14px padding keeps an ordinary small
+            // shadow inside the box, so the clip would cut nothing. The
+            // row's shadow is therefore oversized (blur 60): its fade
+            // extends ~30px past the row, spilling past the card's border
+            // box on the bottom and right. The fragment shader's clip test
+            // then cuts the spill hard at the card boundary — the feathered
+            // fade ends in a straight edge, which is the visible proof the
+            // clip works (with a small blur the tail is too faint to see).
+            _ = try card(ctx, false, true);
+            defer ctx.pop();
+            _ = try caption(ctx, "CLIPPED — THE SHADOW IS CUT AT THE CARD EDGE");
+            {
+                _ = try ctx.row(.{ .gap = 6, .shadow = 60 });
+                defer ctx.pop();
+                _ = try btn(ctx, "clip", TodoApp.clipNoop);
+                _ = try btn(ctx, "overflow", TodoApp.clipNoop);
+                _ = try btn(ctx, "cut", TodoApp.clipNoop);
+            }
+        }
+
+        {
+            // Mandelbrot showcase (Part A): the compute shader renders the
+            // fractal into a 512x384 rgba32_float texture each frame (the
+            // window dispatches it BEFORE the GUI pass and registers it in
+            // the texture heap — sampled + storage views); this box samples
+            // it through the same bindless TYPE_TEXTURE path as the stripe
+            // tile. Full-width x 192px tall (the row-basis variant broke
+            // the flex cross-axis squeeze). Colors are Oklab-authored.
+            _ = try card(ctx, false, false);
+            defer ctx.pop();
+            {
+                _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
+                defer ctx.pop();
+                const prec_text = switch (mandelbrot_precision) {
+                    0 => "f32",
+                    1 => "f64",
+                    else => "adaptive",
+                };
+                const mb_label = try std.fmt.allocPrint(ctx.arena, "Mandelbrot  [{s}]", .{prec_text});
+                _ = try caption(ctx, mb_label);
+                _ = try btn(ctx, "reset", TodoApp.mandelbrotReset);
+            }
+            {
+                _ = try ctx.row(.{});
+                defer ctx.pop();
+                _ = try ctx.column(.{
+                    .texture = mandelbrot_idx,
+                    .basis = 480, // fixed width (the row's main axis)
+                    .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                    .border_color = C_BORDER,
+                    .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+                });
+                defer ctx.pop();
+                _ = try ctx.spacer(.{ .size = 270 }); // content height
+            }
+        }
     }
 
     // --- interactions (click-injection targets; all pub) ---
+
+    /// Reset the mandelbrot's pan/zoom to the default full-set view.
+    pub fn mandelbrotReset(self: *TodoApp) void {
+        _ = self;
+        mandelbrot_center = .{ -0.5, 0 };
+        mandelbrot_scale = 300;
+    }
+
+    // Header pill clicks — the window applies the request before the next
+    // frame (it owns the batch the pills mirror).
+    pub fn toggleSubpixel(self: *TodoApp) void {
+        _ = self;
+        toggle_request = .subpixel;
+    }
+    pub fn toggleBgr(self: *TodoApp) void {
+        _ = self;
+        toggle_request = .bgr;
+    }
+    pub fn toggleDamp(self: *TodoApp) void {
+        _ = self;
+        toggle_request = .damp;
+    }
+    pub fn toggleDebug(self: *TodoApp) void {
+        _ = self;
+        toggle_request = .debug;
+    }
 
     pub fn inc(self: *TodoApp) void {
         if (self.counter < 99) self.counter += 1;
@@ -267,6 +458,12 @@ pub const TodoApp = struct {
 
     pub fn reset(self: *TodoApp) void {
         self.counter = 0;
+    }
+
+    /// The clip showcase's buttons are decoration: clicking them does
+    /// nothing (they exist to exercise the clip test on button fills).
+    pub fn clipNoop(self: *TodoApp) void {
+        _ = self;
     }
 
     pub fn mute(self: *TodoApp) void {
@@ -385,7 +582,7 @@ test "draw: tree contains the expected button labels and title" {
     try std.testing.expectEqual(@as(usize, 2), countButtonLabelsWithPrefix(&tree, "toggle"));
 
     try expectLabel(&tree, "nogui v7 demo");
-    try expectLabel(&tree, "Frame: 7");
+    try expectLabel(&tree, "Frame: 7   FPS: 0");
 }
 
 test "toggle(0) marks the item done in the next draw" {
@@ -486,13 +683,14 @@ test "mute zeroes the volume label" {
 test "click injection: the inc button click reaches the component" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
+    app.serialize_json = true;
 
     var todo = TodoApp{};
     _ = try app.register(TodoApp, &todo);
 
     const out1 = try app.frame(TodoApp, &todo, 1, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out1.json);
-    try std.testing.expect(std.mem.indexOf(u8, out1.json, "Counter: 0") != null);
+    defer if (out1.json) |j| std.testing.allocator.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, out1.json.?, "Counter: 0") != null);
 
     // Find the "inc" button by scanning by kind — ids are not positions.
     var inc_id: ?Id = null;
@@ -510,6 +708,6 @@ test "click injection: the inc button click reaches the component" {
     app.click(out1.tree, inc_id.?);
 
     const out2 = try app.frame(TodoApp, &todo, 2, .{ .width = 800, .height = 600 });
-    defer std.testing.allocator.free(out2.json);
-    try std.testing.expect(std.mem.indexOf(u8, out2.json, "Counter: 1") != null);
+    defer if (out2.json) |j| std.testing.allocator.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, out2.json.?, "Counter: 1") != null);
 }

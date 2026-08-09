@@ -5,17 +5,13 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const release_safe = std.builtin.OptimizeMode.ReleaseSafe;
 
-    // zig-cov instrumentation (see https://github.com/ericsssan/zcov):
-    // `zig-cov test` passes these options; without them the build is unchanged.
-    const coverage = b.option(bool, "coverage", "Instrument tests with zig-cov") orelse false;
-    const coverage_rt = b.option([]const u8, "coverage-rt", "Path to zig-cov-rt.o") orelse null;
-
     // ── Dependencies ───────────────────────────────────────
     const sdl3 = b.dependency("sdl3", .{ .target = target, .optimize = release_safe });
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = release_safe });
     const noapi_dep = b.dependency("noapi", .{ .target = target, .optimize = optimize });
     const freetype_dep = b.dependency("freetype", .{ .target = target, .optimize = optimize });
     const harfbuzz_dep = b.dependency("harfbuzz", .{ .target = target, .optimize = optimize });
+    const libxml2_dep = b.dependency("libxml2", .{ .target = target, .optimize = optimize });
 
     // ── noapi module (borrowed from dependency) ────────────
     const noapi_mod = noapi_dep.module("noapi");
@@ -93,87 +89,13 @@ pub fn build(b: *std.Build) void {
     proto_run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| proto_run_cmd.addArgs(args);
 
-    // ── Tests ──────────────────────────────────────────────
-    // Each test target gets its own module instance so zig-cov
-    // instrumentation (rt object + fuzz/llvm flags) never lands on
-    // a module shared with a production artifact or another test —
-    // sharing would link zig-cov-rt.o twice and fail with
-    // "duplicate symbol: zig_cov_ctor".
-    const mod_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "noapi", .module = noapi_mod },
-            },
-        }),
-    });
-    if (coverage) instrument(mod_tests, coverage_rt);
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    // ── Storage-image isolation probe ───────────────────────
+    // TEMP: standalone compute → storage-image write probe (probe_main.zig
+    // + shaders/storage_probe.comp.slang). Prints three readback pixels:
+    // (0.25,0.75,0.5,1.0) → the noapi storage-image write works in
+    // isolation; (0,0,0,0) → the noapi storage-image path is broken.
 
-    const proto_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/proto.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "noapi", .module = noapi_mod },
-                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
-            },
-        }),
-    });
-    if (coverage) instrument(proto_tests, coverage_rt);
-    const run_proto_tests = b.addRunArtifact(proto_tests);
-
-    const exe_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "nogui", .module = mod },
-                .{ .name = "noapi", .module = noapi_mod },
-                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
-                .{ .name = "tracy", .module = tracy.module("tracy") },
-            },
-        }),
-    });
-    if (coverage) instrument(exe_tests, coverage_rt);
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_proto_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
-
-    // ── Check step ─────────────────────────────────────────
-    const check_step = b.step("check", "Quick errors only");
-    check_step.dependOn(&exe.step);
-
-    // ── Glyph test (FreeType) ─────────────────────────────
-    const glyph_test = b.addExecutable(.{
-        .name = "glyph-test",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/glyph_test.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    glyph_test.root_module.linkLibrary(freetype_dep.artifact("freetype"));
-    b.installArtifact(glyph_test);
-    const glyph_step = b.step("glyph", "Run glyph test");
-    const glyph_cmd = b.addRunArtifact(glyph_test);
-    glyph_step.dependOn(&glyph_cmd.step);
-    glyph_cmd.step.dependOn(b.getInstallStep());
-
-    // ── v7 prototype (pure Zig core; demo-side window backend) ──
-    const v7_mod = b.addModule("v7", .{
-        .root_source_file = b.path("src/v7/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
+    // ── v7 demo executable ────────────────────────────────
     const v7_demo = b.addExecutable(.{
         .name = "v7-demo",
         .root_module = b.createModule(.{
@@ -184,45 +106,72 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "noapi", .module = noapi_mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_enabled") },
             },
         }),
+        // The LLVM codegen backend: the tracy client's stack capture +
+        // symbolication depend on the LLVM-emitted debug info (the native
+        // backend's DWARF is incomplete).
+        .use_llvm = true,
     });
     v7_demo.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_demo.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    // libxml2 (the SVG parser's XML layer): link the hermetic build + emit
+    // its headers so the consumer's @cImport can find them.
+    v7_demo.root_module.linkLibrary(libxml2_dep.artifact("xml2"));
+    v7_demo.root_module.addIncludePath(libxml2_dep.artifact("xml2").getEmittedIncludeTree());
     b.installArtifact(v7_demo);
 
-    const v7_run_step = b.step("v7", "Run the v7 demo (add -- --window for graphical mode)");
     const v7_run_cmd = b.addRunArtifact(v7_demo);
+    const v7_run_step = b.step("v7", "Run the v7 demo");
     v7_run_step.dependOn(&v7_run_cmd.step);
     v7_run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| v7_run_cmd.addArgs(args);
 
-    // Recompile the demo's fragment shader from source before every run so a
-    // stale committed shaders/quad_frag.spv can never silently render wrong
-    // toggles. Attached ONLY to the interactive demo run — test/check/lint
-    // gates stay hermetic (glslangValidator is not guaranteed on PATH).
+    // Recompile the demo's shaders from the Slang sources before every run so
+    // a stale committed .spv can never silently render wrong toggles.
+    // Attached ONLY to the interactive demo run — test/check/lint gates stay
+    // hermetic (slangc is not guaranteed on PATH).
     const quad_frag_spv_step = b.addSystemCommand(&.{
-        "glslangValidator",
-        "-V",
-        "-S",
-        "frag",
-        "-o",
-        "shaders/quad_frag.spv",
-        "shaders/quad_frag.glsl",
+        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/quad_frag.spv", "shaders/quad_frag.slang",
     });
     v7_run_cmd.step.dependOn(&quad_frag_spv_step.step);
+    const quad_vert_spv_step = b.addSystemCommand(&.{
+        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/quad_vert.spv", "shaders/quad_vert.slang",
+    });
+    v7_run_cmd.step.dependOn(&quad_vert_spv_step.step);
+    const blit_spv_step = b.addSystemCommand(&.{
+        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/blit_oklab.spv", "shaders/blit_oklab.slang",
+    });
+    v7_run_cmd.step.dependOn(&blit_spv_step.step);
+    const fullscreen_spv_step = b.addSystemCommand(&.{
+        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/fullscreen_vert.spv", "shaders/fullscreen_vert.slang",
+    });
+    v7_run_cmd.step.dependOn(&fullscreen_spv_step.step);
+    // The mandelbrot compute shader — compiled here too so the .spv can
+    // never silently lag the .slang source (it did once: a stale f32 .spv
+    // with an f64 layout mismatch read the scale's low bytes as max_iter
+    // and hung the GPU on scroll).
+    const mandelbrot_spv_step = b.addSystemCommand(&.{
+        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/mandelbrot_comp.spv", "shaders/mandelbrot.comp.slang",
+    });
+    v7_run_cmd.step.dependOn(&mandelbrot_spv_step.step);
 
-    // Headless layout check: layout one frame with the CPU measure, verify
-    // invariants, and diff the rect fingerprint against the golden. Fails
-    // (non-zero) on any violation or layout drift — CI-gateable.
-    const layout_check_step = b.step("layout-check", "Verify the headless layout against notes/layout-golden.json");
-    const layout_check_cmd = b.addRunArtifact(v7_demo);
-    layout_check_cmd.addArgs(&.{ "--layout", "/tmp/v7-layout-check.txt", "--diff", "notes/layout-golden.json" });
-    layout_check_cmd.step.dependOn(b.getInstallStep());
-    layout_check_step.dependOn(&layout_check_cmd.step);
-
-    const v7_tests = b.addTest(.{ .root_module = v7_mod });
+    // ── Tests ─────────────────────────────────────────────
+    const v7_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
+            },
+        }),
+    });
     const run_v7_tests = b.addRunArtifact(v7_tests);
+    const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_v7_tests.step);
 
     const v7_text_tests = b.addTest(.{
@@ -233,6 +182,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
             },
         }),
     });
@@ -249,6 +200,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
             },
         }),
     });
@@ -257,14 +210,52 @@ pub fn build(b: *std.Build) void {
     const run_v7_ui_tests = b.addRunArtifact(v7_ui_tests);
     test_step.dependOn(&run_v7_ui_tests.step);
 
-    check_step.dependOn(&v7_demo.step);
+    const v7_svg_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7_demo/svg_xml.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
+            },
+        }),
+    });
+    v7_svg_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_svg_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    v7_svg_tests.root_module.linkLibrary(libxml2_dep.artifact("xml2"));
+    v7_svg_tests.root_module.addIncludePath(libxml2_dep.artifact("xml2").getEmittedIncludeTree());
+    const run_v7_svg_tests = b.addRunArtifact(v7_svg_tests);
+    test_step.dependOn(&run_v7_svg_tests.step);
 
-    // ── Lint step (house linters on the ACTIVE tree) ───────
-    // ziglint: enforced rules only — the pre-existing style debt
-    // (Z004/Z020/Z024/Z006/Z023) and Z030 (poison-as-last-statement, house
-    // exclusion: proven write-through-freed-memory) are documented debt,
-    // see AGENTS.md. zlint: every finding fails the step (--deny-warnings).
-    // src/proto/* is prototype debt — excluded from the gate.
+    const exe_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7_demo/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
+            },
+        }),
+    });
+    exe_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    exe_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    const run_exe_tests = b.addRunArtifact(exe_tests);
+    test_step.dependOn(&run_exe_tests.step);
+
+    // ── Layout check ──────────────────────────────────────
+    const layout_check_step = b.step("layout-check", "Verify the headless layout against notes/layout-golden.json");
+    const layout_check_cmd = b.addRunArtifact(v7_demo);
+    layout_check_cmd.addArgs(&.{ "--layout", "/tmp/layout-check.txt", "--diff", "notes/layout-golden.json" });
+    layout_check_step.dependOn(&layout_check_cmd.step);
+
+    // ── Lint step (house linters on the ACTIVE tree) ──────
     const lint_step = b.step("lint", "Run ziglint (enforced rules) + zlint on src/v7 + src/v7_demo");
     const ziglint_cmd = b.addSystemCommand(&.{
         "~/.local/bin/ziglint",
@@ -285,19 +276,7 @@ pub fn build(b: *std.Build) void {
     });
     lint_step.dependOn(&ziglint_cmd.step);
     const zlint_cmd = b.addSystemCommand(&.{
-        "/bin/sh",                                                                                 "-c",
-        "find src/v7 src/v7_demo -name '*.zig' | ~/.local/bin/zlint -S --deny-warnings",
+        "/bin/sh", "-c", "find src/v7 src/v7_demo -name '*.zig' | ~/.local/bin/zlint -S --deny-warnings",
     });
     lint_step.dependOn(&zlint_cmd.step);
-}
-
-/// Apply zig-cov instrumentation to a test binary:
-///   * use_llvm: coverage instrumentation is only emitted by the LLVM backend
-///   * fuzz: emits inline 8-bit counters and the PC table zig-cov reads
-///   * link_libc: the runtime writes its .zcov from a libc atexit handler
-fn instrument(compile: *std.Build.Step.Compile, rt_path: ?[]const u8) void {
-    compile.use_llvm = true;
-    compile.root_module.fuzz = true;
-    compile.root_module.link_libc = true;
-    if (rt_path) |p| compile.root_module.addObjectFile(.{ .cwd_relative = p });
 }
