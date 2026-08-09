@@ -41,6 +41,12 @@ pub const SliceRect = struct {
     curve_bottom: f32 = 0, // glyph curve-space bottom (min y, can be negative)
     curve_w: f32 = 0, // glyph curve-space width (extent); 0 = use corner UV
     curve_h: f32 = 0, // glyph curve-space height (max_y - min_y)
+    /// Glyph pen (the outline origin) in framebuffer px. When set, the
+    /// vertex origin is the pen, so the shader's sweep windows land in
+    /// the SAME space as the curves (the old quad-anchored windows were
+    /// off by the quad's offset from the pen). Null = the SDF rects,
+    /// whose shader branch needs the rect's top-left.
+    glyph_pen: ?[2]f32 = null,
 };
 
 /// Manages GPU buffers for 9-slice rendering.
@@ -58,6 +64,21 @@ pub const Batch9Slice = struct {
 
     /// BDA to GPU material buffer. Written by Window before draw.
     material_buf_bda: u64 = 0,
+
+    /// SUBPIXEL AA experiment: on = three 1/3-px column sweeps with the
+    /// per-channel linear→Oklab assembly (frag_data bit 0); off = the
+    /// single analytic sweep. Per-frame toggleable.
+    subpixel: bool = false,
+    /// QUAD DEBUG: tint every glyph quad's background (frag_data bit 1)
+    /// so the quad bounds are visible against the ink — the cut-off check.
+    quad_debug: bool = false,
+    /// BGR subpixel order (frag_data bit 2): the panel's stripe order is
+    /// often undeclared (BOE EDID) — the empirical left-stem-edge test
+    /// decides; O toggles.
+    bgr_order: bool = false,
+    /// Subpixel chroma damping (frag_data bit 3): the one-line LCD-filter
+    /// approximation (0.3); C toggles it off for the full-chroma test.
+    damp_chroma: bool = true,
 
     const QUAD_INDICES: [6]u32 = .{ 0, 1, 2, 0, 2, 3 };
 
@@ -132,10 +153,15 @@ pub const Batch9Slice = struct {
             },
         );
         cmd.bindVertexBuffer(0, self.vert_buf, 0);
-        // Pass material buffer BDA in vert_data push constant field.
+        // Pass material buffer BDA in vert_data push constant field; the
+        // subpixel-AA toggle (bit 0) and the quad-debug tint (bit 1) in
+        // frag_data.
         const push = noapi.PushData{
             .vert_data = self.material_buf_bda,
-            .frag_data = 0,
+            .frag_data = (if (self.subpixel) @as(u64, 1) else 0) |
+                (if (self.quad_debug) @as(u64, 2) else 0) |
+                (if (self.bgr_order) @as(u64, 4) else 0) |
+                (if (self.damp_chroma) @as(u64, 8) else 0),
         };
         const idx_count = rects.len * IDX_PER_RECT;
         std.debug.assert(idx_count <= std.math.maxInt(u32));
@@ -224,7 +250,7 @@ pub const Batch9Slice = struct {
                         .uv = .{ uv_x, uv_y },
                         .color = r.color,
                         .material_idx = r.material_index,
-                        .origin = .{ r.dst_x, r.dst_y },
+                        .origin = r.glyph_pen orelse .{ r.dst_x, r.dst_y },
                     };
                     vi += 1;
                 }

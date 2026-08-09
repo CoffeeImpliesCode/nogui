@@ -41,7 +41,9 @@ const hitTest = @import("v7/input.zig").hitTest; // runShot's forced --hover
 const Batch9Slice = @import("proto/render_9slice.zig").Batch9Slice;
 const SliceRect = @import("proto/render_9slice.zig").SliceRect;
 const TextEngine = @import("text.zig").TextEngine;
+const text_mod = @import("text.zig");
 const MAX_MATERIALS = @import("text.zig").MAX_MATERIALS;
+const FONT_SIZE_PX = @import("text.zig").FONT_SIZE_PX;
 const proto = @import("proto/sweeper.zig");
 const srgbToOklab = @import("text.zig").srgbToOklab;
 
@@ -161,6 +163,12 @@ fn buildSliceRects(
     // downward (glyphs own slots 1..next_slot-1 from the bottom; the
     // assert in text.zig caps glyphs well below the top).
     var material_slot: u32 = MAX_MATERIALS;
+    // Guard the decoration writes against the LIVE glyph count: glyph
+    // slots ascend from slot 1 as the frame's text is rasterized, so the
+    // headroom below is next_slot, not 1. With `> 1` a burst of
+    // decorations could silently write into in-flight glyph material;
+    // with the live count the assert fires instead.
+    const glyph_slots = text_engine.glyphSlotCount();
 
     for (cmds) |cmd| {
         const b = cmd.box;
@@ -196,12 +204,12 @@ fn buildSliceRects(
             slice_corner_b = b.radius.bottom;
             const shadow_rx: f32 = @max(b.radius.left, b.radius.right);
             const shadow_ry: f32 = @max(b.radius.top, b.radius.bottom);
-            std.debug.assert(material_slot > 1); // never reach the glyph slots
+            std.debug.assert(material_slot > glyph_slots); // never reach the live glyph slots
             material_slot -= 1;
             proto.GlyphSweeper.writeShadowMaterial(text_engine.materials, material_slot, shadow_rx, shadow_ry, cmd.shadow, cmd.rect.w, cmd.rect.h);
             material_index = material_slot;
         } else if (cmd.ring or rx > 0 or ry > 0) {
-            std.debug.assert(material_slot > 1); // never reach the glyph slots
+            std.debug.assert(material_slot > glyph_slots); // never reach the live glyph slots
             material_slot -= 1;
             // Ring materials always carry the ring's gradient (the demo sets
             // none); fills carry one only when the gradient flag is set.
@@ -235,7 +243,7 @@ fn buildSliceRects(
         const thumb_w: f32 = 10;
         const thumb_x = r.x + frac * @max(0, r.w - thumb_w);
         const thumb_radius: f32 = 3;
-        std.debug.assert(material_slot > 1);
+        std.debug.assert(material_slot > glyph_slots);
         material_slot -= 1;
         proto.GlyphSweeper.writeRoundedRectMaterial(text_engine.materials, material_slot, thumb_radius, thumb_radius, 0, thumb_w, r.h, .{ 0, 0, 0, 0 });
         try out.append(gpa, .{
@@ -262,7 +270,7 @@ fn buildSliceRects(
             if (r.w <= 0 or r.h <= 0) break;
             const ring_rx: f32 = @max(n.box.radius.left, n.box.radius.right);
             const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
-            std.debug.assert(material_slot > 1);
+            std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
             proto.GlyphSweeper.writeRoundedRectMaterial(text_engine.materials, material_slot, ring_rx, ring_ry, 2, r.w, r.h, .{ 0, 0, 0, 0 });
             try out.append(gpa, .{
@@ -291,7 +299,7 @@ fn buildSliceRects(
             if (r.w <= 0 or r.h <= 0) break;
             const ring_rx: f32 = @max(n.box.radius.left, n.box.radius.right);
             const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
-            std.debug.assert(material_slot > 1);
+            std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
             proto.GlyphSweeper.writeRoundedRectMaterial(text_engine.materials, material_slot, ring_rx, ring_ry, 2, r.w, r.h, .{ 0, 0, 0, 0 });
             try out.append(gpa, .{
@@ -321,8 +329,9 @@ fn buildSliceRects(
         if (t.len == 0) continue;
         const content = contentRect(tree, n.id);
         if (content.w == 0 or content.h == 0) continue;
-        const baseline_y = text_engine.baselineIn(content.y, content.h);
-        try text_engine.emitText(t, content.x, baseline_y, out);
+        const size: u32 = if (n.font_size > 0) @intFromFloat(@round(n.font_size)) else FONT_SIZE_PX;
+        const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
+        try text_engine.emitText(t, content.x, baseline_y, size, n.font_id, out);
     }
 }
 
@@ -350,7 +359,7 @@ fn renderPass1(
 
 /// Run the graphical demo. Blocks until the window closes.
 /// Generic over the root component (any type with pub draw(self, ctx) !void).
-pub fn run(app: *App, comptime T: type, root: *T) !void {
+pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool) !void {
     const gpa = app.gpa;
 
     try sdl3.hints.set(.video_driver, "wayland");
@@ -358,7 +367,7 @@ pub fn run(app: *App, comptime T: type, root: *T) !void {
     try sdl3.init(.{ .video = true, .events = true });
     defer sdl3.quit(.{ .video = true, .events = true });
 
-    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 900, 700, .{ .resizable = true });
+    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 1100, 1160, .{ .resizable = true });
     defer sdl_win.deinit();
     try sdl_win.show();
 
@@ -401,12 +410,15 @@ pub fn run(app: *App, comptime T: type, root: *T) !void {
     // Surface (the .extent wrapper is required by Surface.init).
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 900, .height = 700 } });
+    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
     defer gw.deinit();
     const win_id = try sdl_win.getId();
 
     // Text engine (owns FreeType + the glyph material buffer) and the
     // 9-slice batch renderer (owns the quad shaders + vertex/index buffers).
+    // Text engine (owns FreeType + the per-size font states + the glyph
+    // material buffer) and the 9-slice batch renderer (owns the quad
+    // shaders + vertex/index buffers). One engine serves every font size.
     var text_engine = try TextEngine.init(&gpu, gpa);
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
@@ -414,6 +426,10 @@ pub fn run(app: *App, comptime T: type, root: *T) !void {
     var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv);
     defer batch.deinit();
     batch.material_buf_bda = text_engine.materialBda();
+    batch.subpixel = subpixel;
+    batch.quad_debug = quad_debug;
+    batch.bgr_order = bgr;
+    batch.damp_chroma = damp;
 
     // Blit pass: fullscreen triangle + Oklab→sRGB fragment shader, with a
     // descriptor heap holding the render-target texture + nearest sampler.
@@ -499,6 +515,28 @@ pub fn run(app: *App, comptime T: type, root: *T) !void {
                     _ = try app.handle(T, root, .{ .mouse_up = .{ .button = button, .x = pos[0], .y = pos[1] } });
                 },
                 .key_down => |kd| {
+                    if (kd.key) |kc| {
+                        if (kc == .s) {
+                            batch.subpixel = !batch.subpixel;
+                            std.log.info("subpixel AA: {s}", .{if (batch.subpixel) "on" else "off"});
+                            continue;
+                        }
+                        if (kc == .d) {
+                            batch.quad_debug = !batch.quad_debug;
+                            std.log.info("quad debug: {s}", .{if (batch.quad_debug) "on" else "off"});
+                            continue;
+                        }
+                        if (kc == .o) {
+                            batch.bgr_order = !batch.bgr_order;
+                            std.log.info("subpixel order: {s}", .{if (batch.bgr_order) "BGR" else "RGB"});
+                            continue;
+                        }
+                        if (kc == .c) {
+                            batch.damp_chroma = !batch.damp_chroma;
+                            std.log.info("chroma damping: {s}", .{if (batch.damp_chroma) "on" else "off"});
+                            continue;
+                        }
+                    }
                     const core_key = mapSdlKey(kd.key orelse continue) orelse continue;
                     const shift = kd.mod.left_shift or kd.mod.right_shift;
                     _ = try app.handle(T, root, .{ .key_down = .{ .key = core_key, .shift = shift } });
@@ -507,6 +545,15 @@ pub fn run(app: *App, comptime T: type, root: *T) !void {
             }
         }
         if (should_close) break;
+
+        // Sync the toggle state for the UI's header line (the UI cannot
+        // import the window; the debug_state lives in text.zig).
+        text_mod.debug_state = .{
+            .subpixel = batch.subpixel,
+            .bgr = batch.bgr_order,
+            .damp = batch.damp_chroma,
+            .quad_debug = batch.quad_debug,
+        };
 
         // Frame event: the core draws + lays out + presents; the output's
         // hover comes from the core's cursor state.
@@ -617,7 +664,7 @@ fn writePpm(io: Io, path: []const u8, pixels: [*]const f32, w: u32, h: u32, gpa:
 /// to a readback buffer and write the result as a P6 PPM at `path`. Same
 /// init as run(), minus the event loop and the swapchain blit. FreeType
 /// glyphs render into the shot — this is the text-renders proof.
-pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?[2]f32) !void {
+pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?[2]f32, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool) !void {
     const gpa = app.gpa;
 
     try sdl3.hints.set(.video_driver, "wayland");
@@ -625,7 +672,7 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     try sdl3.init(.{ .video = true, .events = true });
     defer sdl3.quit(.{ .video = true, .events = true });
 
-    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 900, 700, .{ .resizable = true });
+    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 1100, 1160, .{ .resizable = true });
     defer sdl_win.deinit();
     try sdl_win.show();
 
@@ -662,9 +709,12 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
 
     const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
     const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 900, .height = 700 } });
+    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
     defer gw.deinit();
 
+    // Text engine (owns FreeType + the per-size font states + the glyph
+    // material buffer) and the 9-slice batch renderer (owns the quad
+    // shaders + vertex/index buffers). One engine serves every font size.
     var text_engine = try TextEngine.init(&gpu, gpa);
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
@@ -672,6 +722,10 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv);
     defer batch.deinit();
     batch.material_buf_bda = text_engine.materialBda();
+    batch.subpixel = subpixel;
+    batch.quad_debug = quad_debug;
+    batch.bgr_order = bgr;
+    batch.damp_chroma = damp;
 
     const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
     defer gpu.shaderDestroy(blit_vert);
@@ -690,6 +744,16 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     var rt_w: u32 = 0;
     var rt_h: u32 = 0;
     defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
+
+    // Sync the toggle state BEFORE the frame builds the tree: the shot's
+    // header status line reads debug_state, so a late sync would stamp the
+    // PREVIOUS frame's toggles onto this shot. Same order as run()'s loop.
+    text_mod.debug_state = .{
+        .subpixel = batch.subpixel,
+        .bgr = batch.bgr_order,
+        .damp = batch.damp_chroma,
+        .quad_debug = batch.quad_debug,
+    };
 
     // One frame: fresh tree + layout at the fixed window size.
     const surface_size = gw.surfaceSize();

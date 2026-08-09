@@ -22,11 +22,23 @@ const WidgetSize = @import("v7/widget.zig").Size;
 const hb = @import("harfbuzz");
 const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
 
-pub const MAX_MATERIALS: u32 = 128; // slot 0 = solid; glyphs start at 1
+pub const MAX_MATERIALS: u32 = 1024; // slot 0 = solid; glyphs start at 1, decorations from the top. Demo needs ~52 glyphs x 2 fonts x 6 sizes = ~620; 1024 leaves headroom.
 pub const FONT_SIZE_PX: u32 = 16;
+
+/// The demo's live toggle state — the window writes it per frame, the UI
+/// reads it for the header status line (the UI cannot import the window).
+pub const DebugState = struct {
+    subpixel: bool = false,
+    bgr: bool = false,
+    damp: bool = true,
+    quad_debug: bool = false,
+};
+pub var debug_state: DebugState = .{};
 
 pub const GlyphEntry = struct {
     gid: u32, // shaped glyph id (the shaper resolved the codepoint)
+    size: u32, // the font size this glyph was rasterized at (entries are per (font_id, size, gid))
+    font_id: u8,
     slot: u32, // material slot
     advance: f32,
     bearing_x: f32,
@@ -39,6 +51,30 @@ pub const GlyphEntry = struct {
     curve_h: f32,
 };
 
+/// One font size's FreeType face + HarfBuzz font + metrics. The engine
+/// holds a small per-size cache of these — the ONLY per-size state in the
+/// pipeline; the materials, slice emission and draw path are size-agnostic.
+const FontState = struct {
+    face: c.FT_Face,
+    hb_font: hb.Font,
+    font_id: u8,
+    size: u32,
+    ascent: f32,
+    descent: f32,
+};
+
+/// The embedded font sources: 0 = InterVariable, 1 = Fira Code Nerd Font.
+const FontData = struct {
+    data: []const u8,
+    name: []const u8,
+};
+const FONT_SOURCES = [_]FontData{
+    .{ .data = @embedFile("InterVariable.ttf"), .name = "InterVariable" },
+    .{ .data = @embedFile("FiraCodeNerdFont-Regular.ttf"), .name = "Fira Code Nerd Font" },
+};
+
+const MAX_FONT_SIZES = 16;
+
 pub const TextEngine = struct {
     /// The flex measure hook target: the demo sets this after init and
     /// points App.measure at measureForFlex, so layout sizes leaves to the
@@ -46,35 +82,30 @@ pub const TextEngine = struct {
     pub var measure_engine: ?*TextEngine = null;
 
     /// Host-side measure callback for flex.layoutWith.
-    pub fn measureForFlex(text: []const u8) WidgetSize {
-        return measure_engine.?.measureText(text);
+    pub fn measureForFlex(text: []const u8, font_size: f32, font_id: u8) WidgetSize {
+        return measure_engine.?.measureText(text, if (font_size > 0) @intFromFloat(@round(font_size)) else FONT_SIZE_PX, font_id);
     }
 
-    /// The font's line height in px (ascender − descender; the hb
-    /// descender is negative, y-up).
-    pub fn lineHeight(self: *const TextEngine) f32 {
-        return self.ascent - self.descent;
+    /// The font's line height in px at `size` (ascender − descender; the
+    /// hb descender is negative, y-up).
+    pub fn lineHeight(self: *TextEngine, size: u32, font_id: u8) f32 {
+        const f = self.fontFor(font_id, size) catch return 20;
+        return f.ascent - f.descent;
     }
 
     /// The text baseline for a content box (y, h): the line box centered
-    /// vertically, the baseline at the ascent. This is the correct
-    /// transformation at any font size — the old 0.75*hack only fit the
-    /// 20px size.
-    pub fn baselineIn(self: *const TextEngine, y: f32, h: f32) f32 {
-        return y + (h - self.lineHeight()) / 2 + self.ascent;
+    /// vertically, the baseline at the ascent. Correct at any font size —
+    /// the old 0.75*hack only fit the 20px size.
+    pub fn baselineIn(self: *TextEngine, y: f32, h: f32, size: u32, font_id: u8) f32 {
+        const f = self.fontFor(font_id, size) catch return y + h * 0.75;
+        return y + (h - (f.ascent - f.descent)) / 2 + f.ascent;
     }
     gpu: *noapi.Gpu,
     gpa: std.mem.Allocator,
     ft_lib: c.FT_Library,
-    face: c.FT_Face,
-    /// HarfBuzz font over the shared FT face (hb_ft_font_create_referenced).
-    /// The shaper owns all glyph selection/positioning; FT only rasterizes.
-    hb_font: hb.Font,
-    /// Font line metrics at FONT_SIZE_PX (26.6 → px). The demo derives the
-    /// widget line height and the baseline from these — the old 0.75*hack
-    /// only fit the 20px size.
-    ascent: f32,
-    descent: f32,
+    /// Per-size font states (FT face + hb font + metrics); the default
+    /// size is created at init, others lazily on first use.
+    fonts: [MAX_FONT_SIZES]?FontState = .{null} ** MAX_FONT_SIZES,
     // Parallel arrays, one element per rasterized glyph:
     // sweepers[i] owns the GPU curve buffer backing entries[i].
     sweepers: std.ArrayList(proto.GlyphSweeper) = .empty, // per glyph
@@ -82,6 +113,15 @@ pub const TextEngine = struct {
     materials: noapi.GpuPtr, // MAX_MATERIALS * MATERIAL_SIZE, .default
     next_slot: u32 = 1,
     material_bda: u64 = 0,
+
+    /// How many glyph material slots are live (slots 1..next_slot-1 from
+    /// the bottom of the buffer). window.zig allocates its per-frame
+    /// decoration materials downward from the top and asserts it stays
+    /// above this count, so a decoration write can never overwrite an
+    /// in-flight glyph material.
+    pub fn glyphSlotCount(self: *TextEngine) u32 {
+        return self.next_slot;
+    }
 
     /// Init FreeType, load the embedded Inter font at FONT_SIZE_PX, wrap it
     /// in a HarfBuzz font, and allocate the material buffer. Returns errors
@@ -110,9 +150,12 @@ pub const TextEngine = struct {
         const hb_handle = hb.c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
         var hb_font = hb.Font{ .handle = hb_handle };
         hb.c.hb_ft_font_set_funcs(hb_handle);
-        // Match the shaper's metrics to the rasterized outlines: hint with
-        // FT_LOAD_DEFAULT (pixel-snapped stems, flat top/bottom edges).
-        _ = hb.c.hb_ft_font_set_load_flags(hb_handle, c.FT_LOAD_DEFAULT);
+        // Deliberately UNHINTED (hb-ft's default load flags). Hinting
+        // grid-fits the advances AND the extents per size, so the pen and
+        // the quad boxes snap non-linearly across font sizes (the kerning
+        // "varies wildly", glyphs clip against compressed extents). The
+        // unhinted values scale linearly; the analytic sweep gives the AA.
+        _ = hb.c.hb_ft_font_set_load_flags(hb_handle, c.FT_LOAD_DEFAULT | c.FT_LOAD_NO_HINTING);
         errdefer hb_font.destroy();
 
         // SAFETY: assigned by hb_font_get_extents_for_direction before any read.
@@ -120,28 +163,87 @@ pub const TextEngine = struct {
         _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
 
         const materials = try gpu.gpuMalloc(MAX_MATERIALS * proto.MATERIAL_SIZE, 64, .default);
-        errdefer gpu.gpuFree(materials);
 
-        return .{
+        var self = TextEngine{
             .gpu = gpu,
             .gpa = gpa,
             .ft_lib = ft_lib,
-            .face = face,
-            .hb_font = hb_font,
-            .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
-            .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
             .materials = materials,
             .material_bda = materials.gpu,
         };
+        // The default size's state (created inline so init errors release
+        // everything); the other sizes come lazily via fontFor.
+        self.fonts[0] = .{
+            .face = face,
+            .hb_font = hb_font,
+            .font_id = 0,
+            .size = FONT_SIZE_PX,
+            .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
+            .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
+        };
+        return self;
+    }
+
+    /// Get (or lazily create) the font state for `size` px. One FT face +
+    /// hb font per size — the only per-size state in the pipeline.
+    fn fontFor(self: *TextEngine, font_id: u8, size: u32) !*FontState {
+        for (&self.fonts) |*f| {
+            if (f.*) |*fs| {
+                if (fs.font_id == font_id and fs.size == size) return fs;
+            }
+        }
+        var slot: ?usize = null;
+        for (&self.fonts, 0..) |*f, i| {
+            if (f.* == null) {
+                slot = i;
+                break;
+            }
+        }
+        const idx = slot orelse return error.TooManyFontSizes;
+
+        const font_data = FONT_SOURCES[font_id].data;
+        // SAFETY: assigned by FT_New before any use; failures return errors.
+        var face: c.FT_Face = undefined;
+        std.debug.assert(font_data.len <= std.math.maxInt(u32));
+        if (c.FT_New_Memory_Face(self.ft_lib, font_data.ptr, @as(c.FT_Long, @intCast(font_data.len)), 0, &face) != 0)
+            return error.FreeTypeFaceFailed;
+        errdefer _ = c.FT_Done_Face(face);
+        if (c.FT_Set_Pixel_Sizes(face, 0, size) != 0) return error.FreeTypeSetPixelSizesFailed;
+
+        const hb_handle = hb.c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+        var hb_font = hb.Font{ .handle = hb_handle };
+        hb.c.hb_ft_font_set_funcs(hb_handle);
+        // Unhinted — see the init's note: the positions and extents must
+        // scale linearly with the size, never grid-snap.
+        _ = hb.c.hb_ft_font_set_load_flags(hb_handle, c.FT_LOAD_DEFAULT | c.FT_LOAD_NO_HINTING);
+        errdefer hb_font.destroy();
+
+        // SAFETY: assigned by hb_font_get_extents_for_direction before any read.
+        var font_ext: c.hb_font_extents_t = undefined;
+        _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
+
+        self.fonts[idx] = .{
+            .face = face,
+            .hb_font = hb_font,
+            .font_id = font_id,
+            .size = size,
+            .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
+            .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
+        };
+        return &self.fonts[idx].?;
     }
 
     pub fn deinit(self: *TextEngine) void {
         for (self.sweepers.items) |*s| s.deinit(); // frees each GPU curve buffer
         self.sweepers.deinit(self.gpa);
         self.entries.deinit(self.gpa);
-        self.hb_font.destroy();
+        for (&self.fonts) |*f| {
+            if (f.*) |*fs| {
+                fs.hb_font.destroy();
+                _ = c.FT_Done_Face(fs.face);
+            }
+        }
         self.gpu.gpuFree(self.materials);
-        _ = c.FT_Done_Face(self.face);
         _ = c.FT_Done_FreeType(self.ft_lib);
     }
 
@@ -165,13 +267,14 @@ pub const TextEngine = struct {
     /// buffer when done. hb's addUTF8 never panics on invalid bytes (it
     /// substitutes .notdef, which the gid-0 skip drops) — the old tolerant
     /// iterator is gone.
-    fn shapeRun(self: *TextEngine, text: []const u8) !hb.Buffer {
+    fn shapeRun(self: *TextEngine, font: *FontState, text: []const u8) !hb.Buffer {
+        _ = self;
         var buf = try hb.Buffer.create();
         errdefer buf.destroy();
         buf.addUTF8(text);
         buf.setDirection(.ltr);
         buf.setScript(.latin);
-        hb.shape(self.hb_font, buf, null);
+        hb.shape(font.hb_font, buf, null);
         return buf;
     }
 
@@ -181,10 +284,10 @@ pub const TextEngine = struct {
     /// skipped (no entry, no error). Returns error.TooManyGlyphs once the
     /// MAX_MATERIALS slot budget is exhausted (checked only for glyphs that
     /// would actually consume a new slot).
-    fn ensureGlyph(self: *TextEngine, gid: u32) !void {
+    fn ensureGlyph(self: *TextEngine, font: *FontState, gid: u32) !void {
         if (gid == 0) return; // .notdef: missing glyph, skip
         for (self.entries.items) |e| {
-            if (e.gid == gid) return; // already rasterized
+            if (e.font_id == font.font_id and e.size == font.size and e.gid == gid) return; // already rasterized
         }
 
         // Slot budget exhausted: fail with a real error instead of writing
@@ -194,18 +297,24 @@ pub const TextEngine = struct {
         if (self.next_slot >= MAX_MATERIALS) return error.TooManyGlyphs;
 
         // Extraction failures (missing outline, draw error) → skip glyph.
-        const curves = extractGlyphCurves(self.gpa, self.hb_font, gid) catch return;
+        const curves = extractGlyphCurves(self.gpa, font.hb_font, gid) catch return;
         defer self.gpa.free(curves);
 
         var sweeper = try proto.GlyphSweeper.init(self.gpu, curves);
 
         // Metrics from HarfBuzz (the same 26.6 fixed-point scale as the
         // shaped positions; /64.0 → pixels). No FreeType in our code.
-        const advance = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(self.hb_font.handle, gid))) / 64.0;
+        const advance = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(font.hb_font.handle, gid))) / 64.0;
         // SAFETY: assigned by hb_font_get_glyph_extents before any read; a
         // zero return (no ink) skips the glyph.
         var ext: c.hb_glyph_extents_t = undefined;
-        if (c.hb_font_get_glyph_extents(self.hb_font.handle, gid, &ext) == 0) return; // no ink
+        // No ink: the sweeper's GPU curve buffer was already allocated by
+        // init above, so free it here or it leaks (the success path hands
+        // ownership to self.sweepers, which deinits at TextEngine.deinit).
+        if (c.hb_font_get_glyph_extents(font.hb_font.handle, gid, &ext) == 0) {
+            sweeper.deinit();
+            return; // no ink
+        }
         const bearing_x = @as(f32, @floatFromInt(ext.x_bearing)) / 64.0;
         const bearing_y = @as(f32, @floatFromInt(ext.y_bearing)) / 64.0;
         const glyph_w = @as(f32, @floatFromInt(ext.width)) / 64.0;
@@ -238,6 +347,8 @@ pub const TextEngine = struct {
         };
         self.entries.append(self.gpa, .{
             .gid = gid,
+            .size = font.size,
+            .font_id = font.font_id,
             .slot = slot,
             .advance = advance,
             .bearing_x = bearing_x,
@@ -264,8 +375,9 @@ pub const TextEngine = struct {
     /// missing from the font or invalid UTF-8) is skipped WITHOUT advancing,
     /// matching the pre-shaping behavior. Propagates error.TooManyGlyphs if
     /// the material slot budget is exhausted.
-    pub fn emitText(self: *TextEngine, text: []const u8, x: f32, baseline_y: f32, out: *std.ArrayList(SliceRect)) !void {
-        var buf = try self.shapeRun(text);
+    pub fn emitText(self: *TextEngine, text: []const u8, x: f32, baseline_y: f32, size: u32, font_id: u8, out: *std.ArrayList(SliceRect)) !void {
+        const font = try self.fontFor(font_id, size);
+        var buf = try self.shapeRun(font, text);
         defer buf.destroy();
         const infos = buf.getGlyphInfos();
         const positions = buf.getGlyphPositions() orelse &.{};
@@ -273,8 +385,8 @@ pub const TextEngine = struct {
         const run_baseline = @round(baseline_y);
         var cursor: f32 = 0; // the exact internal pen (relative to run_x)
         for (infos, positions) |info, pos| {
-            try self.ensureGlyph(info.codepoint);
-            const entry = self.entryFor(info.codepoint) orelse continue; // gid 0 → skip
+            try self.ensureGlyph(font, info.codepoint);
+            const entry = self.entryFor(font.font_id, font.size, info.codepoint) orelse continue; // gid 0 → skip
             // Canonical HarfBuzz placement at the exact positions: the
             // glyph sits at run_x + cursor + x_offset + bearing_x, then
             // the pen advances by x_advance (y offsets are y-up font
@@ -290,10 +402,18 @@ pub const TextEngine = struct {
                 continue;
             }
             try out.append(self.gpa, .{
-                .dst_x = ch_x,
-                .dst_y = ch_y,
-                .dst_w = @ceil(entry.glyph_w),
-                .dst_h = @ceil(entry.glyph_h),
+                // 2px surround on ALL sides: the ink's edges land within
+                // ceil(w)-w / ceil(h)-h of the boundary (fractional
+                // extents), and a bb that hits a pixel as a sliver must
+                // still resolve its AA fully inside the quad — the two
+                // outermost pixel rings stay clear of ink, so the fade
+                // never touches the quad's own edge (the original 1px was
+                // enough for integer extents but left the sliver's edge
+                // pixel adjacent to the quad boundary).
+                .dst_x = ch_x - 2,
+                .dst_y = ch_y - 2,
+                .dst_w = @ceil(entry.glyph_w) + 4,
+                .dst_h = @ceil(entry.glyph_h) + 4,
                 .src_u = 0,
                 .src_v = 0,
                 .src_w = 1,
@@ -308,6 +428,11 @@ pub const TextEngine = struct {
                 .curve_bottom = entry.curve_bottom,
                 .curve_w = entry.curve_w,
                 .curve_h = entry.curve_h,
+                // The PEN (the outline origin): the sweep windows must be
+                // anchored in the same space as the curves. x = the exact
+                // shaper pen, y = the baseline (y offsets are y-up: a
+                // raised glyph moves its baseline UP the framebuffer).
+                .glyph_pen = .{ run_x + cursor + @as(f32, @floatFromInt(pos.x_offset)) / 64.0, run_baseline - @as(f32, @floatFromInt(pos.y_offset)) / 64.0 },
             });
             cursor += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
         }
@@ -319,8 +444,12 @@ pub const TextEngine = struct {
     /// widget box (flex), not from the measurement. Shapes only — no glyph
     /// rasterization (unlike the pre-shaping measure, which forced the
     /// atlas to fill). On shape failure falls back to the baked estimate.
-    pub fn measureText(self: *TextEngine, text: []const u8) WidgetSize {
-        var buf = self.shapeRun(text) catch return .{
+    pub fn measureText(self: *TextEngine, text: []const u8, size: u32, font_id: u8) WidgetSize {
+        const font = self.fontFor(font_id, size) catch return .{
+            .width = @as(f32, @floatFromInt(text.len)) * 10,
+            .height = 24,
+        };
+        var buf = self.shapeRun(font, text) catch return .{
             .width = @as(f32, @floatFromInt(text.len)) * 10,
             .height = 24,
         };
@@ -329,12 +458,12 @@ pub const TextEngine = struct {
         for (buf.getGlyphPositions() orelse &.{}) |pos| {
             w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
         }
-        return .{ .width = w, .height = self.lineHeight() };
+        return .{ .width = w, .height = font.ascent - font.descent };
     }
 
-    fn entryFor(self: *const TextEngine, gid: u32) ?GlyphEntry {
+    fn entryFor(self: *const TextEngine, font_id: u8, size: u32, gid: u32) ?GlyphEntry {
         for (self.entries.items) |e| {
-            if (e.gid == gid) return e;
+            if (e.font_id == font_id and e.size == size and e.gid == gid) return e;
         }
         return null;
     }
@@ -471,7 +600,13 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
 
 // ── sweep validation (port of quad_frag scanlineSweep) ─────────────
 fn sweepIntersect(qa: f32, c0: f32, c1: f32, c2: f32, target: f32) f32 {
-    if (@abs(qa) < 1e-3) return (target - c0) / (c2 - c0);
+    if (@abs(qa) < 1e-3) {
+        // Degenerate horizontal segment (c2 == c0): 0/0 → NaN, and the
+        // collinear midpoint quadratic (line_cb) makes it reachable;
+        // the sweep is unconstrained in t, so return 0.0.
+        if (c2 == c0) return 0.0;
+        return (target - c0) / (c2 - c0);
+    }
     const qb = 2.0 * (c1 - c0);
     const qc = c0 - target;
     const d = qb * qb - 4.0 * qa * qc;
@@ -677,6 +812,78 @@ test "glyph sweep: real 'n' curves give full coverage at stroke centers" {
     try std.testing.expect(max_cov > 0.8);
     // Ink: a 13px 'n' covers ~20 px of stroke (the sweep scales with size).
     try std.testing.expect(ink > 15);
+}
+
+test "quad policy: hb extents bound the ink, the 2px surround keeps the outer pixel rings clear" {
+    // The glyph bb (the hb extents — the conservative control-point hull)
+    // must CONTAIN the actual curve hull, and the quad = the bb + 2px
+    // surround (emitText: ch-2 / ceil+4) must leave the two outermost
+    // pixel rings completely clear of ink — so even a bb that hits a
+    // pixel as a sliver resolves its AA edge fully inside the quad.
+    var ft_lib: c.FT_Library = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Init_FreeType(&ft_lib));
+    defer _ = c.FT_Done_FreeType(ft_lib);
+    const font_data = @embedFile("InterVariable.ttf");
+    const glyphs = "nqTfxA";
+    const sizes = [_]u32{ 13, 16, 20 };
+    for (sizes) |px| {
+        var face: c.FT_Face = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+        defer _ = c.FT_Done_Face(face);
+        try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, px));
+        const h = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
+        for (glyphs) |ch| {
+            const gid = c.FT_Get_Char_Index(face, ch);
+            const curves = try extractGlyphCurves(std.testing.allocator, .{ .handle = h }, gid);
+            defer std.testing.allocator.free(curves);
+            // The ink's true extent: the control hull of the EXTRACTED
+            // curves (the cubic-split conics shrink the hull, never grow
+            // it, so it must sit inside the hb bb).
+            const hull = proto.glyphExtent(curves);
+            var ext: c.hb_glyph_extents_t = undefined;
+            try std.testing.expectEqual(@as(c_int, 1), c.hb_font_get_glyph_extents(h, gid, &ext));
+            const bbx = @as(f32, @floatFromInt(ext.x_bearing)) / 64.0;
+            const bby = @as(f32, @floatFromInt(ext.y_bearing)) / 64.0;
+            const bbw = @as(f32, @floatFromInt(ext.width)) / 64.0;
+            const bbh = @as(f32, @floatFromInt(@abs(ext.height))) / 64.0;
+            try std.testing.expect(hull.min_x >= bbx - 0.001);
+            try std.testing.expect(hull.min_y >= bby - bbh - 0.001);
+            try std.testing.expect(hull.min_x + hull.w <= bbx + bbw + 0.001);
+            try std.testing.expect(hull.min_y + hull.h <= bby + 0.001);
+            // The quad in the glyph's own (y-up, pen-origin) space: the bb
+            // + 2px on each side. Sweep the two outermost pixel rings —
+            // they must hold no ink at all (the AA then fades within
+            // rings >= 2).
+            const qx0 = bbx - 2.0; // dst_x - pen = ch_x - 2
+            const qy0 = bby - bbh - 2.0; // the quad's bottom (y-up): the bb's bottom - 2
+            const qw = @ceil(bbw) + 4.0;
+            const qh = @ceil(bbh) + 4.0;
+            const win = [2]f32{ 1.0, 1.0 };
+            var ring_ink: f32 = 0;
+            var col: usize = 0;
+            while (col < @as(usize, @intFromFloat(qw))) : (col += 1) {
+                var row: usize = 0;
+                while (row < @as(usize, @intFromFloat(qh))) : (row += 1) {
+                    // Interior (rings >= 2) is skipped; only the two outer rings are swept.
+                    if (col >= 2 and col < @as(usize, @intFromFloat(qw)) - 2 and
+                        row >= 2 and row < @as(usize, @intFromFloat(qh)) - 2) continue;
+                    const px_ = [2]f32{ qx0 + @as(f32, @floatFromInt(col)), qy0 + @as(f32, @floatFromInt(row)) };
+                    var total: f32 = 0;
+                    for (curves) |cv| {
+                        total += sweepSegment(win, px_, .{ cv.p0x, cv.p0y }, .{ cv.p1x, cv.p1y }, .{ cv.p2x, cv.p2y });
+                    }
+                    ring_ink += total;
+                }
+            }
+            // The residue here is pure boundary float noise (a hull edge
+            // exactly on a window edge, e.g. 'x' at 20px) — ~1e-6, six
+            // orders below any visible coverage; 1e-4 leaves 100x margin.
+            std.testing.expect(ring_ink < 1e-4) catch {
+                std.debug.print("ring leak: '{c}' {d}px bbx={d:.3} bby={d:.3} bbw={d:.3} bbh={d:.3} hull=[{d:.3},{d:.3}] ring_ink={d:.6}\n", .{ ch, px, bbx, bby, bbw, bbh, hull.min_x, hull.min_y, ring_ink });
+                return error.TestUnexpectedResult;
+            };
+        }
+    }
 }
 
 test "shaping: the hb-ft font scale is 26.6 fixed-point pixels" {

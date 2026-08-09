@@ -169,6 +169,11 @@ layout(push_constant) uniform Push {
 float intersectMonotonic(float qa, float c0, float c1, float c2, float target) {
     if (abs(qa) < 1e-3) {
         // Approximately linear (matches paper threshold)
+        // Degenerate horizontal segment (c2 == c0): the division is 0/0 →
+        // NaN, which pollutes the coverage; line_cb emits collinear
+        // midpoint quadratics so this is reachable. The sweep is then
+        // unconstrained in t, so return 0.0.
+        if (c2 == c0) return 0.0;
         return (target - c0) / (c2 - c0);
     }
     float qb = 2.0 * (c1 - c0);
@@ -182,6 +187,33 @@ float intersectMonotonic(float qa, float c0, float c1, float c2, float target) {
 vec2 evalBez(vec2 p0, vec2 p1, vec2 p2, float t) {
     float mt = 1.0 - t;
     return mt*mt*p0 + 2.0*mt*t*p1 + t*t*p2;
+}
+
+vec3 linearToOklab(vec3 rgb) {
+    float l = 0.4122214708 * rgb.r + 0.5363325363 * rgb.g + 0.0514459929 * rgb.b;
+    float m = 0.2119034982 * rgb.r + 0.6806995451 * rgb.g + 0.1073969566 * rgb.b;
+    float s = 0.0883024619 * rgb.r + 0.2817188376 * rgb.g + 0.6299787005 * rgb.b;
+    float lp = pow(l, 1.0 / 3.0);
+    float mp = pow(m, 1.0 / 3.0);
+    float sp = pow(s, 1.0 / 3.0);
+    return vec3(
+        0.2104542553 * lp + 0.7936177850 * mp - 0.0040720468 * sp,
+        1.9779984951 * lp - 2.4285922050 * mp + 0.4505937099 * sp,
+        0.0259040371 * lp + 0.7827717662 * mp - 0.8086757660 * sp
+    );
+}
+
+/// The pipeline's inverse conversion (the blit's): Oklab → LINEAR sRGB.
+vec3 oklabToSRGB(vec3 lab) {
+    float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+    float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+    float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+    vec3 lms = vec3(l_, m_, s_) * vec3(l_, m_, s_) * vec3(l_, m_, s_);
+    return vec3(
+        +4.0767416621 * lms.x - 3.3077115913 * lms.y + 0.2309699292 * lms.z,
+        -1.2684380046 * lms.x + 2.6097574011 * lms.y - 0.3413193965 * lms.z,
+        -0.0041960863 * lms.x - 0.7034186147 * lms.y + 1.7076147010 * lms.z
+    );
 }
 
 float scanlineSweep(vec2 size, vec2 offset, vec2 p0, vec2 p1, vec2 p2) {
@@ -247,15 +279,79 @@ void main() {
         CurveBuf curves = CurveBuf(mat.curve_bda);
         uint n = curves.num_curves;
 
-        // Analytic per-fragment coverage: each fragment is a 1x1 window;
-        // the coverage is the summed fill of the glyph's quadratics at
-        // DISPLAY resolution — exact AA at any (sub-pixel) placement, no
-        // intermediate bitmap. The outline curves are in y-UP font space,
-        // so the cell's y is flipped about the bearing (the glyph's top
-        // distance above the baseline): framebuffer cell.y = 0 at the top
-        // maps to curve y = bearing_y.
-        vec2 cell = vec2(gl_FragCoord.x - vOrigin.x,
-                         mat.bearing_y - (gl_FragCoord.y - vOrigin.y) - 1.0);
+        // The pixel's TRUE span, anchored at the GLYPH'S PEN: gl_FragCoord
+        // is the fragment CENTER, so the pixel at the pen-relative offset
+        // (dx, dy) covers [cell.x, cell.x+1) x [cell.y, cell.y+1) in the
+        // OUTLINE's coordinate space. The outline curves are y-UP with
+        // the origin at the pen, so cell.y is the pixel's y-up distance
+        // from the pen (vOrigin.y); the -0.5 anchors the window at the
+        // pixel's bottom-left. (The old cell was anchored at the QUAD's
+        // top-left but the curves are pen-relative — every window sat
+        // 2px up-left of its pixel, extruding the ink's top/left edges
+        // and cutting its bottom/right by the same amount. vOrigin for
+        // TYPE_GLYPH is the pen, so the two are the same space now.)
+        vec2 cell = vec2(gl_FragCoord.x - vOrigin.x - 0.5,
+                         vOrigin.y - gl_FragCoord.y - 0.5);
+        // QUAD DEBUG (frag_data bit 1): tint the whole quad's background —
+        // the ink on top, so the quad bounds show against the glyph. The
+        // color is the OKLAB of a bright sRGB magenta (0.70, 0.28, -0.17).
+        if ((pc.vp_h_packed & uint64_t(2)) != uint64_t(0)) {
+            float cov = 0.0;
+            for (uint i = 0u; i < n; i++) {
+                QuadCurve cv = curves.curves[i];
+                cov += sweepSegment(vec2(1.0), cell, cv.p0, cv.p1, cv.p2);
+            }
+            cov = clamp(cov, 0.0, 1.0);
+            fragColor = vec4(mix(vec3(0.70, 0.28, -0.17), vColor.rgb, cov), 1.0);
+            return;
+        }
+        // SUBPIXEL AA (frag_data bit 0): split the pixel into three 1/3-px
+        // columns and sweep each (the display's RGB stripes in that
+        // order: left = R, middle = G, right = B). The output chroma is
+        // the barycentric mix of the three PRIMARIES' ab coordinates
+        // weighted by the column coverages (Oklab primaries: R(0.2249,
+        // 0.1258), G(-0.2339, 0.1795), B(-0.0325, -0.3115)); the
+        // luminance is the mean coverage (l+m+r)/3, boosted by the
+        // fragment's own average RGB over white so the text renders at
+        // full brightness, and carried by the alpha for compositing.
+        // OFF (frag_data = 0): the single analytic sweep, grayscale.
+        if ((pc.vp_h_packed & uint64_t(1)) != uint64_t(0)) {
+            float cl = 0.0, cm = 0.0, cr = 0.0;
+            for (uint i = 0u; i < n; i++) {
+                QuadCurve cv = curves.curves[i];
+                cl += sweepSegment(vec2(1.0 / 3.0, 1.0), vec2(cell.x + 0.0 / 3.0, cell.y), cv.p0, cv.p1, cv.p2);
+                cm += sweepSegment(vec2(1.0 / 3.0, 1.0), vec2(cell.x + 1.0 / 3.0, cell.y), cv.p0, cv.p1, cv.p2);
+                cr += sweepSegment(vec2(1.0 / 3.0, 1.0), vec2(cell.x + 2.0 / 3.0, cell.y), cv.p0, cv.p1, cv.p2);
+            }
+            cl = clamp(cl * 3.0, 0.0, 1.0); // sweepSegment returns the filled AREA;
+            cm = clamp(cm * 3.0, 0.0, 1.0); // over a 1/3-wide column that is 1/3 of
+            cr = clamp(cr * 3.0, 0.0, 1.0); // the fraction — rescale to coverage.
+            float avg = (cl + cm + cr) / 3.0;
+            // Physical LCD assembly (the reference shader's model): the
+            // pixel's LINEAR RGB is the three subpixel coverages — the R
+            // column's coverage is the R channel, etc. — modulated by the
+            // TEXT color's linear RGB (the old code ignored vColor and
+            // assumed white). The stripe order is panel-dependent and
+            // often undeclared (BOE EDID: undefined) — bit 2 of frag_data
+            // swaps to BGR for the empirical test.
+            vec3 sub = vec3(cl, cm, cr);
+            if ((pc.vp_h_packed & uint64_t(4)) != uint64_t(0)) sub = vec3(cr, cm, cl);
+            vec3 text_lin = oklabToSRGB(vColor.rgb);
+            vec3 lab = linearToOklab(sub * text_lin);
+            // The assembled L already encodes the coverages, so normalize
+            // it to the full ink BEFORE the alpha: the src-over blend
+            // multiplies by avg again, and without this the edge pixels
+            // double-darken.
+            float L = clamp(lab.x / max(avg, 1e-3), 0.0, 1.0);
+            // Chroma damping ≈ FreeType's 5-tap LCD filter in one line:
+            // keep the luminance detail (the sharpness), kill the fringe
+            // color (raw column coverages fringe maximally). Tune 0.2-0.5;
+            // bit 3 of frag_data disables it (the full-chroma order test).
+            if ((pc.vp_h_packed & uint64_t(8)) != uint64_t(0)) lab.yz *= 0.3;
+            fragColor = vec4(L, lab.y, lab.z, avg * vColor.a);
+            return;
+        }
+
         float total = 0.0;
         for (uint i = 0u; i < n; i++) {
             QuadCurve cv = curves.curves[i];
@@ -323,7 +419,12 @@ void main() {
         vec2 p = gl_FragCoord.xy - vOrigin - size * 0.5;
         vec2 hbox = size * 0.5 - radius;
         vec2 q = abs(p) - hbox;
-        float d = length(max(q, vec2(0.0))) - min(radius.x, radius.y);
+        // Canonical sdRoundBox (the same formula ROUNDED_RECT uses): the
+        // inside term min(max(q.x,q.y), 0.0) makes the interior distance
+        // the true edge distance. Without it the inside distance is just
+        // -r, so zero/thin-radius shadows (r < feather/2) render at
+        // 0.5 + r/feather partial opacity instead of saturating.
+        float d = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - min(radius.x, radius.y);
         float coverage = clamp(0.5 - d / max(mat.bearing_y, 0.5), 0.0, 1.0);
         fragColor = vec4(vColor.rgb, coverage * vColor.a);
         return;

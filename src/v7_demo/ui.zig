@@ -17,6 +17,7 @@ const std = @import("std");
 
 const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
 const srgbToOklab = @import("text.zig").srgbToOklab;
+const text_mod = @import("text.zig");
 const WidgetTree = @import("v7/widget.zig").WidgetTree;
 const App = @import("v7/app.zig").App;
 const Id = @import("v7/id.zig").Id;
@@ -142,12 +143,47 @@ pub const TodoApp = struct {
         defer ctx.pop();
 
         {
-            // Title + live frame counter, stacked. (A row glued them into
-            // one squished line — the frame counter now sits below.)
+            // Title + live frame counter + the toggle-state line, stacked.
             _ = try ctx.column(.{ .gap = 6 });
             defer ctx.pop();
             _ = try label(ctx, "nogui v7 demo");
             _ = try label(ctx, frame_text);
+            const st = text_mod.debug_state;
+            const state_text = try std.fmt.allocPrint(ctx.arena, "subpixel:{s} order:{s} damp:{s} debug:{s}", .{
+                if (st.subpixel) "on" else "off",
+                if (st.bgr) "BGR" else "RGB",
+                if (st.damp) "on" else "off",
+                if (st.quad_debug) "on" else "off",
+            });
+            _ = try label(ctx, state_text);
+        }
+
+        {
+            // Font-sizes showcase: labels at 10/13/16/20/24/32 px. The
+            // per-node font_size selects the matching font state; S toggles
+            // the subpixel AA for comparison at every size.
+            _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.4, 0.4, 0.46, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 } });
+            defer ctx.pop();
+            _ = try label(ctx, "Font sizes (S toggles subpixel AA):");
+            _ = try ctx.label(.{ .text = "10px: The quick brown fox jumps over the lazy dog", .font_size = 10, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "20px: The quick brown fox jumps over the lazy dog", .font_size = 20, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "32px: The quick brown fox jumps over the lazy dog", .font_size = 32, .padding = .{ .left = 6, .right = 6 } });
+        }
+
+        {
+            // The ghostty font (Fira Code Nerd Font) at the same sizes.
+            _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.4, 0.4, 0.46, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 } });
+            defer ctx.pop();
+            _ = try label(ctx, "Fira Code Nerd Font (ghostty):");
+            _ = try ctx.label(.{ .text = "10px: The quick brown fox jumps over the lazy dog", .font_size = 10, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "20px: The quick brown fox jumps over the lazy dog", .font_size = 20, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{ .text = "32px: The quick brown fox jumps over the lazy dog", .font_size = 32, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
         }
 
         {

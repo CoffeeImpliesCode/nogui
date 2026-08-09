@@ -113,7 +113,18 @@ pub const DrawCtx = struct {
     /// The node's `.box` (CSS box model: margin/border/padding/radius) is
     /// set from the opts at creation; its `.rect` is the RELATIVE border
     /// box, filled later by flex.layout().
-    pub fn create(self: *DrawCtx, kind: WidgetKind, box: Box) !Id {
+    /// Font size from a widget's opts (0 = the host default).
+    fn optsFontSize(opts: anytype) f32 {
+        if (@hasField(@TypeOf(opts), "font_size")) return opts.font_size;
+        return 0;
+    }
+
+    fn optsFontId(opts: anytype) u8 {
+        if (@hasField(@TypeOf(opts), "font_id")) return opts.font_id;
+        return 0;
+    }
+
+    pub fn create(self: *DrawCtx, kind: WidgetKind, box: Box, font_size: f32, font_id: u8) !Id {
         const id: Id = @enumFromInt(self.tree.next_id);
         self.tree.next_id += 1;
 
@@ -123,6 +134,8 @@ pub const DrawCtx = struct {
             .kind = kind,
             .parent = parent,
             .box = box,
+            .font_size = font_size,
+            .font_id = font_id,
         });
 
         // Wire into the parent's children array via a linear scan (the
@@ -145,7 +158,7 @@ pub const DrawCtx = struct {
     pub fn column(self: *DrawCtx, opts: anytype) !Id {
         var gap: f32 = 0;
         if (@hasField(@TypeOf(opts), "gap")) gap = opts.gap;
-        const id = try self.create(.{ .column = .{ .gap = gap } }, boxFromOpts(opts));
+        const id = try self.create(.{ .column = .{ .gap = gap } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
         var grow: f32 = 0;
         if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
         if (grow > 0) self.tree.node(id).?.flex.grow = grow;
@@ -158,7 +171,7 @@ pub const DrawCtx = struct {
     pub fn row(self: *DrawCtx, opts: anytype) !Id {
         var gap: f32 = 0;
         if (@hasField(@TypeOf(opts), "gap")) gap = opts.gap;
-        const id = try self.create(.{ .row = .{ .gap = gap } }, boxFromOpts(opts));
+        const id = try self.create(.{ .row = .{ .gap = gap } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
         var grow: f32 = 0;
         if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
         if (grow > 0) self.tree.node(id).?.flex.grow = grow;
@@ -199,7 +212,7 @@ pub const DrawCtx = struct {
     /// id-keyed dirty diffing.
     pub fn label(self: *DrawCtx, opts: anytype) !Id {
         const text = try self.arena.dupe(u8, opts.text);
-        return self.create(.{ .label = .{ .text = text } }, boxFromOpts(opts));
+        return self.create(.{ .label = .{ .text = text } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
     }
 
     /// A clickable button. `owner` binds the click to the component that
@@ -214,7 +227,7 @@ pub const DrawCtx = struct {
             .label = label_copy,
             .on_click = on_click,
             .owner = self.component_id,
-        } }, boxFromOpts(opts));
+        } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
     }
 
     /// A slider bound to a live f32. Label text is duplicated into the
@@ -226,7 +239,7 @@ pub const DrawCtx = struct {
             .value = opts.value,
             .min = opts.min,
             .max = opts.max,
-        } }, boxFromOpts(opts));
+        } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
     }
 
     /// An empty spacer of the given size (`opts.size`, default 0). Box
@@ -234,7 +247,7 @@ pub const DrawCtx = struct {
     pub fn spacer(self: *DrawCtx, opts: anytype) !Id {
         var size: f32 = 0;
         if (@hasField(@TypeOf(opts), "size")) size = opts.size;
-        return self.create(.{ .spacer = .{ .size = size } }, boxFromOpts(opts));
+        return self.create(.{ .spacer = .{ .size = size } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
     }
 
     /// Nest a sub-component: its draw() runs with `component_id` set to a

@@ -549,7 +549,7 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
                 else => null,
             };
             if (text) |t| {
-                const ms = m(t);
+                const ms = m(t, n.font_size, n.font_id);
                 const need_w = switch (n.kind) {
                     .button => ms.width + 16,
                     .slider => @max(100, ms.width + 16),
@@ -990,7 +990,7 @@ test "layoutFingerprint: deterministic, rects only" {
 }
 
 const fakeMeasure = struct {
-    fn f(_: []const u8) Size {
+    fn f(_: []const u8, _: f32, _: u8) Size {
         return .{ .width = 40, .height = 24 };
     }
 }.f;

@@ -197,6 +197,21 @@ pub fn build(b: *std.Build) void {
     v7_run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| v7_run_cmd.addArgs(args);
 
+    // Recompile the demo's fragment shader from source before every run so a
+    // stale committed shaders/quad_frag.spv can never silently render wrong
+    // toggles. Attached ONLY to the interactive demo run — test/check/lint
+    // gates stay hermetic (glslangValidator is not guaranteed on PATH).
+    const quad_frag_spv_step = b.addSystemCommand(&.{
+        "glslangValidator",
+        "-V",
+        "-S",
+        "frag",
+        "-o",
+        "shaders/quad_frag.spv",
+        "shaders/quad_frag.glsl",
+    });
+    v7_run_cmd.step.dependOn(&quad_frag_spv_step.step);
+
     // Headless layout check: layout one frame with the CPU measure, verify
     // invariants, and diff the rect fingerprint against the golden. Fails
     // (non-zero) on any violation or layout drift — CI-gateable.
@@ -232,6 +247,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "noapi", .module = noapi_mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
             },
         }),

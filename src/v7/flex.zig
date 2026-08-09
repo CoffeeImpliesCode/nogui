@@ -50,7 +50,8 @@ pub const FlexStyle = struct {
 
 /// Optional text measurement hook injected by the host (e.g. FreeType
 /// advance sums). When null, leaves use the baked approximation below.
-pub const MeasureFn = *const fn (text: []const u8) Size;
+/// text: the label; font_size: the node's px size (0 = host default).
+pub const MeasureFn = *const fn (text: []const u8, font_size: f32, font_id: u8) Size;
 
 /// Nowrap layout. Fills `WidgetNode.rect` for all nodes.
 ///
@@ -467,7 +468,7 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
     switch (node.kind) {
         .label => |l| {
             const s = if (measure) |m|
-                m(l.text)
+                m(l.text, node.font_size, node.font_id)
             else
                 // Approximate FreeType text at 20px: ~10px advance, 20px tall.
                 Size{ .width = @as(f32, @floatFromInt(l.text.len)) * 10, .height = 20 };
@@ -476,7 +477,7 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
         },
         .button => |b| {
             const s = if (measure) |m|
-                m(b.label)
+                m(b.label, node.font_size, node.font_id)
             else
                 Size{ .width = @as(f32, @floatFromInt(b.label.len)) * 10, .height = 20 };
             node.rect.w = s.width + border.w + padding.w;
@@ -484,7 +485,7 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
         },
         .slider => |s| {
             const ms = if (measure) |m|
-                m(s.label)
+                m(s.label, node.font_size, node.font_id)
             else
                 Size{ .width = 84, .height = 20 };
             const content_w = @max(0, ms.width);

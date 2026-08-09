@@ -12,6 +12,14 @@ const headless = @import("v7/headless.zig");
 const hitTest = @import("v7/input.zig").hitTest;
 const App = @import("v7/app.zig").App;
 
+/// A value-taking flag with no value after it: print which flag is missing
+/// its argument and fail. The runtime reports the returned error and exits
+/// non-zero — same orelse-return shape as --hover's error path.
+fn errMissingArg(flag: []const u8) error{MissingArg} {
+    std.log.err("missing value for {s}", .{flag});
+    return error.MissingArg;
+}
+
 pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -31,19 +39,33 @@ pub fn main(init: std.process.Init) !void {
     var layout_diff: ?[]const u8 = null;
     var layout_write_golden: ?[]const u8 = null;
     var sim_path: ?[]const u8 = null;
+    var subpixel = false; // subpixel AA OFF by default; --subpixel enables
+    var quad_debug = false; // --quad-debug tints the glyph quads
+    var bgr = false; // --bgr: BGR subpixel stripe order
+    var damp = true; // --no-damp: disable the chroma damping
     while (args_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--window")) {
             window_mode = true;
+        } else if (std.mem.eql(u8, arg, "--quad-debug")) {
+            quad_debug = true;
+        } else if (std.mem.eql(u8, arg, "--no-damp")) {
+            damp = false;
+        } else if (std.mem.eql(u8, arg, "--bgr")) {
+            bgr = true;
+        } else if (std.mem.eql(u8, arg, "--subpixel")) {
+            subpixel = true;
+        } else if (std.mem.eql(u8, arg, "--no-subpixel")) {
+            subpixel = false;
         } else if (std.mem.eql(u8, arg, "--shot")) {
-            shot_path = args_it.next();
+            shot_path = args_it.next() orelse return errMissingArg("--shot");
         } else if (std.mem.eql(u8, arg, "--layout")) {
-            layout_path = args_it.next(); // optional output file
+            layout_path = args_it.next() orelse return errMissingArg("--layout"); // optional output file
         } else if (std.mem.eql(u8, arg, "--diff")) {
-            layout_diff = args_it.next(); // compare against a golden file
+            layout_diff = args_it.next() orelse return errMissingArg("--diff"); // compare against a golden file
         } else if (std.mem.eql(u8, arg, "--write-golden")) {
-            layout_write_golden = args_it.next();
+            layout_write_golden = args_it.next() orelse return errMissingArg("--write-golden");
         } else if (std.mem.eql(u8, arg, "--sim")) {
-            sim_path = args_it.next(); // JSON-lines event script
+            sim_path = args_it.next() orelse return errMissingArg("--sim"); // JSON-lines event script
         } else if (std.mem.eql(u8, arg, "--hover")) {
             // "--hover x,y": render the hover outline at a fixed position
             // in the shot (headless mouse-position verification).
@@ -65,7 +87,6 @@ pub fn main(init: std.process.Init) !void {
     // TigerBeetle-style full testing — the system is a pure function of the
     // input stream.
     if (sim_path) |sp| {
-        try measure_cpu.init();
         defer measure_cpu.deinit();
         app.measure = measure_cpu.measure;
 
@@ -108,12 +129,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (window_mode) {
-        try window_backend.run(&app, ui.TodoApp, &todo);
+        try window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp);
         return;
     }
 
     if (shot_path) |p| {
-        try window_backend.runShot(&app, ui.TodoApp, &todo, p, shot_hover);
+        try window_backend.runShot(&app, ui.TodoApp, &todo, p, shot_hover, subpixel, quad_debug, bgr, damp);
         return;
     }
 
@@ -122,11 +143,10 @@ pub fn main(init: std.process.Init) !void {
     // layout invariants, and renders an ASCII map (with the optional
     // --hover outline) to the file or stdout.
     if (layout_path) |lp| {
-        try measure_cpu.init();
         defer measure_cpu.deinit();
         app.measure = measure_cpu.measure;
         todo.frame_count = 1;
-        const out = try app.frame(ui.TodoApp, &todo, 1, .{ .width = 900, .height = 700 });
+        const out = try app.frame(ui.TodoApp, &todo, 1, .{ .width = 1100, .height = 1160 });
         defer alloc.free(out.json);
 
         var io_impl = std.Io.Threaded.init(alloc, .{});
@@ -135,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
         const stdout = std.Io.File.stdout();
 
         const hover_id = if (shot_hover) |p| hitTest(out.tree, p) else null;
-        const report = try headless.verifyLayout(out.tree, app.measure, .{ .width = 900, .height = 700 }, alloc);
+        const report = try headless.verifyLayout(out.tree, app.measure, .{ .width = 1100, .height = 1160 }, alloc);
         defer alloc.free(report);
         try stdout.writeStreamingAll(io, report);
 
@@ -184,7 +204,6 @@ pub fn main(init: std.process.Init) !void {
 
     // Headless: 6 frames with injected clicks to demonstrate interaction.
     // Uses the same CPU measure so the layout matches the windowed mode.
-    try measure_cpu.init();
     defer measure_cpu.deinit();
     app.measure = measure_cpu.measure;
     for (0..6) |i| {

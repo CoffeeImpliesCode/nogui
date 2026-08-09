@@ -97,6 +97,12 @@ pub const WidgetNode = struct {
     /// CSS box model: margin/border/padding/radius. Set at creation from
     /// the DrawCtx opts; flex and the renderer read it.
     box: Box = .{},
+    /// Font size in px for text-bearing nodes; 0 = the host's default.
+    /// Set from opts.font_size; the measure hook and the text engine
+    /// dispatch on it.
+    font_size: f32 = 0,
+    /// Font selection: 0 = the host default font, 1 = the second font.
+    font_id: u8 = 0,
     flex: FlexChild = .{}, // per-child sizing
     style: FlexStyle = .{}, // per-container layout style (justify/align); direction+gap come from kind
 };
