@@ -276,51 +276,28 @@ void main() {
         // Clamp radii to half the box so the SDF never inverts.
         radius = min(radius, size * 0.5);
         vec2 p = gl_FragCoord.xy - vOrigin - size * 0.5;
-        vec2 hbox = size * 0.5 - radius;
-        vec2 q = abs(p) - hbox;
-        float d;
-        if (q.x <= 0.0 && q.y <= 0.0) {
-            // Inside the box: the classic SDF distance -min(radius) is 0
-            // for radius-0 rects, which halves the coverage of fills and
-            // rings. Use the true distance: the nearest flat edge, or the
-            // corner arc when both projections pass its endpoints.
-            float ex = hbox.x - abs(p.x);
-            float ey = hbox.y - abs(p.y);
-            float r = min(radius.x, radius.y);
-            if (abs(p.x) >= hbox.x - r && abs(p.y) >= hbox.y - r) {
-                float cx = abs(p.x) - (hbox.x - r);
-                float cy = abs(p.y) - (hbox.y - r);
-                d = -sqrt(cx * cx + cy * cy);
-            } else {
-                d = -min(ex, ey);
-            }
-        } else {
-            d = length(max(q, vec2(0.0))) - min(radius.x, radius.y);
-        }
+        // Inigo Quilez sdRoundBox: one formula, no branches. Inside the
+        // inset box (q <= 0) the distance is to the nearest straight edge
+        // (the true distance, correct for radius 0 too); beyond it the
+        // distance is to the corner arc. Branchy "true-distance" rewrites
+        // of the corner region measure against the arc's FULL circle, whose
+        // continuation past the visible quarter makes fragments several px
+        // inside the box read as near-boundary — stray 50-80% coverage
+        // pixels at the corners ("dirty inset").
+        vec2 q = abs(p) - size * 0.5 + radius;
+        float r = min(radius.x, radius.y);
+        float d = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
         float outer = clamp(0.5 - d, 0.0, 1.0);
         float coverage = outer;
         float border = mat.bearing_y;
         if (border > 0.0 && border < min(size.x, size.y) * 0.5) {
             // Ring: subtract the inner rounded rect (box inset by the
-            // border, corner radius reduced by the border).
+            // border, corner radius reduced by the border). Same canonical
+            // sdRoundBox (iq): the inner rect's b = size/2 - border.
             vec2 inner_radius = max(radius - border, vec2(0.0));
-            vec2 hbox_inner = size * 0.5 - border - inner_radius;
-            vec2 iq = abs(p) - hbox_inner;
-            float id;
-            if (iq.x <= 0.0 && iq.y <= 0.0) {
-                float ex = hbox_inner.x - abs(p.x);
-                float ey = hbox_inner.y - abs(p.y);
-                float r = min(inner_radius.x, inner_radius.y);
-                if (abs(p.x) >= hbox_inner.x - r && abs(p.y) >= hbox_inner.y - r) {
-                    float cx = abs(p.x) - (hbox_inner.x - r);
-                    float cy = abs(p.y) - (hbox_inner.y - r);
-                    id = -sqrt(cx * cx + cy * cy);
-                } else {
-                    id = -min(ex, ey);
-                }
-            } else {
-                id = length(max(iq, vec2(0.0))) - min(inner_radius.x, inner_radius.y);
-            }
+            vec2 iq = abs(p) - (size * 0.5 - border) + inner_radius;
+            float ir = min(inner_radius.x, inner_radius.y);
+            float id = min(max(iq.x, iq.y), 0.0) + length(max(iq, vec2(0.0))) - ir;
             float inner = clamp(0.5 - id, 0.0, 1.0);
             coverage = clamp(outer - inner, 0.0, 1.0);
         }
