@@ -82,6 +82,8 @@ fn boxFromOpts(opts: anytype) Box {
     // Paint-only fields (absent keeps the Box defaults).
     if (@hasField(T, "shadow")) box.shadow = opts.shadow;
     if (@hasField(T, "clip")) box.clip = opts.clip;
+    // layer is a u32 — copy it directly (absent keeps the Box default 0).
+    if (@hasField(T, "layer")) box.layer = opts.layer;
     // texture is an optional u32 — copy the optional directly.
     if (@hasField(T, "texture")) box.texture = opts.texture;
     // gradient is a [4]f32 like a color — copy element-wise via indexing.
@@ -175,6 +177,12 @@ pub const DrawCtx = struct {
         var basis: f32 = 0;
         if (@hasField(@TypeOf(opts), "basis")) basis = opts.basis;
         if (basis > 0) self.tree.node(id).?.flex.basis = basis;
+        // shrink mirrors grow: a node may opt out of the overflow shrink
+        // pass (e.g. a basis-pinned overlay whose exact height is
+        // load-bearing). Default 1 = the flex default, untouched.
+        var shrink: f32 = 1;
+        if (@hasField(@TypeOf(opts), "shrink")) shrink = opts.shrink;
+        if (shrink != 1) self.tree.node(id).?.flex.shrink = shrink;
         applyFlexStyle(self, id, opts);
         self.descend(id);
         return id;
@@ -191,6 +199,10 @@ pub const DrawCtx = struct {
         var basis: f32 = 0;
         if (@hasField(@TypeOf(opts), "basis")) basis = opts.basis;
         if (basis > 0) self.tree.node(id).?.flex.basis = basis;
+        // shrink mirrors grow (see column()).
+        var shrink: f32 = 1;
+        if (@hasField(@TypeOf(opts), "shrink")) shrink = opts.shrink;
+        if (shrink != 1) self.tree.node(id).?.flex.shrink = shrink;
         applyFlexStyle(self, id, opts);
         self.descend(id);
         return id;
@@ -664,6 +676,28 @@ test "DrawCtx: absent box fields leave Box defaults" {
     try std.testing.expectEqual(Box{}, tree.node(plain_slider).?.box);
     try std.testing.expectEqual(Box{}, tree.node(plain_spacer).?.box);
     try std.testing.expectEqual(Box{}, tree.node(plain_col).?.box);
+}
+
+test "DrawCtx: the .layer box option lands on the node's box" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+
+    // Any widget kind carries the option: a container, a label, a button.
+    const layered_col = try ctx.column(.{ .layer = 3 });
+    ctx.pop();
+    const layered_label = try ctx.label(.{ .text = "layer", .layer = 1 });
+    try std.testing.expectEqual(@as(u32, 3), tree.node(layered_col).?.box.layer);
+    try std.testing.expectEqual(@as(u32, 1), tree.node(layered_label).?.box.layer);
+
+    // Absent -> the Box default (0 = the base tree).
+    const plain_col = try ctx.column(.{});
+    ctx.pop();
+    try std.testing.expectEqual(@as(u32, 0), tree.node(plain_col).?.box.layer);
 }
 
 test "DrawCtx: the .clip opt lands on the container box; pushClip appends to the tree's clip list" {

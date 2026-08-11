@@ -157,6 +157,12 @@ pub fn build(b: *std.Build) void {
         "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/mandelbrot_comp.spv", "shaders/mandelbrot.comp.slang",
     });
     v7_run_cmd.step.dependOn(&mandelbrot_spv_step.step);
+    // The CS1 radix-sort compute shader (V1b) — same staleness rule: the
+    // sort key layout must never silently lag the batch's SceneRect.
+    const sort_spv_step = b.addSystemCommand(&.{
+        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/sort_comp.spv", "shaders/sort.comp.slang",
+    });
+    v7_run_cmd.step.dependOn(&sort_spv_step.step);
 
     // ── Tests ─────────────────────────────────────────────
     const v7_tests = b.addTest(.{

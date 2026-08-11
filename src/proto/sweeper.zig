@@ -37,6 +37,8 @@ pub const TYPE_SOLID: u32 = 0;
 pub const TYPE_GLYPH: u32 = 1;
 pub const TYPE_ROUNDED_RECT: u32 = 2;
 pub const TYPE_SHADOW: u32 = 3;
+pub const TYPE_STROKE: u32 = 4; // a path stroked at width bearing_y (the distance branch)
+pub const TYPE_SWEEP: u32 = 5; // an SVG fill: the SDF-based sweep AA (no subpixel)
 
 /// Compute the AABB extent of a set of curves.
 pub fn glyphExtent(curves: []const Curve) struct { min_x: f32, min_y: f32, w: f32, h: f32 } {
@@ -134,6 +136,56 @@ pub const GlyphSweeper = struct {
             .curve_h = curve_h,
             .win_w = win_w,
             .win_h = win_h,
+            .curve_bda = curve_bda,
+        };
+        const offset = slot * MATERIAL_SIZE;
+        const dst: [*]u8 = @ptrCast(@alignCast(material_buf.cpu));
+        @as(*GlyphMaterial, @ptrCast(@alignCast(dst + offset))).* = mat;
+    }
+
+    /// Write a stroke material (type 4): the same curve BDA as the fill,
+    /// with the stroke width in bearing_y (user units; the SvgView scales
+    /// it with the view). The fragment's TYPE_STROKE branch computes the
+    /// distance to the curves instead of the sweep coverage.
+    pub fn writeStrokeMaterial(
+        curve_bda: u64,
+        material_buf: noapi.GpuPtr,
+        slot: u32,
+        width: f32,
+    ) void {
+        const mat = GlyphMaterial{
+            .type = TYPE_STROKE,
+            .bearing_y = width,
+            .curve_w = 0,
+            .curve_h = 0,
+            .win_w = 0,
+            .win_h = 0,
+            .curve_bda = curve_bda,
+        };
+        const offset = slot * MATERIAL_SIZE;
+        const dst: [*]u8 = @ptrCast(@alignCast(material_buf.cpu));
+        @as(*GlyphMaterial, @ptrCast(@alignCast(dst + offset))).* = mat;
+    }
+
+    /// Write an SVG fill material (type 5): the same curve BDA + extent
+    /// as TYPE_GLYPH, but the fragment uses the SDF-based sweep AA (the
+    /// fwidth band + gamma) and — crucially — NOT the subpixel branch:
+    /// the tiger's colored fills must never be RGB-striped. The text's
+    /// glyphs keep TYPE_GLYPH, so the two render independently.
+    pub fn writeSweepMaterial(
+        curve_bda: u64,
+        material_buf: noapi.GpuPtr,
+        slot: u32,
+        curve_w: f32,
+        curve_h: f32,
+    ) void {
+        const mat = GlyphMaterial{
+            .type = TYPE_SWEEP,
+            .bearing_y = 0,
+            .curve_w = curve_w,
+            .curve_h = curve_h,
+            .win_w = curve_w,
+            .win_h = curve_h,
             .curve_bda = curve_bda,
         };
         const offset = slot * MATERIAL_SIZE;

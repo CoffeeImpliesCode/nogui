@@ -1307,6 +1307,39 @@ test "layoutFingerprint: identical rects with different box sides differ" {
     try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_left\":4.00") != null);
 }
 
+test "layoutFingerprint: paint-only box fields (layer) are excluded" {
+    var tree_a = WidgetTree.init(std.testing.allocator);
+    defer tree_a.nodes.deinit(std.testing.allocator);
+    var tree_b = WidgetTree.init(std.testing.allocator);
+    defer tree_b.nodes.deinit(std.testing.allocator);
+
+    // Same ids, kinds, and rects — only box.layer differs (a paint-only
+    // field, like shadow/gradient/clip/texture). The golden LAYOUT
+    // comparison must ignore it: two frames with the same geometry but
+    // different layer keys hash identically.
+    try tree_a.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .label = .{ .text = "a" } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
+        .box = .{ .layer = 0 },
+    });
+    try tree_b.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .label = .{ .text = "a" } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
+        .box = .{ .layer = 5 },
+    });
+
+    const fpa = try layoutFingerprint(&tree_a, std.testing.allocator);
+    defer std.testing.allocator.free(fpa);
+    const fpb = try layoutFingerprint(&tree_b, std.testing.allocator);
+    defer std.testing.allocator.free(fpb);
+
+    try std.testing.expectEqualStrings(fpa, fpb);
+}
+
 test "renderAscii: hover on a sub-2px node draws no border and does not panic" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.nodes.deinit(std.testing.allocator);

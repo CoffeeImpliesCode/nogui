@@ -252,7 +252,7 @@ pub const Window = struct {
         self.context.gpu.descHeapSetTextures(self.blit_heap, 0, &.{rt_desc});
     }
 
-    pub fn init(context: *Context, title: [:0]const u8, w: u32, h: u32, vert_spv: []const u32, frag_spv: []const u32, blit_vert_spv: []const u32, blit_frag_spv: []const u32) !@This() {
+    pub fn init(context: *Context, title: [:0]const u8, w: u32, h: u32, vert_spv: []const u32, frag_spv: []const u32, sort_spv: []const u32, blit_vert_spv: []const u32, blit_frag_spv: []const u32) !@This() {
         const sdl_win = try sdl3.video.Window.init(title, w, h, .{ .resizable = true });
         try sdl_win.show();
 
@@ -275,7 +275,7 @@ pub const Window = struct {
         const mat_buf = try context.gpu.gpuMalloc(MAX_MATERIALS * MATERIAL_SIZE, 16, .default);
         const mat_bda = mat_buf.gpu;
 
-        var batch = try Batch9Slice.init(&context.gpu, vert_spv, frag_spv);
+        var batch = try Batch9Slice.init(&context.gpu, vert_spv, frag_spv, sort_spv);
         batch.material_buf_bda = mat_bda;
 
         // Blit shaders + descriptor heap
@@ -477,6 +477,10 @@ pub const Window = struct {
         // ── Phase 3: GPU render ──
         var cmd = self.gpu_window.commandsBegin();
 
+        // CS1 (V1b) FIRST, outside the render pass: the bag upload + the
+        // GPU z-sort + the compute→graphics barrier.
+        try self.batch.sort(&cmd, slice_rects[0..rect_count], &.{});
+
         // Pass 1: render GUI to offscreen R32G32B32A32_SFLOAT (Oklab space)
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = self.render_target, .load_op = .clear, .store_op = .store, .clear_color = .{ 0.516395, 0.0, 0.0, 1.0 } },
@@ -485,7 +489,7 @@ pub const Window = struct {
         cmd.setBlendEnable(true);
         // The prototype driver has no clip stack — pass an empty clip list
         // (all SceneRect clip_ids are ~0 → the shader test is a no-op).
-        try self.batch.draw(&cmd, slice_rects[0..rect_count], &.{}, sw, sh);
+        self.batch.draw(&cmd, sw, sh);
         cmd.setBlendEnable(false);
         cmd.endRendering();
 

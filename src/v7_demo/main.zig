@@ -47,10 +47,14 @@ pub fn main(init: std.process.Init) !void {
     defer app.deinit();
     var todo = ui.TodoApp{};
     _ = try app.register(ui.TodoApp, &todo);
+    var tiger = ui.TigerApp{}; // registered at the --tiger dispatch (the App holds ONE root)
+    var strokes = ui.TestStrokesApp{}; // --strokes: the stroke test scene
 
     var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, alloc);
     defer args_it.deinit();
     var window_mode = false;
+    var tiger_mode = false; // --tiger: the dedicated tiger showcase window
+    var strokes_mode = false; // --strokes: the stroke test scene
     var frames: ?u32 = null;
     var shot_path: ?[]const u8 = null;
     var shot_hover: ?[2]f32 = null;
@@ -62,9 +66,23 @@ pub fn main(init: std.process.Init) !void {
     var quad_debug = false; // --quad-debug tints the glyph quads
     var bgr = false; // --bgr: BGR subpixel stripe order
     var damp = true; // --no-damp: disable the chroma damping
+    var gpu_sort_verify = false; // --gpu-sort-verify: submit the bag in reverse paint order
     while (args_it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--window")) {
+        if (std.mem.eql(u8, arg, "--tiger")) {
+            // The dedicated showcase: the tiger LARGE (our sweep) next to
+            // the librsvg reference render. Nothing else.
+            tiger_mode = true;
+        } else if (std.mem.eql(u8, arg, "--strokes")) {
+            // The systematic stroke test scene: curved thin strokes with
+            // scale / algo / oversize sliders.
+            strokes_mode = true;
+        } else if (std.mem.eql(u8, arg, "--window")) {
             window_mode = true;
+        } else if (std.mem.eql(u8, arg, "--gpu-sort-verify")) {
+            // V1b verification: the CPU submits the drawable bag in
+            // REVERSE paint order; the CS1 sort (stable on (z, order))
+            // must restore it, so the runShot stays byte-identical.
+            gpu_sort_verify = true;
         } else if (std.mem.eql(u8, arg, "--quad-debug")) {
             quad_debug = true;
         } else if (std.mem.eql(u8, arg, "--no-damp")) {
@@ -153,13 +171,53 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (strokes_mode) {
+        _ = try app.register(ui.TestStrokesApp, &strokes);
+        if (frames) |n| {
+            window_backend.runFrames(&app, ui.TestStrokesApp, &strokes, n, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
+                std.log.err("runFrames failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        if (shot_path) |p| {
+            window_backend.runShot(&app, ui.TestStrokesApp, &strokes, p, shot_hover, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
+                std.log.err("runShot failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        try window_backend.run(&app, ui.TestStrokesApp, &strokes, subpixel, quad_debug, bgr, damp, gpu_sort_verify);
+        return;
+    }
+
+    if (tiger_mode) {
+        _ = try app.register(ui.TigerApp, &tiger);
+        if (frames) |n| {
+            window_backend.runFrames(&app, ui.TigerApp, &tiger, n, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
+                std.log.err("runFrames failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        if (shot_path) |p| {
+            window_backend.runShot(&app, ui.TigerApp, &tiger, p, shot_hover, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
+                std.log.err("runShot failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        try window_backend.run(&app, ui.TigerApp, &tiger, subpixel, quad_debug, bgr, damp, gpu_sort_verify);
+        return;
+    }
+
     if (window_mode) {
-        try window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp);
+        try window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify);
         return;
     }
 
     if (frames) |n| {
-        window_backend.runFrames(&app, ui.TodoApp, &todo, n, subpixel, quad_debug, bgr, damp) catch |e| {
+        window_backend.runFrames(&app, ui.TodoApp, &todo, n, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
             std.log.err("runFrames failed: {s}", .{@errorName(e)});
             return e;
         };
@@ -167,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (shot_path) |p| {
-        window_backend.runShot(&app, ui.TodoApp, &todo, p, shot_hover, subpixel, quad_debug, bgr, damp) catch |e| {
+        window_backend.runShot(&app, ui.TodoApp, &todo, p, shot_hover, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
             std.log.err("runShot failed: {s}", .{@errorName(e)});
             return e;
         };

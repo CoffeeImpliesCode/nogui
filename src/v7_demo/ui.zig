@@ -19,6 +19,7 @@ const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
 const srgbToOklab = @import("text.zig").srgbToOklab;
 const text_mod = @import("text.zig");
 const WidgetTree = @import("v7/widget.zig").WidgetTree;
+const WidgetNode = @import("v7/widget.zig").WidgetNode;
 const App = @import("v7/app.zig").App;
 const Id = @import("v7/id.zig").Id;
 
@@ -33,6 +34,20 @@ pub var texture_idx: ?u32 = null;
 /// compute with — center/scale are the pan/zoom knobs Part B will drive;
 /// the window feeds the frame time into the shader's hue animation itself.
 pub var mandelbrot_idx: ?u32 = null;
+/// The SVG showcase box's node id (the window injects the tiger's scene
+/// rects at this box's absolute rect each frame).
+pub var svg_box_id: ?u32 = null;
+/// The stroke test scene's tunables (driven by sliders): `stroke_scale`
+/// (the whole scene's extra scale), `stroke_algo` (0 = naive SDF, 1 =
+/// marching quads), `stroke_oversize` (the AA band / quad half-extent).
+/// The window applies them to the SvgView each frame.
+pub var stroke_scale: f32 = 1.0;
+pub var stroke_algo: f32 = 1; // 1 = marching quads (the tiger's current look)
+pub var stroke_oversize: f32 = 0.0;
+/// The tiger reference render's bindless heap index (the window uploads
+/// the rsvg-rendered tiger PNG as a texture; the tiger demo samples it
+/// next to our GPU sweep).
+pub var tiger_ref_idx: ?u32 = null;
 pub var mandelbrot_center: [2]f64 = .{ -0.5, 0 };
 pub var mandelbrot_scale: f64 = 300;
 
@@ -45,6 +60,125 @@ pub var fps: f32 = 0;
 /// A pill-click toggle request, applied by the window driver before the
 /// next frame (the window owns the batch state the pills mirror; the UI
 /// cannot reach the batch, so the click sets a request the window honors).
+/// The tiger showcase root: the minimal UI (title + the two large
+/// cards). The window drives the SvgView injection via svg_box_id and
+/// the reference texture via tiger_ref_idx.
+pub const TigerApp = struct {
+    pub fn draw(self: *TigerApp, ctx: *DrawCtx) !void {
+        _ = self;
+        _ = try ctx.column(.{ .gap = 12, .grow = 1, .padding = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 } });
+        defer ctx.pop();
+
+        {
+            _ = try ctx.column(.{ .gap = 6 });
+            defer ctx.pop();
+            _ = try ctx.label(.{ .text = "TIGER SHOWCASE — GPU SWEEP VS REFERENCE", .color = C_TEXT, .font_size = 18, .padding = .{ .left = 6, .right = 6 } });
+            _ = try caption(ctx, "Left: our SvgView sweep of tiger.svg   |   Right: librsvg reference", 0);
+        }
+
+        {
+            _ = try ctx.row(.{ .gap = 16 });
+            defer ctx.pop();
+            {
+                _ = try card(ctx, false, false);
+                defer ctx.pop();
+                _ = try caption(ctx, "GPU — OUR SWEEP", 0);
+                {
+                    _ = try ctx.row(.{});
+                    defer ctx.pop();
+                    svg_box_id = @intFromEnum(try ctx.column(.{
+                        .basis = 480,
+                        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                        .border_color = C_BORDER,
+                        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+                    }));
+                    defer ctx.pop();
+                    _ = try ctx.spacer(.{ .size = 480 });
+                }
+            }
+            {
+                _ = try card(ctx, false, false);
+                defer ctx.pop();
+                _ = try caption(ctx, "REFERENCE — LIBRSVG", 0);
+                {
+                    _ = try ctx.row(.{});
+                    defer ctx.pop();
+                    _ = try ctx.column(.{
+                        .texture = tiger_ref_idx,
+                        .basis = 480,
+                        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                        .border_color = C_BORDER,
+                        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+                    });
+                    defer ctx.pop();
+                    _ = try ctx.spacer(.{ .size = 480 });
+                }
+            }
+        }
+    }
+};
+
+/// The stroke test scene: a set of curved thin strokes at increasing
+/// widths, with sliders for the scene scale, the stroke algorithm
+/// (naive SDF vs marching quads) and the pixel oversizing. The window
+/// drives the SvgView injection + the per-frame setStrokeStyle.
+pub const TestStrokesApp = struct {
+    pub fn draw(self: *TestStrokesApp, ctx: *DrawCtx) !void {
+        _ = self;
+        _ = try ctx.column(.{ .gap = 12, .grow = 1, .padding = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 } });
+        defer ctx.pop();
+
+        {
+            _ = try ctx.column(.{ .gap = 6 });
+            defer ctx.pop();
+            _ = try ctx.label(.{ .text = "STROKE TEST SCENE", .color = C_TEXT, .font_size = 18, .padding = .{ .left = 6, .right = 6 } });
+            _ = try caption(ctx, "Curved thin strokes at widths 0.1 - 4.0   |   A cycles the stroke algo", 0);
+        }
+
+        {
+            // The scene (left) + the controls (right).
+            _ = try ctx.row(.{ .gap = 16 });
+            defer ctx.pop();
+            {
+                _ = try card(ctx, false, false);
+                defer ctx.pop();
+                _ = try caption(ctx, "STROKES", 0);
+                {
+                    _ = try ctx.row(.{});
+                    defer ctx.pop();
+                    svg_box_id = @intFromEnum(try ctx.column(.{
+                        .basis = 620,
+                        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                        .border_color = C_BORDER,
+                        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+                    }));
+                    defer ctx.pop();
+                    _ = try ctx.spacer(.{ .size = 620 });
+                }
+            }
+            {
+                _ = try card(ctx, false, false);
+                defer ctx.pop();
+                _ = try caption(ctx, "CONTROLS", 0);
+                const algo_idx: u32 = @intFromFloat(stroke_algo);
+                const algo_name = switch (algo_idx) {
+                    0 => "naive SDF",
+                    1 => "marching quads",
+                    else => "spec'd marching quads",
+                };
+                const algo_text = try std.fmt.allocPrint(ctx.arena, "MODE {d}: {s}   (A cycles)", .{ algo_idx, algo_name });
+                _ = try labelColor(ctx, algo_text, C_ACCENT);
+                const scale_text = try std.fmt.allocPrint(ctx.arena, "scale: {d:.2}", .{stroke_scale});
+                _ = try labelColor(ctx, scale_text, C_TEXT_SEC);
+                _ = try ctx.slider(.{ .label = "stroke-scale", .value = &stroke_scale, .min = 0.25, .max = 4, .color = C_ACCENT, .padding = .{ .left = 6, .right = 10 } });
+                const oversize_text = try std.fmt.allocPrint(ctx.arena, "pixel oversizing: {d:.2}", .{stroke_oversize});
+                _ = try labelColor(ctx, oversize_text, C_TEXT_SEC);
+                _ = try ctx.slider(.{ .label = "stroke-oversize", .value = &stroke_oversize, .min = 0, .max = 4, .color = C_ACCENT, .padding = .{ .left = 6, .right = 10 } });
+            }
+        }
+    }
+};
+
 pub const ToggleKind = enum { subpixel, bgr, damp, debug };
 pub var toggle_request: ?ToggleKind = null;
 
@@ -72,9 +206,12 @@ fn labelColor(ctx: *DrawCtx, text: []const u8, color: [4]f32) !Id {
     return ctx.label(.{ .text = text, .color = color, .padding = .{ .left = 6, .right = 6 } });
 }
 
-/// A muted caption (section headers, stat lines).
-fn caption(ctx: *DrawCtx, text: []const u8) !Id {
-    return ctx.label(.{ .text = text, .color = C_TEXT_MUTED, .font_size = 11, .padding = .{ .left = 6, .right = 6 } });
+/// A muted caption (section headers, stat lines). `layer` (default 0)
+/// stamps the caption's own layer key — a caption inside a layered
+/// container must ride that layer or its glyphs sort below the container's
+/// z>0 fill and vanish behind it.
+fn caption(ctx: *DrawCtx, text: []const u8, layer: u32) !Id {
+    return ctx.label(.{ .text = text, .color = C_TEXT_MUTED, .font_size = 11, .padding = .{ .left = 6, .right = 6 }, .layer = layer });
 }
 
 /// Secondary (ghost) button: a flat card-deep fill + a soft border (the
@@ -124,7 +261,7 @@ fn card(ctx: *DrawCtx, comptime grow: bool, clip: bool) !Id {
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
         .border_color = C_BORDER,
         .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
-        .padding = .{ .top = 14, .right = 14, .bottom = 14, .left = 14 },
+        .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
         .shadow = 4,
     });
 }
@@ -167,7 +304,7 @@ const VolumeSlider = struct {
         const text = try std.fmt.allocPrint(ctx.arena, "Volume: {d:.1}", .{self.volume});
         _ = try card(ctx, true, false);
         defer ctx.pop();
-        _ = try caption(ctx, "VOLUME");
+        _ = try caption(ctx, "VOLUME", 0);
         _ = try ctx.slider(.{ .label = "volume-slider", .value = &self.volume, .min = 0, .max = 1, .color = C_ACCENT, .padding = .{ .left = 6, .right = 10 } });
         {
             _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
@@ -231,6 +368,36 @@ pub const TodoApp = struct {
         }
         const footer_text = try std.fmt.allocPrint(ctx.arena, "{d} of {d} done", .{ done_count, self.visible_count });
 
+        // V1c — the layer demo: a "layer 1" badge submitted with z = 1 at
+        // the BAG'S FRONT (the tree's FIRST node — its cmds emit before
+        // the Showcase row and the root column, so it lands at the very
+        // front of the unordered bag). The CS1 sort lifts it above every
+        // z=0 drawable regardless of the bag position, so the badge paints
+        // over the title/header below it (the layout overlap is real: the
+        // badge's rect covers the showcase's pad label and the header's
+        // title). Layout sleight: basis 44 pins the badge's height and the
+        // negative bottom margin cancels it exactly (the next root node
+        // advances by zero), so the tree below lays out byte-identically
+        // to the pre-layer shot and ONLY the badge region differs.
+        _ = try ctx.column(.{
+            .layer = 1,
+            .basis = 44,
+            // shrink 0: the demo tree overflows the 1160px surface, so the
+            // overflow shrink pass would otherwise crush the 44px basis and
+            // break the -44 bottom-margin cancellation below.
+            .shrink = 0,
+            .margin = .{ .left = 20, .bottom = -44, .right = 880 }, // 200px chip, top-left of the 1100px surface
+            .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+            .border_color = C_BORDER,
+            .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
+            .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
+            .fill = C_ACCENT_DIM,
+            .gradient = srgbToOklab(C_ACCENT_DIM),
+            .shadow = 4,
+        });
+        _ = try caption(ctx, "LAYER 1", 1);
+        ctx.pop(); // the badge — explicit, NOT deferred (a deferred pop fires at the end of draw() and collects every following block into the badge)
+
         // Box-model showcase FIRST, at ROOT level: a root-level row spans
         // the full window width, so justify = space_between has main-axis
         // free space to distribute (a nested row would hug its content).
@@ -238,7 +405,7 @@ pub const TodoApp = struct {
 
         // Root column: every block stacked with a 16px gap; the root's own
         // padding insets the whole UI from the window edges.
-        _ = try ctx.column(.{ .gap = 16, .grow = 1, .padding = .{ .top = 20, .right = 20, .bottom = 20, .left = 20 } });
+        _ = try ctx.column(.{ .gap = 12, .grow = 1, .padding = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 } });
         defer ctx.pop();
 
         {
@@ -252,7 +419,6 @@ pub const TodoApp = struct {
                 _ = try ctx.row(.{ .gap = 6 });
                 defer ctx.pop();
                 const st = text_mod.debug_state;
-                _ = try pill(ctx, "subpixel", st.subpixel, TodoApp.toggleSubpixel);
                 _ = try pill(ctx, if (st.bgr) "BGR" else "RGB", st.bgr, TodoApp.toggleBgr);
                 _ = try pill(ctx, "damp", st.damp, TodoApp.toggleDamp);
                 _ = try pill(ctx, "debug", st.quad_debug, TodoApp.toggleDebug);
@@ -260,16 +426,14 @@ pub const TodoApp = struct {
         }
 
         {
-            // Font-sizes showcase: labels at 10/13/16/20/24/32 px. The
+            // Font-sizes showcase: labels at 13/16/20/24/32 px. The
             // per-node font_size selects the matching font state; S toggles
             // the subpixel AA for comparison at every size.
             _ = try card(ctx, false, false);
             defer ctx.pop();
-            _ = try caption(ctx, "FONT SIZES — S TOGGLES SUBPIXEL AA");
-            _ = try ctx.label(.{ .text = "10px: The quick brown fox jumps over the lazy dog", .font_size = 10, .padding = .{ .left = 6, .right = 6 } });
+            _ = try caption(ctx, "FONT SIZES — S TOGGLES SUBPIXEL AA", 0);
             _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .padding = .{ .left = 6, .right = 6 } });
             _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "20px: The quick brown fox jumps over the lazy dog", .font_size = 20, .padding = .{ .left = 6, .right = 6 } });
             _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .padding = .{ .left = 6, .right = 6 } });
         }
 
@@ -295,7 +459,7 @@ pub const TodoApp = struct {
             // numeral + dec/reset/inc row (inc = the primary action).
             _ = try card(ctx, true, false);
             defer ctx.pop();
-            _ = try caption(ctx, "COUNTER");
+            _ = try caption(ctx, "COUNTER", 0);
             _ = try ctx.label(.{ .text = counter_text, .font_size = 28, .color = C_ACCENT, .padding = .{ .left = 6, .right = 6 } });
             {
                 _ = try ctx.row(.{ .gap = 6 });
@@ -315,11 +479,16 @@ pub const TodoApp = struct {
         _ = try ctx.spacer(.{ .size = 8 });
 
         {
-            // Todo block: a card with the add/remove header + one toggle
-            // row per visible item.
+            // Todo block: a card with the done-count header + the
+            // add/remove buttons + one toggle row per visible item.
             _ = try card(ctx, false, false);
             defer ctx.pop();
-            _ = try caption(ctx, "TODOS");
+            {
+                _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
+                defer ctx.pop();
+                _ = try caption(ctx, "TODOS", 0);
+                _ = try labelColor(ctx, footer_text, C_TEXT_MUTED);
+            }
             {
                 _ = try ctx.row(.{ .gap = 6 });
                 defer ctx.pop();
@@ -356,66 +525,73 @@ pub const TodoApp = struct {
             }
         }
 
-        // Footer: done count over the visible items.
-        _ = try labelColor(ctx, footer_text, C_TEXT_SEC);
-
         {
-            // Clipped showcase: a `.clip = true` card. The card hugs its
-            // content, so the button row sits flush at the card's CONTENT
-            // bottom — but the card's 14px padding keeps an ordinary small
-            // shadow inside the box, so the clip would cut nothing. The
-            // row's shadow is therefore oversized (blur 60): its fade
-            // extends ~30px past the row, spilling past the card's border
-            // box on the bottom and right. The fragment shader's clip test
-            // then cuts the spill hard at the card boundary — the feathered
-            // fade ends in a straight edge, which is the visible proof the
-            // clip works (with a small blur the tail is too faint to see).
-            _ = try card(ctx, false, true);
-            defer ctx.pop();
-            _ = try caption(ctx, "CLIPPED — THE SHADOW IS CUT AT THE CARD EDGE");
-            {
-                _ = try ctx.row(.{ .gap = 6, .shadow = 60 });
-                defer ctx.pop();
-                _ = try btn(ctx, "clip", TodoApp.clipNoop);
-                _ = try btn(ctx, "overflow", TodoApp.clipNoop);
-                _ = try btn(ctx, "cut", TodoApp.clipNoop);
-            }
-        }
-
-        {
-            // Mandelbrot showcase (Part A): the compute shader renders the
-            // fractal into a 512x384 rgba32_float texture each frame (the
-            // window dispatches it BEFORE the GUI pass and registers it in
-            // the texture heap — sampled + storage views); this box samples
-            // it through the same bindless TYPE_TEXTURE path as the stripe
-            // tile. Full-width x 192px tall (the row-basis variant broke
-            // the flex cross-axis squeeze). Colors are Oklab-authored.
-            _ = try card(ctx, false, false);
+            // The showcase row: the mandelbrot + the tiger side by side
+            // (the tiger's card to the RIGHT, same height — never below,
+            // where it would overflow the window).
+            _ = try ctx.row(.{ .gap = 12 });
             defer ctx.pop();
             {
-                _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
+                // Mandelbrot showcase (Part A): the compute shader renders
+                // the fractal into a 512x384 rgba32_float texture each
+                // frame (the window dispatches it BEFORE the GUI pass and
+                // registers it in the texture heap — sampled + storage
+                // views); this box samples it through the same bindless
+                // TYPE_TEXTURE path as the stripe tile. Colors are
+                // Oklab-authored.
+                _ = try card(ctx, false, false);
                 defer ctx.pop();
-                const prec_text = switch (mandelbrot_precision) {
-                    0 => "f32",
-                    1 => "f64",
-                    else => "adaptive",
-                };
-                const mb_label = try std.fmt.allocPrint(ctx.arena, "Mandelbrot  [{s}]", .{prec_text});
-                _ = try caption(ctx, mb_label);
-                _ = try btn(ctx, "reset", TodoApp.mandelbrotReset);
+                {
+                    _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
+                    defer ctx.pop();
+                    const prec_text = switch (mandelbrot_precision) {
+                        0 => "f32",
+                        1 => "f64",
+                        else => "adaptive",
+                    };
+                    const mb_label = try std.fmt.allocPrint(ctx.arena, "Mandelbrot  [{s}]", .{prec_text});
+                    _ = try caption(ctx, mb_label, 0);
+                    _ = try btn(ctx, "reset", TodoApp.mandelbrotReset);
+                }
+                {
+                    _ = try ctx.row(.{});
+                    defer ctx.pop();
+                    _ = try ctx.column(.{
+                        .texture = mandelbrot_idx,
+                        .basis = 480, // fixed width (the row's main axis)
+                        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                        .border_color = C_BORDER,
+                        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+                    });
+                    defer ctx.pop();
+                    _ = try ctx.spacer(.{ .size = 190 }); // content height
+                }
             }
             {
-                _ = try ctx.row(.{});
+                // SVG showcase: the tiger (the classic SVG reference) —
+                // parsed + converted by the window's SvgView (the path
+                // curves + the glyph materials); this box reserves the
+                // drawing rect (the window injects the tiger's scene rects
+                // at it each frame).
+                _ = try card(ctx, false, false);
                 defer ctx.pop();
-                _ = try ctx.column(.{
-                    .texture = mandelbrot_idx,
-                    .basis = 480, // fixed width (the row's main axis)
-                    .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                    .border_color = C_BORDER,
-                    .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
-                });
-                defer ctx.pop();
-                _ = try ctx.spacer(.{ .size = 270 }); // content height
+                {
+                    _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
+                    defer ctx.pop();
+                    _ = try caption(ctx, "TIGER", 0);
+                }
+                {
+                    _ = try ctx.row(.{});
+                    defer ctx.pop();
+                    svg_box_id = @intFromEnum(try ctx.column(.{
+                        .basis = 190, // fixed width — the same height as the mandelbrot's box
+                        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                        .border_color = C_BORDER,
+                        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+                    }));
+                    defer ctx.pop();
+                    _ = try ctx.spacer(.{ .size = 190 }); // the square content height
+                }
             }
         }
     }
@@ -458,12 +634,6 @@ pub const TodoApp = struct {
 
     pub fn reset(self: *TodoApp) void {
         self.counter = 0;
-    }
-
-    /// The clip showcase's buttons are decoration: clicking them does
-    /// nothing (they exist to exercise the clip test on button fills).
-    pub fn clipNoop(self: *TodoApp) void {
-        _ = self;
     }
 
     pub fn mute(self: *TodoApp) void {
@@ -522,6 +692,48 @@ fn buildTree(app: *TodoApp) !WidgetTree {
 fn freeTree() void {
     if (test_arena) |*a| a.deinit();
     test_arena = null;
+}
+
+// The badge's exact-cancellation invariant: basis 44 + the -44 bottom
+// margin pin the badge to y=0..44 AND advance the next root node by zero,
+// so the tree below lays out byte-identically to a shot without the badge
+// (the runShot's diff is confined to the badge region).
+test "layer badge: first root, layer 1, its height cancels exactly" {
+    var app = TodoApp{};
+    var tree = try buildTree(&app);
+    defer freeTree();
+
+    // The badge column is the tree's FIRST root-level node (append order)
+    // and carries the layer key; its caption rides the same layer.
+    var roots_buf: [64]*WidgetNode = undefined;
+    const n_roots = tree.roots(&roots_buf);
+    try std.testing.expect(n_roots >= 3);
+    const badge_col = roots_buf[0];
+    try std.testing.expectEqual(Id.root, badge_col.parent);
+    try std.testing.expectEqual(@as(u32, 1), badge_col.box.layer);
+    var caption_has_layer = false;
+    for (tree.nodes.items) |n| {
+        if (n.kind == .label and n.parent == badge_col.id and n.box.layer == 1) caption_has_layer = true;
+    }
+    try std.testing.expect(caption_has_layer);
+
+    // Layout: the badge is a 44px (basis) x 200px (20 + 880 margins on the
+    // 1100px surface) chip at y=0; its -44 bottom margin cancels the
+    // advance exactly, so the Showcase row starts at y=0 and the root
+    // column follows it directly — no badge-induced offset anywhere.
+    const flex = @import("v7/flex.zig");
+    const Rect = @import("v7/widget.zig").Rect;
+    const Size = @import("v7/widget.zig").Size;
+    const fakeMeasure = struct {
+        fn f(_: []const u8, _: f32, _: u8) Size {
+            return .{ .width = 40, .height = 24 };
+        }
+    }.f;
+    flex.layoutWith(&tree, .{ .width = 1100, .height = 1160 }, fakeMeasure);
+
+    try std.testing.expectEqual(Rect{ .x = 20, .y = 0, .w = 200, .h = 44 }, badge_col.rect);
+    try std.testing.expectEqual(@as(f32, 0), roots_buf[1].rect.y); // Showcase row, unchanged
+    try std.testing.expectEqual(roots_buf[1].rect.y + roots_buf[1].rect.h, roots_buf[2].rect.y); // root column, unchanged
 }
 
 /// Scan by kind (never by position): node order is post-order and ids are

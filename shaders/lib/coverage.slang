@@ -182,3 +182,57 @@ float scanlineSweep(float2 size, float2 offset, float2 p0, float2 p1, float2 p2)
     area += b_trap * h_trap;
     return area;
 }
+
+// ── Stroke distance (TYPE_STROKE) ───────────────────────────────────────
+// The EXACT point-to-quadratic distance — Inigo Quilez's closed form
+// (minimize |B(t)-p|^2 by solving the cubic f'(t)=0 via Cardano). One
+// real root (h >= 0) or three (h < 0, the cosine form); the t's clamp to
+// [0,1] and the best is kept.
+public float distQuad(float2 p, float2 p0, float2 p1, float2 p2) {
+    float2 a = p1 - p0;
+    float2 b = p0 - 2.0 * p1 + p2;
+    float2 c = 2.0 * a;
+    float2 d = p0 - p;
+    float bb = dot(b, b);
+    // Degenerate: a straight line (the collinear midpoint conic) — the
+    // exact distance to the segment, avoiding the 1/0.
+    if (bb < 1e-12) {
+        float2 ab = p2 - p0;
+        float len2 = dot(ab, ab);
+        if (len2 < 1e-12) return length(d);
+        float t = clamp(dot(-d, ab) / len2, 0.0, 1.0);
+        float2 q = p0 + t * ab - p;
+        return length(q);
+    }
+    float kk = 1.0 / bb;
+    float kx = kk * dot(a, b);
+    float ky = kk * (2.0 * dot(a, a) + dot(d, b)) / 3.0;
+    float kz = kk * dot(d, a);
+    float res = 0.0;
+    float p = ky - kx * kx;
+    float p3 = p * p * p;
+    float q = kx * (2.0 * kx * kx - 3.0 * ky) + kz;
+    float h = q * q + 4.0 * p3;
+    if (h >= 0.0) {
+        h = sqrt(h);
+        float2 x = float2(h, -h) - q;
+        x *= 0.5;
+        float2 uv = sign(x) * pow(abs(x), float2(1.0 / 3.0));
+        // The depressed root is z = u + v (the cube roots of the two
+        // quadratics), so t = z - kx — NOT u^2+v^2.
+        float t = clamp(uv.x + uv.y - kx, 0.0, 1.0);
+        float2 qp = d + (c + b * t) * t;
+        res = dot(qp, qp);
+    } else {
+        float z = sqrt(-p);
+        float v = acos(q / (p * z * 2.0)) / 3.0;
+        float m = cos(v);
+        float n = sin(v) * 1.732050808;
+        float3 t = clamp(float3(m + m, -n - m, n - m) * z - kx, 0.0, 1.0);
+        float2 q1 = d + (c + b * t.x) * t.x;
+        float2 q2 = d + (c + b * t.y) * t.y;
+        float2 q3 = d + (c + b * t.z) * t.z;
+        res = min(dot(q1, q1), min(dot(q2, q2), dot(q3, q3)));
+    }
+    return sqrt(res);
+}

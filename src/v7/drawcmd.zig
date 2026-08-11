@@ -73,6 +73,12 @@ pub const DrawCmd = struct {
     /// shader's TYPE_TEXTURE branch samples the texture before the material
     /// dispatch; ring and shadow cmds never carry a texture.
     tex_idx: u32 = 0xFFFFFFFF,
+    /// Paint-only: the node's layer key (the GPU sort's z, v1 spec §2).
+    /// Copied from the node's box onto EVERY cmd the node emits — the
+    /// shadow, the ring, and the fill share the node's layer, so a layered
+    /// node paints as one unit over the whole z=0 tree regardless of the
+    /// bag position. buildSliceRects stamps it as the SceneRect's z.
+    layer: u32 = 0,
 };
 
 const palette = struct {
@@ -182,6 +188,7 @@ pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Al
                 .shadow = b.shadow,
                 .gradient = b.gradient,
                 .clip_id = clip_id,
+                .layer = b.layer,
             });
         }
 
@@ -199,21 +206,24 @@ pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Al
                 .shadow = b.shadow,
                 .gradient = b.gradient,
                 .clip_id = clip_id,
+                .layer = b.layer,
             });
         }
 
         const c = base_color orelse continue;
         // A textured fill shows the texture's own pixels: the fragment
-        // branch multiplies the sample by vColor (the tint), so the fill
-        // color is Oklab white (L=1, a=0, b=0) — the identity tint. The
-        // texture rect carries the registered heap index.
+        // branch multiplies the sample by vColor (the tint). The
+        // MULTIPLICATIVE identity for the Oklab channels is (1,1,1) —
+        // Oklab "white" (1,0,0) would zero the sample's a/b chroma and
+        // render every texture desaturated. The texture rect carries the
+        // registered heap index.
         const tex_idx: u32 = b.texture orelse 0xFFFFFFFF;
         // The held-down button eases from its normal fill to the darker
         // pressed palette color by press_alpha (1 = fully pressed; the
         // core drives the eased value, so the fill tracks the press-in
         // animation instead of snapping).
         const color: [4]f32 = if (tex_idx != 0xFFFFFFFF)
-            .{ 1, 0, 0, 1 } // OKLAB white — identity tint for the texture
+            .{ 1, 1, 1, 1 } // the identity tint — the texture's own Oklab pixels
         else if (pressed_id != null and pressed_id.? == node.id and node.kind == .button)
             lerp4(c, palette.button_pressed, press_alpha)
         else
@@ -238,6 +248,7 @@ pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Al
             .gradient = b.gradient,
             .clip_id = clip_id,
             .tex_idx = tex_idx,
+            .layer = b.layer,
         });
     }
     return list.toOwnedSlice(allocator);
@@ -559,6 +570,48 @@ test "collectDrawCmds: shadowed node emits one shadow cmd first with offset rect
     try expectColor(cmds[1].color, palette.button);
     try std.testing.expectEqual(@as(f32, 3), cmds[1].shadow);
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, cmds[1].gradient);
+}
+
+test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    // A layered, bordered, shadowed button emits three cmds (shadow, ring,
+    // fill) — every one must carry the node's layer key so the drawable
+    // bag sorts the whole node as one unit onto its z level.
+    const btn: Id = @enumFromInt(1);
+    const box = Box{ .layer = 2, .shadow = 3, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = btn,
+        .kind = .{ .button = .{ .label = "go" } },
+        .parent = .root,
+        .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
+        .box = box,
+    });
+
+    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    defer std.testing.allocator.free(cmds);
+
+    try std.testing.expectEqual(@as(usize, 3), cmds.len);
+    try std.testing.expectEqual(@as(f32, 3), cmds[0].shadow); // shadow first
+    try std.testing.expect(cmds[1].ring);
+    try std.testing.expect(!cmds[2].ring);
+    for (cmds) |c| try std.testing.expectEqual(@as(u32, 2), c.layer);
+
+    // A plain (unlayered) node's cmds default to layer 0.
+    const plain: Id = @enumFromInt(2);
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = plain,
+        .kind = .{ .button = .{ .label = "plain" } },
+        .parent = .root,
+        .rect = .{ .x = 10, .y = 60, .w = 80, .h = 30 },
+    });
+    const cmds2 = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    defer std.testing.allocator.free(cmds2);
+    // Reversed post-order: the plain button (appended last) emits first.
+    try std.testing.expectEqual(@as(usize, 4), cmds2.len);
+    try std.testing.expectEqual(@as(u32, 0), cmds2[0].layer); // plain fill
+    for (cmds2[1..]) |c| try std.testing.expectEqual(@as(u32, 2), c.layer);
 }
 
 test "collectDrawCmds: bordered label emits exactly one ring cmd" {

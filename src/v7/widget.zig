@@ -85,6 +85,15 @@ pub const Box = struct {
     /// white (identity tint) so the texture's own pixels show through.
     /// Never affects layout; excluded from the layout fingerprint.
     texture: ?u32 = null,
+    /// Paint-only: the layer key (the GPU sort's z) this node's drawables
+    /// submit with. 0 = the base tree; >0 = overlays/popups that paint over
+    /// the WHOLE z=0 tree regardless of their position in the drawable bag
+    /// (the v1 spec §2: the stable radix sorts on (z << 32) | order).
+    /// collectDrawCmds stamps it onto every cmd the node emits (shadow,
+    /// ring, fill) and buildSliceRects stamps it onto the node's glyphs, so
+    /// a layered node paints as one unit. Never affects layout; excluded
+    /// from the layout fingerprint.
+    layer: u32 = 0,
 };
 
 /// Horizontal+vertical sums of a Sides (for content-box derivation).

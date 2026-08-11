@@ -46,6 +46,8 @@ const SceneRect = @import("proto/render_9slice.zig").SceneRect;
 const BatchClipRect = @import("proto/render_9slice.zig").ClipRect;
 const TextEngine = @import("text.zig").TextEngine;
 const text_mod = @import("text.zig");
+const svg_xml = @import("svg_xml.zig");
+const SvgView = @import("svg_view.zig").SvgView;
 const MAX_MATERIALS = @import("text.zig").MAX_MATERIALS;
 const FONT_SIZE_PX = @import("text.zig").FONT_SIZE_PX;
 const proto = @import("proto/sweeper.zig");
@@ -84,6 +86,56 @@ fn mandelbrotRect(tree: *const WidgetTree, idx: ?u32) Rect {
         if (idx != null and n.box.texture == idx) return absoluteRect(tree, n.id);
     }
     return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+}
+
+/// The SVG showcase's reserved box (the node the ui stores in
+/// ui.svg_box_id): the tiger's scene rects are injected at its content
+/// rect. The CONTENT rect (not the border box) — the drawing area the
+/// box's padding/border define — plus the card's paint layer (the
+/// injected SVG rects must sort ON TOP of the card's fill, not at the
+/// default z=0 behind every box).
+const SvgCard = struct { rect: Rect, layer: u32 };
+
+fn svgCardRect(tree: *const WidgetTree) SvgCard {
+    if (ui.svg_box_id) |id_raw| {
+        const id: Id = @enumFromInt(id_raw);
+        for (tree.nodes.items) |n| {
+            if (n.id == id) return .{ .rect = contentRect(tree, id), .layer = n.box.layer };
+        }
+    }
+    return .{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .layer = 0 };
+}
+
+/// Parse the embedded tiger + convert it into the renderer's SvgView
+/// (per-path conics + glyph materials + scene rects). The materials are
+/// written into the shared text-engine buffer at the SVG region — the
+/// batch draws everything with that one material BDA.
+fn initSvgView(gpu: *noapi.Gpu, gpa: std.mem.Allocator, text_engine: *TextEngine) !SvgView {
+    const tiger_xml = @embedFile("tiger.svg");
+    var doc = try svg_xml.parseSvg(gpa, tiger_xml);
+    defer doc.deinit();
+    const v = try SvgView.init(gpu, gpa, &doc, text_engine.materials, text_engine.materialBda(), SVG_MATERIAL_BASE);
+    return v;
+}
+
+/// The stroke test scene: curved thin strokes at increasing widths. The
+/// stroke algo + oversize sliders drive the shader; the scale slider
+/// zooms the whole scene.
+fn initStrokeView(gpu: *noapi.Gpu, gpa: std.mem.Allocator, text_engine: *TextEngine) !SvgView {
+    const strokes_xml =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+        \\  <path d="M 50 60 C 150 220, 350 -80, 450 60" stroke="#fff" stroke-width="0.1" fill="none"/>
+        \\  <path d="M 50 120 C 150 280, 350 -20, 450 120" stroke="#fff" stroke-width="0.25" fill="none"/>
+        \\  <path d="M 50 180 C 150 340, 350 40, 450 180" stroke="#fff" stroke-width="0.5" fill="none"/>
+        \\  <path d="M 50 240 C 150 400, 350 100, 450 240" stroke="#fff" stroke-width="1" fill="none"/>
+        \\  <path d="M 50 300 C 150 460, 350 160, 450 300" stroke="#fff" stroke-width="2" fill="none"/>
+        \\  <path d="M 50 360 C 150 520, 350 220, 450 360" stroke="#fff" stroke-width="4" fill="none"/>
+        \\</svg>
+    ;
+    var doc = try svg_xml.parseSvg(gpa, strokes_xml);
+    defer doc.deinit();
+    const v = try SvgView.init(gpu, gpa, &doc, text_engine.materials, text_engine.materialBda(), SVG_MATERIAL_BASE);
+    return v;
 }
 
 /// In-flight pan (drag) state: the mouse position + the center at the grab.
@@ -135,6 +187,14 @@ fn toSurfacePoint(sdl_win: sdl3.video.Window, gw: *noapi.Surface, p: [2]f32) ![2
 /// (b < 0) — the deepest surface the cards sit on. Clears the offscreen
 /// target.
 const OKLAB_GRAY = [4]f32{ 0.20, 0.0, -0.008, 1.0 };
+
+/// The SVG view's material slots own the TOP region of the shared
+/// material buffer: [SVG_MATERIAL_BASE, MAX_MATERIALS). The tiger has
+/// ≤240 fill paths + up to 78 stroked paths (a slot each); the per-frame
+/// decorations descend from SVG_MATERIAL_BASE. The glyphs (from slot 1
+/// upward) must stay below SVG_MATERIAL_BASE — the demo's ~620 glyphs
+/// fit with headroom.
+const SVG_MATERIAL_BASE: u32 = MAX_MATERIALS - 512;
 
 /// A shader file read from disk: owns the byte buffer, exposes the SPIR-V
 /// word slice (shaderCreate copies the module, so the bytes only need to
@@ -415,7 +475,54 @@ fn uploadDemoTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.mem.A
     return registry.register(gpa, tex);
 }
 
-/// Flatten the frame's draw commands + widget text into SceneRects:
+/// The tiger demo's reference render: the rsvg-rendered tiger (a raw
+/// RGBA8 blob, 512×512, generated at build time from tiger.svg) uploaded
+/// as an rgba32_float texture and registered (ui.tiger_ref_idx) for the
+/// sampler-only TYPE_TEXTURE path.
+const TIGER_REF_SIZE = 512;
+fn uploadReferenceTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.mem.Allocator) !void {
+    const tex = try gpu.textureCreate(.{
+        .dimensions = .{ TIGER_REF_SIZE, TIGER_REF_SIZE, 1 },
+        .format = .rgba32_float,
+        .usage = .{ .sampled = true },
+    });
+    errdefer gpu.textureDestroy(tex);
+
+    const bytes: u64 = TIGER_REF_SIZE * TIGER_REF_SIZE * 4 * @sizeOf(f32);
+    const buf = try gpu.gpuMalloc(bytes, 64, .default);
+    defer gpu.gpuFree(buf);
+    const src = @embedFile("tiger_ref.rgba");
+    // The pipeline outputs Oklab (the blit converts to sRGB), so the
+    // texture's pixels must be Oklab — the sRGB RGBA8 reference converts
+    // per pixel here, exactly like the procedural demo texture's authoring.
+    for (0..TIGER_REF_SIZE * TIGER_REF_SIZE) |pix| {
+        const o = pix * 4;
+        const ok = srgbToOklab(.{
+            @as(f32, @floatFromInt(src[o])) / 255.0,
+            @as(f32, @floatFromInt(src[o + 1])) / 255.0,
+            @as(f32, @floatFromInt(src[o + 2])) / 255.0,
+            @as(f32, @floatFromInt(src[o + 3])) / 255.0, // the reference's alpha (transparent bg)
+        });
+        const out: [*]f32 = @as([*]f32, @ptrCast(@alignCast(buf.cpu))) + pix * 4;
+        out[0] = ok[0];
+        out[1] = ok[1];
+        out[2] = ok[2];
+        out[3] = ok[3];
+    }
+
+    var cmd = try gpu.commandsBegin();
+    cmd.copyToTexture(.{
+        .gpu = gpu,
+        .handle = tex,
+        .dimensions = .{ TIGER_REF_SIZE, TIGER_REF_SIZE, 1 },
+        .format = .rgba32_float,
+    }, buf, .{ .size = .{ TIGER_REF_SIZE, TIGER_REF_SIZE, 1 } });
+    try gpu.queueSubmit(&.{cmd});
+    gpu.commandsEnd(cmd);
+    try gpu.waitIdle();
+
+    ui.tiger_ref_idx = try registry.register(gpa, tex);
+}
 /// 1. Every DrawCmd rect becomes a SceneRect. Ring cmds (borders) get a
 ///    rounded-rect ring material (type 2, full box radius + border width +
 ///    border-box size); radius-bearing fill cmds get a rounded-rect fill
@@ -435,6 +542,7 @@ fn uploadDemoTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.mem.A
 ///    LAST so text paints on top of every widget decoration.
 fn buildSliceRects(
     text_engine: *TextEngine,
+    svg_view: ?*SvgView,
     cmds: []const DrawCmd,
     tree: *const WidgetTree,
     hover_id: ?Id,
@@ -447,8 +555,11 @@ fn buildSliceRects(
     defer zone.end();
     // Rounded-rect material slots, allocated from the top of the buffer
     // downward (glyphs own slots 1..next_slot-1 from the bottom; the
-    // assert in text.zig caps glyphs well below the top).
-    var material_slot: u32 = MAX_MATERIALS;
+    // assert in text.zig caps glyphs well below the top). The SVG view's
+    // materials own the TOP region [SVG_MATERIAL_BASE, MAX_MATERIALS) —
+    // the decorations descend from SVG_MATERIAL_BASE, never into the
+    // tiger's slots.
+    var material_slot: u32 = SVG_MATERIAL_BASE;
     // Guard the decoration writes against the LIVE glyph count: glyph
     // slots ascend from slot 1 as the frame's text is rasterized, so the
     // headroom below is next_slot, not 1. With `> 1` a burst of
@@ -512,6 +623,7 @@ fn buildSliceRects(
                 .clip_id = cmd.clip_id,
                 .origin = .{ cmd.rect.x, cmd.rect.y },
                 .tex_idx = cmd.tex_idx,
+                .z = cmd.layer,
             });
             continue;
         } else if (cmd.ring or rx > 0 or ry > 0) {
@@ -528,12 +640,18 @@ fn buildSliceRects(
             .dst = .{ cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h },
             .src = .{ 0, 0, 1, 1 },
             .corners = .{ slice_corner_l, slice_corner_r, slice_corner_t, slice_corner_b },
-            .color = srgbToOklab(cmd.color),
+            // The drawcmd colors are sRGB-authored EXCEPT the textured
+            // fill's identity tint: the tint must stay (1,1,1) in the
+            // Oklab space the shader multiplies in — converting it through
+            // srgbToOklab yields Oklab white (1,0,0), which zeroes the
+            // sample's a/b chroma (every texture renders grayscale).
+            .color = if (cmd.tex_idx != 0xFFFFFFFF) cmd.color else srgbToOklab(cmd.color),
             .curve = .{ 0, 0, 0, 0 },
             .material_index = material_index,
             .clip_id = cmd.clip_id,
             .origin = .{ cmd.rect.x, cmd.rect.y },
             .tex_idx = cmd.tex_idx,
+            .z = cmd.layer,
         });
     }
 
@@ -637,8 +755,68 @@ fn buildSliceRects(
         };
         // The node's clip id (stamped by collectDrawCmds): glyphs inside
         // a `.clip` container are clipped to its rect like any other cmd.
+        // The node's layer key stamps the glyphs' z: a layered node's text
+        // must ride its OWN layer (the layer-1 badge's caption would
+        // otherwise sort below the badge's z=1 fill and vanish behind it).
+        const before = out.items.len;
         try text_engine.emitText(t, content.x, baseline_y, size, n.font_id, n.clip_id, srgbToOklab(text_color), out);
+        if (n.box.layer > 0) {
+            for (out.items[before..]) |*r| r.z = n.box.layer;
+        }
     }
+
+    // The SVG showcase: inject the tiger's cached scene rects, scaled +
+    // translated into the reserved card's content rect (the tiger's
+    // viewBox is 900×900 — an aspect-fit into the square box). The rects
+    // are the glyph-style quads with the per-path materials from the
+    // shared buffer's SVG region.
+    if (svg_view) |sv| {
+        const card = svgCardRect(tree);
+        const card_rect = card.rect;
+        const vb = sv.boundsRect();
+        if (card_rect.w > 0 and card_rect.h > 0 and vb.w > 0 and vb.h > 0) {
+            // The stroke test scene's algo + oversize sliders, applied to
+            // the stroke materials each frame (the tiger's defaults: algo
+            // 0, oversize 1).
+            sv.setStrokeStyle(@intFromFloat(ui.stroke_algo), ui.stroke_oversize);
+            // Fit the paths' ACTUAL union bounds (the tiger's paths extend
+            // beyond its viewBox with negative coords — the viewBox fit
+            // would land them off-card), translated so the bounds' origin
+            // maps into the card. The stroke test scene multiplies the fit
+            // by its scale slider (the tiger's default 1.0).
+            const scale: f32 = @min(card_rect.w / vb.w, card_rect.h / vb.h) * ui.stroke_scale;
+            const ox = card_rect.x + (card_rect.w - vb.w * scale) / 2 - vb.x * scale;
+            const oy = card_rect.y + (card_rect.h - vb.h * scale) / 2 - vb.y * scale;
+            // The curves are swept in pixel space (the glyph branch's 1x1
+            // window) — bake the fit scale into the GPU curve buffers.
+            sv.setScale(scale);
+            // std.log.info("svg: card=({d:.0},{d:.0},{d:.0},{d:.0}) scale={d:.3}", .{ card_rect.x, card_rect.y, card_rect.w, card_rect.h, scale });
+            for (sv.rects()) |r| {
+                try out.append(gpa, .{
+                    .dst = .{ ox + r.dst[0] * scale, oy + r.dst[1] * scale, r.dst[2] * scale, r.dst[3] * scale },
+                    .src = .{ 0, 0, 1, 1 },
+                    .corners = .{ 0, 0, 0, 0 },
+                    .color = r.color,
+                    .curve = .{ r.curve[0] * scale, r.curve[1] * scale, r.curve[2] * scale, r.curve[3] * scale },
+                    .material_index = r.material_index,
+                    .clip_id = r.clip_id,
+                    .origin = .{ ox + r.origin[0] * scale, oy + r.origin[1] * scale },
+                    .tex_idx = r.tex_idx,
+                    // Paint ON the card: the default z=0 would sort the
+                    // rects BEHIND the card's fill (every box layer > 0).
+                    .z = card.layer,
+                });
+            }
+        }
+    }
+
+    // The v1 bag contract: stamp the submission counter — the stable
+    // tiebreaker the CS1 sort keys on. The paint order IS the append
+    // order; reversing the bag (--gpu-sort-verify) changes the buffer
+    // positions but not the counters, so the sort restores the paint
+    // order. Stamped at the END so the SVG injection's rects (appended
+    // after the tree pass) get their true positions too.
+    for (out.items, 0..) |*r, i| r.order = @intCast(i);
 }
 
 /// Render the current app frame into the offscreen Oklab target. Shared by
@@ -660,26 +838,47 @@ fn renderPass1(
     const sw: f32 = @floatFromInt(surface_size.width);
     const sh: f32 = @floatFromInt(surface_size.height);
 
+    // CS1 (V1b) FIRST, outside the render pass: upload the drawable bag,
+    // dispatch the stable radix sort, barrier compute → graphics. Compute
+    // cannot run inside dynamic rendering, so the batch's sort/draw split
+    // mirrors the pass structure.
+    const proto_rects: []const BatchClipRect = @ptrCast(clip_rects);
+    try batch.sort(cmd, slice_rects, proto_rects);
+
     cmd.beginRendering(.{ .color_attachments = &.{
         .{ .texture = render_target, .load_op = .clear, .store_op = .store, .clear_color = OKLAB_GRAY },
     }, .render_area_size = .{ surface_size.width, surface_size.height } });
 
-    cmd.setBlendEnable(true);
+    // The v1 general blending pipeline (spec §4): ONE uniform alpha blend
+    // for every drawable — translucency is a material/color property,
+    // never a pipeline switch. src_alpha/one_minus_src_alpha (the
+    // straight-alpha convention: the blend scales the source rgb by the
+    // source alpha, so the SDF branches' coverage × color and the solid
+    // branch's straight output are both correct without shader-side
+    // premultiplication).
+    cmd.setBlendState(.{
+        .enable = true,
+        .color_op = .add,
+        .src_color_factor = .src_alpha,
+        .dst_color_factor = .one_minus_src_alpha,
+        .alpha_op = .add,
+        .src_alpha_factor = .one,
+        .dst_alpha_factor = .one_minus_src_alpha,
+    });
     // Bind the GUI texture heap (set 0 = app-registered textures, set 2 =
     // samplers) — ONE call; bindings are not draws, so the one-draw
     // invariant holds. The blit pass re-binds its own heap afterwards.
     cmd.bindDescriptorSets(texture_heap);
     // The tree's ClipRect and the batch's are layout-identical (4 f32);
     // the batch defines its own to avoid the module-identity split.
-    const proto_rects: []const BatchClipRect = @ptrCast(clip_rects);
-    try batch.draw(cmd, slice_rects, proto_rects, sw, sh);
+    batch.draw(cmd, sw, sh);
     cmd.setBlendEnable(false);
     cmd.endRendering();
 }
 
 /// Run the graphical demo. Blocks until the window closes.
 /// Generic over the root component (any type with pub draw(self, ctx) !void).
-pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool) !void {
+pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool) !void {
     const gpa = app.gpa;
 
     // OVERRIDE priority: the SDL gives env vars precedence over
@@ -708,12 +907,14 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
     defer io_impl.deinit();
     const io = io_impl.io();
 
-    // Load SPIR-V: quad_vert/quad_frag for the 9-slice batch, plus the
-    // fullscreen blit pass (Oklab → sRGB).
+    // Load SPIR-V: quad_vert/quad_frag for the 9-slice batch, the CS1
+    // sort compute (V1b), plus the fullscreen blit pass (Oklab → sRGB).
     var quad_vert_f = try ShaderFile.load(io, gpa, "shaders/quad_vert.spv");
     defer quad_vert_f.deinit(gpa);
     var quad_frag_f = try ShaderFile.load(io, gpa, "shaders/quad_frag.spv");
     defer quad_frag_f.deinit(gpa);
+    var sort_comp_f = try ShaderFile.load(io, gpa, "shaders/sort_comp.spv");
+    defer sort_comp_f.deinit(gpa);
     var fullscreen_vert_f = try ShaderFile.load(io, gpa, "shaders/fullscreen_vert.spv");
     defer fullscreen_vert_f.deinit(gpa);
     var blit_oklab_f = try ShaderFile.load(io, gpa, "shaders/blit_oklab.spv");
@@ -748,7 +949,7 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
     app.measure = TextEngine.measureForFlex;
-    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv);
+    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
     defer batch.deinit();
     batch.material_buf_bda = text_engine.materialBda();
     batch.subpixel = subpixel;
@@ -763,11 +964,22 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
     var tex_registry = try TextureRegistry.init(&gpu, gpa);
     defer tex_registry.deinit(gpa);
     ui.texture_idx = try uploadDemoTexture(&gpu, &tex_registry, gpa);
+    try uploadReferenceTexture(&gpu, &tex_registry, gpa);
 
     // Mandelbrot compute pass: render target + compute shader + params
     // buffer, registered into the GUI heap (set 0 sampled + set 1 storage).
     var mandelbrot = try MandelbrotPass.init(&gpu, io, gpa, &tex_registry);
     defer mandelbrot.deinit(&gpu);
+
+    // SVG showcase: the tiger, parsed + converted once (the paths →
+    // conics → glyph materials + cached scene rects).
+    // The stroke test scene (the TestStrokesApp root) loads the curved
+    // thin-stroke set; everything else loads the tiger.
+    var svg_view = if (comptime T == ui.TestStrokesApp)
+        try initStrokeView(&gpu, gpa, &text_engine)
+    else
+        try initSvgView(&gpu, gpa, &text_engine);
+    defer svg_view.deinit(&gpu);
 
     // Blit pass: fullscreen triangle + Oklab→sRGB fragment shader, with a
     // descriptor heap holding the render-target texture + nearest sampler.
@@ -894,6 +1106,17 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
                             std.log.info("quad debug: {s}", .{if (batch.quad_debug) "on" else "off"});
                             continue;
                         }
+                        if (kc == .a) {
+                            // Cycle the stroke algo: 0 = naive SDF, 1 =
+                            // marching quads, 2 = the spec'd marching quads.
+                            ui.stroke_algo = @floatFromInt((@as(u32, @intFromFloat(ui.stroke_algo)) + 1) % 3);
+                            std.log.info("stroke algo: {d} ({s})", .{ ui.stroke_algo, switch (@as(u32, @intFromFloat(ui.stroke_algo))) {
+                                0 => "naive SDF",
+                                1 => "marching quads",
+                                else => "spec'd marching quads",
+                            } });
+                            continue;
+                        }
                         if (kc == .o) {
                             batch.bgr_order = !batch.bgr_order;
                             std.log.info("subpixel order: {s}", .{if (batch.bgr_order) "BGR" else "RGB"});
@@ -962,7 +1185,11 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
         defer gpa.free(base_cmds);
         var slice_rects = std.ArrayList(SceneRect).empty;
         defer slice_rects.deinit(gpa);
-        try buildSliceRects(&text_engine, base_cmds, out.tree, out.hover, out.hover_alpha, out.focus, &slice_rects, gpa);
+        try buildSliceRects(&text_engine, &svg_view, base_cmds, out.tree, out.hover, out.hover_alpha, out.focus, &slice_rects, gpa);
+        // --gpu-sort-verify: submit the bag in REVERSE paint order — the
+        // CS1 sort (stable on (z, order)) must restore the paint order,
+        // so the frame renders byte-identical to the ordered submission.
+        if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
 
         // Acquire the swapchain image (recreates the swapchain on resize).
         // OutOfDateKHR consumed the frame event: sleep ~16ms before the
@@ -1075,7 +1302,7 @@ fn writePpm(io: Io, path: []const u8, pixels: [*]const f32, w: u32, h: u32, gpa:
 /// to a readback buffer and write the result as a P6 PPM at `path`. Same
 /// init as run(), minus the event loop and the swapchain blit. FreeType
 /// glyphs render into the shot — this is the text-renders proof.
-pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?[2]f32, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool) !void {
+pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?[2]f32, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool) !void {
     const gpa = app.gpa;
 
     // OVERRIDE priority: the SDL gives env vars precedence over
@@ -1106,6 +1333,8 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     defer quad_vert_f.deinit(gpa);
     var quad_frag_f = try ShaderFile.load(io, gpa, "shaders/quad_frag.spv");
     defer quad_frag_f.deinit(gpa);
+    var sort_comp_f = try ShaderFile.load(io, gpa, "shaders/sort_comp.spv");
+    defer sort_comp_f.deinit(gpa);
     var fullscreen_vert_f = try ShaderFile.load(io, gpa, "shaders/fullscreen_vert.spv");
     defer fullscreen_vert_f.deinit(gpa);
     var blit_oklab_f = try ShaderFile.load(io, gpa, "shaders/blit_oklab.spv");
@@ -1135,7 +1364,7 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
     app.measure = TextEngine.measureForFlex;
-    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv);
+    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
     defer batch.deinit();
     batch.material_buf_bda = text_engine.materialBda();
     batch.subpixel = subpixel;
@@ -1148,10 +1377,19 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     var tex_registry = try TextureRegistry.init(&gpu, gpa);
     defer tex_registry.deinit(gpa);
     ui.texture_idx = try uploadDemoTexture(&gpu, &tex_registry, gpa);
+    try uploadReferenceTexture(&gpu, &tex_registry, gpa);
 
     // Mandelbrot compute pass (Part A) — the shot renders it like run().
     var mandelbrot = try MandelbrotPass.init(&gpu, io, gpa, &tex_registry);
     defer mandelbrot.deinit(&gpu);
+
+    // The stroke test scene (the TestStrokesApp root) loads the curved
+    // thin-stroke set; everything else loads the tiger.
+    var svg_view = if (comptime T == ui.TestStrokesApp)
+        try initStrokeView(&gpu, gpa, &text_engine)
+    else
+        try initSvgView(&gpu, gpa, &text_engine);
+    defer svg_view.deinit(&gpu);
 
     const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
     defer gpu.shaderDestroy(blit_vert);
@@ -1197,7 +1435,10 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     // Static shot: the hover ring renders at full alpha when a node is
     // hovered (no easing in a one-frame shot); 0 otherwise.
     const hover_alpha: f32 = if (hover_id != null) 1 else 0;
-    try buildSliceRects(&text_engine, base_cmds, out.tree, hover_id, hover_alpha, null, &slice_rects, gpa);
+    try buildSliceRects(&text_engine, &svg_view, base_cmds, out.tree, hover_id, hover_alpha, null, &slice_rects, gpa);
+    // --gpu-sort-verify: submit the bag in REVERSE paint order — the CS1
+    // sort must restore it, so the shot stays byte-identical.
+    if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
 
     try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, surface_size.width, surface_size.height, blit_heap);
 
@@ -1211,7 +1452,12 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     // render pass 1 into the offscreen target, then copy the target into
     // the readback buffer.
     var cmd = try gpu.commandsBegin();
-    recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, sdl3.timer.getMillisecondsSinceInit());
+    // The shot's mandelbrot hue phase is PINNED to a natural-range value
+    // (1200 ms) instead of the live init timer: the live timer varied by
+    // ±250 ms between runs (the fractal hue shifts with process timing),
+    // which made runShot unreproducible at the byte level. The pinned
+    // phase renders the same fractal as a typical interactive start.
+    recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, 1200);
     try renderPass1(&batch, &cmd, slice_rects.items, out.tree.clip_rects[0..out.tree.clip_count], render_target, surface_size, tex_registry.heap);
     cmd.barrier(.{ .color_output = true }, .{ .transfer = true }, .{});
 
@@ -1229,6 +1475,47 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     gpu.commandsEnd(cmd);
     try gpu.waitIdle();
 
+    // --gpu-sort-verify: the REVERSED bag must produce the paint-order
+    // permutation. Read the sort's output back and check it against a
+    // CPU-side stable (z, order) reference — the assertion the flag is
+    // about (the runShot itself is the pixel-level check).
+    if (gpu_sort_verify) {
+        const n = slice_rects.items.len;
+        const perm_rb = try gpu.gpuMalloc(@as(u64, n) * @sizeOf(u32), 64, .readback);
+        defer gpu.gpuFree(perm_rb);
+        var cmd2 = try gpu.commandsBegin();
+        cmd2.memCopy(perm_rb, batch.perm_a[batch.cur_slot], @as(u64, n) * @sizeOf(u32));
+        try gpu.queueSubmit(&.{cmd2});
+        gpu.commandsEnd(cmd2);
+        try gpu.waitIdle();
+        const got: [*]const u32 = @ptrCast(@alignCast(perm_rb.cpu));
+        const RectSort = struct {
+            rects: []const SceneRect,
+            fn lessThan(ctx: @This(), a: u32, b: u32) bool {
+                const ra = ctx.rects[a];
+                const rb = ctx.rects[b];
+                if (ra.z != rb.z) return ra.z < rb.z;
+                return ra.order < rb.order;
+            }
+        };
+        var ref = try gpa.alloc(u32, n);
+        defer gpa.free(ref);
+        for (0..n) |i| ref[i] = @intCast(i);
+        std.sort.insertion(u32, ref, RectSort{ .rects = slice_rects.items }, RectSort.lessThan);
+        var bad: ?usize = null;
+        for (ref, 0..) |want, i| {
+            if (got[i] != want) {
+                bad = i;
+                break;
+            }
+        }
+        if (bad) |i| {
+            std.log.err("gpu-sort-verify FAILED: perm[{d}] = {d}, want {d} (z={d} order={d})", .{ i, got[i], ref[i], slice_rects.items[ref[i]].z, slice_rects.items[ref[i]].order });
+            return error.GpuSortVerifyMismatch;
+        }
+        std.log.info("gpu-sort-verify: permutation matches the stable (z, order) reference ({d} drawables)", .{n});
+    }
+
     // Convert Oklab floats → sRGB bytes and write the PPM.
     const pixels: [*]const f32 = @ptrCast(@alignCast(readback.cpu));
     try writePpm(io, path, pixels, surface_size.width, surface_size.height, gpa);
@@ -1242,7 +1529,7 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
 /// forever, the loop stops cycling, and the tracy client never completes
 /// its handshake. The frames mode cycles anywhere, so tracy-capture gets
 /// a full run. Same init as runShot (window + GPU + offscreen target).
-pub fn runFrames(app: *App, comptime T: type, root: *T, frames: u32, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool) !void {
+pub fn runFrames(app: *App, comptime T: type, root: *T, frames: u32, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool) !void {
     const gpa = app.gpa;
 
     try sdl3.hints.setWithPriority(.video_driver, "wayland", .override);
@@ -1268,6 +1555,8 @@ pub fn runFrames(app: *App, comptime T: type, root: *T, frames: u32, subpixel: b
     defer quad_vert_f.deinit(gpa);
     var quad_frag_f = try ShaderFile.load(io, gpa, "shaders/quad_frag.spv");
     defer quad_frag_f.deinit(gpa);
+    var sort_comp_f = try ShaderFile.load(io, gpa, "shaders/sort_comp.spv");
+    defer sort_comp_f.deinit(gpa);
     var fullscreen_vert_f = try ShaderFile.load(io, gpa, "shaders/fullscreen_vert.spv");
     defer fullscreen_vert_f.deinit(gpa);
     var blit_oklab_f = try ShaderFile.load(io, gpa, "shaders/blit_oklab.spv");
@@ -1294,7 +1583,7 @@ pub fn runFrames(app: *App, comptime T: type, root: *T, frames: u32, subpixel: b
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
     app.measure = TextEngine.measureForFlex;
-    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv);
+    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
     defer batch.deinit();
     batch.material_buf_bda = text_engine.materialBda();
     batch.subpixel = subpixel;
@@ -1305,9 +1594,18 @@ pub fn runFrames(app: *App, comptime T: type, root: *T, frames: u32, subpixel: b
     var tex_registry = try TextureRegistry.init(&gpu, gpa);
     defer tex_registry.deinit(gpa);
     ui.texture_idx = try uploadDemoTexture(&gpu, &tex_registry, gpa);
+    try uploadReferenceTexture(&gpu, &tex_registry, gpa);
 
     var mandelbrot = try MandelbrotPass.init(&gpu, io, gpa, &tex_registry);
     defer mandelbrot.deinit(&gpu);
+
+    // The stroke test scene (the TestStrokesApp root) loads the curved
+    // thin-stroke set; everything else loads the tiger.
+    var svg_view = if (comptime T == ui.TestStrokesApp)
+        try initStrokeView(&gpu, gpa, &text_engine)
+    else
+        try initSvgView(&gpu, gpa, &text_engine);
+    defer svg_view.deinit(&gpu);
 
     const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
     defer gpu.shaderDestroy(blit_vert);
@@ -1349,7 +1647,9 @@ pub fn runFrames(app: *App, comptime T: type, root: *T, frames: u32, subpixel: b
         defer gpa.free(base_cmds);
         var slice_rects = std.ArrayList(SceneRect).empty;
         defer slice_rects.deinit(gpa);
-        try buildSliceRects(&text_engine, base_cmds, out.tree, null, 0, null, &slice_rects, gpa);
+        try buildSliceRects(&text_engine, &svg_view, base_cmds, out.tree, null, 0, null, &slice_rects, gpa);
+        // --gpu-sort-verify: submit the bag in REVERSE paint order.
+        if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
 
         var cmd = try gpu.commandsBegin();
         if (i > 0) cmd.barrier(.{ .fragment = true }, .{ .compute = true }, .{});

@@ -226,6 +226,11 @@ pub fn main(init: std.process.Init) !void {
     const vert_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, vert_bytes));
     const frag_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, frag_bytes));
 
+    // Load the CS1 sort compute shader (V1b)
+    const sort_bytes = try std.Io.Dir.cwd().readFileAlloc(io, "shaders/sort_comp.spv", gpa, .unlimited);
+    defer gpa.free(sort_bytes);
+    const sort_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, sort_bytes));
+
     // Load blit shaders (fullscreen vertex + Oklab→sRGB fragment)
     const blit_vert_bytes = try std.Io.Dir.cwd().readFileAlloc(io, "shaders/fullscreen_vert.spv", gpa, .unlimited);
     defer gpa.free(blit_vert_bytes);
@@ -251,7 +256,7 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(a_curves);
     std.debug.print("Glyph 'A': {d} curves\n", .{a_curves.len});
 
-    var win = try proto.Window.init(&ctx, "nogui prototype", 800, 600, vert_spv, frag_spv, blit_vert_spv, blit_frag_spv);
+    var win = try proto.Window.init(&ctx, "nogui prototype", 800, 600, vert_spv, frag_spv, sort_spv, blit_vert_spv, blit_frag_spv);
     defer win.deinit();
 
     // Create 'A' sweeper (background glyph)

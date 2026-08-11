@@ -23,11 +23,11 @@ const WidgetSize = @import("v7/widget.zig").Size;
 const hb = @import("harfbuzz");
 const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
 
-pub const MAX_MATERIALS: u32 = 1024; // slot 0 = solid; glyphs start at 1, decorations from the top. Demo needs ~52 glyphs x 2 fonts x 6 sizes = ~620; 1024 leaves headroom.
+pub const MAX_MATERIALS: u32 = 1536; // slot 0 = solid; glyphs start at 1, the SVG region + decorations from the top. Demo needs ~620 glyphs + the tiger (240 fills + up to 78 strokes); 1536 leaves headroom.
 /// Max cached shaped runs (generation-clock eviction). The demo has ~32
 /// unique runs; 256 leaves ample headroom for the churning dynamic text.
 pub const RUN_CACHE_CAPACITY: u32 = 256;
-pub const FONT_SIZE_PX: u32 = 16;
+pub const FONT_SIZE_PX: u32 = 14;
 
 /// The demo's live toggle state — the window writes it per frame, the UI
 /// reads it for the header status line (the UI cannot import the window).

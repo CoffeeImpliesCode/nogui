@@ -11,6 +11,11 @@
 //! NAIVE READING — deliberate simplifications, matching the demo's scope:
 //! - Only `<path>` elements are collected (groups are traversed, other
 //!   elements are skipped silently). No transforms, no `<use>`, no shapes.
+//! - Fill inheritance is naive: the root `<svg>` element's `fill` is the
+//!   document default, applied to every path without its own `fill`
+//!   attribute. Group (`<g>`) inheritance is out of scope. Fills are
+//!   `#RGB`/`#RRGGBB` hex or `none`; a malformed value is tolerated as
+//!   black, never an error.
 //! - Namespace prefixes: libxml2 stores the *local* name in `node.name`
 //!   when the prefix is declared (xmlns:svg), but keeps the full "svg:path"
 //!   name when it is not. `isLocalName` matches either (see below).
@@ -117,7 +122,13 @@ pub fn parseSvg(allocator: std.mem.Allocator, xml: []const u8) ParseError!SvgDoc
         width = attrFloat(root, "width");
         height = attrFloat(root, "height");
         view_box = attrViewBox(root);
-        try collectPaths(a, allocator, &paths, root);
+        // The root's `fill` is the document default: paths without their
+        // own `fill` inherit it. (Group-level inheritance is out of
+        // scope — the naive reading.)
+        const default_fill = attrFill(root) orelse .{ 0, 0, 0, 1 };
+        const default_stroke = attrStroke(root);
+        const default_stroke_width = attrFloat(root, "stroke-width") orelse 1;
+        try collectPaths(a, allocator, &paths, root, default_fill, default_stroke, default_stroke_width, IDENTITY);
     }
 
     return .{
@@ -129,15 +140,54 @@ pub fn parseSvg(allocator: std.mem.Allocator, xml: []const u8) ParseError!SvgDoc
     };
 }
 
+/// The identity affine. Transforms accumulate down the tree: a group's
+/// transform post-multiplies its parent's (SVG's nesting semantics).
+const IDENTITY = [6]f32{ 1, 0, 0, 1, 0, 0 };
+
+fn isIdentity(m: [6]f32) bool {
+    return m[0] == 1 and m[1] == 0 and m[2] == 0 and m[3] == 1 and m[4] == 0 and m[5] == 0;
+}
+
+/// Compose two affines: `parent` then `child` (child's points transform
+/// through `parent` first — the SVG nesting order).
+fn composeTransform(parent: [6]f32, child: [6]f32) [6]f32 {
+    return .{
+        parent[0] * child[0] + parent[2] * child[1],
+        parent[1] * child[0] + parent[3] * child[1],
+        parent[0] * child[2] + parent[2] * child[3],
+        parent[1] * child[2] + parent[3] * child[3],
+        parent[0] * child[4] + parent[2] * child[5] + parent[4],
+        parent[1] * child[4] + parent[3] * child[5] + parent[5],
+    };
+}
+
 /// Append a parsed `SvgPath` for every `<path>` element reachable from
 /// `node` (siblings and descendants; groups are just traversed). `a` owns
 /// the growing path list; `base` is the caller's allocator that each path's
-/// own arena is built on.
-fn collectPaths(a: std.mem.Allocator, base: std.mem.Allocator, out: *std.ArrayList(svg.SvgPath), node: [*c]c.xmlNode) !void {
+/// own arena is built on. `default_fill` is the document default (the root
+/// `<svg>`'s `fill`): applied to paths without their own `fill`. `m` is
+/// the accumulated affine from the enclosing groups.
+fn collectPaths(a: std.mem.Allocator, base: std.mem.Allocator, out: *std.ArrayList(svg.SvgPath), node: [*c]c.xmlNode, default_fill: [4]f32, default_stroke: ?[4]f32, default_stroke_width: f32, m: [6]f32) !void {
     var cur: [*c]c.xmlNode = node;
     while (cur) |n| {
         cur = n.*.next; // advance first so `continue` can never spin
         if (n.*.type != c.XML_ELEMENT_NODE) continue;
+
+        // A group's transform post-multiplies the accumulated one; the
+        // tiger's root g carries a matrix() the parser must honor. The
+        // group's `fill` likewise overrides the inherited fill for its
+        // children (the tiger's g6 fill="#FFF" colors every path in it).
+        var m_child = m;
+        if (attrTransform(n)) |tm| m_child = composeTransform(m, tm);
+        var fill_child = default_fill;
+        if (attrFill(n)) |f| fill_child = f;
+        // The stroke inherits like the fill: the nearest enclosing
+        // group's stroke + stroke-width win (the tiger's g6 stroke="#000"
+        // stroke-width="0.172" outlines every path in it).
+        var stroke_child = default_stroke;
+        if (attrStroke(n)) |s| stroke_child = s;
+        var stroke_width_child = default_stroke_width;
+        if (attrFloat(n, "stroke-width")) |w| stroke_width_child = w;
 
         if (isLocalName(std.mem.span(n.*.name), "path")) {
             if (c.xmlGetProp(n, "d")) |d_raw| {
@@ -148,6 +198,18 @@ fn collectPaths(a: std.mem.Allocator, base: std.mem.Allocator, out: *std.ArrayLi
                     error.InvalidPathData => continue,
                     error.OutOfMemory => return error.OutOfMemory,
                 };
+                // The path's own `fill` wins; without one it inherits the
+                // enclosing group's fill (or the document default).
+                path.fill = attrFill(n) orelse fill_child;
+                if (attrStroke(n)) |s| {
+                    path.stroke = s;
+                } else if (stroke_child) |s| {
+                    path.stroke = s;
+                }
+                path.stroke_width = attrFloat(n, "stroke-width") orelse stroke_width_child;
+                // The enclosing groups' transform: the tiger's root g
+                // scales+translates the whole drawing.
+                if (!isIdentity(m_child)) svg.transformPath(&path, m_child);
                 // The path's arena is NOT a child of the doc arena (see
                 // parseSvg): if the append below fails, the just-parsed
                 // path would leak. The success path hands it to the list.
@@ -157,8 +219,28 @@ fn collectPaths(a: std.mem.Allocator, base: std.mem.Allocator, out: *std.ArrayLi
             // A missing `d` attribute: skip the element silently.
         }
 
-        if (n.*.children != null) try collectPaths(a, base, out, n.*.children);
+        if (n.*.children != null) try collectPaths(a, base, out, n.*.children, fill_child, stroke_child, stroke_width_child, m_child);
     }
+}
+
+/// Parse a group's `transform` attribute: the `matrix(a,b,c,d,e,f)` form
+/// (the tiger's root g; the common scale/translate forms are expressible
+/// as matrices). Other transform functions (rotate/skew) return null —
+/// the naive reading keeps them out of scope. Malformed values yield
+/// null; a bad attribute never fails the document.
+fn attrTransform(node: [*c]c.xmlNode) ?[6]f32 {
+    const raw = c.xmlGetProp(node, "transform") orelse return null;
+    defer if (c.xmlFree) |free_fn| free_fn(raw);
+    const s = std.mem.trim(u8, std.mem.span(raw), " \t\r\n");
+    if (!std.mem.startsWith(u8, s, "matrix(") or !std.mem.endsWith(u8, s, ")")) return null;
+    const inner = s["matrix(".len .. s.len - 1];
+    var it = std.mem.tokenizeAny(u8, inner, " ,\t\r\n");
+    var m: [6]f32 = undefined;
+    for (&m) |*v| {
+        v.* = std.fmt.parseFloat(f32, it.next() orelse return null) catch return null;
+    }
+    if (it.next() != null) return null; // trailing junk
+    return m;
 }
 
 /// Parse a numeric attribute (width/height). Missing or malformed values
@@ -184,6 +266,54 @@ fn attrViewBox(node: [*c]c.xmlNode) ?[4]f32 {
         count += 1;
     }
     return if (count == 4) out else null;
+}
+
+/// Parse the `fill` attribute of an element, or null when the attribute
+/// is absent. A present-but-malformed value is tolerated as black — a bad
+/// fill never fails the document (the naive reading).
+fn attrFill(node: [*c]c.xmlNode) ?[4]f32 {
+    const raw = c.xmlGetProp(node, "fill") orelse return null;
+    defer if (c.xmlFree) |free_fn| free_fn(raw);
+    return parseFillColor(std.mem.span(raw)) orelse .{ 0, 0, 0, 1 };
+}
+
+/// Parse the `stroke` attribute: the color, or null for `stroke="none"`
+/// (and for absent/malformed — the naive reading).
+fn attrStroke(node: [*c]c.xmlNode) ?[4]f32 {
+    const raw = c.xmlGetProp(node, "stroke") orelse return null;
+    defer if (c.xmlFree) |free_fn| free_fn(raw);
+    if (std.mem.eql(u8, std.mem.span(raw), "none")) return null;
+    return parseFillColor(std.mem.span(raw));
+}
+
+/// Parse an SVG fill value into sRGB with alpha: `#RGB`/`#RRGGBB` hex
+/// (case-insensitive), or `none` (no fill — alpha 0). Anything else
+/// yields null. Named colors and other color syntaxes are out of scope.
+fn parseFillColor(s: []const u8) ?[4]f32 {
+    if (std.mem.eql(u8, s, "none")) return .{ 0, 0, 0, 0 };
+    if (s.len < 2 or s[0] != '#') return null;
+    const digits = s.len - 1;
+    // #RGB or #RRGGBB, nothing else.
+    if (digits != 3 and digits != 6) return null;
+    var out: [4]f32 = .{ 0, 0, 0, 1 };
+    const per = digits / 3; // 1 for #RGB, 2 for #RRGGBB
+    for (0..3) |i| {
+        const hi = hexVal(s[1 + i * per]) orelse return null;
+        // #RGB expands each digit to a channel pair (#f00 → #ff0000).
+        const lo = if (per == 2) hexVal(s[2 + i * per]) orelse return null else hi;
+        out[i] = @as(f32, @floatFromInt((hi << 4) | lo)) / 255.0;
+    }
+    return out;
+}
+
+/// A hex nibble (case-insensitive), or null for a non-hex character.
+fn hexVal(ch: u8) ?u8 {
+    return switch (ch) {
+        '0'...'9' => ch - '0',
+        'a'...'f' => ch - 'a' + 10,
+        'A'...'F' => ch - 'A' + 10,
+        else => null,
+    };
 }
 
 /// Naive namespace handling: match the bare local name, or any name that
@@ -309,6 +439,62 @@ test "malformed size attributes are ignored" {
     try t.expectEqual(@as(?f32, null), doc.width);
     try t.expectEqual(@as(?f32, 50), doc.height);
     try t.expectEqual(@as(?[4]f32, null), doc.view_box);
+}
+
+test "fill attribute: hex, shorthand, none, missing" {
+    const t = std.testing;
+    var doc = try parseSvg(t.allocator,
+        \\<svg>
+        \\  <path d="M0 0" fill="#cc7226"/>
+        \\  <path d="M0 0" fill="#F06"/>
+        \\  <path d="M0 0" fill="none"/>
+        \\  <path d="M0 0"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    try t.expectEqual(@as(usize, 4), doc.paths.len);
+    // #cc7226 → 204/255, 114/255, 38/255, opaque.
+    try t.expectApproxEqAbs(@as(f32, 0.8), doc.paths[0].fill[0], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 114.0 / 255.0), doc.paths[0].fill[1], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 38.0 / 255.0), doc.paths[0].fill[2], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 1), doc.paths[0].fill[3], 1e-6);
+    // #F06 expands each digit: #FF0066 → {1, 0, 0.4, 1}.
+    try t.expectEqual([4]f32{ 1, 0, 0.4, 1 }, doc.paths[1].fill);
+    // fill="none" paints nothing: alpha 0.
+    try t.expectEqual([4]f32{ 0, 0, 0, 0 }, doc.paths[2].fill);
+    // No fill attribute: SVG's initial value, opaque black.
+    try t.expectEqual([4]f32{ 0, 0, 0, 1 }, doc.paths[3].fill);
+}
+
+test "root svg fill is the document default" {
+    const t = std.testing;
+    var doc = try parseSvg(t.allocator, "<svg fill=\"#ffffff\"><path d=\"M0 0\"/><path d=\"M1 1\" fill=\"#000\"/></svg>");
+    defer doc.deinit();
+    // The path without its own fill inherits the root's white.
+    try t.expectEqual([4]f32{ 1, 1, 1, 1 }, doc.paths[0].fill);
+    // An explicit fill still wins.
+    try t.expectEqual([4]f32{ 0, 0, 0, 1 }, doc.paths[1].fill);
+}
+
+test "a malformed fill is black, not the document default; hex is case-insensitive" {
+    const t = std.testing;
+    var doc = try parseSvg(t.allocator,
+        \\<svg fill="#ffffff">
+        \\  <path d="M0 0" fill="#AbCdEf"/>
+        \\  <path d="M0 0" fill="red"/>
+        \\  <path d="M0 0" fill="#1234"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    try t.expectEqual(@as(usize, 3), doc.paths.len);
+    // Uppercase hex parses: #AbCdEf → {171, 205, 239}/255.
+    try t.expectApproxEqAbs(@as(f32, 171.0 / 255.0), doc.paths[0].fill[0], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 205.0 / 255.0), doc.paths[0].fill[1], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 239.0 / 255.0), doc.paths[0].fill[2], 1e-6);
+    // A present-but-malformed fill is tolerated as black, never inherited.
+    try t.expectEqual([4]f32{ 0, 0, 0, 1 }, doc.paths[1].fill);
+    // Wrong hex length: same tolerance.
+    try t.expectEqual([4]f32{ 0, 0, 0, 1 }, doc.paths[2].fill);
 }
 
 test "the reference tiger parses end to end" {

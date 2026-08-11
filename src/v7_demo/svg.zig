@@ -86,6 +86,16 @@ pub const Command = union(enum) {
 pub const SvgPath = struct {
     commands: []Command, // owned by `arena`
     bbox: Rect, // conservative bounds over the whole path; (0,0,0,0) when empty
+    /// The path's fill color, sRGB with alpha: 1 when the path is
+    /// painted, 0 for `fill="none"`. Defaults to opaque black, SVG's
+    /// initial value; the XML layer overrides it from the `fill`
+    /// attribute (or the document default).
+    fill: [4]f32 = .{ 0, 0, 0, 1 },
+    /// The path's stroke color (sRGB with alpha) + width in user units.
+    /// `stroke` null (or alpha 0) = no stroke; the XML layer inherits the
+    /// enclosing groups' stroke attributes like the fill.
+    stroke: ?[4]f32 = null,
+    stroke_width: f32 = 0,
     arena: std.heap.ArenaAllocator, // owns `commands` and any future doc data
 
     /// Release everything the path owns.
@@ -93,6 +103,149 @@ pub const SvgPath = struct {
         self.arena.deinit();
     }
 };
+
+/// Apply an SVG affine transform (the `matrix(a,b,c,d,e,f)` form) to the
+/// path's geometry: every command resolves to absolute, transforms, and
+/// re-stores as absolute (the relative deltas transform through the
+/// linear part — the same math as the absolute points). The bbox's four
+/// corners transform; since the affine maps the convex hull of the
+/// control points, the new bbox is still conservative. Horizontal and
+/// vertical commands become full line_tos — an affine can slant them.
+/// Arc commands keep their radii (a non-trivial transform) and only
+/// their endpoint moves; the SvgView skips arcs regardless. The current
+/// point advances exactly as `parsePath`'s consumers expect.
+pub fn transformPath(path: *SvgPath, m: [6]f32) void {
+    const apply = struct {
+        fn f(p: Point, mm: [6]f32) Point {
+            return .{ .x = mm[0] * p.x + mm[2] * p.y + mm[4], .y = mm[1] * p.x + mm[3] * p.y + mm[5] };
+        }
+    }.f;
+    // The linear part on a RELATIVE delta: the affine maps absolute
+    // points, so a delta transforms through the 2x2 only (no translate).
+    const lin = struct {
+        fn f(d: Point, mm: [6]f32) Point {
+            return .{ .x = mm[0] * d.x + mm[2] * d.y, .y = mm[1] * d.x + mm[3] * d.y };
+        }
+    }.f;
+    // Resolve a command's endpoint: absolute values transform directly;
+    // relative values add the transformed delta to the current point —
+    // `cur` is ALREADY transformed (each command stores the transformed
+    // absolute), so the delta alone goes through the linear part.
+    const end = struct {
+        fn f(x: f32, y: f32, abs: bool, cur: Point, mm: [6]f32) Point {
+            if (abs) return apply(.{ .x = x, .y = y }, mm);
+            const d = lin(.{ .x = x, .y = y }, mm);
+            return .{ .x = cur.x + d.x, .y = cur.y + d.y };
+        }
+    }.f;
+    var cur = Point{ .x = m[4], .y = m[5] }; // the transformed origin: a relative command from (0,0) must land at the translate
+    var sub = cur;
+    for (path.commands) |*cmd| {
+        switch (cmd.*) {
+            .move_to => |*mv| {
+                const p = end(mv.x, mv.y, mv.abs, cur, m);
+                mv.abs = true;
+                mv.x = p.x;
+                mv.y = p.y;
+                cur = p;
+                sub = p;
+            },
+            .line_to => |*l| {
+                const p = end(l.x, l.y, l.abs, cur, m);
+                l.abs = true;
+                l.x = p.x;
+                l.y = p.y;
+                cur = p;
+            },
+            .horizontal_to => |*h| {
+                const p = if (h.abs)
+                    apply(.{ .x = h.x, .y = cur.y }, m)
+                else p: {
+                    const d = lin(.{ .x = h.x, .y = 0 }, m);
+                    break :p Point{ .x = cur.x + d.x, .y = cur.y + d.y };
+                };
+                cmd.* = .{ .line_to = .{ .abs = true, .x = p.x, .y = p.y } };
+                cur = p;
+            },
+            .vertical_to => |*v| {
+                const p = if (v.abs)
+                    apply(.{ .x = cur.x, .y = v.y }, m)
+                else p: {
+                    const d = lin(.{ .x = 0, .y = v.y }, m);
+                    break :p Point{ .x = cur.x + d.x, .y = cur.y + d.y };
+                };
+                cmd.* = .{ .line_to = .{ .abs = true, .x = p.x, .y = p.y } };
+                cur = p;
+            },
+            .cubic_to => |*c| {
+                const c1 = end(c.x1, c.y1, c.abs, cur, m);
+                const c2 = end(c.x2, c.y2, c.abs, cur, m);
+                const p = end(c.x, c.y, c.abs, cur, m);
+                c.abs = true;
+                c.x1 = c1.x;
+                c.y1 = c1.y;
+                c.x2 = c2.x;
+                c.y2 = c2.y;
+                c.x = p.x;
+                c.y = p.y;
+                cur = p;
+            },
+            .smooth_cubic_to => |*s| {
+                const c2 = end(s.x2, s.y2, s.abs, cur, m);
+                const p = end(s.x, s.y, s.abs, cur, m);
+                s.abs = true;
+                s.x2 = c2.x;
+                s.y2 = c2.y;
+                s.x = p.x;
+                s.y = p.y;
+                cur = p;
+            },
+            .quadratic_to => |*q| {
+                const c1 = end(q.x1, q.y1, q.abs, cur, m);
+                const p = end(q.x, q.y, q.abs, cur, m);
+                q.abs = true;
+                q.x1 = c1.x;
+                q.y1 = c1.y;
+                q.x = p.x;
+                q.y = p.y;
+                cur = p;
+            },
+            .smooth_quadratic_to => |*s| {
+                const p = end(s.x, s.y, s.abs, cur, m);
+                s.abs = true;
+                s.x = p.x;
+                s.y = p.y;
+                cur = p;
+            },
+            .arc_to => |*a| {
+                // The endpoint transforms; the radii/rotation do not (the
+                // full ellipse transform is out of scope — the SvgView
+                // skips arcs anyway). The current point still advances so
+                // the following commands resolve correctly.
+                const p = end(a.x, a.y, a.abs, cur, m);
+                a.abs = true;
+                a.x = p.x;
+                a.y = p.y;
+                cur = p;
+            },
+            .close_path => {
+                cur = sub;
+            },
+        }
+    }
+    // The bbox's corners transform; the new extents are the transformed
+    // hull's bounds (conservative for the transformed curves).
+    const b = path.bbox;
+    const tl = apply(.{ .x = b.x, .y = b.y }, m);
+    const tr = apply(.{ .x = b.x + b.w, .y = b.y }, m);
+    const bl = apply(.{ .x = b.x, .y = b.y + b.h }, m);
+    const br = apply(.{ .x = b.x + b.w, .y = b.y + b.h }, m);
+    const min_x = @min(@min(tl.x, tr.x), @min(bl.x, br.x));
+    const max_x = @max(@max(tl.x, tr.x), @max(bl.x, br.x));
+    const min_y = @min(@min(tl.y, tr.y), @min(bl.y, br.y));
+    const max_y = @max(@max(tl.y, tr.y), @max(bl.y, br.y));
+    path.bbox = .{ .x = min_x, .y = min_y, .w = max_x - min_x, .h = max_y - min_y };
+}
 
 // ---------------------------------------------------------------------------
 // Bounding box
