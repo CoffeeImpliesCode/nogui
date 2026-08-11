@@ -662,7 +662,10 @@ fn buildSliceRects(
         const s = n.kind.slider;
         const r = absoluteRect(tree, n.id);
         if (r.w <= 0 or r.h <= 0) continue;
-        const frac = std.math.clamp((s.value.* - s.min) / (s.max - s.min), 0, 1);
+        // A max <= min slider has no valid range: 0/0 (or overflow) would
+        // yield NaN/inf and poison the thumb rect. Center the thumb instead.
+        const range = s.max - s.min;
+        const frac = std.math.clamp(if (range <= 0) 0.5 else (s.value.* - s.min) / range, 0, 1);
         const thumb_w: f32 = 10;
         const thumb_x = r.x + frac * @max(0, r.w - thumb_w);
         const thumb_radius: f32 = 3;
@@ -878,7 +881,7 @@ fn renderPass1(
 
 /// Run the graphical demo. Blocks until the window closes.
 /// Generic over the root component (any type with pub draw(self, ctx) !void).
-pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool) !void {
+pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool, max_frames: ?u32) !void {
     const gpa = app.gpa;
 
     // OVERRIDE priority: the SDL gives env vars precedence over
@@ -925,6 +928,7 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
         .frames_in_flight = 3,
         .app_name = "v7-demo",
         .validation = false,
+        .timestamp_queries = true, // Tracy GPU zones (--frames profiling)
         .loader = .{
             .get_instance_proc_addr = @ptrCast(get_proc_addr),
             .get_instance_extensions = &getExts,
@@ -1210,15 +1214,20 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
         // Mandelbrot compute pass BEFORE the GUI pass: the compute writes
         // the fractal into the storage texture (set 1 of the GUI heap),
         // then the barrier makes it visible to the GUI pass's sampled read.
+        cmd.beginZone(.{ .name = "mandelbrot_gpu", .src = @src() });
         recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, time_ms);
+        cmd.endZone();
 
         // Pass 1: GUI into the offscreen Oklab target.
+        cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
         try renderPass1(&batch, &cmd, slice_rects.items, out.tree.clip_rects[0..out.tree.clip_count], render_target, size, tex_registry.heap);
+        cmd.endZone();
 
         // Barrier: render target color output → fragment shader read.
         cmd.barrier(.{ .color_output = true }, .{ .fragment = true }, .{});
 
         // Pass 2: blit the Oklab target to the swapchain (converts to sRGB).
+        cmd.beginZone(.{ .name = "blit_gpu", .src = @src() });
         const sc = gw.currentImage();
         cmd.beginRendering(.{ .color_attachments = &.{
             .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
@@ -1230,6 +1239,7 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
         cmd.setBlendEnable(false);
         cmd.draw(noapi.PushData{}, 3, 1);
         cmd.endRendering();
+        cmd.endZone();
 
         const frame_result = try gw.endFrame(.{ .blit_to_swapchain = true });
         _ = frame_result;
@@ -1247,6 +1257,9 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
         // Mark the frame boundary — without this the tracy profiler thread
         // stays gated on its futex and never processes the connection.
         tracy.frameMark(null);
+        if (max_frames) |mf| {
+            if (tick >= mf) break;
+        }
     }
 
     try gpu.waitIdle();
@@ -1519,145 +1532,4 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     // Convert Oklab floats → sRGB bytes and write the PPM.
     const pixels: [*]const f32 = @ptrCast(@alignCast(readback.cpu));
     try writePpm(io, path, pixels, surface_size.width, surface_size.height, gpa);
-}
-
-/// Headless profiling mode (`--frames N`): render N frames into the
-/// offscreen Oklab target (mandelbrot compute + GUI pass) WITHOUT the
-/// swapchain present, then submit once. The interactive run() stalls in
-/// headless/remote sessions because endFrame waits on the present-done
-/// fence — with no compositor consuming the images the wait blocks
-/// forever, the loop stops cycling, and the tracy client never completes
-/// its handshake. The frames mode cycles anywhere, so tracy-capture gets
-/// a full run. Same init as runShot (window + GPU + offscreen target).
-pub fn runFrames(app: *App, comptime T: type, root: *T, frames: u32, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool) !void {
-    const gpa = app.gpa;
-
-    try sdl3.hints.setWithPriority(.video_driver, "wayland", .override);
-    try sdl3.hints.setWithPriority(.render_driver, "vulkan", .override);
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-
-    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 1100, 1160, .{ .resizable = true });
-    defer sdl_win.deinit();
-    try sdl_win.show();
-
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    exts_copy_global = try gpa.dupe([*:0]const u8, sdl_exts);
-    defer gpa.free(exts_copy_global);
-
-    var io_impl = std.Io.Threaded.init(gpa, .{});
-    defer io_impl.deinit();
-    const io = io_impl.io();
-
-    var quad_vert_f = try ShaderFile.load(io, gpa, "shaders/quad_vert.spv");
-    defer quad_vert_f.deinit(gpa);
-    var quad_frag_f = try ShaderFile.load(io, gpa, "shaders/quad_frag.spv");
-    defer quad_frag_f.deinit(gpa);
-    var sort_comp_f = try ShaderFile.load(io, gpa, "shaders/sort_comp.spv");
-    defer sort_comp_f.deinit(gpa);
-    var fullscreen_vert_f = try ShaderFile.load(io, gpa, "shaders/fullscreen_vert.spv");
-    defer fullscreen_vert_f.deinit(gpa);
-    var blit_oklab_f = try ShaderFile.load(io, gpa, "shaders/blit_oklab.spv");
-    defer blit_oklab_f.deinit(gpa);
-
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = 3,
-        .app_name = "v7-demo",
-        .validation = false,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
-        .io = io,
-    });
-    defer gpu.deinit();
-
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
-    defer gw.deinit();
-
-    var text_engine = try TextEngine.init(&gpu, gpa);
-    defer text_engine.deinit();
-    TextEngine.measure_engine = &text_engine;
-    app.measure = TextEngine.measureForFlex;
-    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
-    defer batch.deinit();
-    batch.material_buf_bda = text_engine.materialBda();
-    batch.subpixel = subpixel;
-    batch.quad_debug = quad_debug;
-    batch.bgr_order = bgr;
-    batch.damp_chroma = damp;
-
-    var tex_registry = try TextureRegistry.init(&gpu, gpa);
-    defer tex_registry.deinit(gpa);
-    ui.texture_idx = try uploadDemoTexture(&gpu, &tex_registry, gpa);
-    try uploadReferenceTexture(&gpu, &tex_registry, gpa);
-
-    var mandelbrot = try MandelbrotPass.init(&gpu, io, gpa, &tex_registry);
-    defer mandelbrot.deinit(&gpu);
-
-    // The stroke test scene (the TestStrokesApp root) loads the curved
-    // thin-stroke set; everything else loads the tiger.
-    var svg_view = if (comptime T == ui.TestStrokesApp)
-        try initStrokeView(&gpu, gpa, &text_engine)
-    else
-        try initSvgView(&gpu, gpa, &text_engine);
-    defer svg_view.deinit(&gpu);
-
-    const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
-    defer gpu.shaderDestroy(blit_vert);
-    const blit_frag = try gpu.shaderCreate(blit_oklab_f.spv, .fragment, "main", "blit_oklab");
-    defer gpu.shaderDestroy(blit_frag);
-    const blit_heap = try gpu.descHeapCreate(8, 0, 1);
-    defer gpu.descHeapDestroy(blit_heap);
-    const blit_sampler = gpu.samplerDescriptor(.{
-        .min_filter = .nearest,
-        .mag_filter = .nearest,
-        .mip_filter = .nearest,
-    });
-    gpu.descHeapSetSamplers(blit_heap, 0, &.{blit_sampler});
-
-    var render_target: noapi.TextureHandle = .{};
-    var rt_w: u32 = 0;
-    var rt_h: u32 = 0;
-    defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
-
-    text_mod.debug_state = .{
-        .subpixel = batch.subpixel,
-        .bgr = batch.bgr_order,
-        .damp = batch.damp_chroma,
-        .quad_debug = batch.quad_debug,
-    };
-
-    const surface_size = gw.surfaceSize();
-    try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, surface_size.width, surface_size.height, blit_heap);
-
-    // TEMP-TEST: one-buffer variant
-    for (0..frames) |i| {
-        const out = try app.frame(T, root, @intCast(i + 1), .{
-            .width = @floatFromInt(surface_size.width),
-            .height = @floatFromInt(surface_size.height),
-        });
-        defer if (out.json) |j| gpa.free(j);
-
-        const base_cmds = try collectDrawCmds(@constCast(out.tree), null, gpa, 0);
-        defer gpa.free(base_cmds);
-        var slice_rects = std.ArrayList(SceneRect).empty;
-        defer slice_rects.deinit(gpa);
-        try buildSliceRects(&text_engine, &svg_view, base_cmds, out.tree, null, 0, null, &slice_rects, gpa);
-        // --gpu-sort-verify: submit the bag in REVERSE paint order.
-        if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
-
-        var cmd = try gpu.commandsBegin();
-        if (i > 0) cmd.barrier(.{ .fragment = true }, .{ .compute = true }, .{});
-        recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, sdl3.timer.getMillisecondsSinceInit());
-        try renderPass1(&batch, &cmd, slice_rects.items, out.tree.clip_rects[0..out.tree.clip_count], render_target, surface_size, tex_registry.heap);
-        try gpu.queueSubmit(&.{cmd});
-        gpu.commandsEnd(cmd);
-        tracy.frameMark(null);
-    }
-    try gpu.waitIdle();
 }

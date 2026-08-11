@@ -470,14 +470,17 @@ float4 main(
 
         if (algo == 2u) {
             // The EXACT CAIRO REFERENCE: the stroke's offset-outline
-            // polygon, integrated per pixel via the exact trapezoid
-            // coverage — Cairo's covered_height / uncovered_area model.
-            // The band's boundary edges (m.curve_bda holds the EDGE buffer
-            // for mode 2) cross the pixel; each contributes its signed
-            // vertical extent + the exact trapezoid area to the pixel's
-            // left edge, and the coverage is |Σ covered_height − Σ
-            // uncovered_area|. Exact for the straight edges (the
-            // polygonalized offset), no field sampling.
+            // polygon, integrated per pixel via Cairo's running-cover
+            // model (covered_height / uncovered_area). The coverage is
+            // the running covered height — the signed vertical extents of
+            // the band edges whose column lies LEFT of the pixel — plus
+            // the pixel's own column's height, minus the uncovered
+            // trapezoid between the pixel's left edge and the boundary.
+            // No abs(): the winding state (which edges are to the left) is
+            // what makes the coverage, so a right-boundary pixel gets the
+            // thin sliver on the correct side instead of its complement,
+            // and interior pixels of wide bands fill from the far-side
+            // edges' carried height.
             vk::BufferPointer<EdgeBuf> eb = vk::BufferPointer<EdgeBuf>(m.curve_bda);
             uint ne = eb.Get().count;
             // The pixel's integration window is [cell_s, cell_s+1) — c_s is
@@ -485,8 +488,9 @@ float4 main(
             // old code integrated [c_s, c_s+1], shifted +0.5px.)
             float px = c_s.x - 0.5;
             float py = c_s.y - 0.5;
-            float hsum = 0.0;
-            float usum = 0.0;
+            float cover = 0.0;   // running covered height (columns < px)
+            float h_here = 0.0;  // covered height in this column
+            float u_here = 0.0;  // uncovered trapezoid area in this column
             for (uint i = 0u; i < ne; i++) {
                 Edge e = edgeAt(m.curve_bda, i);
                 float ay = e.p0.y;
@@ -499,19 +503,46 @@ float4 main(
                 float inv = (by == ay) ? 0.0 : 1.0 / (by - ay);
                 float xt = e.p0.x + (e.p1.x - e.p0.x) * (yt - ay) * inv;
                 float xb = e.p0.x + (e.p1.x - e.p0.x) * (yb - ay) * inv;
-                // Clip the edge's x-crossings to the pixel's x-extent so
-                // the trapezoid spans only the overlap. Every edge crossing
-                // the row contributes here; the band's left/right pairs
-                // cancel per pixel (the accumulation the earlier cell-based
-                // variants replaced — they degraded the lines).
-                xt = clamp(xt, px, px + 1.0);
-                xb = clamp(xb, px, px + 1.0);
                 float sign = (by > ay) ? 1.0 : -1.0;
                 float h = yb - yt;
-                hsum += sign * h;
-                usum += sign * 0.5 * ((xt - px) + (xb - px)) * h;
+                if (h <= 0.0) continue;  // horizontal: carries no height
+                // The edge's height splits across the columns it spans by
+                // the fraction of its x-span in each (the subspan split —
+                // what keeps a band's left/right pairs cancelling per
+                // column and the spill streaks out).
+                float xlo = min(xt, xb);
+                float xhi = max(xt, xb);
+                float span = xhi - xlo;
+                if (span <= 0.0) {
+                    // Vertical edge: the whole height belongs to the
+                    // column at its x.
+                    if (xt < px) {
+                        cover += sign * h;
+                    } else if (xt < px + 1.0) {
+                        h_here += sign * h;
+                        u_here += sign * (xt - px) * h;
+                    }
+                    continue;
+                }
+                if (xhi <= px) { cover += sign * h; continue; }
+                if (xlo >= px + 1.0) continue;
+                // The part of the edge's x-span inside this column:
+                float hc = h * (min(xhi, px + 1.0) - max(xlo, px)) / span;
+                if (xlo < px) cover += sign * h * (px - xlo) / span;
+                h_here += sign * hc;
+                // The uncovered trapezoid: the area between the column's
+                // left and the edge over the clipped y-extent.
+                float xtc = clamp(xt, px, px + 1.0);
+                float xbc = clamp(xb, px, px + 1.0);
+                u_here += sign * 0.5 * ((xtc - px) + (xbc - px)) * hc;
             }
-            float cov = clamp(abs(hsum - usum), 0.0, 1.0);
+            // |.| takes the winding magnitude: the accumulated value is
+            // the SIGNED covered area (negative for CW-wound bands, e.g.
+            // horizontal strokes whose caps run against the row), and the
+            // coverage is its magnitude. With the running cover in place
+            // the abs no longer complements right edges — it only flips
+            // the whole-band sign.
+            float cov = clamp(abs(cover + h_here - u_here), 0.0, 1.0);
             cov = pow(cov, 1.0 / COVERAGE_GAMMA);
             return float4(vColor.rgb, cov * vColor.a);
         }

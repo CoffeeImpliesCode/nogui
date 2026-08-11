@@ -41,9 +41,10 @@ pub const Sides = struct {
 };
 
 /// CSS box-sizing. With auto (natural) sizing both modes produce the same
-/// border box (content + border + padding); the mode matters once fixed
-/// sizes arrive (a specified border-box width includes padding+border, a
-/// specified content-box width does not). Inert today, part of the model.
+/// border box (content + border + padding); the mode matters once a fixed
+/// `flex.basis` arrives: `.content_box` adds the item's own main-axis
+/// border + padding on top of the basis, `.border_box` treats the basis as
+/// the full border-box main (see flex.zig's basis handling).
 pub const BoxSizing = enum { content_box, border_box };
 
 /// The CSS box model for one node: margin (outside, handled by the parent
@@ -152,6 +153,11 @@ pub const WidgetNode = struct {
     /// Font selection: 0 = the host default font, 1 = the second font.
     font_id: u8 = 0,
     flex: FlexChild = .{}, // per-child sizing
+    /// The item's natural (measured/hugged) main size before any basis
+    /// override, recorded by the parent when placing. The flex-shrink
+    /// floor: shrink never crosses it (the canonical automatic minimum,
+    /// CSS flexbox §4.5). Filled by flex.layout().
+    natural_main: f32 = 0,
     style: FlexStyle = .{}, // per-container layout style (justify/align); direction+gap come from kind
     /// The clip rect id (index into WidgetTree.clip_rects) enclosing this
     /// node, stamped by collectDrawCmds during its walk; 0xFFFFFFFF = no

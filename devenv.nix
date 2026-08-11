@@ -25,7 +25,7 @@ rec {
     xorg.libXext
     xorg.libXi
     xorg.libxcb
-    tracy_0_11
+    # tracy_0_11
     mangohud
     zig-zlint
   ];

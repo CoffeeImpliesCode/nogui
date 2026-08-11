@@ -2,10 +2,13 @@
 //!
 //! Pipeline: a bottom-up pass sizes every node and positions children
 //! relative to their container's CONTENT box; placeRoot places root-level
-//! nodes relative to the surface; two top-down passes (finalizeCross,
-//! finalizeMain) re-fit children against each container's FINAL content box —
-//! the cross axis (stretch/center/end) and the main axis (grow/shrink/justify),
-//! which can only be known once the container itself was sized. Node rects
+//! nodes relative to the surface; two top-down passes (finalizeMain,
+//! finalizeCross) re-fit children against each container's FINAL content box —
+//! the main axis (grow/shrink/justify) first, then the cross axis
+//! (stretch/center/end). Both depend on the container's final size, which
+//! is only known once the container itself was sized — and the cross
+//! stretch needs the main pass first: a grown container must stretch its
+//! children across the GROWN cross, not the pre-grow hug. Node rects
 //! are RELATIVE BORDER boxes (see widget.zig's Rect doc): each rect = content
 //! + border + padding, positioned against its parent's content box; margins
 //! are handled by the parent when positioning. Absolute positions are
@@ -70,7 +73,7 @@ pub const MeasureFn = *const fn (text: []const u8, font_size: f32, font_id: u8) 
 /// cross size under `align = .stretch`. Children live in the container's
 /// CONTENT box (its border box inset by its own border + padding). Because a
 /// container's real content box is only final once ITS parent was sized, two
-/// top-down passes (finalizeCross, finalizeMain) re-place every child against
+/// top-down passes (finalizeMain, finalizeCross) re-place every child against
 /// the FINAL content box. No allocation.
 pub fn layout(tree: *WidgetTree, available: Size) void {
     layoutWith(tree, available, null);
@@ -94,14 +97,17 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
     placeRoot(tree, available);
     // Top-down passes: a container's content box is only final once ITS
     // parent was sized, so the bottom-up pass placed children against the
-    // container's hug box. finalizeCross re-stretches every stretch-aligned
-    // child to the parent's FINAL content cross, recursing so the propagation
-    // reaches nested containers (a 776px card must stretch its slider to
-    // 758px, not leave it at the 125px hug width). finalizeMain then re-runs
-    // grow/shrink/justify against the FINAL content main — nested containers
-    // never distribute space bottom-up, their parent allocates it later.
-    finalizeCross(tree, .root, available);
+    // container's hug box. finalizeMain re-runs grow/shrink/justify against
+    // the FINAL content main — nested containers never distribute space
+    // bottom-up, their parent allocates it later. finalizeCross then
+    // re-stretches every stretch-aligned child to the parent's FINAL content
+    // cross, recursing so the propagation reaches nested containers (a
+    // 776px grown card must stretch its slider to 758px, not leave it at
+    // the 125px hug width). The main pass runs FIRST: the stretch pass must
+    // see the container's grown main, or grown cards never fill their
+    // stretched children.
     finalizeMain(tree, .root, available);
+    finalizeCross(tree, .root, available);
 }
 
 /// Finalize every child's CROSS size and position against the parent's
@@ -164,10 +170,11 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
 /// distributes space only later), so grow/shrink/justify never fired below
 /// the root. This top-down pass re-computes each container's content main
 /// from its children's FINAL border-box mains + margins + gaps, distributes
-/// the free space in the container's FINAL content box (grow, or shrink
-/// clamped at 0), and re-places the children's main positions (justify
-/// included: start/center/end/space_between). The container's own rect is
-/// already final. Cross sizes/positions are untouched.
+/// the free space in the container's FINAL content box (grow, or shrink via
+/// scaled factors floored at each item's natural content main), and
+/// re-places the children's main positions (justify included:
+/// start/center/end/space_between). The container's own rect is already
+/// final. Cross sizes/positions are untouched.
 fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
     const parent = if (parent_id == .root) null else tree.node(parent_id).?;
     if (parent) |p| {
@@ -201,7 +208,9 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
         for (0..count) |i| {
             const child = tree.node(p.children.items[i]) orelse continue;
             mains[i] = if (dir == .column) child.rect.h else child.rect.w;
-            content += mains[i] + child.box.margin.left + child.box.margin.right;
+            // Main-axis margins: top+bottom in a column, left+right in a row.
+            const m = child.box.margin;
+            content += mains[i] + (if (dir == .column) m.top + m.bottom else m.left + m.right);
             if (child.flex.grow > 0) total_grow += child.flex.grow;
             if (child.flex.shrink > 0) total_shrink += child.flex.shrink;
         }
@@ -218,17 +227,49 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 if (child.flex.grow > 0) mains[i] += free * child.flex.grow / total_grow;
             }
         } else if (shrank) {
-            const overflow = -free;
-            for (0..count) |i| {
-                const child = tree.node(p.children.items[i]) orelse continue;
-                // Canonical automatic minimum (CSS flexbox §4.5): a flex
-                // item's default min-main is its CONTENT-based minimum —
-                // shrink can never cross the item's natural size, or the
-                // text spills out of the box. The container then overflows
-                // visibly instead of crushing its content.
-                const natural = mains[i]; // the measured natural main
-                if (child.flex.shrink > 0)
-                    mains[i] = @max(natural, mains[i] - overflow * child.flex.shrink / total_shrink);
+            // Scaled flex-shrink (CSS flexbox §9.7) with a content floor:
+            // reduction_i = overflow × shrink_i × base_i / Σ(shrink × base)
+            // over the shrinkable items, never below the item's natural
+            // content main (natural_main — the canonical automatic minimum,
+            // §4.5, so shrink never crushes the text out of the box). An
+            // item that would clamp at its floor FREEZES there; the
+            // remaining overflow is redistributed over the unfrozen items
+            // until nothing new clamps.
+            var remaining = -free;
+            var frozen: [32]bool = [_]bool{false} ** 32;
+            for (0..count) |_| {
+                var total_scaled: f32 = 0;
+                for (0..count) |i| {
+                    if (frozen[i]) continue;
+                    const child = tree.node(p.children.items[i]) orelse continue;
+                    if (child.flex.shrink > 0) total_scaled += child.flex.shrink * mains[i];
+                }
+                if (total_scaled <= 0) break;
+                var any_frozen = false;
+                for (0..count) |i| {
+                    const child = tree.node(p.children.items[i]) orelse continue;
+                    if (frozen[i] or child.flex.shrink <= 0) continue;
+                    const base = mains[i];
+                    const target = base - remaining * child.flex.shrink * base / total_scaled;
+                    const clamped = @max(child.natural_main, target);
+                    mains[i] = clamped;
+                    if (clamped != target) {
+                        frozen[i] = true;
+                        any_frozen = true;
+                    }
+                }
+                if (!any_frozen) break;
+                // Recompute the overflow left after the freeze: frozen items
+                // can no longer absorb any of it.
+                var fitted: f32 = 0;
+                for (0..count) |i| {
+                    const child = tree.node(p.children.items[i]) orelse continue;
+                    const m = child.box.margin;
+                    fitted += mains[i] + (if (dir == .column) m.top + m.bottom else m.left + m.right);
+                }
+                if (count > 1) fitted += gap * @as(f32, @floatFromInt(count - 1));
+                remaining = @max(0, fitted - (container_main - inset_main));
+                if (remaining <= 0) break;
             }
         }
 
@@ -262,7 +303,10 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 child.rect.w = mains[i];
                 child.rect.x = m.left + main_pos;
             }
-            main_pos += mains[i] + m.left + m.right + (if (i + 1 < count) gap + extra_gap else 0);
+            // Advance by the border box + the MAIN-axis margins (top+bottom
+            // in a column, left+right in a row).
+            const m_main = if (dir == .column) m.top + m.bottom else m.left + m.right;
+            main_pos += mains[i] + m_main + (if (i + 1 < count) gap + extra_gap else 0);
         }
 
         // Recurse so nested containers distribute against their FINAL mains.
@@ -343,14 +387,28 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     for (0..count) |i| {
         const child = tree.node(node.children.items[i]) orelse continue;
         const natural = if (dir == .column) child.rect.h else child.rect.w;
-        const main = if (child.flex.basis > 0) child.flex.basis else natural;
+        // The natural (pre-basis) main is the flex-shrink floor.
+        child.natural_main = natural;
+        // Basis override: `.border_box` treats the basis as the border-box
+        // main; `.content_box` adds the child's own main-axis border +
+        // padding on top of the basis.
+        var main = if (child.flex.basis > 0) child.flex.basis else natural;
+        if (child.flex.basis > 0 and child.box.box_sizing == .content_box) {
+            const cb = child.box;
+            main += if (dir == .column)
+                cb.border.top + cb.border.bottom + cb.padding.top + cb.padding.bottom
+            else
+                cb.border.left + cb.border.right + cb.padding.left + cb.padding.right;
+        }
         mains[i] = main;
         const child_cross = if (dir == .column) child.rect.w else child.rect.h;
         crosses[i] = child_cross;
         if (child_cross > max_cross) max_cross = child_cross;
         if (child.flex.grow > 0) total_grow += child.flex.grow;
         if (child.flex.shrink > 0) total_shrink += child.flex.shrink;
-        content += main + child.box.margin.left + child.box.margin.right;
+        // Main-axis margins: top+bottom in a column, left+right in a row.
+        const cm = child.box.margin;
+        content += main + (if (dir == .column) cm.top + cm.bottom else cm.left + cm.right);
     }
     if (count > 1) content += gap * @as(f32, @floatFromInt(count - 1));
 
@@ -380,14 +438,47 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
             if (child.flex.grow > 0) mains[i] += free * child.flex.grow / total_grow;
         }
     } else if (shrank) {
-        const overflow = -free;
-        for (0..count) |i| {
-            const child = tree.node(node.children.items[i]) orelse continue;
-            // Canonical automatic minimum (§4.5): never shrink below the
-            // item's natural main (the content-based floor).
-            const natural = mains[i];
-            if (child.flex.shrink > 0)
-                mains[i] = @max(natural, mains[i] - overflow * child.flex.shrink / total_shrink);
+        // Scaled flex-shrink (CSS flexbox §9.7) with a content floor:
+        // reduction_i = overflow × shrink_i × base_i / Σ(shrink × base) over
+        // the shrinkable items, never below the item's natural content main
+        // (the canonical automatic minimum, §4.5). An item that would clamp
+        // at its floor FREEZES there; the remaining overflow is
+        // redistributed over the unfrozen items until nothing new clamps.
+        var remaining = -free;
+        var frozen: [32]bool = [_]bool{false} ** 32;
+        for (0..count) |_| {
+            var total_scaled: f32 = 0;
+            for (0..count) |i| {
+                if (frozen[i]) continue;
+                const child = tree.node(node.children.items[i]) orelse continue;
+                if (child.flex.shrink > 0) total_scaled += child.flex.shrink * mains[i];
+            }
+            if (total_scaled <= 0) break;
+            var any_frozen = false;
+            for (0..count) |i| {
+                const child = tree.node(node.children.items[i]) orelse continue;
+                if (frozen[i] or child.flex.shrink <= 0) continue;
+                const base = mains[i];
+                const target = base - remaining * child.flex.shrink * base / total_scaled;
+                const clamped = @max(child.natural_main, target);
+                mains[i] = clamped;
+                if (clamped != target) {
+                    frozen[i] = true;
+                    any_frozen = true;
+                }
+            }
+            if (!any_frozen) break;
+            // Recompute the overflow left after the freeze: frozen items can
+            // no longer absorb any of it.
+            var fitted: f32 = 0;
+            for (0..count) |i| {
+                const child = tree.node(node.children.items[i]) orelse continue;
+                const m = child.box.margin;
+                fitted += mains[i] + (if (dir == .column) m.top + m.bottom else m.left + m.right);
+            }
+            if (count > 1) fitted += gap * @as(f32, @floatFromInt(count - 1));
+            remaining = @max(0, fitted - (avail_main - inset_main));
+            if (remaining <= 0) break;
         }
     }
 
@@ -397,9 +488,12 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     // border + padding.
     const spread = count > 0 and free > 0 and justify != .start;
     const container_main: f32 = if (grew or shrank or spread) avail_main else content + inset_main;
-    // Border-box cross: stretch fills the available cross, otherwise it hugs
-    // the largest child cross plus its own border + padding.
-    const container_cross: f32 = if (cross == .stretch) avail_cross else max_cross + inset_cross;
+    // Border-box cross: a ROOT-LEVEL stretch fills the available cross; a
+    // NESTED stretch hugs its content (largest child cross + its own border
+    // + padding) — the parent's final cross is unknown bottom-up, and the
+    // top-down finalizeCross pass re-stretches it against that. Non-stretch
+    // always hugs.
+    const container_cross: f32 = if (cross == .stretch and root_level) avail_cross else max_cross + inset_cross;
     // The cross extent children are placed within: the container's OWN
     // CONTENT box cross (container_cross minus its border + padding).
     // Root-level containers may fill the available cross under stretch, but
@@ -463,7 +557,10 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
             child.rect.y = m.top + cross_pos;
             child.rect.x = m.left + main_pos;
         }
-        main_pos += mains[i] + m.left + m.right + (if (i + 1 < count) gap + extra_gap else 0);
+        // Advance by the border box + the MAIN-axis margins (top+bottom in a
+        // column, left+right in a row).
+        const m_main = if (dir == .column) m.top + m.bottom else m.left + m.right;
+        main_pos += mains[i] + m_main + (if (i + 1 < count) gap + extra_gap else 0);
     }
 }
 
@@ -478,9 +575,13 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
         .label => |l| {
             const s = if (measure) |m|
                 m(l.text, node.font_size, node.font_id)
-            else
-                // Approximate FreeType text at 20px: ~10px advance, 20px tall.
-                Size{ .width = @as(f32, @floatFromInt(l.text.len)) * 10, .height = 20 };
+            else blk: {
+                // Approximate FreeType text at 20px: ~10px advance, 20px
+                // tall; an explicit font_size scales both dims (0 = the
+                // baked 20px default).
+                const scale: f32 = if (node.font_size > 0) node.font_size / 20 else 1;
+                break :blk Size{ .width = @as(f32, @floatFromInt(l.text.len)) * 10 * scale, .height = 20 * scale };
+            };
             node.rect.w = s.width + border.w + padding.w;
             node.rect.h = s.height + border.h + padding.h;
         },
@@ -501,6 +602,17 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
     }
 }
 
+/// The root-level main after the basis override: `basis` when set, else the
+/// natural main. Under `.content_box` a fixed basis is a CONTENT size, so
+/// the node's own main-axis border + padding are added on top to form its
+/// border-box main (the root pseudo-container is a column: top + bottom).
+fn rootBasisMain(n: *const WidgetNode) f32 {
+    if (n.flex.basis <= 0) return n.rect.h;
+    if (n.box.box_sizing != .content_box) return n.flex.basis;
+    const b = n.box;
+    return n.flex.basis + b.border.top + b.border.bottom + b.padding.top + b.padding.bottom;
+}
+
 /// Place root-level nodes against `available` as a column: the root
 /// pseudo-container with `FlexStyle{}` defaults (justify=start, align=stretch,
 /// gap=0), including grow/shrink on root-level nodes. Root nodes get the
@@ -510,13 +622,17 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
 /// advance, and stretch fills the available width minus its cross margins.
 fn placeRoot(tree: *WidgetTree, available: Size) void {
     // No fixed buffer: root-level nodes are iterated directly over the nodes
-    // slice (append order) in two passes — first count/sum, then place.
+    // slice (append order) — first count/sum, then shrink, then place.
+    var root_count: usize = 0;
     var content: f32 = 0;
     var total_grow: f32 = 0;
     var total_shrink: f32 = 0;
     for (tree.nodes.items) |*n| {
         if (n.parent != .root) continue;
-        const main = if (n.flex.basis > 0) n.flex.basis else n.rect.h;
+        root_count += 1;
+        // The natural (pre-basis) main is the flex-shrink floor.
+        n.natural_main = n.rect.h;
+        const main = rootBasisMain(n);
         content += main + n.box.margin.top + n.box.margin.bottom;
         if (n.flex.grow > 0) total_grow += n.flex.grow;
         if (n.flex.shrink > 0) total_shrink += n.flex.shrink;
@@ -528,16 +644,59 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
     const grew = free > 0 and total_grow > 0;
     const shrank = free < 0 and total_shrink > 0;
 
+    // Scaled flex-shrink with content floors — the same freeze-and-
+    // redistribute as finalizeMain/placeContainer. No fixed buffer here
+    // (root counts are unbounded), so the frozen state lives in the mains
+    // themselves: an item is frozen exactly when it sits at its floor, and
+    // only non-frozen shrinkable items share the remaining overflow. This
+    // yields the same final sizes as the flag version whenever no basis is
+    // smaller than its content (the degenerate raise case).
+    if (shrank) {
+        for (tree.nodes.items) |*n| {
+            if (n.parent != .root) continue;
+            n.rect.h = rootBasisMain(n);
+        }
+        var remaining = -free;
+        for (0..root_count) |_| {
+            var total_scaled: f32 = 0;
+            for (tree.nodes.items) |*n| {
+                if (n.parent != .root) continue;
+                if (n.flex.shrink > 0 and n.rect.h > n.natural_main)
+                    total_scaled += n.flex.shrink * n.rect.h;
+            }
+            if (total_scaled <= 0) break;
+            var changed = false;
+            for (tree.nodes.items) |*n| {
+                if (n.parent != .root) continue;
+                if (n.flex.shrink <= 0 or n.rect.h <= n.natural_main) continue;
+                const base = n.rect.h;
+                const target = base - remaining * n.flex.shrink * base / total_scaled;
+                const clamped = @max(n.natural_main, target);
+                if (clamped != n.rect.h) {
+                    n.rect.h = clamped;
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+            var fitted: f32 = 0;
+            for (tree.nodes.items) |*n| {
+                if (n.parent != .root) continue;
+                fitted += n.rect.h + n.box.margin.top + n.box.margin.bottom;
+            }
+            remaining = @max(0, fitted - available.height);
+            if (remaining <= 0) break;
+        }
+    }
+
     var y: f32 = 0;
     for (tree.nodes.items) |*n| {
         if (n.parent != .root) continue;
         const m = n.box.margin;
-        var main = if (n.flex.basis > 0) n.flex.basis else n.rect.h;
+        // After the shrink pass rect.h already holds the basis-applied (and
+        // shrunk) main; otherwise derive it from the untouched natural.
+        var main = if (shrank) n.rect.h else rootBasisMain(n);
         if (grew and n.flex.grow > 0) {
             main += free * n.flex.grow / total_grow;
-        } else if (shrank and n.flex.shrink > 0) {
-            // Clamp at 0 — never a negative main.
-            main = @max(0, main - (-free) * n.flex.shrink / total_shrink);
         }
         // Root align = stretch: fill the available width minus cross margins.
         n.rect.w = @max(0, available.width - m.left - m.right);
@@ -799,8 +958,10 @@ test "column stretch subtracts child margins" {
     // Content box cross = 100 (no border/padding); stretched border w =
     // 100 - 5 - 5 = 90, offset by the left margin.
     try testing.expectEqual(Rect{ .x = 5, .y = 0, .w = 90, .h = 20 }, tree.node(id1).?.rect);
-    // Container natural h = child main (20) + child margins (5+5) = 30.
-    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 30 }, tree.node(id2).?.rect);
+    // Container natural h = child main (20) + the MAIN-axis margins
+    // (top+bottom = 0 in a column) = 20 — the left/right margins are
+    // cross-axis and never count toward the main-axis size.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 20 }, tree.node(id2).?.rect);
 }
 
 test "bordered container: children sit inside border + padding" {
@@ -1004,4 +1165,171 @@ test "finalizeMain: nested grow child fills the FINAL content main" {
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 800, .h = 600 }, tree.node(outer).?.rect);
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 800, .h = 600 }, tree.node(inner).?.rect);
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 800, .h = 600 }, tree.node(label).?.rect);
+}
+
+test "column main margins: top/bottom counted, left/right ignored" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+
+    const a: Id = @enumFromInt(1);
+    const b: Id = @enumFromInt(2);
+    const col: Id = @enumFromInt(3);
+    try appendNode(&tree, a, col, .{ .label = .{ .text = "aaa" } });
+    try appendNode(&tree, b, col, .{ .label = .{ .text = "bbb" } });
+    try appendNode(&tree, col, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    tree.node(a).?.box.margin = .{ .top = 10 };
+    // Left/right margins are CROSS-axis for a column — they must neither
+    // inflate the main-axis sum nor advance the next child.
+    tree.node(b).?.box.margin = .{ .left = 99, .right = 99 };
+
+    layout(&tree, .{ .width = 100, .height = 600 });
+
+    // Main axis: A margin box = 20 + top 10 + bottom 0 = 30, B = 20; the
+    // container hugs 50 (the 99px left/right margins are ignored).
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 50 }, tree.node(col).?.rect);
+    // A.y = margin.top (10).
+    try testing.expectEqual(Rect{ .x = 0, .y = 10, .w = 100, .h = 20 }, tree.node(a).?.rect);
+    // B.y = A's margin box (main 20 + top 10 + bottom 0 = 30) — no
+    // left/right margin in the advance.
+    try testing.expectEqual(@as(f32, 30), tree.node(b).?.rect.y);
+    try testing.expectEqual(@as(f32, 20), tree.node(b).?.rect.h);
+}
+
+test "shrink uses scaled factor + content floor" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+
+    const a: Id = @enumFromInt(1);
+    const b: Id = @enumFromInt(2);
+    const row: Id = @enumFromInt(3);
+    try appendNode(&tree, a, row, .{ .label = .{ .text = "aa" } });
+    try appendNode(&tree, b, row, .{ .label = .{ .text = "bb" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    wireChildren(&tree);
+    tree.node(a).?.flex = FlexChild{ .basis = 80, .shrink = 1 };
+    tree.node(b).?.flex = FlexChild{ .basis = 40, .shrink = 1 };
+
+    layout(&tree, .{ .width = 100, .height = 40 });
+
+    // Content 120 vs 100, overflow 20: total_scaled = 1*80 + 1*40 = 120;
+    // reduction_i = overflow * shrink_i * base_i / total_scaled:
+    //   A: 80 - 20*80/120 = 66.67,  B: 40 - 20*40/120 = 33.33.
+    // Both stay above their 20px content floors, so nothing freezes.
+    try testing.expectApproxEqAbs(@as(f32, 66.67), tree.node(a).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 33.33), tree.node(b).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 66.67), tree.node(b).?.rect.x, 0.01);
+    // The row takes the available main (shrink fired) and fits exactly.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 40 }, tree.node(row).?.rect);
+}
+
+test "shrink freezes at the floor and redistributes" {
+    // Scenario 1: no item clamps — plain scaled reductions over 3 items.
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+
+    const a: Id = @enumFromInt(1);
+    const b: Id = @enumFromInt(2);
+    const c: Id = @enumFromInt(3);
+    const row1: Id = @enumFromInt(4);
+    try appendNode(&tree, a, row1, .{ .label = .{ .text = "aa" } });
+    try appendNode(&tree, b, row1, .{ .label = .{ .text = "bb" } });
+    try appendNode(&tree, c, row1, .{ .label = .{ .text = "cc" } });
+    try appendNode(&tree, row1, .root, .{ .row = .{} });
+    wireChildren(&tree);
+    tree.node(a).?.flex = FlexChild{ .basis = 60, .shrink = 1 };
+    tree.node(b).?.flex = FlexChild{ .basis = 60, .shrink = 1 };
+    tree.node(c).?.flex = FlexChild{ .basis = 60, .shrink = 1 };
+
+    layout(&tree, .{ .width = 100, .height = 40 });
+
+    // Content 180, overflow 80, total_scaled = 180: reduction_i =
+    // 80*60/180 = 26.67 — all land at 33.33, above the 20px floor, so
+    // nothing freezes and the row fits exactly.
+    try testing.expectApproxEqAbs(@as(f32, 33.33), tree.node(a).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 33.33), tree.node(b).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 33.33), tree.node(c).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 33.33), tree.node(b).?.rect.x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 66.67), tree.node(c).?.rect.x, 0.01);
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 40 }, tree.node(row1).?.rect);
+
+    // Scenario 2: B and C clamp at their 20px floors; the remaining
+    // overflow redistributes to A alone.
+    var tree2 = WidgetTree.init(testing.allocator);
+    defer tree2.nodes.deinit(testing.allocator);
+
+    const a2: Id = @enumFromInt(1);
+    const b2: Id = @enumFromInt(2);
+    const c2: Id = @enumFromInt(3);
+    const row2: Id = @enumFromInt(4);
+    try appendNode(&tree2, a2, row2, .{ .label = .{ .text = "aa" } });
+    try appendNode(&tree2, b2, row2, .{ .label = .{ .text = "bb" } });
+    try appendNode(&tree2, c2, row2, .{ .label = .{ .text = "cc" } });
+    try appendNode(&tree2, row2, .root, .{ .row = .{} });
+    wireChildren(&tree2);
+    tree2.node(a2).?.flex = FlexChild{ .basis = 80, .shrink = 1 };
+    tree2.node(b2).?.flex = FlexChild{ .basis = 20, .shrink = 1 };
+    tree2.node(c2).?.flex = FlexChild{ .basis = 20, .shrink = 1 };
+
+    layout(&tree2, .{ .width = 100, .height = 40 });
+
+    // Pass 1: total_scaled = 1*80 + 1*20 + 1*20 = 120, overflow 20; A drops
+    // to 66.67, B/C to 16.67 — both clamp at their 20px floor and freeze.
+    // Pass 2: total_scaled = 66.67 (A only), remaining overflow 6.67 →
+    // A = 60. Final: A=60, B=20, C=20, row fits 100 exactly.
+    try testing.expectApproxEqAbs(@as(f32, 60), tree2.node(a2).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 20), tree2.node(b2).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 20), tree2.node(c2).?.rect.w, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 60), tree2.node(b2).?.rect.x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 80), tree2.node(c2).?.rect.x, 0.01);
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 40 }, tree2.node(row2).?.rect);
+}
+
+test "stretch-after-grow: stretch child fills the grown container" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+
+    const slider: Id = @enumFromInt(1);
+    const card: Id = @enumFromInt(2);
+    const row: Id = @enumFromInt(3);
+    var value: f32 = 0.5;
+    try appendNode(&tree, slider, card, .{ .slider = .{ .label = "s", .value = &value, .min = 0, .max = 1 } });
+    try appendNode(&tree, card, row, .{ .column = .{} });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    wireChildren(&tree);
+    tree.node(card).?.box.padding = .{ .left = 12, .right = 12 };
+    tree.node(card).?.flex = FlexChild{ .grow = 1 };
+
+    layout(&tree, .{ .width = 600, .height = 40 });
+
+    // Bottom-up, the card hugged its slider at 100 + 12 + 12 = 124 wide;
+    // the root row then grew it to the full 600. finalizeMain runs BEFORE
+    // finalizeCross, so the stretch pass sees the card's FINAL (grown)
+    // width and the slider fills its content box: 600 - 12 - 12 = 576.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 600, .h = 40 }, tree.node(card).?.rect);
+    try testing.expectApproxEqAbs(@as(f32, 576), tree.node(slider).?.rect.w, 0.01);
+}
+
+test "nested stretch container keeps its own inset" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+
+    const label: Id = @enumFromInt(1);
+    const col: Id = @enumFromInt(2);
+    const row: Id = @enumFromInt(3);
+    try appendNode(&tree, label, col, .{ .label = .{ .text = "aaa" } });
+    try appendNode(&tree, col, row, .{ .column = .{} });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    wireChildren(&tree);
+    tree.node(col).?.box.padding = .{ .left = 10, .right = 10 };
+
+    layout(&tree, .{ .width = 200, .height = 40 });
+
+    // The nested column hugs its content bottom-up: largest child cross (30)
+    // + its own border+padding (10+10) = 50 — a nested stretch must NOT size
+    // it to the pre-final hug (30), the top-down finalizeCross pass
+    // re-stretches it against the row's FINAL content box instead.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 50, .h = 40 }, tree.node(col).?.rect);
+    // The label fills the column's content box: 50 - 20 inset = 30.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 30, .h = 20 }, tree.node(label).?.rect);
 }

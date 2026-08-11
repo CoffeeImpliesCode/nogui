@@ -474,6 +474,19 @@ pub fn layoutFingerprint(tree: *const WidgetTree, allocator: std.mem.Allocator) 
 /// labels/buttons/sliders must fit their measured text extent. `surface`
 /// (optional) is the surface size: when non-null, root-level nodes that
 /// extend past it are flagged; null skips the bounds check (old behavior).
+/// True when the node or any ancestor is layered (z > 0): a layered node
+/// paints over siblings by design (the GPU z-sort decides the order), so
+/// its overlaps are intentional, not collisions.
+fn isLayered(tree: *const WidgetTree, id: Id) bool {
+    var cur: ?Id = id;
+    while (cur) |cid| {
+        const n = tree.nodeConst(cid) orelse return false;
+        if (n.box.layer != 0) return true;
+        cur = if (n.parent == .root) null else n.parent;
+    }
+    return false;
+}
+
 pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size, allocator: std.mem.Allocator) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -494,9 +507,10 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
             try add(w, &problems, "negative size: id {d} {d}x{d}", .{ n.id.index(), r.w, r.h });
         }
 
-        // Box sides (margin/border/padding) must not be negative.
+        // Box sides: borders and paddings must not be negative. Margins may
+        // be negative (legal CSS — the layer badge's -44 bottom margin is a
+        // deliberate layout trick).
         const side_vals = [_]f32{
-            n.box.margin.top,  n.box.margin.right,  n.box.margin.bottom,  n.box.margin.left,
             n.box.border.top,  n.box.border.right,  n.box.border.bottom,  n.box.border.left,
             n.box.padding.top, n.box.padding.right, n.box.padding.bottom, n.box.padding.left,
         };
@@ -555,9 +569,15 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
             };
             if (text) |t| {
                 const ms = m(t, n.font_size, n.font_id);
+                // flex.zig's measureLeaf adds the node's ACTUAL border +
+                // padding (widget.sidesSum) to the content measure; the old
+                // +16 baked approximation disagrees whenever they sum to
+                // anything else.
+                const insets = widget.sidesSum(n.box.border);
+                const pads = widget.sidesSum(n.box.padding);
                 const need_w = switch (n.kind) {
-                    .button => ms.width + 16,
-                    .slider => @max(100, ms.width + 16),
+                    .button => ms.width + insets.w + pads.w,
+                    .slider => @max(100, ms.width + insets.w + pads.w),
                     else => ms.width,
                 };
                 if (r.w + 0.001 < need_w) {
@@ -594,7 +614,7 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
             const rb = widget.absoluteRect(tree, b.id);
             const overlap_x = ra.x < rb.x + rb.w - 0.001 and rb.x < ra.x + ra.w - 0.001;
             const overlap_y = ra.y < rb.y + rb.h - 0.001 and rb.y < ra.y + ra.h - 0.001;
-            if (overlap_x and overlap_y) {
+            if (overlap_x and overlap_y and !isLayered(tree, a.id) and !isLayered(tree, b.id)) {
                 try add(w, &problems, "root overlap: {d} and {d}", .{ a.id.index(), b.id.index() });
             }
         }
@@ -637,15 +657,40 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
             try boxes.append(allocator, .{ .id = n.id, .box = widget.contentRect(tree, n.id) });
         }
         // Strictly-ordered pairs (i < j): each overlap is reported once.
+        // Ancestor-descendant pairs are skipped: a button's label child sits
+        // in the button's own text box by construction (the same text, same
+        // box), so they always intersect — that is the design, not a
+        // collision.
         for (0..boxes.items.len) |i| {
             for (i + 1..boxes.items.len) |j| {
                 const a = boxes.items[i].box;
                 const b = boxes.items[j].box;
                 const overlap_x = a.x < b.x + b.w - 0.001 and b.x < a.x + a.w - 0.001;
                 const overlap_y = a.y < b.y + b.h - 0.001 and b.y < a.y + a.h - 0.001;
-                if (overlap_x and overlap_y) {
-                    try add(w, &problems, "text overlap: id {d} and id {d}", .{ boxes.items[i].id.index(), boxes.items[j].id.index() });
+                if (!(overlap_x and overlap_y)) continue;
+                // Ancestor-descendant: walk desc's parent chain up to anc.
+                var skip = false;
+                var cur = tree.nodeConst(boxes.items[j].id).?.parent;
+                while (cur != .root) {
+                    if (cur == boxes.items[i].id) {
+                        skip = true;
+                        break;
+                    }
+                    cur = tree.nodeConst(cur).?.parent;
                 }
+                if (!skip) {
+                    cur = tree.nodeConst(boxes.items[i].id).?.parent;
+                    while (cur != .root) {
+                        if (cur == boxes.items[j].id) {
+                            skip = true;
+                            break;
+                        }
+                        cur = tree.nodeConst(cur).?.parent;
+                    }
+                }
+                if (skip) continue;
+                if (isLayered(tree, boxes.items[i].id) or isLayered(tree, boxes.items[j].id)) continue;
+                try add(w, &problems, "text overlap: id {d} and id {d}", .{ boxes.items[i].id.index(), boxes.items[j].id.index() });
             }
         }
     }

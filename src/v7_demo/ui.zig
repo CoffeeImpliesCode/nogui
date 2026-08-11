@@ -39,10 +39,11 @@ pub var mandelbrot_idx: ?u32 = null;
 pub var svg_box_id: ?u32 = null;
 /// The stroke test scene's tunables (driven by sliders): `stroke_scale`
 /// (the whole scene's extra scale), `stroke_algo` (0 = naive SDF, 1 =
-/// marching quads), `stroke_oversize` (the AA band / quad half-extent).
+/// marching quads, 2 = Cairo running-cover), `stroke_oversize` (the AA
+/// band / quad half-extent).
 /// The window applies them to the SvgView each frame.
 pub var stroke_scale: f32 = 1.0;
-pub var stroke_algo: f32 = 1; // 1 = marching quads (the tiger's current look)
+pub var stroke_algo: f32 = 2; // 2 = Cairo running-cover (the tiger's current look)
 pub var stroke_oversize: f32 = 0.0;
 /// The tiger reference render's bindless heap index (the window uploads
 /// the rsvg-rendered tiger PNG as a texture; the tiger demo samples it
@@ -88,6 +89,7 @@ pub const TigerApp = struct {
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
                         .basis = 480,
+                        .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = C_BORDER,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
@@ -148,6 +150,7 @@ pub const TestStrokesApp = struct {
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
                         .basis = 620,
+                        .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = C_BORDER,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
@@ -164,7 +167,7 @@ pub const TestStrokesApp = struct {
                 const algo_name = switch (algo_idx) {
                     0 => "naive SDF",
                     1 => "marching quads",
-                    else => "spec'd marching quads",
+                    else => "Cairo running-cover",
                 };
                 const algo_text = try std.fmt.allocPrint(ctx.arena, "MODE {d}: {s}   (A cycles)", .{ algo_idx, algo_name });
                 _ = try labelColor(ctx, algo_text, C_ACCENT);
@@ -382,6 +385,7 @@ pub const TodoApp = struct {
         _ = try ctx.column(.{
             .layer = 1,
             .basis = 44,
+            .box_sizing = .border_box,
             // shrink 0: the demo tree overflows the 1160px surface, so the
             // overflow shrink pass would otherwise crush the 44px basis and
             // break the -44 bottom-margin cancellation below.
@@ -559,6 +563,7 @@ pub const TodoApp = struct {
                     _ = try ctx.column(.{
                         .texture = mandelbrot_idx,
                         .basis = 480, // fixed width (the row's main axis)
+                        .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = C_BORDER,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
@@ -585,6 +590,7 @@ pub const TodoApp = struct {
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
                         .basis = 190, // fixed width — the same height as the mandelbrot's box
+                        .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = C_BORDER,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },

@@ -94,9 +94,8 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--no-subpixel")) {
             subpixel = false;
         } else if (std.mem.eql(u8, arg, "--frames")) {
-            // Headless profiling: render N frames without the swapchain
-            // present (tracy-capture needs a cycling loop; the interactive
-            // loop stalls when no compositor consumes the presents).
+            // Profiling: run the REAL windowed loop (swapchain presents
+            // included) for N frames, then exit — tracy-capture friendly.
             frames = std.fmt.parseUnsigned(u32, args_it.next() orelse return errMissingArg("--frames"), 10) catch return error.BadFramesArg;
         } else if (std.mem.eql(u8, arg, "--shot")) {
             shot_path = args_it.next() orelse return errMissingArg("--shot");
@@ -174,8 +173,8 @@ pub fn main(init: std.process.Init) !void {
     if (strokes_mode) {
         _ = try app.register(ui.TestStrokesApp, &strokes);
         if (frames) |n| {
-            window_backend.runFrames(&app, ui.TestStrokesApp, &strokes, n, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
-                std.log.err("runFrames failed: {s}", .{@errorName(e)});
+            window_backend.run(&app, ui.TestStrokesApp, &strokes, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
+                std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
             };
             return;
@@ -187,15 +186,15 @@ pub fn main(init: std.process.Init) !void {
             };
             return;
         }
-        try window_backend.run(&app, ui.TestStrokesApp, &strokes, subpixel, quad_debug, bgr, damp, gpu_sort_verify);
+        try window_backend.run(&app, ui.TestStrokesApp, &strokes, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
         return;
     }
 
     if (tiger_mode) {
         _ = try app.register(ui.TigerApp, &tiger);
         if (frames) |n| {
-            window_backend.runFrames(&app, ui.TigerApp, &tiger, n, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
-                std.log.err("runFrames failed: {s}", .{@errorName(e)});
+            window_backend.run(&app, ui.TigerApp, &tiger, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
+                std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
             };
             return;
@@ -207,18 +206,18 @@ pub fn main(init: std.process.Init) !void {
             };
             return;
         }
-        try window_backend.run(&app, ui.TigerApp, &tiger, subpixel, quad_debug, bgr, damp, gpu_sort_verify);
+        try window_backend.run(&app, ui.TigerApp, &tiger, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
         return;
     }
 
     if (window_mode) {
-        try window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify);
+        try window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
         return;
     }
 
     if (frames) |n| {
-        window_backend.runFrames(&app, ui.TodoApp, &todo, n, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
-            std.log.err("runFrames failed: {s}", .{@errorName(e)});
+        window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
+            std.log.err("run failed: {s}", .{@errorName(e)});
             return e;
         };
         return;
