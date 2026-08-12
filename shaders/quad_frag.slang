@@ -518,7 +518,7 @@ float4 main(
             // (4.0) and cov == 1.0. pow(1.0, 1.0/1.6) == 1.0, so return
             // the full-alpha color directly — what the loop would produce.
             if (off_f.x >= bh.interior_rect.x && off_f.y >= bh.interior_rect.y &&
-                off_f.x + win_f.x <= bh.interior_rect.x + bh.interior_rect.w &&
+                off_f.x + win_f.x <= bh.interior_rect.x + bh.interior_rect.z &&
                 off_f.y + win_f.y <= bh.interior_rect.y + bh.interior_rect.w) {
                 return float4(vColor.rgb, vColor.a);
             }

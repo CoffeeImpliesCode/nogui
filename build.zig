@@ -5,6 +5,10 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const release_safe = std.builtin.OptimizeMode.ReleaseSafe;
 
+    // zig-cov coverage (see zig-cov README): zig-gate --cov passes these
+    const coverage = b.option(bool, "coverage", "Enable zig-cov") orelse false;
+    const cov_rt = b.option([]const u8, "coverage-rt", "zig-cov-rt path") orelse null;
+
     // ── Dependencies ──────────────────────────────
     const sdl3 = b.dependency("sdl3", .{ .target = target, .optimize = release_safe });
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = release_safe });
@@ -178,6 +182,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (coverage) {
+        v7_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
+        v7_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
+        v7_tests.root_module.link_libc = true; // atexit handler writes the .zcov
+        if (cov_rt) |p| v7_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
     const run_v7_tests = b.addRunArtifact(v7_tests);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_v7_tests.step);
@@ -197,6 +207,12 @@ pub fn build(b: *std.Build) void {
     });
     v7_text_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_text_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    if (coverage) {
+        v7_text_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
+        v7_text_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
+        v7_text_tests.root_module.link_libc = true; // atexit handler writes the .zcov
+        if (cov_rt) |p| v7_text_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
     const run_v7_text_tests = b.addRunArtifact(v7_text_tests);
     test_step.dependOn(&run_v7_text_tests.step);
 
@@ -215,6 +231,12 @@ pub fn build(b: *std.Build) void {
     });
     v7_ui_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_ui_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    if (coverage) {
+        v7_ui_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
+        v7_ui_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
+        v7_ui_tests.root_module.link_libc = true; // atexit handler writes the .zcov
+        if (cov_rt) |p| v7_ui_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
     const run_v7_ui_tests = b.addRunArtifact(v7_ui_tests);
     test_step.dependOn(&run_v7_ui_tests.step);
 
@@ -235,6 +257,12 @@ pub fn build(b: *std.Build) void {
     v7_svg_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     v7_svg_tests.root_module.linkLibrary(libxml2_dep.artifact("xml2"));
     v7_svg_tests.root_module.addIncludePath(libxml2_dep.artifact("xml2").getEmittedIncludeTree());
+    if (coverage) {
+        v7_svg_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
+        v7_svg_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
+        v7_svg_tests.root_module.link_libc = true; // atexit handler writes the .zcov
+        if (cov_rt) |p| v7_svg_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
     const run_v7_svg_tests = b.addRunArtifact(v7_svg_tests);
     test_step.dependOn(&run_v7_svg_tests.step);
 
@@ -254,6 +282,12 @@ pub fn build(b: *std.Build) void {
     });
     exe_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     exe_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    if (coverage) {
+        exe_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
+        exe_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
+        exe_tests.root_module.link_libc = true; // atexit handler writes the .zcov
+        if (cov_rt) |p| exe_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
     const run_exe_tests = b.addRunArtifact(exe_tests);
     test_step.dependOn(&run_exe_tests.step);
 

@@ -527,6 +527,13 @@ pub const SvgView = struct {
     stroke_edge_bufs: []noapi.GpuPtr,
     stroke_edge_bdas: []u64,
     stroke_curve_bdas: []u64,
+    /// The PRISTINE (unscaled) offset-outline edges: buildStrokeOutline's
+    /// init-time output per stroked path, in the sweep space — the
+    /// source the GPU edge buffers are (re)written from at the current
+    /// `scale`, the `self.curves` pattern (setScale re-derives pristine *
+    /// scale, never scales the buffer in place: the in-place `*= scale`
+    /// compounded across setScale calls). Arena-owned alongside `curves`.
+    stroke_edges_pristine: [][]const StrokeEdge,
     /// The per-path fill-band GPU buffers (the TYPE_SWEEP optimization:
     /// the interior box + the per-pixel-row curve runs, see
     /// buildFillBands) + their BDAs, parallel to `sweepers`. Built in
@@ -581,6 +588,7 @@ pub const SvgView = struct {
         var stroke_edge_bufs = std.ArrayList(noapi.GpuPtr).empty;
         var stroke_edge_bdas = std.ArrayList(u64).empty;
         var stroke_curve_bdas = std.ArrayList(u64).empty;
+        var stroke_edges_pristine = std.ArrayList([]const StrokeEdge).empty;
         var stroke_band_bufs = std.ArrayList(?noapi.GpuPtr).empty;
         var stroke_band_bdas = std.ArrayList(u64).empty;
         errdefer {
@@ -721,6 +729,10 @@ pub const SvgView = struct {
                 try stroke_edge_bufs.append(a, edge_buf);
                 try stroke_edge_bdas.append(a, edge_buf.gpu);
                 try stroke_curve_bdas.append(a, sweeper.curve_buf_bda);
+                // Keep the PRISTINE edges (the buildStrokeOutline output,
+                // arena-owned) — setScale re-derives the scaled GPU
+                // buffer from them, the curves' `self.curves` pattern.
+                try stroke_edges_pristine.append(a, edge_list);
                 // The stroke's band slot: the buffer is built at setScale
                 // (the bands live in the scaled sweep space); the
                 // material's band_bda is written there too.
@@ -795,6 +807,8 @@ pub const SvgView = struct {
         errdefer a.free(stroke_edge_bdas_owned);
         const stroke_curve_bdas_owned = try stroke_curve_bdas.toOwnedSlice(a);
         errdefer a.free(stroke_curve_bdas_owned);
+        const stroke_edges_pristine_owned = try stroke_edges_pristine.toOwnedSlice(a);
+        errdefer a.free(stroke_edges_pristine_owned);
         const stroke_band_bufs_owned = try stroke_band_bufs.toOwnedSlice(a);
         errdefer {
             for (stroke_band_bufs_owned) |b| if (b) |bb| gpu.gpuFree(bb);
@@ -825,6 +839,7 @@ pub const SvgView = struct {
             .stroke_edge_bufs = stroke_edge_bufs_owned,
             .stroke_edge_bdas = stroke_edge_bdas_owned,
             .stroke_curve_bdas = stroke_curve_bdas_owned,
+            .stroke_edges_pristine = stroke_edges_pristine_owned,
             .stroke_band_bufs = stroke_band_bufs_owned,
             .stroke_band_bdas = stroke_band_bdas_owned,
             .band_bufs = band_bufs_owned,
@@ -901,15 +916,21 @@ pub const SvgView = struct {
         // rebuilt from the SCALED edges (the band rows live in the sweep's
         // pixel space like the fill bands) — the scaled edges are read
         // straight back out of the GPU buffer, the fill-band pattern.
-        for (self.stroke_edge_bufs, 0..) |eb, j| {
+        for (self.stroke_edge_bufs, self.stroke_edges_pristine, 0..) |eb, pristine, j| {
             const edst: [*]u8 = @ptrCast(@alignCast(eb.cpu));
             const count: u32 = @as(*const u32, @ptrCast(@alignCast(edst))).*;
             const edges: [*]StrokeEdge = @ptrCast(@alignCast(edst + 8));
+            std.debug.assert(count == pristine.len);
             for (0..count) |i| {
-                edges[i].x0 *= scale;
-                edges[i].y0 *= scale;
-                edges[i].x1 *= scale;
-                edges[i].y1 *= scale;
+                // RE-DERIVE from the pristine edges (the curves' pattern)
+                // — the `*= scale` in-place form compounded across
+                // setScale calls: the buffer held the PREVIOUS scale's
+                // values, so scale 1.0 -> 2.0 -> 1.0 left the edges at
+                // 2x instead of back at 1x.
+                edges[i].x0 = pristine[i].x0 * scale;
+                edges[i].y0 = pristine[i].y0 * scale;
+                edges[i].x1 = pristine[i].x1 * scale;
+                edges[i].y1 = pristine[i].y1 * scale;
             }
             self.buildStrokeBands(j, edges[0..count]);
         }
@@ -1222,4 +1243,61 @@ test "rebaseToBbox flips y about the bbox top-left" {
     // (8,7) → (6, -4); y UP — the ink hangs below the origin.
     rebaseToBbox(&src, .{ .x = 2, .y = 3, .w = 6, .h = 4 }, &out);
     try expectCurve(out[0], .{ 0, 0 }, .{ 3, -4 }, .{ 6, 0 });
+}
+
+// The setScale stroke-edge regression: the mode-2 edge buffers must be
+// RE-DERIVED from the pristine buildStrokeOutline output (the curves'
+// `self.curves` pattern), never scaled in place — the in-place
+// `*= scale` loop compounded across setScale calls (each frame's fit
+// scale while the stroke-scale slider moves), over-scaling the mode-2
+// strokes after any second scale change.
+test "setScale re-derives the stroke edges from the pristine outline" {
+    // buildStrokeOutline's sweep-space output at init: two vertical band
+    // edges at x = 10 and x = 20.
+    const pristine = [_]StrokeEdge{
+        .{ .x0 = 10, .y0 = 0, .x1 = 10, .y1 = 100 },
+        .{ .x0 = 20, .y0 = 0, .x1 = 20, .y1 = 100 },
+    };
+    // THE BUG (the old in-place loop): each setScale multiplies the
+    // ALREADY-scaled buffer values, so successive calls compound —
+    // [10, 20] *= 1.5 then *= 2.0 yields 30, 60 instead of the 20, 40
+    // pristine * 2.0.
+    var buf = pristine; // the GPU buffer starts as a copy of the pristine
+    for ([_]f32{ 1.5, 2.0 }) |s| {
+        for (&buf) |*e| {
+            e.x0 *= s;
+            e.y0 *= s;
+            e.x1 *= s;
+            e.y1 *= s;
+        }
+    }
+    try testing.expectEqual(@as(f32, 30), buf[0].x0);
+    try testing.expectEqual(@as(f32, 60), buf[1].x0);
+    // THE FIX (the setScale loop): edges[i] = pristine[i] * scale — the
+    // buffer is a pure function of the last scale, no accumulation.
+    buf = pristine;
+    for ([_]f32{ 1.5, 2.0 }) |s| {
+        for (&buf, 0..) |*e, i| {
+            e.x0 = pristine[i].x0 * s;
+            e.y0 = pristine[i].y0 * s;
+            e.x1 = pristine[i].x1 * s;
+            e.y1 = pristine[i].y1 * s;
+        }
+    }
+    try testing.expectEqual(@as(f32, 20), buf[0].x0);
+    try testing.expectEqual(@as(f32, 40), buf[1].x0);
+    // The round trip the stroke-scale slider produces (fit 1.0 -> 2.0 ->
+    // 1.0): the fixed loop returns the edges to the ORIGINAL; the buggy
+    // loop left them at 2x (20, 40).
+    buf = pristine;
+    for ([_]f32{ 1.0, 2.0, 1.0 }) |s| {
+        for (&buf, 0..) |*e, i| {
+            e.x0 = pristine[i].x0 * s;
+            e.y0 = pristine[i].y0 * s;
+            e.x1 = pristine[i].x1 * s;
+            e.y1 = pristine[i].y1 * s;
+        }
+    }
+    try testing.expectEqual(pristine[0].x0, buf[0].x0);
+    try testing.expectEqual(pristine[1].x0, buf[1].x0);
 }
