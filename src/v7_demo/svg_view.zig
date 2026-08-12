@@ -289,7 +289,8 @@ fn rebaseToBbox(curves: []const Curve, bbox: Rect, out: []Curve) void {
 /// One edge of the stroke's offset-outline polygon: a straight segment
 /// (x0,y0) -> (x1,y1) in the sweep space. Cairo's reference rasterizes
 /// these edges exactly (the trapezoid coverage), never sampling a field.
-const StrokeEdge = extern struct { x0: f32, y0: f32, x1: f32, y1: f32 };
+/// (The extern layout lives with the band builder in proto/sweeper.zig.)
+const StrokeEdge = proto.StrokeEdge;
 
 /// The left perpendicular of the chord a0→a1, normalized; null when the
 /// chord is degenerate (zero length).
@@ -505,6 +506,28 @@ pub const SvgView = struct {
     stroke_edge_bufs: []noapi.GpuPtr,
     stroke_edge_bdas: []u64,
     stroke_curve_bdas: []u64,
+    /// The per-path fill-band GPU buffers (the TYPE_SWEEP optimization:
+    /// the interior box + the per-pixel-row curve runs, see
+    /// buildFillBands) + their BDAs, parallel to `sweepers`. Built in
+    /// setScale — the bands live in the SCALED sweep space like the
+    /// curves, and the fit scale is unknown at init — and freed in
+    /// deinit. null = no band data for the path (the material's band_bda
+    /// stays 0 → the full sweep loop).
+    band_bufs: []?noapi.GpuPtr,
+    band_bdas: []u64,
+    /// The per-stroke band GPU buffers (the mode-2 TYPE_STROKE
+    /// optimization: the per-pixel-row edge runs, see buildStrokeBands)
+    /// + their BDAs, parallel to `stroke_edge_bufs`. Built in setScale —
+    /// the bands live in the SCALED sweep space like the scaled edges —
+    /// and freed in deinit. null = no band data for the stroke (the
+    /// material's band_bda stays 0 → the full edge loop).
+    stroke_band_bufs: []?noapi.GpuPtr,
+    stroke_band_bdas: []u64,
+    /// The GPU handle (the band buffers are built at setScale).
+    gpu: *noapi.Gpu,
+    /// The init-time allocator, reused for the band builders' temporary
+    /// arrays at setScale.
+    gpa: std.mem.Allocator,
 
     /// Convert the document and create all GPU data once. `doc` must
     /// outlive the view (the view owns nothing of the doc). The materials
@@ -530,9 +553,16 @@ pub const SvgView = struct {
         var stroke_edge_bufs = std.ArrayList(noapi.GpuPtr).empty;
         var stroke_edge_bdas = std.ArrayList(u64).empty;
         var stroke_curve_bdas = std.ArrayList(u64).empty;
+        var stroke_band_bufs = std.ArrayList(?noapi.GpuPtr).empty;
+        var stroke_band_bdas = std.ArrayList(u64).empty;
         errdefer {
             for (stroke_edge_bufs.items) |*b| gpu.gpuFree(b.*);
+            for (stroke_band_bufs.items) |*b| if (b.*) |bb| gpu.gpuFree(bb);
         }
+        // The fill-band buffers are built at setScale (they live in the
+        // scaled sweep space); here we only track the per-path slots.
+        var band_bufs = std.ArrayList(?noapi.GpuPtr).empty;
+        var band_bdas = std.ArrayList(u64).empty;
         for (doc.paths) |*path| {
             const user_curves = (try convertPath(a, path)) orelse {
                 skipped += 1; // unsupported command (quadratic/arc)
@@ -570,6 +600,12 @@ pub const SvgView = struct {
                 continue;
             }
 
+            // The path's fill-band slot: the buffer is built at setScale
+            // (the bands live in the scaled sweep space); the material's
+            // band_bda is written there too.
+            try band_bufs.append(a, null);
+            try band_bdas.append(a, 0);
+
             // The glyph material: type GLYPH, the curve BDA, the bbox
             // extent (the rebased curves span exactly the bbox), zero
             // bearing — SVG has no bearing; the ink's top edge is the
@@ -583,6 +619,7 @@ pub const SvgView = struct {
             // never stripe or blur the tiger).
             GlyphSweeper.writeSweepMaterial(
                 sweeper.curve_buf_bda,
+                0, // band_bda: built + written at setScale
                 materials,
                 slot,
                 sweeper.curve_w,
@@ -653,6 +690,11 @@ pub const SvgView = struct {
                 try stroke_edge_bufs.append(a, edge_buf);
                 try stroke_edge_bdas.append(a, edge_buf.gpu);
                 try stroke_curve_bdas.append(a, sweeper.curve_buf_bda);
+                // The stroke's band slot: the buffer is built at setScale
+                // (the bands live in the scaled sweep space); the
+                // material's band_bda is written there too.
+                try stroke_band_bufs.append(a, null);
+                try stroke_band_bdas.append(a, 0);
                 const w = path.stroke_width;
                 rect_list.append(a, .{
                     .dst = .{ bbox.x - w / 2 - 2, bbox.y - w / 2 - 2, @ceil(bbox.w) + w + 4, @ceil(bbox.h) + w + 4 },
@@ -718,6 +760,12 @@ pub const SvgView = struct {
             .stroke_edge_bufs = try stroke_edge_bufs.toOwnedSlice(a),
             .stroke_edge_bdas = try stroke_edge_bdas.toOwnedSlice(a),
             .stroke_curve_bdas = try stroke_curve_bdas.toOwnedSlice(a),
+            .stroke_band_bufs = try stroke_band_bufs.toOwnedSlice(a),
+            .stroke_band_bdas = try stroke_band_bdas.toOwnedSlice(a),
+            .band_bufs = try band_bufs.toOwnedSlice(a),
+            .band_bdas = try band_bdas.toOwnedSlice(a),
+            .gpu = gpu,
+            .gpa = gpa,
             .scale = 0,
         };
     }
@@ -761,11 +809,11 @@ pub const SvgView = struct {
             const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
             @as(*f32, @ptrCast(@alignCast(dst + offset))).* = w * scale;
         }
-        for (self.sweepers, self.curves) |*s, curves| {
+        for (self.sweepers, self.curves, 0..) |*s, curves, i| {
             const dst: [*]u8 = @ptrCast(@alignCast(s.curve_buf.cpu));
             const curve_dst: [*]Curve = @ptrCast(@alignCast(dst + 8));
-            for (curves, 0..) |c, i| {
-                curve_dst[i] = .{
+            for (curves, 0..) |c, j| {
+                curve_dst[j] = .{
                     .p0x = c.p0x * scale,
                     .p0y = c.p0y * scale,
                     .p1x = c.p1x * scale,
@@ -774,10 +822,21 @@ pub const SvgView = struct {
                     .p2y = c.p2y * scale,
                 };
             }
+            // The fill bands (the TYPE_SWEEP optimization), rebuilt from
+            // the SCALED curves (the band rows + the interior box live in
+            // the sweep's pixel space). The scaled curves are already in
+            // the GPU buffer above — read them straight back out.
+            const scaled_curves: [*]const Curve = @ptrCast(@alignCast(curve_dst));
+            const scaled: []const Curve = scaled_curves[0..curves.len];
+            self.buildBands(i, scaled);
         }
         // The offset-outline edges (mode 2) scale uniformly too: the
         // offsets (±half) and the sample positions both scale linearly.
-        for (self.stroke_edge_bufs) |eb| {
+        // The stroke bands (the mode-2 TYPE_STROKE optimization) are then
+        // rebuilt from the SCALED edges (the band rows live in the sweep's
+        // pixel space like the fill bands) — the scaled edges are read
+        // straight back out of the GPU buffer, the fill-band pattern.
+        for (self.stroke_edge_bufs, 0..) |eb, j| {
             const edst: [*]u8 = @ptrCast(@alignCast(eb.cpu));
             const count: u32 = @as(*const u32, @ptrCast(@alignCast(edst))).*;
             const edges: [*]StrokeEdge = @ptrCast(@alignCast(edst + 8));
@@ -787,7 +846,137 @@ pub const SvgView = struct {
                 edges[i].x1 *= scale;
                 edges[i].y1 *= scale;
             }
+            self.buildStrokeBands(j, edges[0..count]);
         }
+    }
+
+    /// Build + upload one path's fill-band buffer (buildFillBands →
+    /// serialize into a GPU buffer) and point the path's sweep material
+    /// at it. `scaled` is the path's curve set in the SCALED sweep space
+    /// (the same space the shader sweeps). Called from setScale; a no-op
+    /// band (row_count == 0 and no interior) leaves band_bda = 0 — the
+    /// material keeps the full-loop path. Any previous band buffer is
+    /// freed and the material's band_bda is ALWAYS rewritten (a stale
+    /// pointer would render the wrong scale's rows).
+    fn buildBands(self: *SvgView, i: usize, scaled: []const Curve) void {
+        const bands = proto.buildFillBands(self.gpa, scaled) catch {
+            // OOM: drop any stale band, fall back to the full loop.
+            if (self.band_bufs[i]) |old| self.gpu.gpuFree(old);
+            self.band_bufs[i] = null;
+            self.band_bdas[i] = 0;
+            self.writeBandBda(i, 0);
+            return;
+        };
+        defer self.gpa.free(bands.pairs);
+        defer self.gpa.free(bands.indices);
+        const has_interior = bands.interior[2] > 0 and bands.interior[3] > 0;
+        var bda: u64 = 0;
+        if (bands.row_count > 0 or has_interior) {
+            const band_size: u64 = 32 + 8 * @as(u64, bands.row_count) + 4 * @as(u64, bands.indices.len);
+            const maybe_buf = self.gpu.gpuMalloc(band_size, 16, .default) catch null;
+            if (maybe_buf) |new_buf| {
+                if (self.band_bufs[i]) |old| self.gpu.gpuFree(old);
+                self.band_bufs[i] = new_buf;
+                self.band_bdas[i] = new_buf.gpu;
+                bda = new_buf.gpu;
+                // The 32-byte header: float4 interior @0, i32 row_base
+                // @16, u32 row_count @20, u32 pairs_base @24, u32
+                // indices_base @28, then the (offset, count) pairs, then
+                // the curve indices.
+                const hdr: [*]u32 = @ptrCast(@alignCast(new_buf.cpu));
+                @as(*[4]f32, @ptrCast(@alignCast(hdr))).* = bands.interior;
+                hdr[4] = @bitCast(bands.row_base);
+                hdr[5] = bands.row_count;
+                hdr[6] = 8; // pairs_base: 32 header bytes / 4
+                hdr[7] = 8 + 2 * bands.row_count; // indices_base
+                @memcpy(hdr[8 .. 8 + 2 * @as(usize, bands.row_count)], bands.pairs);
+                @memcpy(hdr[8 + 2 * @as(usize, bands.row_count) ..][0..bands.indices.len], bands.indices);
+            } else {
+                // Allocation failure: fall back to the full loop.
+                if (self.band_bufs[i]) |old| self.gpu.gpuFree(old);
+                self.band_bufs[i] = null;
+                self.band_bdas[i] = 0;
+            }
+        } else {
+            // No band data at all: keep the full-loop material.
+            if (self.band_bufs[i]) |old| self.gpu.gpuFree(old);
+            self.band_bufs[i] = null;
+            self.band_bdas[i] = 0;
+        }
+        self.writeBandBda(i, bda);
+    }
+
+    /// Write a path's band_bda into its sweep material slot.
+    fn writeBandBda(self: *SvgView, i: usize, bda: u64) void {
+        const slot = self.base_slot + @as(u32, @intCast(i));
+        const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
+        const bda_off = slot * proto.MATERIAL_SIZE + @offsetOf(proto.GlyphMaterial, "band_bda");
+        @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
+    }
+
+    /// Build + upload one stroke path's band buffer (buildStrokeBands →
+    /// serialize into a GPU buffer) and point the stroke's material at it
+    /// (slot = base_slot + paths_len + j). Mirrors buildBands for the
+    /// fills; the stroke band has NO interior (the interior is always
+    /// disabled), so a no-op band (row_count == 0) leaves band_bda = 0 —
+    /// the material keeps the full edge loop. Any previous band buffer is
+    /// freed and the material's band_bda is ALWAYS rewritten (a stale
+    /// pointer would render the wrong scale's rows).
+    fn buildStrokeBands(self: *SvgView, j: usize, scaled: []const StrokeEdge) void {
+        const bands = proto.buildStrokeBands(self.gpa, scaled, 1.0) catch {
+            // OOM: drop any stale band, fall back to the full loop.
+            if (self.stroke_band_bufs[j]) |old| self.gpu.gpuFree(old);
+            self.stroke_band_bufs[j] = null;
+            self.stroke_band_bdas[j] = 0;
+            self.writeStrokeBandBda(j, 0);
+            return;
+        };
+        defer self.gpa.free(bands.pairs);
+        defer self.gpa.free(bands.indices);
+        var bda: u64 = 0;
+        if (bands.row_count > 0) {
+            const band_size: u64 = 32 + 8 * @as(u64, bands.row_count) + 4 * @as(u64, bands.indices.len);
+            const maybe_buf = self.gpu.gpuMalloc(band_size, 16, .default) catch null;
+            if (maybe_buf) |new_buf| {
+                if (self.stroke_band_bufs[j]) |old| self.gpu.gpuFree(old);
+                self.stroke_band_bufs[j] = new_buf;
+                self.stroke_band_bdas[j] = new_buf.gpu;
+                bda = new_buf.gpu;
+                // The 32-byte header: float4 interior @0 (always
+                // {0,0,-1,-1} — the stroke branch has no interior test),
+                // i32 row_base @16, u32 row_count @20, u32 pairs_base
+                // @24, u32 indices_base @28, then the (offset, count)
+                // pairs, then the edge indices.
+                const hdr: [*]u32 = @ptrCast(@alignCast(new_buf.cpu));
+                @as(*[4]f32, @ptrCast(@alignCast(hdr))).* = bands.interior;
+                hdr[4] = @bitCast(bands.row_base);
+                hdr[5] = bands.row_count;
+                hdr[6] = 8; // pairs_base: 32 header bytes / 4
+                hdr[7] = 8 + 2 * bands.row_count; // indices_base
+                @memcpy(hdr[8 .. 8 + 2 * @as(usize, bands.row_count)], bands.pairs);
+                @memcpy(hdr[8 + 2 * @as(usize, bands.row_count) ..][0..bands.indices.len], bands.indices);
+            } else {
+                // Allocation failure: fall back to the full loop.
+                if (self.stroke_band_bufs[j]) |old| self.gpu.gpuFree(old);
+                self.stroke_band_bufs[j] = null;
+                self.stroke_band_bdas[j] = 0;
+            }
+        } else {
+            // No band data at all: keep the full-loop material.
+            if (self.stroke_band_bufs[j]) |old| self.gpu.gpuFree(old);
+            self.stroke_band_bufs[j] = null;
+            self.stroke_band_bdas[j] = 0;
+        }
+        self.writeStrokeBandBda(j, bda);
+    }
+
+    /// Write a stroke path's band_bda into its stroke material slot
+    /// (base_slot + paths_len + j).
+    fn writeStrokeBandBda(self: *SvgView, j: usize, bda: u64) void {
+        const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
+        const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
+        const bda_off = slot * proto.MATERIAL_SIZE + @offsetOf(proto.GlyphMaterial, "band_bda");
+        @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
     }
 
     /// Release the GPU curve buffers; the CPU side (curves, sweepers,
@@ -796,6 +985,8 @@ pub const SvgView = struct {
     pub fn deinit(self: *SvgView, gpu: *noapi.Gpu) void {
         for (self.sweepers) |*s| s.deinit();
         for (self.stroke_edge_bufs) |b| gpu.gpuFree(b);
+        for (self.stroke_band_bufs) |b| if (b) |bb| gpu.gpuFree(bb);
+        for (self.band_bufs) |b| if (b) |bb| gpu.gpuFree(bb);
         self.arena.deinit();
     }
 

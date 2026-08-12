@@ -544,9 +544,9 @@ pub const GpuOptions = struct {
 /// ```text
 /// Main Thread           Per-Window Render Thread
 /// ────────────          ─────────────────────────
-/// poll events           
-/// build widget tree     
-/// run layout            
+/// poll events
+/// build widget tree
+/// run layout
 /// produce FrameData ──→ wait for FrameData
 /// signal render thread   upload GPU resources
 /// process commands       record command buffer

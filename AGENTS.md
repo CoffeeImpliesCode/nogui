@@ -95,6 +95,7 @@ glslangValidator -V shaders/file.vert -o shaders/file_vert.spv  # Compile shader
   - Per-change convention: the linters must be clean on changed files even
     where the step's scope/exclusions don't apply.
 - `zbc` (static memory-safety analysis, needs `PATH=~/tools/anyzig/zig-out/bin:$PATH`) — clean except the benign `f32-narrowing-int-to-float` (FreeType 26.6 metrics) and the documented `aligncast-on-byte-slice` false positive (state.zig provenance)
+- All linters/analyzers are locally built (~/.local/bin/*, ~/tools/*) and may be patched for this setup; prefer them over nixpkgs versions.
 - Lint debt ledger (pre-existing, not gate-blocking; fix as filed work):
   - `src/proto/*`: ~60 zlint findings (unsafe-undefined 13, suppressed-errors 10, no-print 4, unused-decls 11, avoid-as 13) + ziglint style findings — prototype debt, excluded from `zig build lint`
   - `src/v7` + `src/v7_demo`: 176 ziglint style findings (Z004 ×76, Z024 ×48, Z020 ×35, Z006 ×17, Z023 ×15) — pre-existing style debt, excluded via `--ignore`
@@ -121,6 +122,7 @@ mandatory post-implementation review. Read before coding:
   silent side-effects.
 
 ### Gates — definition of done (evidence in the same turn)
+- **`gate`** (devenv shell; runs `zig-gate`): run all quality gates in one command — fmt --check, build, test, ast-check, ziglint, zlint (local ~/.local/bin tools); zbc by default (advisory; strict via ZBC_STRICT=1); optional `--cov`; exits 1 on issues.
 1. `zig fmt --check .` — zero diffs.
 2. `zig build` Debug + ReleaseSafe — exit 0.
 3. `zig build test` Debug + ReleaseSafe — all green, zero leaks (`std.testing.allocator`).

@@ -74,9 +74,10 @@ static const float STROKE_AA = 1.5;
 // boundaries (an experiment knob — the boundary blur grows with the size).
 static const float SWEEP_WINDOW = 2.0;
 
-// GLSL GlyphMaterial (std430 buffer_reference layout, 48 bytes):
+// GLSL GlyphMaterial (std430 buffer_reference layout, 56 bytes):
 // int type @0; float bearing_y/curve_w/curve_h/win_w/win_h @4..24;
-// uint64_t curve_bda @24; float4 gradient_to @32.
+// uint64_t curve_bda @24; uint64_t band_bda @32; float4 gradient_to @40.
+// Field order MUST match the Zig extern struct in src/proto/sweeper.zig.
 struct GlyphMaterial {
     int type;
     float bearing_y;
@@ -85,6 +86,7 @@ struct GlyphMaterial {
     float win_w;
     float win_h;
     uint64_t curve_bda;
+    uint64_t band_bda; // the fill-band buffer BDA (TYPE_SWEEP); 0 = none
     float4 gradient_to; // gradient bottom color (Oklab); .w > 0 enables the gradient
 };
 
@@ -104,6 +106,23 @@ struct QuadCurve {
 struct CurveBuf {
     uint num_curves;
     uint pad;
+};
+
+// The per-path fill-band buffer (the TYPE_SWEEP optimization), 32-byte
+// header: float4 interior_rect @0 (the conservative interior box in the
+// sweep space; w <= 0 or h <= 0 = the interior early-out disabled),
+// int row_base @16 (the first band row), uint row_count @20,
+// uint pairs_base @24 (the u32 offset of the (offset,count) pair array),
+// uint indices_base @28 (the u32 offset of the curve-index payload).
+// Then row_count (offset, count) u32 pairs, then the concatenated u32
+// curve indices (ascending curve order — the banded sum is bit-identical
+// to the full loop). All offsets are u32 offsets into this buffer.
+struct BandHeader {
+    float4 interior_rect;
+    int row_base;
+    uint row_count;
+    uint pairs_base;
+    uint indices_base;
 };
 
 // The stroke's offset-outline polygon (the exact Cairo reference, mode 2):
@@ -291,6 +310,56 @@ float msTri(float2 c, float2 a, float2 b, float sc, float sa, float sb) {
     return 0.5 * abs(cross2(c, a) + cross2(a, x_ab) + cross2(x_ab, x_cb) + cross2(x_cb, c));
 }
 
+/// The mode-2 per-edge accumulation (the Cairo running-cover model): the
+/// edge's signed height across the pixel's column [px, px+1) x
+/// [py, py+1), split across the columns it spans by the fraction of its
+/// x-span in each (the subspan split — what keeps a band's left/right
+/// pairs cancelling per column and the spill streaks out). Shared by the
+/// banded run and the full loop — ONE copy of the float ops, so the two
+/// paths are bit-identical by construction. The y-clip (`ymax <= py ||
+/// ymin >= py + 1.0`) returns before any accumulation, so an edge the
+/// band includes but this fragment's clip rejects contributes exactly
+/// 0.0, like the full loop's `continue`.
+void accumulateStrokeEdge(Edge e, float px, float py, inout float cover, inout float h_here, inout float u_here) {
+    float ay = e.p0.y;
+    float by = e.p1.y;
+    float ymin = min(ay, by);
+    float ymax = max(ay, by);
+    if (ymax <= py || ymin >= py + 1.0) return;
+    float yt = max(ymin, py);
+    float yb = min(ymax, py + 1.0);
+    float inv = (by == ay) ? 0.0 : 1.0 / (by - ay);
+    float xt = e.p0.x + (e.p1.x - e.p0.x) * (yt - ay) * inv;
+    float xb = e.p0.x + (e.p1.x - e.p0.x) * (yb - ay) * inv;
+    float sign = (by > ay) ? 1.0 : -1.0;
+    float h = yb - yt;
+    if (h <= 0.0) return;  // horizontal: carries no height
+    float xlo = min(xt, xb);
+    float xhi = max(xt, xb);
+    float span = xhi - xlo;
+    if (span <= 0.0) {
+        // Vertical edge: the whole height belongs to the column at its x.
+        if (xt < px) {
+            cover += sign * h;
+        } else if (xt < px + 1.0) {
+            h_here += sign * h;
+            u_here += sign * (xt - px) * h;
+        }
+        return;
+    }
+    if (xhi <= px) { cover += sign * h; return; }
+    if (xlo >= px + 1.0) return;
+    // The part of the edge's x-span inside this column:
+    float hc = h * (min(xhi, px + 1.0) - max(xlo, px)) / span;
+    if (xlo < px) cover += sign * h * (px - xlo) / span;
+    h_here += sign * hc;
+    // The uncovered trapezoid: the area between the column's left and the
+    // edge over the clipped y-extent.
+    float xtc = clamp(xt, px, px + 1.0);
+    float xbc = clamp(xb, px, px + 1.0);
+    u_here += sign * 0.5 * ((xtc - px) + (xbc - px)) * hc;
+}
+
 [shader("fragment")]
 float4 main(
     [[vk::location(0)]] float2 vUv,
@@ -329,8 +398,8 @@ float4 main(
 
     // writeMaterial stores glyph materials at their slot: the vertex's
     // material_idx indexes the material ARRAY at the buffer base (GLSL:
-    // materials[mat_idx]; the 48-byte stride is GlyphMaterial's size).
-    vk::BufferPointer<GlyphMaterial> mat = vk::BufferPointer<GlyphMaterial>(pc.vert_data + 48 * vMaterialIdx);
+    // materials[mat_idx]; the 56-byte stride is GlyphMaterial's size).
+    vk::BufferPointer<GlyphMaterial> mat = vk::BufferPointer<GlyphMaterial>(pc.vert_data + 56 * vMaterialIdx);
     GlyphMaterial m = mat.Get();
 
     if (m.type == TYPE_SOLID) { return vColor; }
@@ -435,6 +504,44 @@ float4 main(
         uint nf = cb_f.Get().num_curves;
         float2 win_f = float2(SWEEP_WINDOW, SWEEP_WINDOW);
         float2 off_f = cell_f + 0.5 - 0.5 * win_f; // centered on the pixel
+        // The fill-band fast path (band_bda != 0): the per-path band
+        // buffer holds the conservative interior box + the per-pixel-row
+        // curve runs. The runs keep the ascending curve order and use the
+        // exact same y-predicate as sweepSegment's first line, so the
+        // banded sum is bit-identical to the full loop below; rows the
+        // band does not cover fall through to it.
+        if (m.band_bda != uint64_t(0)) {
+            BandHeader bh = vk::BufferPointer<BandHeader>(m.band_bda).Get();
+            // INTERIOR: the whole 2x2 window inside the verified interior
+            // box — no curve crosses it (every hull is eps away) and the
+            // winding there is nonzero, so |total| == the window area
+            // (4.0) and cov == 1.0. pow(1.0, 1.0/1.6) == 1.0, so return
+            // the full-alpha color directly — what the loop would produce.
+            if (off_f.x >= bh.interior_rect.x && off_f.y >= bh.interior_rect.y &&
+                off_f.x + win_f.x <= bh.interior_rect.x + bh.interior_rect.w &&
+                off_f.y + win_f.y <= bh.interior_rect.y + bh.interior_rect.w) {
+                return float4(vColor.rgb, vColor.a);
+            }
+            // BAND: this fragment's pixel row's curve run.
+            int row = int(floor(cell_f.y)) - bh.row_base;
+            if (row >= 0 && row < int(bh.row_count)) {
+                uint pair_off = bh.pairs_base + 2u * uint(row);
+                uint64_t pair_addr = m.band_bda + uint64_t(4) * uint64_t(pair_off);
+                uint idx_off = vk::BufferPointer<uint>(pair_addr).Get();
+                uint count = vk::BufferPointer<uint>(pair_addr + uint64_t(4)).Get();
+                float total_f = 0.0;
+                for (uint i = 0u; i < count; i++) {
+                    uint ci = vk::BufferPointer<uint>(m.band_bda + uint64_t(4) * uint64_t(bh.indices_base + idx_off + i)).Get();
+                    QuadCurve cv = curveAt(m.curve_bda, ci);
+                    total_f += sweepSegment(win_f, off_f, cv.p0, cv.p1, cv.p2);
+                }
+                float cov_f = clamp(abs(total_f) / (SWEEP_WINDOW * SWEEP_WINDOW), 0.0, 1.0);
+                cov_f = pow(cov_f, 1.0 / COVERAGE_GAMMA);
+                return float4(vColor.rgb, cov_f * vColor.a);
+            }
+            // The row is outside the band (e.g. the rect's 2px AA
+            // surround): fall through to the full loop — never drop curves.
+        }
         float total_f = 0.0;
         for (uint i = 0u; i < nf; i++) {
             QuadCurve cv = curveAt(m.curve_bda, i);
@@ -488,53 +595,51 @@ float4 main(
             // old code integrated [c_s, c_s+1], shifted +0.5px.)
             float px = c_s.x - 0.5;
             float py = c_s.y - 0.5;
+            // The stroke-band fast path (band_bda != 0): the per-path
+            // band buffer holds the per-pixel-row edge runs (see
+            // buildStrokeBands). The runs keep the ascending edge order
+            // and are a SUPERSET of the edges that pass the y-clip for
+            // ANY fragment in the row (the membership is the union over
+            // the row's py in [r, r+1) of the windows [py, py+1)), so
+            // every contributing edge is in the run and the edges the run
+            // excludes fail the clip for every py in the row — they
+            // contribute exactly 0.0, and the banded sum is bit-identical
+            // to the full loop below (both call accumulateStrokeEdge,
+            // ONE copy of the float ops). Rows the band does not cover
+            // fall through to it. No interior test: the stroke band's
+            // interior is always disabled.
+            if (m.band_bda != uint64_t(0)) {
+                BandHeader bh = vk::BufferPointer<BandHeader>(m.band_bda).Get();
+                int row = int(floor(py)) - bh.row_base;
+                if (row >= 0 && row < int(bh.row_count)) {
+                    uint pair_off = bh.pairs_base + 2u * uint(row);
+                    uint64_t pair_addr = m.band_bda + uint64_t(4) * uint64_t(pair_off);
+                    uint idx_off = vk::BufferPointer<uint>(pair_addr).Get();
+                    uint count = vk::BufferPointer<uint>(pair_addr + uint64_t(4)).Get();
+                    float cover = 0.0;   // running covered height (columns < px)
+                    float h_here = 0.0;  // covered height in this column
+                    float u_here = 0.0;  // uncovered trapezoid area in this column
+                    for (uint i = 0u; i < count; i++) {
+                        uint ei = vk::BufferPointer<uint>(m.band_bda + uint64_t(4) * uint64_t(bh.indices_base + idx_off + i)).Get();
+                        accumulateStrokeEdge(edgeAt(m.curve_bda, ei), px, py, cover, h_here, u_here);
+                    }
+                    // |.| takes the winding magnitude: the accumulated
+                    // value is the SIGNED covered area (negative for
+                    // CW-wound bands, e.g. horizontal strokes whose caps
+                    // run against the row), and the coverage is its
+                    // magnitude. With the running cover in place the abs
+                    // no longer complements right edges — it only flips
+                    // the whole-band sign.
+                    float cov = clamp(abs(cover + h_here - u_here), 0.0, 1.0);
+                    cov = pow(cov, 1.0 / COVERAGE_GAMMA);
+                    return float4(vColor.rgb, cov * vColor.a);
+                }
+            }
             float cover = 0.0;   // running covered height (columns < px)
             float h_here = 0.0;  // covered height in this column
             float u_here = 0.0;  // uncovered trapezoid area in this column
             for (uint i = 0u; i < ne; i++) {
-                Edge e = edgeAt(m.curve_bda, i);
-                float ay = e.p0.y;
-                float by = e.p1.y;
-                float ymin = min(ay, by);
-                float ymax = max(ay, by);
-                if (ymax <= py || ymin >= py + 1.0) continue;
-                float yt = max(ymin, py);
-                float yb = min(ymax, py + 1.0);
-                float inv = (by == ay) ? 0.0 : 1.0 / (by - ay);
-                float xt = e.p0.x + (e.p1.x - e.p0.x) * (yt - ay) * inv;
-                float xb = e.p0.x + (e.p1.x - e.p0.x) * (yb - ay) * inv;
-                float sign = (by > ay) ? 1.0 : -1.0;
-                float h = yb - yt;
-                if (h <= 0.0) continue;  // horizontal: carries no height
-                // The edge's height splits across the columns it spans by
-                // the fraction of its x-span in each (the subspan split —
-                // what keeps a band's left/right pairs cancelling per
-                // column and the spill streaks out).
-                float xlo = min(xt, xb);
-                float xhi = max(xt, xb);
-                float span = xhi - xlo;
-                if (span <= 0.0) {
-                    // Vertical edge: the whole height belongs to the
-                    // column at its x.
-                    if (xt < px) {
-                        cover += sign * h;
-                    } else if (xt < px + 1.0) {
-                        h_here += sign * h;
-                        u_here += sign * (xt - px) * h;
-                    }
-                    continue;
-                }
-                if (xhi <= px) { cover += sign * h; continue; }
-                if (xlo >= px + 1.0) continue;
-                // The part of the edge's x-span inside this column:
-                float hc = h * (min(xhi, px + 1.0) - max(xlo, px)) / span;
-                if (xlo < px) cover += sign * h * (px - xlo) / span;
-                h_here += sign * hc;
-                // The uncovered trapezoid: the area between the column's
-                // left and the edge over the clipped y-extent.
-                float xtc = clamp(xt, px, px + 1.0);
-                float xbc = clamp(xb, px, px + 1.0);
-                u_here += sign * 0.5 * ((xtc - px) + (xbc - px)) * hc;
+                accumulateStrokeEdge(edgeAt(m.curve_bda, i), px, py, cover, h_here, u_here);
             }
             // |.| takes the winding magnitude: the accumulated value is
             // the SIGNED covered area (negative for CW-wound bands, e.g.
