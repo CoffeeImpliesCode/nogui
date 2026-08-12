@@ -66,7 +66,7 @@ fn find(dir: *const StateDir, key: Key) ?*anyopaque {
 test "StateDir: same key twice in one frame resolves to the same pointer" {
     var dir: StateDir = .empty;
     defer dir.deinit(testing.allocator);
-    const key = Key{ .node = @enumFromInt(1), .name_hash = 7 };
+    const key: Key = .{ .node = @enumFromInt(1), .name_hash = 7 };
 
     var a: u32 = 0;
     var b: u32 = 0;
@@ -84,8 +84,8 @@ test "StateDir: keys are node-local — same name, different nodes, no clash" {
     defer dir.deinit(testing.allocator);
     const name_hash = hashName("count");
 
-    const node_a = Key{ .node = @enumFromInt(1), .name_hash = name_hash };
-    const node_b = Key{ .node = @enumFromInt(2), .name_hash = name_hash };
+    const node_a: Key = .{ .node = @enumFromInt(1), .name_hash = name_hash };
+    const node_b: Key = .{ .node = @enumFromInt(2), .name_hash = name_hash };
     var a: u32 = 1;
     var b: u32 = 2;
     try dir.append(testing.allocator, .{ .key = node_a, .ptr = &a });
@@ -99,7 +99,7 @@ test "StateDir: keys are node-local — same name, different nodes, no clash" {
 test "StateDir: seeding copies the previous frame's bytes" {
     var prev: StateDir = .empty;
     defer prev.deinit(testing.allocator);
-    const key = Key{ .node = @enumFromInt(1), .name_hash = 9 };
+    const key: Key = .{ .node = @enumFromInt(1), .name_hash = 9 };
 
     var stored: f32 = 2.5;
     try prev.append(testing.allocator, .{ .key = key, .ptr = &stored });

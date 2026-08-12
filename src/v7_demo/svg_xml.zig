@@ -74,6 +74,7 @@ pub const SvgDoc = struct {
     pub fn deinit(self: *SvgDoc) void {
         for (self.paths) |*path| path.deinit();
         self.arena.deinit();
+        self.* = undefined;
     }
 };
 
@@ -104,7 +105,13 @@ pub fn parseSvg(allocator: std.mem.Allocator, xml: []const u8) ParseError!SvgDoc
     // the naive reading tolerates undeclared namespace prefixes and other
     // recoverable quirks — libxml2's stderr diagnostics would otherwise
     // pollute the process's stderr (and trip the test runner).
-    const doc = c.xmlReadMemory(xml.ptr, @intCast(xml.len), null, null, c.XML_PARSE_NONET | c.XML_PARSE_NOERROR | c.XML_PARSE_NOWARNING) orelse
+    const doc = c.xmlReadMemory(
+        xml.ptr,
+        @intCast(xml.len),
+        null,
+        null,
+        c.XML_PARSE_NONET | c.XML_PARSE_NOERROR | c.XML_PARSE_NOWARNING,
+    ) orelse
         return error.InvalidXml;
     defer c.xmlFreeDoc(doc);
 
@@ -128,7 +135,7 @@ pub fn parseSvg(allocator: std.mem.Allocator, xml: []const u8) ParseError!SvgDoc
         const default_fill = attrFill(root) orelse .{ 0, 0, 0, 1 };
         const default_stroke = attrStroke(root);
         const default_stroke_width = attrFloat(root, "stroke-width") orelse 1;
-        try collectPaths(a, allocator, &paths, root, default_fill, default_stroke, default_stroke_width, IDENTITY);
+        try collectPaths(a, allocator, &paths, root, default_fill, default_stroke, default_stroke_width, identity);
     }
 
     return .{
@@ -142,7 +149,7 @@ pub fn parseSvg(allocator: std.mem.Allocator, xml: []const u8) ParseError!SvgDoc
 
 /// The identity affine. Transforms accumulate down the tree: a group's
 /// transform post-multiplies its parent's (SVG's nesting semantics).
-const IDENTITY = [6]f32{ 1, 0, 0, 1, 0, 0 };
+const identity = [6]f32{ 1, 0, 0, 1, 0, 0 };
 
 fn isIdentity(m: [6]f32) bool {
     return m[0] == 1 and m[1] == 0 and m[2] == 0 and m[3] == 1 and m[4] == 0 and m[5] == 0;
@@ -167,7 +174,16 @@ fn composeTransform(parent: [6]f32, child: [6]f32) [6]f32 {
 /// own arena is built on. `default_fill` is the document default (the root
 /// `<svg>`'s `fill`): applied to paths without their own `fill`. `m` is
 /// the accumulated affine from the enclosing groups.
-fn collectPaths(a: std.mem.Allocator, base: std.mem.Allocator, out: *std.ArrayList(svg.SvgPath), node: [*c]c.xmlNode, default_fill: [4]f32, default_stroke: ?[4]f32, default_stroke_width: f32, m: [6]f32) !void {
+fn collectPaths(
+    a: std.mem.Allocator,
+    base: std.mem.Allocator,
+    out: *std.ArrayList(svg.SvgPath),
+    node: [*c]c.xmlNode,
+    default_fill: [4]f32,
+    default_stroke: ?[4]f32,
+    default_stroke_width: f32,
+    m: [6]f32,
+) !void {
     var cur: [*c]c.xmlNode = node;
     while (cur) |n| {
         cur = n.*.next; // advance first so `continue` can never spin
@@ -219,7 +235,16 @@ fn collectPaths(a: std.mem.Allocator, base: std.mem.Allocator, out: *std.ArrayLi
             // A missing `d` attribute: skip the element silently.
         }
 
-        if (n.*.children != null) try collectPaths(a, base, out, n.*.children, fill_child, stroke_child, stroke_width_child, m_child);
+        if (n.*.children != null) try collectPaths(
+            a,
+            base,
+            out,
+            n.*.children,
+            fill_child,
+            stroke_child,
+            stroke_width_child,
+            m_child,
+        );
     }
 }
 
@@ -388,7 +413,10 @@ test "viewBox attribute" {
 test "namespaced path elements" {
     const t = std.testing;
     // Declared prefix: libxml2 stores the local name, "path".
-    var declared = try parseSvg(t.allocator, "<svg:svg xmlns:svg=\"http://www.w3.org/2000/svg\"><svg:path d=\"M1 1 L2 2\"/></svg:svg>");
+    var declared = try parseSvg(
+        t.allocator,
+        "<svg:svg xmlns:svg=\"http://www.w3.org/2000/svg\"><svg:path d=\"M1 1 L2 2\"/></svg:svg>",
+    );
     defer declared.deinit();
     try t.expectEqual(@as(usize, 1), declared.paths.len);
     // Undeclared prefix: libxml2 keeps the full "svg:path" name; the naive
@@ -468,7 +496,10 @@ test "fill attribute: hex, shorthand, none, missing" {
 
 test "root svg fill is the document default" {
     const t = std.testing;
-    var doc = try parseSvg(t.allocator, "<svg fill=\"#ffffff\"><path d=\"M0 0\"/><path d=\"M1 1\" fill=\"#000\"/></svg>");
+    var doc = try parseSvg(
+        t.allocator,
+        "<svg fill=\"#ffffff\"><path d=\"M0 0\"/><path d=\"M1 1\" fill=\"#000\"/></svg>",
+    );
     defer doc.deinit();
     // The path without its own fill inherits the root's white.
     try t.expectEqual([4]f32{ 1, 1, 1, 1 }, doc.paths[0].fill);
@@ -501,7 +532,12 @@ test "the reference tiger parses end to end" {
     const t = std.testing;
     var io_impl = std.Io.Threaded.init(t.allocator, .{});
     defer io_impl.deinit();
-    const xml = std.Io.Dir.cwd().readFileAlloc(io_impl.io(), "notes/research/tiger.svg", t.allocator, .unlimited) catch {
+    const xml = std.Io.Dir.cwd().readFileAlloc(
+        io_impl.io(),
+        "notes/research/tiger.svg",
+        t.allocator,
+        .unlimited,
+    ) catch {
         // The corpus file may be absent in a packaged environment — the
         // parse itself is covered by the inline fixtures above.
         return;

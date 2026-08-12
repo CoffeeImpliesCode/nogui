@@ -101,6 +101,7 @@ pub const SvgPath = struct {
     /// Release everything the path owns.
     pub fn deinit(self: *SvgPath) void {
         self.arena.deinit();
+        self.* = undefined;
     }
 };
 
@@ -138,7 +139,9 @@ pub fn transformPath(path: *SvgPath, m: [6]f32) void {
             return .{ .x = cur.x + d.x, .y = cur.y + d.y };
         }
     }.f;
-    var cur = Point{ .x = m[4], .y = m[5] }; // the transformed origin: a relative command from (0,0) must land at the translate
+    // The transformed origin: a relative command from (0,0) must land at
+    // the translate.
+    var cur: Point = .{ .x = m[4], .y = m[5] };
     var sub = cur;
     for (path.commands) |*cmd| {
         switch (cmd.*) {
@@ -658,7 +661,9 @@ fn parseSmoothCubic(p: *Parser, ctx: Ctx, abs: bool) !void {
         // about the current point; without a preceding cubic, it is the
         // current point itself (SVG 2 §8.3.8).
         const r1 = if (ctx.st.prev.kind == .cubic) reflect(ctx.st.prev.cp2, ctx.st.cur) else ctx.st.cur;
-        try ctx.list.append(ctx.alloc, .{ .smooth_cubic_to = .{ .abs = abs, .x2 = c2.x, .y2 = c2.y, .x = end.x, .y = end.y } });
+        try ctx.list.append(ctx.alloc, .{
+            .smooth_cubic_to = .{ .abs = abs, .x2 = c2.x, .y2 = c2.y, .x = end.x, .y = end.y },
+        });
         // The reflected control point can lie outside the hull of the other
         // three points, so include it explicitly to keep the bound valid.
         ctx.bbox.include(ctx.st.cur);
@@ -682,7 +687,9 @@ fn parseQuadratic(p: *Parser, ctx: Ctx, abs: bool) !void {
         const end = try p.parseCoordinatePair();
         const rc = resolve(c, ctx.st.cur, abs);
         const rend = resolve(end, ctx.st.cur, abs);
-        try ctx.list.append(ctx.alloc, .{ .quadratic_to = .{ .abs = abs, .x1 = c.x, .y1 = c.y, .x = end.x, .y = end.y } });
+        try ctx.list.append(ctx.alloc, .{
+            .quadratic_to = .{ .abs = abs, .x1 = c.x, .y1 = c.y, .x = end.x, .y = end.y },
+        });
         ctx.bbox.include(ctx.st.cur);
         ctx.bbox.include(rc);
         ctx.bbox.include(rend);
@@ -764,10 +771,10 @@ pub fn parsePath(allocator: std.mem.Allocator, data: []const u8) ParseError!SvgP
     const a = arena.allocator();
 
     var list = std.ArrayList(Command).empty;
-    var bbox = BBox{};
-    var st = ParseState{};
-    var p = Parser{ .data = data };
-    const ctx = Ctx{ .list = &list, .alloc = a, .st = &st, .bbox = &bbox };
+    var bbox: BBox = .{};
+    var st: ParseState = .{};
+    var p: Parser = .{ .data = data };
+    const ctx: Ctx = .{ .list = &list, .alloc = a, .st = &st, .bbox = &bbox };
 
     p.skipWsp();
     // Every command group starts with a moveto (SVG 2 §8.3.1): the first
@@ -948,9 +955,29 @@ test "relative, smooth and quadratic commands" {
     defer path.deinit();
     try t.expectEqual(@as(usize, 5), path.commands.len);
     try t.expectEqual(Command{ .move_to = .{ .abs = false, .x = 10, .y = 10 } }, path.commands[0]);
-    try t.expectEqual(Command{ .cubic_to = .{ .abs = false, .x1 = 5, .y1 = 5, .x2 = 10, .y2 = 0, .x = 15, .y = 5 } }, path.commands[1]);
-    try t.expectEqual(Command{ .smooth_cubic_to = .{ .abs = false, .x2 = 5, .y2 = 5, .x = 10, .y = 0 } }, path.commands[2]);
-    try t.expectEqual(Command{ .quadratic_to = .{ .abs = false, .x1 = 5, .y1 = 5, .x = 10, .y = 0 } }, path.commands[3]);
+    try t.expectEqual(Command{ .cubic_to = .{
+        .abs = false,
+        .x1 = 5,
+        .y1 = 5,
+        .x2 = 10,
+        .y2 = 0,
+        .x = 15,
+        .y = 5,
+    } }, path.commands[1]);
+    try t.expectEqual(Command{ .smooth_cubic_to = .{
+        .abs = false,
+        .x2 = 5,
+        .y2 = 5,
+        .x = 10,
+        .y = 0,
+    } }, path.commands[2]);
+    try t.expectEqual(Command{ .quadratic_to = .{
+        .abs = false,
+        .x1 = 5,
+        .y1 = 5,
+        .x = 10,
+        .y = 0,
+    } }, path.commands[3]);
     try t.expectEqual(Command{ .smooth_quadratic_to = .{ .abs = false, .x = 10, .y = 0 } }, path.commands[4]);
     // Bounds of the resolved geometry: min (10,10), max (55,20).
     try t.expectEqual(Rect{ .x = 10, .y = 10, .w = 45, .h = 10 }, path.bbox);

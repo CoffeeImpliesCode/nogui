@@ -23,11 +23,14 @@ const WidgetSize = @import("v7/widget.zig").Size;
 const hb = @import("harfbuzz");
 const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
 
-pub const MAX_MATERIALS: u32 = 1536; // slot 0 = solid; glyphs start at 1, the SVG region + decorations from the top. Demo needs ~620 glyphs + the tiger (240 fills + up to 78 strokes); 1536 leaves headroom.
+/// slot 0 = solid; glyphs start at 1, the SVG region + decorations from
+/// the top. Demo needs ~620 glyphs + the tiger (240 fills + up to 78
+/// strokes); 1536 leaves headroom.
+pub const max_materials: u32 = 1536;
 /// Max cached shaped runs (generation-clock eviction). The demo has ~32
 /// unique runs; 256 leaves ample headroom for the churning dynamic text.
-pub const RUN_CACHE_CAPACITY: u32 = 256;
-pub const FONT_SIZE_PX: u32 = 14;
+pub const run_cache_capacity: u32 = 256;
+pub const font_size_px: u32 = 14;
 
 /// The demo's live toggle state — the window writes it per frame, the UI
 /// reads it for the header status line (the UI cannot import the window).
@@ -93,12 +96,12 @@ const FontData = struct {
     data: []const u8,
     name: []const u8,
 };
-const FONT_SOURCES = [_]FontData{
+const font_sources = [_]FontData{
     .{ .data = @embedFile("InterVariable.ttf"), .name = "InterVariable" },
     .{ .data = @embedFile("FiraCodeNerdFont-Regular.ttf"), .name = "Fira Code Nerd Font" },
 };
 
-const MAX_FONT_SIZES = 16;
+const max_font_sizes = 16;
 
 pub const TextEngine = struct {
     /// The flex measure hook target: the demo sets this after init and
@@ -108,7 +111,11 @@ pub const TextEngine = struct {
 
     /// Host-side measure callback for flex.layoutWith.
     pub fn measureForFlex(text: []const u8, font_size: f32, font_id: u8) WidgetSize {
-        return measure_engine.?.measureText(text, if (font_size > 0) @intFromFloat(@round(font_size)) else FONT_SIZE_PX, font_id);
+        return measure_engine.?.measureText(
+            text,
+            if (font_size > 0) @intFromFloat(@round(font_size)) else font_size_px,
+            font_id,
+        );
     }
 
     /// The font's line height in px at `size` (ascender − descender; the
@@ -130,12 +137,12 @@ pub const TextEngine = struct {
     ft_lib: c.FT_Library,
     /// Per-size font states (FT face + hb font + metrics); the default
     /// size is created at init, others lazily on first use.
-    fonts: [MAX_FONT_SIZES]?FontState = .{null} ** MAX_FONT_SIZES,
+    fonts: [max_font_sizes]?FontState = .{null} ** max_font_sizes,
     // Parallel arrays, one element per rasterized glyph:
     // sweepers[i] owns the GPU curve buffer backing entries[i].
     sweepers: std.ArrayList(proto.GlyphSweeper) = .empty, // per glyph
     entries: std.ArrayList(GlyphEntry) = .empty, // per glyph
-    materials: noapi.GpuPtr, // MAX_MATERIALS * MATERIAL_SIZE, .default
+    materials: noapi.GpuPtr, // max_materials * MATERIAL_SIZE, .default
     next_slot: u32 = 1,
     material_bda: u64 = 0,
 
@@ -158,11 +165,11 @@ pub const TextEngine = struct {
         return self.next_slot;
     }
 
-    /// Init FreeType, load the embedded Inter font at FONT_SIZE_PX, wrap it
+    /// Init FreeType, load the embedded Inter font at font_size_px, wrap it
     /// in a HarfBuzz font, and allocate the material buffer. Returns errors
     /// (not panics) on FT/HB failures; on partial failure everything
     /// allocated so far is released.
-    pub fn init(gpu: *noapi.Gpu, gpa: std.mem.Allocator) !TextEngine {
+    pub fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu) !TextEngine {
         // SAFETY: assigned by FT_Init/FT_New before any use; failures return errors.
         var ft_lib: c.FT_Library = undefined;
         if (c.FT_Init_FreeType(&ft_lib) != 0) return error.FreeTypeInitFailed;
@@ -175,7 +182,7 @@ pub const TextEngine = struct {
         if (c.FT_New_Memory_Face(ft_lib, font_data.ptr, @as(c.FT_Long, @intCast(font_data.len)), 0, &face) != 0)
             return error.FreeTypeFaceFailed;
         errdefer _ = c.FT_Done_Face(face);
-        if (c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX) != 0) return error.FreeTypeSetPixelSizesFailed;
+        if (c.FT_Set_Pixel_Sizes(face, 0, font_size_px) != 0) return error.FreeTypeSetPixelSizesFailed;
 
         // hb-ft over the shared FT face. NOTE: we build the Font directly
         // from the binding's `c` (hb.c) rather than hb.freetype.createFont —
@@ -183,7 +190,7 @@ pub const TextEngine = struct {
         // translate-c of freetype.h, whose FT_Face type is incompatible with
         // the one in hb.c (two cimport instances of the same header).
         const hb_handle = hb.c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
-        var hb_font = hb.Font{ .handle = hb_handle };
+        var hb_font: hb.Font = .{ .handle = hb_handle };
         hb.c.hb_ft_font_set_funcs(hb_handle);
         // Deliberately UNHINTED (hb-ft's default load flags). Hinting
         // grid-fits the advances AND the extents per size, so the pen and
@@ -197,9 +204,9 @@ pub const TextEngine = struct {
         var font_ext: c.hb_font_extents_t = undefined;
         _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
 
-        const materials = try gpu.gpuMalloc(MAX_MATERIALS * proto.MATERIAL_SIZE, 64, .default);
+        const materials = try gpu.gpuMalloc(max_materials * proto.MATERIAL_SIZE, 64, .default);
 
-        var self = TextEngine{
+        var self: TextEngine = .{
             .gpu = gpu,
             .gpa = gpa,
             .ft_lib = ft_lib,
@@ -212,7 +219,7 @@ pub const TextEngine = struct {
             .face = face,
             .hb_font = hb_font,
             .font_id = 0,
-            .size = FONT_SIZE_PX,
+            .size = font_size_px,
             .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
             .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
         };
@@ -236,7 +243,7 @@ pub const TextEngine = struct {
         }
         const idx = slot orelse return error.TooManyFontSizes;
 
-        const font_data = FONT_SOURCES[font_id].data;
+        const font_data = font_sources[font_id].data;
         // SAFETY: assigned by FT_New before any use; failures return errors.
         var face: c.FT_Face = undefined;
         std.debug.assert(font_data.len <= std.math.maxInt(u32));
@@ -246,7 +253,7 @@ pub const TextEngine = struct {
         if (c.FT_Set_Pixel_Sizes(face, 0, size) != 0) return error.FreeTypeSetPixelSizesFailed;
 
         const hb_handle = hb.c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
-        var hb_font = hb.Font{ .handle = hb_handle };
+        var hb_font: hb.Font = .{ .handle = hb_handle };
         hb.c.hb_ft_font_set_funcs(hb_handle);
         // Unhinted — see the init's note: the positions and extents must
         // scale linearly with the size, never grid-snap.
@@ -284,6 +291,7 @@ pub const TextEngine = struct {
         self.run_cache.deinit(self.gpa);
         self.gpu.gpuFree(self.materials);
         _ = c.FT_Done_FreeType(self.ft_lib);
+        self.* = undefined;
     }
 
     pub fn materialBda(self: *const TextEngine) u64 {
@@ -332,7 +340,7 @@ pub const TextEngine = struct {
     fn getOrShape(self: *TextEngine, font: *FontState, text: []const u8) !*TextRun {
         const zone = tracy.Zone.begin(.{ .name = "getOrShape", .src = @src() });
         defer zone.end();
-        const key = RunKey{ .hash = std.hash.Wyhash.hash(0, text), .size = font.size, .font_id = font.font_id };
+        const key: RunKey = .{ .hash = std.hash.Wyhash.hash(0, text), .size = font.size, .font_id = font.font_id };
         if (self.run_cache.getPtr(key)) |run| {
             if (std.mem.eql(u8, run.text, text)) {
                 run.generation = self.run_clock; // LRU stamp on hit
@@ -373,7 +381,7 @@ pub const TextEngine = struct {
         errdefer self.gpa.free(text_dup);
 
         self.run_clock += 1; // bump BEFORE stamping
-        if (self.run_cache.count() >= RUN_CACHE_CAPACITY) {
+        if (self.run_cache.count() >= run_cache_capacity) {
             // Evict the entry with the oldest generation stamp (an O(n)
             // scan of ≤256 entries is fine).
             // SAFETY: only read if the scan finds a victim (victim_found);
@@ -408,7 +416,7 @@ pub const TextEngine = struct {
     /// buffer) → glyph material → entry. Glyph id 0 (.notdef, from chars
     /// absent in the font) and glyphs whose outline extraction fails are
     /// skipped (no entry, no error). Returns error.TooManyGlyphs once the
-    /// MAX_MATERIALS slot budget is exhausted (checked only for glyphs that
+    /// max_materials slot budget is exhausted (checked only for glyphs that
     /// would actually consume a new slot).
     fn ensureGlyph(self: *TextEngine, font: *FontState, gid: u32) !void {
         if (gid == 0) return; // .notdef: missing glyph, skip
@@ -419,8 +427,8 @@ pub const TextEngine = struct {
         // Slot budget exhausted: fail with a real error instead of writing
         // OOB into the GPU material heap — a debug-only assert would compile
         // out in ReleaseFast. The assert stays as belt-and-suspenders.
-        std.debug.assert(self.next_slot < MAX_MATERIALS); // slot 0 reserved for solid
-        if (self.next_slot >= MAX_MATERIALS) return error.TooManyGlyphs;
+        std.debug.assert(self.next_slot < max_materials); // slot 0 reserved for solid
+        if (self.next_slot >= max_materials) return error.TooManyGlyphs;
 
         // Extraction failures (missing outline, draw error) → skip glyph.
         const curves = extractGlyphCurves(self.gpa, font.hb_font, gid) catch return;
@@ -506,7 +514,17 @@ pub const TextEngine = struct {
     /// exhausted.
     /// `color` is the glyph color in Oklab (the pipeline space — the
     /// caller converts the sRGB-authored widget color via srgbToOklab).
-    pub fn emitText(self: *TextEngine, text: []const u8, x: f32, baseline_y: f32, size: u32, font_id: u8, clip_id: u32, color: [4]f32, out: *std.ArrayList(SceneRect)) !void {
+    pub fn emitText(
+        self: *TextEngine,
+        text: []const u8,
+        x: f32,
+        baseline_y: f32,
+        size: u32,
+        font_id: u8,
+        clip_id: u32,
+        color: [4]f32,
+        out: *std.ArrayList(SceneRect),
+    ) !void {
         const zone = tracy.Zone.begin(.{ .name = "emitText", .src = @src() });
         defer zone.end();
         const font = try self.fontFor(font_id, size);
@@ -610,7 +628,7 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
         last_y: *f32,
     };
 
-    var ctx = Ctx{
+    var ctx: Ctx = .{
         .curves = &buf,
         .count = &count,
         .first_x = &first_x,
@@ -620,7 +638,14 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
     };
 
     const move_cb = struct {
-        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+        fn cb(
+            dfuncs: ?*c.hb_draw_funcs_t,
+            draw_data: ?*anyopaque,
+            st: ?*c.hb_draw_state_t,
+            to_x: f32,
+            to_y: f32,
+            user_data: ?*anyopaque,
+        ) callconv(.c) void {
             _ = dfuncs;
             _ = draw_data;
             _ = st;
@@ -632,7 +657,14 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
         }
     }.cb;
     const line_cb = struct {
-        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+        fn cb(
+            dfuncs: ?*c.hb_draw_funcs_t,
+            draw_data: ?*anyopaque,
+            st: ?*c.hb_draw_state_t,
+            to_x: f32,
+            to_y: f32,
+            user_data: ?*anyopaque,
+        ) callconv(.c) void {
             _ = dfuncs;
             _ = draw_data;
             _ = st;
@@ -640,7 +672,14 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
             const tx = to_x / 64;
             const ty = to_y / 64;
             if (p.count.* < 4096) {
-                p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = (p.last_x.* + tx) * 0.5, .p1y = (p.last_y.* + ty) * 0.5, .p2x = tx, .p2y = ty };
+                p.curves[p.count.*] = .{
+                    .p0x = p.last_x.*,
+                    .p0y = p.last_y.*,
+                    .p1x = (p.last_x.* + tx) * 0.5,
+                    .p1y = (p.last_y.* + ty) * 0.5,
+                    .p2x = tx,
+                    .p2y = ty,
+                };
                 p.count.* += 1;
             }
             p.last_x.* = tx;
@@ -648,7 +687,16 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
         }
     }.cb;
     const quad_cb = struct {
-        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, control_x: f32, control_y: f32, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+        fn cb(
+            dfuncs: ?*c.hb_draw_funcs_t,
+            draw_data: ?*anyopaque,
+            st: ?*c.hb_draw_state_t,
+            control_x: f32,
+            control_y: f32,
+            to_x: f32,
+            to_y: f32,
+            user_data: ?*anyopaque,
+        ) callconv(.c) void {
             _ = dfuncs;
             _ = draw_data;
             _ = st;
@@ -658,7 +706,14 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
             const tx = to_x / 64;
             const ty = to_y / 64;
             if (p.count.* < 4096) {
-                p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = cx, .p1y = cy, .p2x = tx, .p2y = ty };
+                p.curves[p.count.*] = .{
+                    .p0x = p.last_x.*,
+                    .p0y = p.last_y.*,
+                    .p1x = cx,
+                    .p1y = cy,
+                    .p2x = tx,
+                    .p2y = ty,
+                };
                 p.count.* += 1;
             }
             p.last_x.* = tx;
@@ -666,7 +721,18 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
         }
     }.cb;
     const cubic_cb = struct {
-        fn cb(dfuncs: ?*c.hb_draw_funcs_t, draw_data: ?*anyopaque, st: ?*c.hb_draw_state_t, c1x: f32, c1y: f32, c2x: f32, c2y: f32, to_x: f32, to_y: f32, user_data: ?*anyopaque) callconv(.c) void {
+        fn cb(
+            dfuncs: ?*c.hb_draw_funcs_t,
+            draw_data: ?*anyopaque,
+            st: ?*c.hb_draw_state_t,
+            c1x: f32,
+            c1y: f32,
+            c2x: f32,
+            c2y: f32,
+            to_x: f32,
+            to_y: f32,
+            user_data: ?*anyopaque,
+        ) callconv(.c) void {
             _ = dfuncs;
             _ = draw_data;
             _ = st;
@@ -692,7 +758,14 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
                 const cy2 = mt * b1y + t * b2y;
                 const dx = mt * cx1 + t * cx2;
                 const dy = mt * cy1 + t * cy2;
-                p.curves[p.count.*] = .{ .p0x = p.last_x.*, .p0y = p.last_y.*, .p1x = b0x, .p1y = b0y, .p2x = dx, .p2y = dy };
+                p.curves[p.count.*] = .{
+                    .p0x = p.last_x.*,
+                    .p0y = p.last_y.*,
+                    .p1x = b0x,
+                    .p1y = b0y,
+                    .p2x = dx,
+                    .p2y = dy,
+                };
                 p.count.* += 1;
                 p.curves[p.count.*] = .{ .p0x = dx, .p0y = dy, .p1x = cx2, .p1y = cy2, .p2x = tx, .p2y = ty };
                 p.count.* += 1;
@@ -734,7 +807,10 @@ fn sweepIntersect(qa: f32, c0: f32, c1: f32, c2: f32, target: f32) f32 {
 
 fn sweepEval(p0: [2]f32, p1: [2]f32, p2: [2]f32, t: f32) [2]f32 {
     const mt = 1.0 - t;
-    return .{ mt * mt * p0[0] + 2.0 * mt * t * p1[0] + t * t * p2[0], mt * mt * p0[1] + 2.0 * mt * t * p1[1] + t * t * p2[1] };
+    return .{
+        mt * mt * p0[0] + 2.0 * mt * t * p1[0] + t * t * p2[0],
+        mt * mt * p0[1] + 2.0 * mt * t * p1[1] + t * t * p2[1],
+    };
 }
 
 fn sweepSegment(size: [2]f32, offset: [2]f32, p0: [2]f32, p1: [2]f32, p2: [2]f32) f32 {
@@ -801,17 +877,34 @@ fn sweepSegment(size: [2]f32, offset: [2]f32, p0: [2]f32, p1: [2]f32, p2: [2]f32
 }
 
 /// Rasterize real glyph curves at a pixel; returns coverage.
-fn glyphCoverage(curves: []const proto.Curve, curve_left: f32, curve_bottom: f32, curve_w: f32, curve_h: f32, px: [2]f32, win: [2]f32) f32 {
+fn glyphCoverage(
+    curves: []const proto.Curve,
+    curve_left: f32,
+    curve_bottom: f32,
+    curve_w: f32,
+    curve_h: f32,
+    px: [2]f32,
+    win: [2]f32,
+) f32 {
     // map pixel → curve space (the shader's uv mapping):
     // window size in curve units = win (curve_w/dst_w etc.), offset = pixel's curve pos
-    const offset = [2]f32{ curve_left + curve_w * (px[0] + 0.5 - px[0]), curve_bottom + curve_h * (px[1] + 0.5 - px[1]) };
+    const offset = [2]f32{
+        curve_left + curve_w * (px[0] + 0.5 - px[0]),
+        curve_bottom + curve_h * (px[1] + 0.5 - px[1]),
+    };
     _ = offset;
     // The shader: win_size = dFdx(vUv) = curve_w/dst_w; offset = vUv - 0.5*win_size.
     // For a pixel at curve position c: window = [c - win/2, c + win/2].
 
     var total: f32 = 0;
     for (curves) |cv| {
-        total += sweepSegment(win, .{ curve_left + curve_w * px[0] / 200, curve_bottom + curve_h * px[1] / 200 }, .{ cv.p0x, cv.p0y }, .{ cv.p1x, cv.p1y }, .{ cv.p2x, cv.p2y });
+        total += sweepSegment(
+            win,
+            .{ curve_left + curve_w * px[0] / 200, curve_bottom + curve_h * px[1] / 200 },
+            .{ cv.p0x, cv.p0y },
+            .{ cv.p1x, cv.p1y },
+            .{ cv.p2x, cv.p2y },
+        );
     }
     return total / (win[0] * win[1]);
 }
@@ -838,10 +931,10 @@ pub fn srgbToOklab(rgb: [4]f32) [4]f32 {
     const mp = std.math.cbrt(m);
     const sp = std.math.cbrt(s);
 
-    const L = 0.2104542553 * lp + 0.7936177850 * mp - 0.0040720468 * sp;
+    const l_oklab = 0.2104542553 * lp + 0.7936177850 * mp - 0.0040720468 * sp;
     const a = 1.9779984951 * lp - 2.4285922050 * mp + 0.4505937099 * sp;
     const bb = 0.0259040371 * lp + 0.7827717662 * mp - 0.8086757660 * sp;
-    return .{ L, a, bb, rgb[3] };
+    return .{ l_oklab, a, bb, rgb[3] };
 }
 
 // ─── Tests (pure only — GPU paths are smoke-verified by the orchestrator) ───
@@ -882,7 +975,10 @@ test "glyph sweep: real 'n' curves give full coverage at stroke centers" {
     defer _ = c.FT_Done_FreeType(ft_lib);
     const font_data = @embedFile("InterVariable.ttf");
     var face: c.FT_Face = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face),
+    );
     defer _ = c.FT_Done_Face(face);
     try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, 20));
 
@@ -912,7 +1008,13 @@ test "glyph sweep: real 'n' curves give full coverage at stroke centers" {
             const total: f32 = blk: {
                 var t: f32 = 0;
                 for (curves) |cv| {
-                    t += sweepSegment(win, px, .{ cv.p0x - min_x, cv.p0y - min_y }, .{ cv.p1x - min_x, cv.p1y - min_y }, .{ cv.p2x - min_x, cv.p2y - min_y });
+                    t += sweepSegment(
+                        win,
+                        px,
+                        .{ cv.p0x - min_x, cv.p0y - min_y },
+                        .{ cv.p1x - min_x, cv.p1y - min_y },
+                        .{ cv.p2x - min_x, cv.p2y - min_y },
+                    );
                 }
                 break :blk t;
             };
@@ -944,7 +1046,10 @@ test "quad policy: hb extents bound the ink, the 2px surround keeps the outer pi
     const sizes = [_]u32{ 13, 16, 20 };
     for (sizes) |px| {
         var face: c.FT_Face = undefined;
-        try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face),
+        );
         defer _ = c.FT_Done_Face(face);
         try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, px));
         const h = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
@@ -995,7 +1100,11 @@ test "quad policy: hb extents bound the ink, the 2px surround keeps the outer pi
             // exactly on a window edge, e.g. 'x' at 20px) — ~1e-6, six
             // orders below any visible coverage; 1e-4 leaves 100x margin.
             std.testing.expect(ring_ink < 1e-4) catch {
-                std.debug.print("ring leak: '{c}' {d}px bbx={d:.3} bby={d:.3} bbw={d:.3} bbh={d:.3} hull=[{d:.3},{d:.3}] ring_ink={d:.6}\n", .{ ch, px, bbx, bby, bbw, bbh, hull.min_x, hull.min_y, ring_ink });
+                std.debug.print(
+                    "ring leak: '{c}' {d}px bbx={d:.3} bby={d:.3} bbw={d:.3} " ++
+                        "bbh={d:.3} hull=[{d:.3},{d:.3}] ring_ink={d:.6}\n",
+                    .{ ch, px, bbx, bby, bbw, bbh, hull.min_x, hull.min_y, ring_ink },
+                );
                 return error.TestUnexpectedResult;
             };
         }
@@ -1010,11 +1119,14 @@ test "shaping: the hb-ft font scale is 26.6 fixed-point pixels" {
     defer _ = c.FT_Done_FreeType(ft_lib);
     const font_data = @embedFile("InterVariable.ttf");
     var face: c.FT_Face = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face),
+    );
     defer _ = c.FT_Done_Face(face);
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, font_size_px));
     const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
-    var font = hb.Font{ .handle = handle };
+    var font: hb.Font = .{ .handle = handle };
     defer font.destroy();
 
     var buf = try hb.Buffer.create();
@@ -1040,11 +1152,14 @@ test "shaping: kerned AV pair is narrower than the advance sum" {
     defer _ = c.FT_Done_FreeType(ft_lib);
     const font_data = @embedFile("InterVariable.ttf");
     var face: c.FT_Face = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face),
+    );
     defer _ = c.FT_Done_Face(face);
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, font_size_px));
     const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
-    var font = hb.Font{ .handle = handle };
+    var font: hb.Font = .{ .handle = handle };
     defer font.destroy();
 
     const width = struct {
@@ -1078,11 +1193,14 @@ test "shaping: invalid UTF-8 substitutes .notdef, never panics" {
     defer _ = c.FT_Done_FreeType(ft_lib);
     const font_data = @embedFile("InterVariable.ttf");
     var face: c.FT_Face = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face),
+    );
     defer _ = c.FT_Done_Face(face);
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, font_size_px));
     const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
-    var font = hb.Font{ .handle = handle };
+    var font: hb.Font = .{ .handle = handle };
     defer font.destroy();
 
     var buf = try hb.Buffer.create();
@@ -1106,11 +1224,14 @@ test "shaping: the kern feature applies GPOS pair adjustments in px" {
     defer _ = c.FT_Done_FreeType(ft_lib);
     const font_data = @embedFile("InterVariable.ttf");
     var face: c.FT_Face = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face));
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.FT_New_Memory_Face(ft_lib, font_data.ptr, @intCast(font_data.len), 0, &face),
+    );
     defer _ = c.FT_Done_Face(face);
-    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, FONT_SIZE_PX));
+    try std.testing.expectEqual(@as(c_int, 0), c.FT_Set_Pixel_Sizes(face, 0, font_size_px));
     const handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
-    var font = hb.Font{ .handle = handle };
+    var font: hb.Font = .{ .handle = handle };
     defer font.destroy();
 
     const kern_off = [_]hb.Feature{.{ .tag = 0x6b65726e, .value = 0, .start = 0, .end = std.math.maxInt(c_uint) }};

@@ -73,7 +73,12 @@ pub const TigerApp = struct {
         {
             _ = try ctx.column(.{ .gap = 6 });
             defer ctx.pop();
-            _ = try ctx.label(.{ .text = "TIGER SHOWCASE — GPU SWEEP VS REFERENCE", .color = C_TEXT, .font_size = 18, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{
+                .text = "TIGER SHOWCASE — GPU SWEEP VS REFERENCE",
+                .color = c_text,
+                .font_size = 18,
+                .padding = .{ .left = 6, .right = 6 },
+            });
             _ = try caption(ctx, "Left: our SvgView sweep of tiger.svg   |   Right: librsvg reference", 0);
         }
 
@@ -81,7 +86,7 @@ pub const TigerApp = struct {
             _ = try ctx.row(.{ .gap = 16 });
             defer ctx.pop();
             {
-                _ = try card(ctx, false, false);
+                _ = try card(false, ctx, false);
                 defer ctx.pop();
                 _ = try caption(ctx, "GPU — OUR SWEEP", 0);
                 {
@@ -91,7 +96,7 @@ pub const TigerApp = struct {
                         .basis = 480,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                        .border_color = C_BORDER,
+                        .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                     }));
                     defer ctx.pop();
@@ -99,7 +104,7 @@ pub const TigerApp = struct {
                 }
             }
             {
-                _ = try card(ctx, false, false);
+                _ = try card(false, ctx, false);
                 defer ctx.pop();
                 _ = try caption(ctx, "REFERENCE — LIBRSVG", 0);
                 {
@@ -109,7 +114,7 @@ pub const TigerApp = struct {
                         .texture = tiger_ref_idx,
                         .basis = 480,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                        .border_color = C_BORDER,
+                        .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                     });
                     defer ctx.pop();
@@ -133,7 +138,12 @@ pub const TestStrokesApp = struct {
         {
             _ = try ctx.column(.{ .gap = 6 });
             defer ctx.pop();
-            _ = try ctx.label(.{ .text = "STROKE TEST SCENE", .color = C_TEXT, .font_size = 18, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{
+                .text = "STROKE TEST SCENE",
+                .color = c_text,
+                .font_size = 18,
+                .padding = .{ .left = 6, .right = 6 },
+            });
             _ = try caption(ctx, "Curved thin strokes at widths 0.1 - 4.0   |   A cycles the stroke algo", 0);
         }
 
@@ -142,7 +152,7 @@ pub const TestStrokesApp = struct {
             _ = try ctx.row(.{ .gap = 16 });
             defer ctx.pop();
             {
-                _ = try card(ctx, false, false);
+                _ = try card(false, ctx, false);
                 defer ctx.pop();
                 _ = try caption(ctx, "STROKES", 0);
                 {
@@ -152,7 +162,7 @@ pub const TestStrokesApp = struct {
                         .basis = 620,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                        .border_color = C_BORDER,
+                        .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                     }));
                     defer ctx.pop();
@@ -160,7 +170,7 @@ pub const TestStrokesApp = struct {
                 }
             }
             {
-                _ = try card(ctx, false, false);
+                _ = try card(false, ctx, false);
                 defer ctx.pop();
                 _ = try caption(ctx, "CONTROLS", 0);
                 const algo_idx: u32 = @intFromFloat(stroke_algo);
@@ -169,14 +179,32 @@ pub const TestStrokesApp = struct {
                     1 => "marching quads",
                     else => "Cairo running-cover",
                 };
-                const algo_text = try std.fmt.allocPrint(ctx.arena, "MODE {d}: {s}   (A cycles)", .{ algo_idx, algo_name });
-                _ = try labelColor(ctx, algo_text, C_ACCENT);
+                const algo_text = try std.fmt.allocPrint(
+                    ctx.arena,
+                    "MODE {d}: {s}   (A cycles)",
+                    .{ algo_idx, algo_name },
+                );
+                _ = try labelColor(ctx, algo_text, c_accent);
                 const scale_text = try std.fmt.allocPrint(ctx.arena, "scale: {d:.2}", .{stroke_scale});
-                _ = try labelColor(ctx, scale_text, C_TEXT_SEC);
-                _ = try ctx.slider(.{ .label = "stroke-scale", .value = &stroke_scale, .min = 0.25, .max = 4, .color = C_ACCENT, .padding = .{ .left = 6, .right = 10 } });
+                _ = try labelColor(ctx, scale_text, c_text_sec);
+                _ = try ctx.slider(.{
+                    .label = "stroke-scale",
+                    .value = &stroke_scale,
+                    .min = 0.25,
+                    .max = 4,
+                    .color = c_accent,
+                    .padding = .{ .left = 6, .right = 10 },
+                });
                 const oversize_text = try std.fmt.allocPrint(ctx.arena, "pixel oversizing: {d:.2}", .{stroke_oversize});
-                _ = try labelColor(ctx, oversize_text, C_TEXT_SEC);
-                _ = try ctx.slider(.{ .label = "stroke-oversize", .value = &stroke_oversize, .min = 0, .max = 4, .color = C_ACCENT, .padding = .{ .left = 6, .right = 10 } });
+                _ = try labelColor(ctx, oversize_text, c_text_sec);
+                _ = try ctx.slider(.{
+                    .label = "stroke-oversize",
+                    .value = &stroke_oversize,
+                    .min = 0,
+                    .max = 4,
+                    .color = c_accent,
+                    .padding = .{ .left = 6, .right = 10 },
+                });
             }
         }
     }
@@ -188,15 +216,18 @@ pub var toggle_request: ?ToggleKind = null;
 /// ── Modern dark palette (sRGB-authored; the pipeline converts to Oklab) ──
 /// Surfaces: canvas → card → raised. One violet-indigo accent owns the
 /// interactive bits (primary buttons, slider, numerals, active pills).
-const C_CARD_DEEP: [4]f32 = .{ 0.16, 0.17, 0.22, 1 }; // raised chip surface (buttons/pills — LIGHTER than the card so they read as controls, not shadows)
-const C_BORDER: [4]f32 = .{ 0.24, 0.25, 0.33, 0.55 }; // soft card border
-const C_BORDER_STRONG: [4]f32 = .{ 0.34, 0.35, 0.46, 0.75 };
-const C_TEXT: [4]f32 = .{ 0.87, 0.87, 0.92, 1 }; // primary text
-const C_TEXT_SEC: [4]f32 = .{ 0.60, 0.61, 0.70, 1 }; // secondary text
-const C_TEXT_MUTED: [4]f32 = .{ 0.46, 0.47, 0.56, 1 }; // captions/stats
-const C_ACCENT: [4]f32 = .{ 0.40, 0.34, 0.78, 1 }; // violet-indigo (dark enough to match the neutral buttons' visual weight)
-const C_ACCENT_DIM: [4]f32 = .{ 0.24, 0.21, 0.47, 1 }; // accent-tinted surface
-const C_ON_ACCENT: [4]f32 = .{ 0.95, 0.94, 1, 1 }; // text on the accent
+// raised chip surface (buttons/pills — LIGHTER than the card so they read
+// as controls, not shadows)
+const c_card_deep: [4]f32 = .{ 0.16, 0.17, 0.22, 1 };
+const c_border: [4]f32 = .{ 0.24, 0.25, 0.33, 0.55 }; // soft card border
+const c_border_strong: [4]f32 = .{ 0.34, 0.35, 0.46, 0.75 };
+const c_text: [4]f32 = .{ 0.87, 0.87, 0.92, 1 }; // primary text
+const c_text_sec: [4]f32 = .{ 0.60, 0.61, 0.70, 1 }; // secondary text
+const c_text_muted: [4]f32 = .{ 0.46, 0.47, 0.56, 1 }; // captions/stats
+// violet-indigo (dark enough to match the neutral buttons' visual weight)
+const c_accent: [4]f32 = .{ 0.40, 0.34, 0.78, 1 };
+const c_accent_dim: [4]f32 = .{ 0.24, 0.21, 0.47, 1 }; // accent-tinted surface
+const c_on_accent: [4]f32 = .{ 0.95, 0.94, 1, 1 }; // text on the accent
 
 /// Label with the demo's baked 6px side padding, now carried by the widget
 /// box instead of hard-coded text offsets.
@@ -214,7 +245,13 @@ fn labelColor(ctx: *DrawCtx, text: []const u8, color: [4]f32) !Id {
 /// container must ride that layer or its glyphs sort below the container's
 /// z>0 fill and vanish behind it.
 fn caption(ctx: *DrawCtx, text: []const u8, layer: u32) !Id {
-    return ctx.label(.{ .text = text, .color = C_TEXT_MUTED, .font_size = 11, .padding = .{ .left = 6, .right = 6 }, .layer = layer });
+    return ctx.label(.{
+        .text = text,
+        .color = c_text_muted,
+        .font_size = 11,
+        .padding = .{ .left = 6, .right = 6 },
+        .layer = layer,
+    });
 }
 
 /// Secondary (ghost) button: a flat card-deep fill + a soft border (the
@@ -224,13 +261,13 @@ fn btn(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
     return ctx.button(.{
         .label = text,
         .on_click = on_click,
-        .color = C_TEXT,
+        .color = c_text,
         .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
         .radius = .{ .top = 7, .right = 7, .bottom = 7, .left = 7 },
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = C_BORDER_STRONG,
-        .fill = C_CARD_DEEP,
-        .gradient = srgbToOklab(C_CARD_DEEP),
+        .border_color = c_border_strong,
+        .fill = c_card_deep,
+        .gradient = srgbToOklab(c_card_deep),
     });
 }
 
@@ -243,26 +280,26 @@ fn btnPrimary(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
     return ctx.button(.{
         .label = text,
         .on_click = on_click,
-        .color = C_ON_ACCENT,
+        .color = c_on_accent,
         .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
         .radius = .{ .top = 7, .right = 7, .bottom = 7, .left = 7 },
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = C_ACCENT,
-        .fill = C_ACCENT,
-        .gradient = srgbToOklab(C_ACCENT),
+        .border_color = c_accent,
+        .fill = c_accent,
+        .gradient = srgbToOklab(c_accent),
     });
 }
 
 /// A card: rounded surface + soft border + a gentle shadow + the standard
 /// padding. `grow` spreads the card in its flex parent (the counter and
 /// volume cards side by side).
-fn card(ctx: *DrawCtx, comptime grow: bool, clip: bool) !Id {
+fn card(comptime grow: bool, ctx: *DrawCtx, clip: bool) !Id {
     return ctx.column(.{
         .gap = 8,
         .grow = if (grow) 1 else 0,
         .clip = clip,
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = C_BORDER,
+        .border_color = c_border,
         .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
         .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
         .shadow = 4,
@@ -277,23 +314,23 @@ fn pill(ctx: *DrawCtx, text: []const u8, on: bool, on_click: anytype) !Id {
         return ctx.button(.{
             .label = text,
             .on_click = on_click,
-            .color = C_ACCENT,
+            .color = c_accent,
             .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
             .radius = .{ .top = 9, .right = 9, .bottom = 9, .left = 9 },
-            .fill = C_ACCENT_DIM,
-            .gradient = srgbToOklab(C_ACCENT_DIM),
+            .fill = c_accent_dim,
+            .gradient = srgbToOklab(c_accent_dim),
         });
     }
     return ctx.button(.{
         .label = text,
         .on_click = on_click,
-        .color = C_TEXT_MUTED,
+        .color = c_text_muted,
         .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
         .radius = .{ .top = 9, .right = 9, .bottom = 9, .left = 9 },
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = C_BORDER,
-        .fill = C_CARD_DEEP,
-        .gradient = srgbToOklab(C_CARD_DEEP),
+        .border_color = c_border,
+        .fill = c_card_deep,
+        .gradient = srgbToOklab(c_card_deep),
     });
 }
 
@@ -305,15 +342,22 @@ const VolumeSlider = struct {
 
     pub fn draw(self: *VolumeSlider, ctx: *DrawCtx) !void {
         const text = try std.fmt.allocPrint(ctx.arena, "Volume: {d:.1}", .{self.volume});
-        _ = try card(ctx, true, false);
+        _ = try card(true, ctx, false);
         defer ctx.pop();
         _ = try caption(ctx, "VOLUME", 0);
-        _ = try ctx.slider(.{ .label = "volume-slider", .value = &self.volume, .min = 0, .max = 1, .color = C_ACCENT, .padding = .{ .left = 6, .right = 10 } });
+        _ = try ctx.slider(.{
+            .label = "volume-slider",
+            .value = &self.volume,
+            .min = 0,
+            .max = 1,
+            .color = c_accent,
+            .padding = .{ .left = 6, .right = 10 },
+        });
         {
             _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
             defer ctx.pop();
             _ = try btn(ctx, "mute", VolumeSlider.mute);
-            _ = try labelColor(ctx, text, C_TEXT_SEC);
+            _ = try labelColor(ctx, text, c_text_sec);
         }
     }
 
@@ -331,7 +375,12 @@ const Showcase = struct {
         // Root-level row: spans the window, so it needs its OWN side
         // padding (the root column's padding does not apply here) and
         // justify has main-axis free space to spread the children.
-        _ = try ctx.row(.{ .gap = 10, .justify = .space_between, .@"align" = .center, .padding = .{ .left = 12, .right = 12 } });
+        _ = try ctx.row(.{
+            .gap = 10,
+            .justify = .space_between,
+            .@"align" = .center,
+            .padding = .{ .left = 12, .right = 12 },
+        });
         defer ctx.pop();
         // All three boxes share the same vertical padding (44px tall), so
         // the text baselines line up despite the box-model differences.
@@ -339,10 +388,20 @@ const Showcase = struct {
         _ = try ctx.label(.{ .text = "pad", .padding = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 } });
         // Ring: 2px rounded border around the text (no fill); border 2 +
         // padding 8 = the same 10px content inset as "pad".
-        _ = try ctx.label(.{ .text = "ring", .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 }, .border = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 }, .border_color = .{ 0.8, 0.5, 0.3, 1 }, .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 } });
+        _ = try ctx.label(.{
+            .text = "ring",
+            .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+            .border = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 },
+            .border_color = .{ 0.8, 0.5, 0.3, 1 },
+            .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
+        });
         // Margin: pushed 10px right of its spread slot (horizontal only —
         // a vertical offset reads as misalignment).
-        _ = try ctx.label(.{ .text = "margin", .margin = .{ .left = 10 }, .padding = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 } });
+        _ = try ctx.label(.{
+            .text = "margin",
+            .margin = .{ .left = 10 },
+            .padding = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 },
+        });
     }
 };
 
@@ -359,7 +418,7 @@ pub const TodoApp = struct {
     visible_count: u8 = 2, // how many of the 4 pool items are shown (1..4)
 
     /// The fixed pool of candidate todo items.
-    pub const ITEMS = [4][]const u8{ "buy milk", "water plants", "write docs", "exercise" };
+    pub const items = [4][]const u8{ "buy milk", "water plants", "write docs", "exercise" };
 
     pub fn draw(self: *TodoApp, ctx: *DrawCtx) !void {
         const frame_text = try std.fmt.allocPrint(ctx.arena, "Frame: {d}   FPS: {d:.0}", .{ self.frame_count, fps });
@@ -392,15 +451,17 @@ pub const TodoApp = struct {
             .shrink = 0,
             .margin = .{ .left = 20, .bottom = -44, .right = 880 }, // 200px chip, top-left of the 1100px surface
             .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-            .border_color = C_BORDER,
+            .border_color = c_border,
             .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
             .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
-            .fill = C_ACCENT_DIM,
-            .gradient = srgbToOklab(C_ACCENT_DIM),
+            .fill = c_accent_dim,
+            .gradient = srgbToOklab(c_accent_dim),
             .shadow = 4,
         });
         _ = try caption(ctx, "LAYER 1", 1);
-        ctx.pop(); // the badge — explicit, NOT deferred (a deferred pop fires at the end of draw() and collects every following block into the badge)
+        // The badge — explicit, NOT deferred (a deferred pop fires at the end
+        // of draw() and collects every following block into the badge).
+        ctx.pop();
 
         // Box-model showcase FIRST, at ROOT level: a root-level row spans
         // the full window width, so justify = space_between has main-axis
@@ -418,7 +479,7 @@ pub const TodoApp = struct {
             _ = try ctx.column(.{ .gap = 6 });
             defer ctx.pop();
             _ = try ctx.label(.{ .text = "nogui v7 demo", .font_size = 20, .padding = .{ .left = 6, .right = 6 } });
-            _ = try labelColor(ctx, frame_text, C_TEXT_SEC);
+            _ = try labelColor(ctx, frame_text, c_text_sec);
             {
                 _ = try ctx.row(.{ .gap = 6 });
                 defer ctx.pop();
@@ -433,24 +494,67 @@ pub const TodoApp = struct {
             // Font-sizes showcase: labels at 13/16/20/24/32 px. The
             // per-node font_size selects the matching font state; S toggles
             // the subpixel AA for comparison at every size.
-            _ = try card(ctx, false, false);
+            _ = try card(false, ctx, false);
             defer ctx.pop();
             _ = try caption(ctx, "FONT SIZES — S TOGGLES SUBPIXEL AA", 0);
-            _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .padding = .{ .left = 6, .right = 6 } });
-            _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{
+                .text = "13px: The quick brown fox jumps over the lazy dog",
+                .font_size = 13,
+                .padding = .{ .left = 6, .right = 6 },
+            });
+            _ = try ctx.label(.{
+                .text = "16px: The quick brown fox jumps over the lazy dog",
+                .font_size = 16,
+                .padding = .{ .left = 6, .right = 6 },
+            });
+            _ = try ctx.label(.{
+                .text = "24px: The quick brown fox jumps over the lazy dog",
+                .font_size = 24,
+                .padding = .{ .left = 6, .right = 6 },
+            });
         }
 
         // The ghostty font (Fira Code Nerd Font) at the same sizes — commented
         // out for now (the multi-font showcase is redundant; keep it for later).
-        // _ = try ctx.column(.{ .gap = 6, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, .border_color = .{ 0.4, 0.4, 0.46, 1 }, .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 }, .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 } });
+        // _ = try ctx.column(.{
+        //     .gap = 6,
+        //     .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        //     .border_color = .{ 0.4, 0.4, 0.46, 1 },
+        //     .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
+        //     .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+        // });
         // defer ctx.pop();
         // _ = try label(ctx, "Fira Code Nerd Font (ghostty):");
-        // _ = try ctx.label(.{ .text = "10px: The quick brown fox jumps over the lazy dog", .font_size = 10, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-        // _ = try ctx.label(.{ .text = "13px: The quick brown fox jumps over the lazy dog", .font_size = 13, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-        // _ = try ctx.label(.{ .text = "16px: The quick brown fox jumps over the lazy dog", .font_size = 16, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-        // _ = try ctx.label(.{ .text = "20px: The quick brown fox jumps over the lazy dog", .font_size = 20, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
-        // _ = try ctx.label(.{ .text = "24px: The quick brown fox jumps over the lazy dog", .font_size = 24, .font_id = 1, .padding = .{ .left = 6, .right = 6 } });
+        // _ = try ctx.label(.{
+        //     .text = "10px: The quick brown fox jumps over the lazy dog",
+        //     .font_size = 10,
+        //     .font_id = 1,
+        //     .padding = .{ .left = 6, .right = 6 },
+        // });
+        // _ = try ctx.label(.{
+        //     .text = "13px: The quick brown fox jumps over the lazy dog",
+        //     .font_size = 13,
+        //     .font_id = 1,
+        //     .padding = .{ .left = 6, .right = 6 },
+        // });
+        // _ = try ctx.label(.{
+        //     .text = "16px: The quick brown fox jumps over the lazy dog",
+        //     .font_size = 16,
+        //     .font_id = 1,
+        //     .padding = .{ .left = 6, .right = 6 },
+        // });
+        // _ = try ctx.label(.{
+        //     .text = "20px: The quick brown fox jumps over the lazy dog",
+        //     .font_size = 20,
+        //     .font_id = 1,
+        //     .padding = .{ .left = 6, .right = 6 },
+        // });
+        // _ = try ctx.label(.{
+        //     .text = "24px: The quick brown fox jumps over the lazy dog",
+        //     .font_size = 24,
+        //     .font_id = 1,
+        //     .padding = .{ .left = 6, .right = 6 },
+        // });
         // }
 
         // Counter + volume side by side in a horizontal flex box. The row's
@@ -461,10 +565,15 @@ pub const TodoApp = struct {
         {
             // Counter block: a card holding the value as a big accent
             // numeral + dec/reset/inc row (inc = the primary action).
-            _ = try card(ctx, true, false);
+            _ = try card(true, ctx, false);
             defer ctx.pop();
             _ = try caption(ctx, "COUNTER", 0);
-            _ = try ctx.label(.{ .text = counter_text, .font_size = 28, .color = C_ACCENT, .padding = .{ .left = 6, .right = 6 } });
+            _ = try ctx.label(.{
+                .text = counter_text,
+                .font_size = 28,
+                .color = c_accent,
+                .padding = .{ .left = 6, .right = 6 },
+            });
             {
                 _ = try ctx.row(.{ .gap = 6 });
                 defer ctx.pop();
@@ -485,13 +594,13 @@ pub const TodoApp = struct {
         {
             // Todo block: a card with the done-count header + the
             // add/remove buttons + one toggle row per visible item.
-            _ = try card(ctx, false, false);
+            _ = try card(false, ctx, false);
             defer ctx.pop();
             {
                 _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
                 defer ctx.pop();
                 _ = try caption(ctx, "TODOS", 0);
-                _ = try labelColor(ctx, footer_text, C_TEXT_MUTED);
+                _ = try labelColor(ctx, footer_text, c_text_muted);
             }
             {
                 _ = try ctx.row(.{ .gap = 6 });
@@ -509,13 +618,17 @@ pub const TodoApp = struct {
                     // has been drawn. Node-local (each row has its own),
                     // reset to 0 when the row is hidden by "remove" (its
                     // state directory entry dies with the frame).
-                    const frames = try ctx.state("toggle-frames", u32, 0);
+                    const frames = try ctx.state(u32, "toggle-frames", 0);
                     frames.* += 1;
-                    const toggle_text = try std.fmt.allocPrint(ctx.arena, "toggle{d}: [{s}] n={d}", .{ i, if (self.done[i]) "x" else " ", frames.* });
+                    const toggle_text = try std.fmt.allocPrint(
+                        ctx.arena,
+                        "toggle{d}: [{s}] n={d}",
+                        .{ i, if (self.done[i]) "x" else " ", frames.* },
+                    );
                     const item_text = if (self.done[i])
-                        (try std.fmt.allocPrint(ctx.arena, "DONE: {s}", .{ITEMS[i]}))
+                        (try std.fmt.allocPrint(ctx.arena, "DONE: {s}", .{items[i]}))
                     else
-                        ITEMS[i];
+                        items[i];
                     _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
                     defer ctx.pop();
                     _ = try btn(ctx, toggle_text, comptime switch (i) {
@@ -524,7 +637,7 @@ pub const TodoApp = struct {
                         2 => TodoApp.onToggle2,
                         else => TodoApp.onToggle3,
                     });
-                    _ = try labelColor(ctx, item_text, if (self.done[i]) C_TEXT_MUTED else C_TEXT);
+                    _ = try labelColor(ctx, item_text, if (self.done[i]) c_text_muted else c_text);
                 }
             }
         }
@@ -543,7 +656,7 @@ pub const TodoApp = struct {
                 // views); this box samples it through the same bindless
                 // TYPE_TEXTURE path as the stripe tile. Colors are
                 // Oklab-authored.
-                _ = try card(ctx, false, false);
+                _ = try card(false, ctx, false);
                 defer ctx.pop();
                 {
                     _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
@@ -565,7 +678,7 @@ pub const TodoApp = struct {
                         .basis = 480, // fixed width (the row's main axis)
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                        .border_color = C_BORDER,
+                        .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                     });
                     defer ctx.pop();
@@ -578,7 +691,7 @@ pub const TodoApp = struct {
                 // curves + the glyph materials); this box reserves the
                 // drawing rect (the window injects the tiger's scene rects
                 // at it each frame).
-                _ = try card(ctx, false, false);
+                _ = try card(false, ctx, false);
                 defer ctx.pop();
                 {
                     _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
@@ -592,7 +705,7 @@ pub const TodoApp = struct {
                         .basis = 190, // fixed width — the same height as the mandelbrot's box
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                        .border_color = C_BORDER,
+                        .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                     }));
                     defer ctx.pop();
@@ -689,7 +802,7 @@ fn buildTree(app: *TodoApp) !WidgetTree {
     errdefer arena.deinit();
     const alloc = arena.allocator();
     var tree = WidgetTree.init(alloc); // mutable: DrawCtx takes *WidgetTree
-    var ctx = DrawCtx{ .tree = &tree, .arena = alloc };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = alloc };
     try app.draw(&ctx);
     test_arena = arena;
     return tree;
@@ -705,7 +818,7 @@ fn freeTree() void {
 // so the tree below lays out byte-identically to a shot without the badge
 // (the runShot's diff is confined to the badge region).
 test "layer badge: first root, layer 1, its height cancels exactly" {
-    var app = TodoApp{};
+    var app: TodoApp = .{};
     var tree = try buildTree(&app);
     defer freeTree();
 
@@ -739,7 +852,10 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
 
     try std.testing.expectEqual(Rect{ .x = 20, .y = 0, .w = 200, .h = 44 }, badge_col.rect);
     try std.testing.expectEqual(@as(f32, 0), roots_buf[1].rect.y); // Showcase row, unchanged
-    try std.testing.expectEqual(roots_buf[1].rect.y + roots_buf[1].rect.h, roots_buf[2].rect.y); // root column, unchanged
+    try std.testing.expectEqual(
+        roots_buf[1].rect.y + roots_buf[1].rect.h,
+        roots_buf[2].rect.y,
+    ); // root column, unchanged
 }
 
 /// Scan by kind (never by position): node order is post-order and ids are
@@ -771,7 +887,7 @@ fn countButtonLabelsWithPrefix(tree: *const WidgetTree, prefix: []const u8) usiz
 }
 
 test "draw: tree contains the expected button labels and title" {
-    var app = TodoApp{ .frame_count = 7 };
+    var app: TodoApp = .{ .frame_count = 7 };
     const tree = try buildTree(&app);
     defer freeTree();
 
@@ -804,7 +920,7 @@ test "draw: tree contains the expected button labels and title" {
 }
 
 test "toggle(0) marks the item done in the next draw" {
-    var app = TodoApp{};
+    var app: TodoApp = .{};
     app.toggle(0);
     const tree = try buildTree(&app);
     defer freeTree();
@@ -841,7 +957,7 @@ test "toggle(0) marks the item done in the next draw" {
 }
 
 test "counter: inc, dec clamps at 0, reset returns to 0" {
-    var app = TodoApp{};
+    var app: TodoApp = .{};
     app.inc();
     const tree = try buildTree(&app);
     defer freeTree();
@@ -865,7 +981,7 @@ test "counter: inc, dec clamps at 0, reset returns to 0" {
 }
 
 test "add grows visible rows, remove shrinks, both clamp" {
-    var app = TodoApp{};
+    var app: TodoApp = .{};
     const tree = try buildTree(&app);
     defer freeTree();
     try std.testing.expectEqual(@as(usize, 2), countButtonLabelsWithPrefix(&tree, "toggle"));
@@ -888,7 +1004,7 @@ test "add grows visible rows, remove shrinks, both clamp" {
 }
 
 test "mute zeroes the volume label" {
-    var app = TodoApp{};
+    var app: TodoApp = .{};
     const tree = try buildTree(&app);
     defer freeTree();
     try expectLabel(&tree, "Volume: 0.5");
@@ -903,7 +1019,7 @@ test "click injection: the inc button click reaches the component" {
     defer app.deinit();
     app.serialize_json = true;
 
-    var todo = TodoApp{};
+    var todo: TodoApp = .{};
     _ = try app.register(TodoApp, &todo);
 
     const out1 = try app.frame(TodoApp, &todo, 1, .{ .width = 800, .height = 600 });

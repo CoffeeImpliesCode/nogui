@@ -402,7 +402,7 @@ test "absoluteRect: root-level node is relative to the surface (0,0)" {
 }
 
 test "WidgetNode: defaults are zero-valued" {
-    const n = WidgetNode{
+    const n: WidgetNode = .{
         .id = .root,
         .kind = .{ .label = .{ .text = "x" } },
         .parent = .root,

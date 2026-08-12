@@ -19,14 +19,16 @@ pub fn wrap(comptime F: anytype) *const fn (*anyopaque) void {
 
 test "wrap: invokes the method with the correct receiver" {
     const Counter = struct {
+        const Self = @This();
+
         n: u32 = 0,
 
-        fn bump(self: *@This()) void {
+        fn bump(self: *Self) void {
             self.n += 1;
         }
     };
 
-    var c = Counter{};
+    var c: Counter = .{};
     const cb = wrap(Counter.bump);
     cb(@ptrCast(&c));
     try std.testing.expectEqual(@as(u32, 1), c.n);
@@ -36,20 +38,24 @@ test "wrap: invokes the method with the correct receiver" {
 
 test "wrap: two types get independent receivers" {
     const A = struct {
+        const Self = @This();
+
         v: u32 = 0,
-        fn inc(self: *@This()) void {
+        fn inc(self: *Self) void {
             self.v += 1;
         }
     };
     const B = struct {
+        const Self = @This();
+
         v: u32 = 0,
-        fn inc(self: *@This()) void {
+        fn inc(self: *Self) void {
             self.v += 10;
         }
     };
 
-    var a = A{};
-    var b = B{};
+    var a: A = .{};
+    var b: B = .{};
     const ca = wrap(A.inc);
     const cb = wrap(B.inc);
     ca(@ptrCast(&a));

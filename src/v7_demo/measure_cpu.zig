@@ -13,7 +13,7 @@ const WidgetSize = @import("v7/widget.zig").Size;
 const hb = @import("harfbuzz");
 const c = hb.c;
 
-const FONT_SIZE_PX: u32 = 16; // must match TextEngine.FONT_SIZE_PX
+const font_size_px: u32 = 16; // must match TextEngine.font_size_px
 
 const SizeState = struct {
     ft_lib: c.FT_Library,
@@ -26,8 +26,8 @@ const SizeState = struct {
     font_id: u8,
 };
 
-const MAX_ENTRIES = 16;
-var entries: [MAX_ENTRIES]?SizeState = .{null} ** MAX_ENTRIES;
+const max_entries = 16;
+var entries: [max_entries]?SizeState = .{null} ** max_entries;
 
 /// Get (or lazily create) the state for `px` pixels. One shared FT
 /// library; a fresh face + hb font per size — identical init to the
@@ -73,7 +73,7 @@ fn entryFor(font_id: u8, px: u32) !*SizeState {
     if (c.FT_Set_Pixel_Sizes(face, 0, px) != 0) return error.FreeTypeSetPixelSizesFailed;
 
     const hb_handle = c.hb_ft_font_create_referenced(face) orelse return error.HarfbuzzFailed;
-    const hb_font = hb.Font{ .handle = hb_handle };
+    const hb_font: hb.Font = .{ .handle = hb_handle };
     c.hb_ft_font_set_funcs(hb_handle);
     // Unhinted — same policy as the window engine (see text.zig's note):
     // positions and extents must scale linearly with the size.
@@ -116,7 +116,7 @@ pub fn measure(text: []const u8, font_size: f32, font_id: u8) WidgetSize {
     const px: u32 = if (font_size > 0)
         @intFromFloat(@round(font_size))
     else
-        FONT_SIZE_PX;
+        font_size_px;
     const s = entryFor(font_id, px) catch return fallback(text);
 
     var buf = shape(s, text) catch return fallback(text);

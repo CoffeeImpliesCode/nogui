@@ -48,8 +48,8 @@ const TextEngine = @import("text.zig").TextEngine;
 const text_mod = @import("text.zig");
 const svg_xml = @import("svg_xml.zig");
 const SvgView = @import("svg_view.zig").SvgView;
-const MAX_MATERIALS = @import("text.zig").MAX_MATERIALS;
-const FONT_SIZE_PX = @import("text.zig").FONT_SIZE_PX;
+const max_materials = @import("text.zig").max_materials;
+const font_size_px = @import("text.zig").font_size_px;
 const proto = @import("proto/sweeper.zig");
 const srgbToOklab = @import("text.zig").srgbToOklab;
 const ui = @import("ui.zig"); // for the demo texture index (texture_idx)
@@ -110,18 +110,18 @@ fn svgCardRect(tree: *const WidgetTree) SvgCard {
 /// (per-path conics + glyph materials + scene rects). The materials are
 /// written into the shared text-engine buffer at the SVG region — the
 /// batch draws everything with that one material BDA.
-fn initSvgView(gpu: *noapi.Gpu, gpa: std.mem.Allocator, text_engine: *TextEngine) !SvgView {
+fn initSvgView(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEngine) !SvgView {
     const tiger_xml = @embedFile("tiger.svg");
     var doc = try svg_xml.parseSvg(gpa, tiger_xml);
     defer doc.deinit();
-    const v = try SvgView.init(gpu, gpa, &doc, text_engine.materials, text_engine.materialBda(), SVG_MATERIAL_BASE);
+    const v = try SvgView.init(gpa, gpu, &doc, text_engine.materials, text_engine.materialBda(), svg_material_base);
     return v;
 }
 
 /// The stroke test scene: curved thin strokes at increasing widths. The
 /// stroke algo + oversize sliders drive the shader; the scale slider
 /// zooms the whole scene.
-fn initStrokeView(gpu: *noapi.Gpu, gpa: std.mem.Allocator, text_engine: *TextEngine) !SvgView {
+fn initStrokeView(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEngine) !SvgView {
     const strokes_xml =
         \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
         \\  <path d="M 50 60 C 150 220, 350 -80, 450 60" stroke="#fff" stroke-width="0.1" fill="none"/>
@@ -134,7 +134,7 @@ fn initStrokeView(gpu: *noapi.Gpu, gpa: std.mem.Allocator, text_engine: *TextEng
     ;
     var doc = try svg_xml.parseSvg(gpa, strokes_xml);
     defer doc.deinit();
-    const v = try SvgView.init(gpu, gpa, &doc, text_engine.materials, text_engine.materialBda(), SVG_MATERIAL_BASE);
+    const v = try SvgView.init(gpa, gpu, &doc, text_engine.materials, text_engine.materialBda(), svg_material_base);
     return v;
 }
 
@@ -159,8 +159,8 @@ fn applyMandelbrot(drag: ?*?MandelDrag, pos: [2]f32, wheel_y: f32, rect: Rect, s
             // width-derived scale makes the y pan wrong. Each axis divides
             // by ITS OWN display scale (px-per-unit: rect.{w,h} shows
             // MANDEL_{W,H}/scale units).
-            const s_x = scale * @as(f64, rect.w / @as(f32, MANDEL_W));
-            const s_y = scale * @as(f64, rect.h / @as(f32, MANDEL_H));
+            const s_x = scale * @as(f64, rect.w / @as(f32, mandel_w));
+            const s_y = scale * @as(f64, rect.h / @as(f32, mandel_h));
             ui.mandelbrot_center[0] = st.center[0] - @as(f64, pos[0] - st.mouse[0]) / s_x;
             ui.mandelbrot_center[1] = st.center[1] - @as(f64, pos[1] - st.mouse[1]) / s_y;
         }
@@ -186,15 +186,15 @@ fn toSurfacePoint(sdl_win: sdl3.video.Window, gw: *noapi.Surface, p: [2]f32) ![2
 /// The modern dark canvas: the Oklab L≈0.20 neutral with a whisper of blue
 /// (b < 0) — the deepest surface the cards sit on. Clears the offscreen
 /// target.
-const OKLAB_GRAY = [4]f32{ 0.20, 0.0, -0.008, 1.0 };
+const oklab_gray = [4]f32{ 0.20, 0.0, -0.008, 1.0 };
 
 /// The SVG view's material slots own the TOP region of the shared
-/// material buffer: [SVG_MATERIAL_BASE, MAX_MATERIALS). The tiger has
+/// material buffer: [svg_material_base, MAX_MATERIALS). The tiger has
 /// ≤240 fill paths + up to 78 stroked paths (a slot each); the per-frame
-/// decorations descend from SVG_MATERIAL_BASE. The glyphs (from slot 1
-/// upward) must stay below SVG_MATERIAL_BASE — the demo's ~620 glyphs
+/// decorations descend from svg_material_base. The glyphs (from slot 1
+/// upward) must stay below svg_material_base — the demo's ~620 glyphs
 /// fit with headroom.
-const SVG_MATERIAL_BASE: u32 = MAX_MATERIALS - 512;
+const svg_material_base: u32 = max_materials - 512;
 
 /// A shader file read from disk: owns the byte buffer, exposes the SPIR-V
 /// word slice (shaderCreate copies the module, so the bytes only need to
@@ -203,7 +203,7 @@ const ShaderFile = struct {
     bytes: []u8,
     spv: []const u32,
 
-    fn load(io: Io, gpa: std.mem.Allocator, path: []const u8) !ShaderFile {
+    fn load(gpa: std.mem.Allocator, io: Io, path: []const u8) !ShaderFile {
         const bytes = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
         errdefer gpa.free(bytes);
         const spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, bytes));
@@ -212,6 +212,7 @@ const ShaderFile = struct {
 
     fn deinit(self: *ShaderFile, gpa: std.mem.Allocator) void {
         gpa.free(self.bytes);
+        self.* = undefined;
     }
 };
 
@@ -252,6 +253,8 @@ fn ensureRenderTarget(
 /// descHeapCreate's requested counts are capacity hints — the backend
 /// forces the pool to max_textures/max_samplers either way.
 const TextureRegistry = struct {
+    const Self = TextureRegistry;
+
     gpu: *noapi.Gpu,
     heap: noapi.DescriptorHeap,
     /// Next free heap slot (the registry is append-only this pass).
@@ -259,7 +262,7 @@ const TextureRegistry = struct {
     /// The app's texture handle → heap index.
     map: std.AutoHashMapUnmanaged(noapi.TextureHandle, u32) = .empty,
 
-    fn init(gpu: *noapi.Gpu, gpa: std.mem.Allocator) !@This() {
+    fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu) !Self {
         _ = gpa; // the unmanaged map allocates lazily at register time
         const heap = try gpu.descHeapCreate(16, 0, 1);
         errdefer gpu.descHeapDestroy(heap);
@@ -275,19 +278,20 @@ const TextureRegistry = struct {
         return .{ .gpu = gpu, .heap = heap };
     }
 
-    fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+    fn deinit(self: *Self, gpa: std.mem.Allocator) void {
         // The registry owns the registered textures (created by the demo
         // setup, alive for the whole run).
         var it = self.map.keyIterator();
         while (it.next()) |h| self.gpu.textureDestroy(h.*);
         self.map.deinit(gpa);
         self.gpu.descHeapDestroy(self.heap);
+        self.* = undefined;
     }
 
     /// Register a texture: write its view descriptor into the heap at a
     /// stable index (returned) — descHeapSetTextures, once per texture.
     /// Idempotent: a handle already registered returns its index.
-    fn register(self: *@This(), gpa: std.mem.Allocator, tex: noapi.TextureHandle) !u32 {
+    fn register(self: *Self, gpa: std.mem.Allocator, tex: noapi.TextureHandle) !u32 {
         if (self.map.get(tex)) |idx| return idx;
         const idx = self.next_idx;
         self.next_idx += 1;
@@ -307,7 +311,7 @@ const TextureRegistry = struct {
     /// sees element 0 only — set-1 indices are independent of the set-0
     /// indices. Plain register() textures (the demo stripe) are NOT
     /// storage-capable and never write a set-1 descriptor.
-    fn registerWithStorage(self: *@This(), gpa: std.mem.Allocator, tex: noapi.TextureHandle) !u32 {
+    fn registerWithStorage(self: *Self, gpa: std.mem.Allocator, tex: noapi.TextureHandle) !u32 {
         const idx = try self.register(gpa, tex);
         const rw_desc = self.gpu.textureRwViewDescriptor(tex, .{ .format = .default });
         self.gpu.descHeapSetTexturesRw(self.heap, 0, &.{rw_desc});
@@ -323,9 +327,9 @@ const TextureRegistry = struct {
 /// (.default = host_coherent, like the material buffers) and rewritten
 /// every frame before the dispatch — same pattern as the per-frame
 /// material writes, so no flush is needed.
-const MANDEL_W: u32 = 512;
-const MANDEL_H: u32 = 384;
-const MANDEL_MAX_ITER: u32 = 256;
+const mandel_w: u32 = 512;
+const mandel_h: u32 = 384;
+const mandel_max_iter: u32 = 256;
 
 /// The compute params, written verbatim into the host-visible buffer.
 /// Layout MUST match MandelParams in shaders/mandelbrot.comp.slang
@@ -347,19 +351,19 @@ const MandelbrotPass = struct {
     params_buf: noapi.GpuPtr,
     params_bda: u64,
 
-    fn init(gpu: *noapi.Gpu, io: Io, gpa: std.mem.Allocator, registry: *TextureRegistry) !MandelbrotPass {
+    fn init(gpa: std.mem.Allocator, io: Io, gpu: *noapi.Gpu, registry: *TextureRegistry) !MandelbrotPass {
         // Storage + sampled usage: the compute writes it (set 1 storage
         // view), the GUI samples it (set 0 sampled view). textureCreate
         // forces transfer_dst and transitions to GENERAL — the layout both
         // descriptor types use.
         const tex = try gpu.textureCreate(.{
-            .dimensions = .{ MANDEL_W, MANDEL_H, 1 },
+            .dimensions = .{ mandel_w, mandel_h, 1 },
             .format = .rgba32_float,
             .usage = .{ .sampled = true, .storage = true },
         });
         errdefer gpu.textureDestroy(tex);
 
-        var shader_f = try ShaderFile.load(io, gpa, "shaders/mandelbrot_comp.spv");
+        var shader_f = try ShaderFile.load(gpa, io, "shaders/mandelbrot_comp.spv");
         defer shader_f.deinit(gpa);
         const shader = try gpu.shaderCreate(shader_f.spv, .compute, "main", "mandelbrot_comp");
         errdefer gpu.shaderDestroy(shader);
@@ -376,6 +380,7 @@ const MandelbrotPass = struct {
     fn deinit(self: *MandelbrotPass, gpu: *noapi.Gpu) void {
         gpu.gpuFree(self.params_buf);
         gpu.shaderDestroy(self.shader);
+        self.* = undefined;
     }
 };
 
@@ -383,25 +388,30 @@ const MandelbrotPass = struct {
 /// rewrite the params (center/scale from the demo globals — the
 /// pan/zoom/animation knobs — plus the frame time for the hue shift),
 /// bind the GUI texture heap (set 1 = the storage image at fixed index 0),
-/// dispatch MANDEL_W/8 x MANDEL_H/8 groups, then a compute→fragment
+/// dispatch mandel_w/8 x mandel_h/8 groups, then a compute→fragment
 /// barrier so the GUI pass's sampled read sees the fresh fractal. The
 /// image stays in GENERAL layout throughout (textureCreate + the heap
 /// descriptors), so the barrier is access-only — no layout transition.
-fn recordMandelbrot(cmd: *noapi.CommandBuffer, pass: *const MandelbrotPass, heap: noapi.DescriptorHeap, time_ms: u64) void {
+fn recordMandelbrot(
+    cmd: *noapi.CommandBuffer,
+    pass: *const MandelbrotPass,
+    heap: noapi.DescriptorHeap,
+    time_ms: u64,
+) void {
     const zone = tracy.Zone.begin(.{ .name = "mandelbrot", .src = @src() });
     defer zone.end();
     const params: *MandelParams = @ptrCast(@alignCast(pass.params_buf.cpu));
     params.* = .{
-        .size = .{ MANDEL_W, MANDEL_H },
+        .size = .{ mandel_w, mandel_h },
         .center = ui.mandelbrot_center,
         .scale = ui.mandelbrot_scale,
         .time = @as(f32, @floatFromInt(time_ms)) / 1000.0,
-        .max_iter = MANDEL_MAX_ITER,
+        .max_iter = mandel_max_iter,
         .precision = ui.mandelbrot_precision,
     };
     cmd.setComputeShader(pass.shader);
     cmd.bindDescriptorSets(heap);
-    cmd.dispatch(pass.params_bda, MANDEL_W / 8, MANDEL_H / 8, 1);
+    cmd.dispatch(pass.params_bda, mandel_w / 8, mandel_h / 8, 1);
     cmd.barrier(.{ .compute = true }, .{ .fragment = true }, .{});
 }
 
@@ -414,7 +424,7 @@ fn recordMandelbrot(cmd: *noapi.CommandBuffer, pass: *const MandelbrotPass, heap
 /// end. Written as rgba32_float in the pipeline's Oklab space (the blit
 /// pass converts to sRGB like every other color; rgba8 UNORM could not
 /// hold negative Oklab ab chroma).
-const DEMO_TEX_SIZE = 64;
+const demo_tex_size = 64;
 
 fn writeDemoTexturePixels(pixels: [*]f32) void {
     const stripe_w: usize = 8;
@@ -429,13 +439,13 @@ fn writeDemoTexturePixels(pixels: [*]f32) void {
         srgbToOklab(.{ 0.9, 0.4, 0.7, 1 }),
         srgbToOklab(.{ 0.6, 0.85, 0.25, 1 }),
     };
-    for (0..DEMO_TEX_SIZE) |y| {
-        for (0..DEMO_TEX_SIZE) |x| {
+    for (0..demo_tex_size) |y| {
+        for (0..demo_tex_size) |x| {
             const c = stripes[x / stripe_w];
-            pixels[(y * DEMO_TEX_SIZE + x) * 4 + 0] = c[0];
-            pixels[(y * DEMO_TEX_SIZE + x) * 4 + 1] = c[1];
-            pixels[(y * DEMO_TEX_SIZE + x) * 4 + 2] = c[2];
-            pixels[(y * DEMO_TEX_SIZE + x) * 4 + 3] = c[3];
+            pixels[(y * demo_tex_size + x) * 4 + 0] = c[0];
+            pixels[(y * demo_tex_size + x) * 4 + 1] = c[1];
+            pixels[(y * demo_tex_size + x) * 4 + 2] = c[2];
+            pixels[(y * demo_tex_size + x) * 4 + 3] = c[3];
         }
     }
 }
@@ -445,15 +455,15 @@ fn writeDemoTexturePixels(pixels: [*]f32) void {
 /// staging buffer), register it in the GUI texture heap and return its
 /// heap index (tex_idx). The texture's OWNED by the registry (destroyed
 /// with it).
-fn uploadDemoTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.mem.Allocator) !u32 {
+fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *TextureRegistry) !u32 {
     const tex = try gpu.textureCreate(.{
-        .dimensions = .{ DEMO_TEX_SIZE, DEMO_TEX_SIZE, 1 },
+        .dimensions = .{ demo_tex_size, demo_tex_size, 1 },
         .format = .rgba32_float,
         .usage = .{ .sampled = true },
     });
     errdefer gpu.textureDestroy(tex);
 
-    const bytes: u64 = DEMO_TEX_SIZE * DEMO_TEX_SIZE * 4 * @sizeOf(f32);
+    const bytes: u64 = demo_tex_size * demo_tex_size * 4 * @sizeOf(f32);
     const buf = try gpu.gpuMalloc(bytes, 64, .default);
     defer gpu.gpuFree(buf);
     writeDemoTexturePixels(@ptrCast(@alignCast(buf.cpu)));
@@ -465,9 +475,9 @@ fn uploadDemoTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.mem.A
     cmd.copyToTexture(.{
         .gpu = gpu,
         .handle = tex,
-        .dimensions = .{ DEMO_TEX_SIZE, DEMO_TEX_SIZE, 1 },
+        .dimensions = .{ demo_tex_size, demo_tex_size, 1 },
         .format = .rgba32_float,
-    }, buf, .{ .size = .{ DEMO_TEX_SIZE, DEMO_TEX_SIZE, 1 } });
+    }, buf, .{ .size = .{ demo_tex_size, demo_tex_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
     gpu.commandsEnd(cmd);
     try gpu.waitIdle();
@@ -479,23 +489,23 @@ fn uploadDemoTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.mem.A
 /// RGBA8 blob, 512×512, generated at build time from tiger.svg) uploaded
 /// as an rgba32_float texture and registered (ui.tiger_ref_idx) for the
 /// sampler-only TYPE_TEXTURE path.
-const TIGER_REF_SIZE = 512;
-fn uploadReferenceTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.mem.Allocator) !void {
+const tiger_ref_size = 512;
+fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *TextureRegistry) !void {
     const tex = try gpu.textureCreate(.{
-        .dimensions = .{ TIGER_REF_SIZE, TIGER_REF_SIZE, 1 },
+        .dimensions = .{ tiger_ref_size, tiger_ref_size, 1 },
         .format = .rgba32_float,
         .usage = .{ .sampled = true },
     });
     errdefer gpu.textureDestroy(tex);
 
-    const bytes: u64 = TIGER_REF_SIZE * TIGER_REF_SIZE * 4 * @sizeOf(f32);
+    const bytes: u64 = tiger_ref_size * tiger_ref_size * 4 * @sizeOf(f32);
     const buf = try gpu.gpuMalloc(bytes, 64, .default);
     defer gpu.gpuFree(buf);
     const src = @embedFile("tiger_ref.rgba");
     // The pipeline outputs Oklab (the blit converts to sRGB), so the
     // texture's pixels must be Oklab — the sRGB RGBA8 reference converts
     // per pixel here, exactly like the procedural demo texture's authoring.
-    for (0..TIGER_REF_SIZE * TIGER_REF_SIZE) |pix| {
+    for (0..tiger_ref_size * tiger_ref_size) |pix| {
         const o = pix * 4;
         const ok = srgbToOklab(.{
             @as(f32, @floatFromInt(src[o])) / 255.0,
@@ -514,9 +524,9 @@ fn uploadReferenceTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.
     cmd.copyToTexture(.{
         .gpu = gpu,
         .handle = tex,
-        .dimensions = .{ TIGER_REF_SIZE, TIGER_REF_SIZE, 1 },
+        .dimensions = .{ tiger_ref_size, tiger_ref_size, 1 },
         .format = .rgba32_float,
-    }, buf, .{ .size = .{ TIGER_REF_SIZE, TIGER_REF_SIZE, 1 } });
+    }, buf, .{ .size = .{ tiger_ref_size, tiger_ref_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
     gpu.commandsEnd(cmd);
     try gpu.waitIdle();
@@ -541,6 +551,7 @@ fn uploadReferenceTexture(gpu: *noapi.Gpu, registry: *TextureRegistry, gpa: std.
 ///    (x = content.x, baseline = the font-derived baseline), appended
 ///    LAST so text paints on top of every widget decoration.
 fn buildSliceRects(
+    gpa: std.mem.Allocator,
     text_engine: *TextEngine,
     svg_view: ?*SvgView,
     cmds: []const DrawCmd,
@@ -549,17 +560,16 @@ fn buildSliceRects(
     hover_alpha: f32,
     focus_id: ?Id,
     out: *std.ArrayList(SceneRect),
-    gpa: std.mem.Allocator,
 ) !void {
     const zone = tracy.Zone.begin(.{ .name = "buildSliceRects", .src = @src() });
     defer zone.end();
     // Rounded-rect material slots, allocated from the top of the buffer
     // downward (glyphs own slots 1..next_slot-1 from the bottom; the
     // assert in text.zig caps glyphs well below the top). The SVG view's
-    // materials own the TOP region [SVG_MATERIAL_BASE, MAX_MATERIALS) —
-    // the decorations descend from SVG_MATERIAL_BASE, never into the
+    // materials own the TOP region [svg_material_base, MAX_MATERIALS) —
+    // the decorations descend from svg_material_base, never into the
     // tiger's slots.
-    var material_slot: u32 = SVG_MATERIAL_BASE;
+    var material_slot: u32 = svg_material_base;
     // Guard the decoration writes against the LIVE glyph count: glyph
     // slots ascend from slot 1 as the frame's text is rasterized, so the
     // headroom below is next_slot, not 1. With `> 1` a burst of
@@ -611,10 +621,23 @@ fn buildSliceRects(
             const feather = cmd.shadow;
             std.debug.assert(material_slot > glyph_slots); // never reach the live glyph slots
             material_slot -= 1;
-            proto.GlyphSweeper.writeShadowMaterial(text_engine.materials, material_slot, shadow_rx, shadow_ry, feather, cmd.rect.w, cmd.rect.h);
+            proto.GlyphSweeper.writeShadowMaterial(
+                text_engine.materials,
+                material_slot,
+                shadow_rx,
+                shadow_ry,
+                feather,
+                cmd.rect.w,
+                cmd.rect.h,
+            );
             material_index = material_slot;
             try out.append(gpa, .{
-                .dst = .{ cmd.rect.x - feather, cmd.rect.y - feather, cmd.rect.w + 2 * feather, cmd.rect.h + 2 * feather },
+                .dst = .{
+                    cmd.rect.x - feather,
+                    cmd.rect.y - feather,
+                    cmd.rect.w + 2 * feather,
+                    cmd.rect.h + 2 * feather,
+                },
                 .src = .{ 0, 0, 1, 1 },
                 .corners = .{ slice_corner_l, slice_corner_r, slice_corner_t, slice_corner_b },
                 .color = srgbToOklab(cmd.color),
@@ -632,7 +655,16 @@ fn buildSliceRects(
             // Ring materials always carry the ring's gradient (the demo sets
             // none); fills carry one only when the gradient flag is set.
             const gradient: [4]f32 = if (cmd.ring or cmd.gradient[3] > 0) cmd.gradient else .{ 0, 0, 0, 0 };
-            proto.GlyphSweeper.writeRoundedRectMaterial(text_engine.materials, material_slot, rx, ry, border, cmd.rect.w, cmd.rect.h, gradient);
+            proto.GlyphSweeper.writeRoundedRectMaterial(
+                text_engine.materials,
+                material_slot,
+                rx,
+                ry,
+                border,
+                cmd.rect.w,
+                cmd.rect.h,
+                gradient,
+            );
             material_index = material_slot;
         }
 
@@ -671,7 +703,16 @@ fn buildSliceRects(
         const thumb_radius: f32 = 3;
         std.debug.assert(material_slot > glyph_slots);
         material_slot -= 1;
-        proto.GlyphSweeper.writeRoundedRectMaterial(text_engine.materials, material_slot, thumb_radius, thumb_radius, 0, thumb_w, r.h, .{ 0, 0, 0, 0 });
+        proto.GlyphSweeper.writeRoundedRectMaterial(
+            text_engine.materials,
+            material_slot,
+            thumb_radius,
+            thumb_radius,
+            0,
+            thumb_w,
+            r.h,
+            .{ 0, 0, 0, 0 },
+        );
         try out.append(gpa, .{
             .dst = .{ thumb_x, r.y, thumb_w, r.h },
             .src = .{ 0, 0, 1, 1 },
@@ -696,7 +737,16 @@ fn buildSliceRects(
             const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
             std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
-            proto.GlyphSweeper.writeRoundedRectMaterial(text_engine.materials, material_slot, ring_rx, ring_ry, 2, r.w, r.h, .{ 0, 0, 0, 0 });
+            proto.GlyphSweeper.writeRoundedRectMaterial(
+                text_engine.materials,
+                material_slot,
+                ring_rx,
+                ring_ry,
+                2,
+                r.w,
+                r.h,
+                .{ 0, 0, 0, 0 },
+            );
             try out.append(gpa, .{
                 .dst = .{ r.x, r.y, r.w, r.h },
                 .src = .{ 0, 0, 1, 1 },
@@ -723,7 +773,16 @@ fn buildSliceRects(
             const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
             std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
-            proto.GlyphSweeper.writeRoundedRectMaterial(text_engine.materials, material_slot, ring_rx, ring_ry, 2, r.w, r.h, .{ 0, 0, 0, 0 });
+            proto.GlyphSweeper.writeRoundedRectMaterial(
+                text_engine.materials,
+                material_slot,
+                ring_rx,
+                ring_ry,
+                2,
+                r.w,
+                r.h,
+                .{ 0, 0, 0, 0 },
+            );
             try out.append(gpa, .{
                 .dst = .{ r.x, r.y, r.w, r.h },
                 .src = .{ 0, 0, 1, 1 },
@@ -749,7 +808,7 @@ fn buildSliceRects(
         if (t.len == 0) continue;
         const content = contentRect(tree, n.id);
         if (content.w == 0 or content.h == 0) continue;
-        const size: u32 = if (n.font_size > 0) @intFromFloat(@round(n.font_size)) else FONT_SIZE_PX;
+        const size: u32 = if (n.font_size > 0) @intFromFloat(@round(n.font_size)) else font_size_px;
         const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
         const text_color: [4]f32 = switch (n.kind) {
             .label => |l| l.color,
@@ -793,7 +852,9 @@ fn buildSliceRects(
             // The curves are swept in pixel space (the glyph branch's 1x1
             // window) — bake the fit scale into the GPU curve buffers.
             sv.setScale(scale);
-            // std.log.info("svg: card=({d:.0},{d:.0},{d:.0},{d:.0}) scale={d:.3}", .{ card_rect.x, card_rect.y, card_rect.w, card_rect.h, scale });
+            // std.log.info("svg: card=({d:.0},{d:.0},{d:.0},{d:.0}) scale={d:.3}", .{
+            //     card_rect.x, card_rect.y, card_rect.w, card_rect.h, scale
+            // });
             for (sv.rects()) |r| {
                 try out.append(gpa, .{
                     .dst = .{ ox + r.dst[0] * scale, oy + r.dst[1] * scale, r.dst[2] * scale, r.dst[3] * scale },
@@ -849,7 +910,7 @@ fn renderPass1(
     try batch.sort(cmd, slice_rects, proto_rects);
 
     cmd.beginRendering(.{ .color_attachments = &.{
-        .{ .texture = render_target, .load_op = .clear, .store_op = .store, .clear_color = OKLAB_GRAY },
+        .{ .texture = render_target, .load_op = .clear, .store_op = .store, .clear_color = oklab_gray },
     }, .render_area_size = .{ surface_size.width, surface_size.height } });
 
     // The v1 general blending pipeline (spec §4): ONE uniform alpha blend
@@ -881,7 +942,17 @@ fn renderPass1(
 
 /// Run the graphical demo. Blocks until the window closes.
 /// Generic over the root component (any type with pub draw(self, ctx) !void).
-pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool, max_frames: ?u32) !void {
+pub fn run(
+    comptime T: type,
+    app: *App,
+    root: *T,
+    subpixel: bool,
+    quad_debug: bool,
+    bgr: bool,
+    damp: bool,
+    gpu_sort_verify: bool,
+    max_frames: ?u32,
+) !void {
     const gpa = app.gpa;
 
     // OVERRIDE priority: the SDL gives env vars precedence over
@@ -912,15 +983,15 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
 
     // Load SPIR-V: quad_vert/quad_frag for the 9-slice batch, the CS1
     // sort compute (V1b), plus the fullscreen blit pass (Oklab → sRGB).
-    var quad_vert_f = try ShaderFile.load(io, gpa, "shaders/quad_vert.spv");
+    var quad_vert_f = try ShaderFile.load(gpa, io, "shaders/quad_vert.spv");
     defer quad_vert_f.deinit(gpa);
-    var quad_frag_f = try ShaderFile.load(io, gpa, "shaders/quad_frag.spv");
+    var quad_frag_f = try ShaderFile.load(gpa, io, "shaders/quad_frag.spv");
     defer quad_frag_f.deinit(gpa);
-    var sort_comp_f = try ShaderFile.load(io, gpa, "shaders/sort_comp.spv");
+    var sort_comp_f = try ShaderFile.load(gpa, io, "shaders/sort_comp.spv");
     defer sort_comp_f.deinit(gpa);
-    var fullscreen_vert_f = try ShaderFile.load(io, gpa, "shaders/fullscreen_vert.spv");
+    var fullscreen_vert_f = try ShaderFile.load(gpa, io, "shaders/fullscreen_vert.spv");
     defer fullscreen_vert_f.deinit(gpa);
-    var blit_oklab_f = try ShaderFile.load(io, gpa, "shaders/blit_oklab.spv");
+    var blit_oklab_f = try ShaderFile.load(gpa, io, "shaders/blit_oklab.spv");
     defer blit_oklab_f.deinit(gpa);
 
     // GPU init.
@@ -949,7 +1020,7 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
     // Text engine (owns FreeType + the per-size font states + the glyph
     // material buffer) and the 9-slice batch renderer (owns the quad
     // shaders + vertex/index buffers). One engine serves every font size.
-    var text_engine = try TextEngine.init(&gpu, gpa);
+    var text_engine = try TextEngine.init(gpa, &gpu);
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
     app.measure = TextEngine.measureForFlex;
@@ -965,14 +1036,14 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
     // registered textures, set 2 = the shared linear/clamp sampler), bound
     // once per frame before the batch draw. The demo registers one
     // procedural texture and the UI draws it via `.texture = idx`.
-    var tex_registry = try TextureRegistry.init(&gpu, gpa);
+    var tex_registry = try TextureRegistry.init(gpa, &gpu);
     defer tex_registry.deinit(gpa);
-    ui.texture_idx = try uploadDemoTexture(&gpu, &tex_registry, gpa);
-    try uploadReferenceTexture(&gpu, &tex_registry, gpa);
+    ui.texture_idx = try uploadDemoTexture(gpa, &gpu, &tex_registry);
+    try uploadReferenceTexture(gpa, &gpu, &tex_registry);
 
     // Mandelbrot compute pass: render target + compute shader + params
     // buffer, registered into the GUI heap (set 0 sampled + set 1 storage).
-    var mandelbrot = try MandelbrotPass.init(&gpu, io, gpa, &tex_registry);
+    var mandelbrot = try MandelbrotPass.init(gpa, io, &gpu, &tex_registry);
     defer mandelbrot.deinit(&gpu);
 
     // SVG showcase: the tiger, parsed + converted once (the paths →
@@ -980,9 +1051,9 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
     // The stroke test scene (the TestStrokesApp root) loads the curved
     // thin-stroke set; everything else loads the tiger.
     var svg_view = if (comptime T == ui.TestStrokesApp)
-        try initStrokeView(&gpu, gpa, &text_engine)
+        try initStrokeView(gpa, &gpu, &text_engine)
     else
-        try initSvgView(&gpu, gpa, &text_engine);
+        try initSvgView(gpa, &gpu, &text_engine);
     defer svg_view.deinit(&gpu);
 
     // Blit pass: fullscreen triangle + Oklab→sRGB fragment shader, with a
@@ -1067,7 +1138,10 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
                         .middle;
                     // Grab the mandelbrot for a pan drag if the press lands
                     // inside its box (consumed by the driver).
-                    if (button == .left and mandel_rect.w > 0 and pos[0] >= mandel_rect.x and pos[0] < mandel_rect.x + mandel_rect.w and pos[1] >= mandel_rect.y and pos[1] < mandel_rect.y + mandel_rect.h) {
+                    if (button == .left and mandel_rect.w > 0 and
+                        pos[0] >= mandel_rect.x and pos[0] < mandel_rect.x + mandel_rect.w and
+                        pos[1] >= mandel_rect.y and pos[1] < mandel_rect.y + mandel_rect.h)
+                    {
                         mandel_drag = .{ .mouse = pos, .center = ui.mandelbrot_center };
                         continue;
                     }
@@ -1114,11 +1188,14 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
                             // Cycle the stroke algo: 0 = naive SDF, 1 =
                             // marching quads, 2 = the spec'd marching quads.
                             ui.stroke_algo = @floatFromInt((@as(u32, @intFromFloat(ui.stroke_algo)) + 1) % 3);
-                            std.log.info("stroke algo: {d} ({s})", .{ ui.stroke_algo, switch (@as(u32, @intFromFloat(ui.stroke_algo))) {
-                                0 => "naive SDF",
-                                1 => "marching quads",
-                                else => "spec'd marching quads",
-                            } });
+                            std.log.info("stroke algo: {d} ({s})", .{
+                                ui.stroke_algo,
+                                switch (@as(u32, @intFromFloat(ui.stroke_algo))) {
+                                    0 => "naive SDF",
+                                    1 => "marching quads",
+                                    else => "spec'd marching quads",
+                                },
+                            });
                             continue;
                         }
                         if (kc == .o) {
@@ -1185,11 +1262,21 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
         // (the tree is const-typed in FrameOutput; the per-frame clip list
         // is the renderer's legitimate scratch — collectDrawCmds extends it
         // and stamps clip ids, never touches layout state).
-        const base_cmds = try collectDrawCmds(@constCast(out.tree), out.pressed, gpa, out.press_alpha);
+        const base_cmds = try collectDrawCmds(gpa, @constCast(out.tree), out.pressed, out.press_alpha);
         defer gpa.free(base_cmds);
         var slice_rects = std.ArrayList(SceneRect).empty;
         defer slice_rects.deinit(gpa);
-        try buildSliceRects(&text_engine, &svg_view, base_cmds, out.tree, out.hover, out.hover_alpha, out.focus, &slice_rects, gpa);
+        try buildSliceRects(
+            gpa,
+            &text_engine,
+            &svg_view,
+            base_cmds,
+            out.tree,
+            out.hover,
+            out.hover_alpha,
+            out.focus,
+            &slice_rects,
+        );
         // --gpu-sort-verify: submit the bag in REVERSE paint order — the
         // CS1 sort (stable on (z, order)) must restore the paint order,
         // so the frame renders byte-identical to the ordered submission.
@@ -1220,7 +1307,15 @@ pub fn run(app: *App, comptime T: type, root: *T, subpixel: bool, quad_debug: bo
 
         // Pass 1: GUI into the offscreen Oklab target.
         cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
-        try renderPass1(&batch, &cmd, slice_rects.items, out.tree.clip_rects[0..out.tree.clip_count], render_target, size, tex_registry.heap);
+        try renderPass1(
+            &batch,
+            &cmd,
+            slice_rects.items,
+            out.tree.clip_rects[0..out.tree.clip_count],
+            render_target,
+            size,
+            tex_registry.heap,
+        );
         cmd.endZone();
 
         // Barrier: render target color output → fragment shader read.
@@ -1288,7 +1383,7 @@ fn linearToSrgbByte(v: f32) u8 {
 
 /// Write a P6 PPM of the offscreen Oklab target's pixels (rgba32_float,
 /// tightly packed rows): header + one gamma-encoded sRGB byte per channel.
-fn writePpm(io: Io, path: []const u8, pixels: [*]const f32, w: u32, h: u32, gpa: std.mem.Allocator) !void {
+fn writePpm(gpa: std.mem.Allocator, io: Io, path: []const u8, pixels: [*]const f32, w: u32, h: u32) !void {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(gpa);
 
@@ -1315,7 +1410,18 @@ fn writePpm(io: Io, path: []const u8, pixels: [*]const f32, w: u32, h: u32, gpa:
 /// to a readback buffer and write the result as a P6 PPM at `path`. Same
 /// init as run(), minus the event loop and the swapchain blit. FreeType
 /// glyphs render into the shot — this is the text-renders proof.
-pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?[2]f32, subpixel: bool, quad_debug: bool, bgr: bool, damp: bool, gpu_sort_verify: bool) !void {
+pub fn runShot(
+    comptime T: type,
+    app: *App,
+    root: *T,
+    path: []const u8,
+    hover: ?[2]f32,
+    subpixel: bool,
+    quad_debug: bool,
+    bgr: bool,
+    damp: bool,
+    gpu_sort_verify: bool,
+) !void {
     const gpa = app.gpa;
 
     // OVERRIDE priority: the SDL gives env vars precedence over
@@ -1342,15 +1448,15 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     defer io_impl.deinit();
     const io = io_impl.io();
 
-    var quad_vert_f = try ShaderFile.load(io, gpa, "shaders/quad_vert.spv");
+    var quad_vert_f = try ShaderFile.load(gpa, io, "shaders/quad_vert.spv");
     defer quad_vert_f.deinit(gpa);
-    var quad_frag_f = try ShaderFile.load(io, gpa, "shaders/quad_frag.spv");
+    var quad_frag_f = try ShaderFile.load(gpa, io, "shaders/quad_frag.spv");
     defer quad_frag_f.deinit(gpa);
-    var sort_comp_f = try ShaderFile.load(io, gpa, "shaders/sort_comp.spv");
+    var sort_comp_f = try ShaderFile.load(gpa, io, "shaders/sort_comp.spv");
     defer sort_comp_f.deinit(gpa);
-    var fullscreen_vert_f = try ShaderFile.load(io, gpa, "shaders/fullscreen_vert.spv");
+    var fullscreen_vert_f = try ShaderFile.load(gpa, io, "shaders/fullscreen_vert.spv");
     defer fullscreen_vert_f.deinit(gpa);
-    var blit_oklab_f = try ShaderFile.load(io, gpa, "shaders/blit_oklab.spv");
+    var blit_oklab_f = try ShaderFile.load(gpa, io, "shaders/blit_oklab.spv");
     defer blit_oklab_f.deinit(gpa);
 
     var gpu = try noapi.Gpu.init(.{
@@ -1373,7 +1479,7 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     // Text engine (owns FreeType + the per-size font states + the glyph
     // material buffer) and the 9-slice batch renderer (owns the quad
     // shaders + vertex/index buffers). One engine serves every font size.
-    var text_engine = try TextEngine.init(&gpu, gpa);
+    var text_engine = try TextEngine.init(gpa, &gpu);
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
     app.measure = TextEngine.measureForFlex;
@@ -1387,21 +1493,21 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
 
     // GUI texture heap + registry + the demo's procedural texture — the
     // shot renders it like run() (the texture card is part of the frame).
-    var tex_registry = try TextureRegistry.init(&gpu, gpa);
+    var tex_registry = try TextureRegistry.init(gpa, &gpu);
     defer tex_registry.deinit(gpa);
-    ui.texture_idx = try uploadDemoTexture(&gpu, &tex_registry, gpa);
-    try uploadReferenceTexture(&gpu, &tex_registry, gpa);
+    ui.texture_idx = try uploadDemoTexture(gpa, &gpu, &tex_registry);
+    try uploadReferenceTexture(gpa, &gpu, &tex_registry);
 
     // Mandelbrot compute pass (Part A) — the shot renders it like run().
-    var mandelbrot = try MandelbrotPass.init(&gpu, io, gpa, &tex_registry);
+    var mandelbrot = try MandelbrotPass.init(gpa, io, &gpu, &tex_registry);
     defer mandelbrot.deinit(&gpu);
 
     // The stroke test scene (the TestStrokesApp root) loads the curved
     // thin-stroke set; everything else loads the tiger.
     var svg_view = if (comptime T == ui.TestStrokesApp)
-        try initStrokeView(&gpu, gpa, &text_engine)
+        try initStrokeView(gpa, &gpu, &text_engine)
     else
-        try initSvgView(&gpu, gpa, &text_engine);
+        try initSvgView(gpa, &gpu, &text_engine);
     defer svg_view.deinit(&gpu);
 
     const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
@@ -1440,7 +1546,7 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     });
     defer if (out.json) |j| gpa.free(j);
 
-    const base_cmds = try collectDrawCmds(@constCast(out.tree), null, gpa, 0);
+    const base_cmds = try collectDrawCmds(gpa, @constCast(out.tree), null, 0);
     defer gpa.free(base_cmds);
     var slice_rects = std.ArrayList(SceneRect).empty;
     defer slice_rects.deinit(gpa);
@@ -1448,7 +1554,17 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     // Static shot: the hover ring renders at full alpha when a node is
     // hovered (no easing in a one-frame shot); 0 otherwise.
     const hover_alpha: f32 = if (hover_id != null) 1 else 0;
-    try buildSliceRects(&text_engine, &svg_view, base_cmds, out.tree, hover_id, hover_alpha, null, &slice_rects, gpa);
+    try buildSliceRects(
+        gpa,
+        &text_engine,
+        &svg_view,
+        base_cmds,
+        out.tree,
+        hover_id,
+        hover_alpha,
+        null,
+        &slice_rects,
+    );
     // --gpu-sort-verify: submit the bag in REVERSE paint order — the CS1
     // sort must restore it, so the shot stays byte-identical.
     if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
@@ -1471,7 +1587,15 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
     // which made runShot unreproducible at the byte level. The pinned
     // phase renders the same fractal as a typical interactive start.
     recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, 1200);
-    try renderPass1(&batch, &cmd, slice_rects.items, out.tree.clip_rects[0..out.tree.clip_count], render_target, surface_size, tex_registry.heap);
+    try renderPass1(
+        &batch,
+        &cmd,
+        slice_rects.items,
+        out.tree.clip_rects[0..out.tree.clip_count],
+        render_target,
+        surface_size,
+        tex_registry.heap,
+    );
     cmd.barrier(.{ .color_output = true }, .{ .transfer = true }, .{});
 
     const tex: noapi.Texture = .{
@@ -1503,8 +1627,10 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
         try gpu.waitIdle();
         const got: [*]const u32 = @ptrCast(@alignCast(perm_rb.cpu));
         const RectSort = struct {
+            const Self = @This();
+
             rects: []const SceneRect,
-            fn lessThan(ctx: @This(), a: u32, b: u32) bool {
+            fn lessThan(ctx: Self, a: u32, b: u32) bool {
                 const ra = ctx.rects[a];
                 const rb = ctx.rects[b];
                 if (ra.z != rb.z) return ra.z < rb.z;
@@ -1523,7 +1649,10 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
             }
         }
         if (bad) |i| {
-            std.log.err("gpu-sort-verify FAILED: perm[{d}] = {d}, want {d} (z={d} order={d})", .{ i, got[i], ref[i], slice_rects.items[ref[i]].z, slice_rects.items[ref[i]].order });
+            std.log.err(
+                "gpu-sort-verify FAILED: perm[{d}] = {d}, want {d} (z={d} order={d})",
+                .{ i, got[i], ref[i], slice_rects.items[ref[i]].z, slice_rects.items[ref[i]].order },
+            );
             return error.GpuSortVerifyMismatch;
         }
         std.log.info("gpu-sort-verify: permutation matches the stable (z, order) reference ({d} drawables)", .{n});
@@ -1531,5 +1660,5 @@ pub fn runShot(app: *App, comptime T: type, root: *T, path: []const u8, hover: ?
 
     // Convert Oklab floats → sRGB bytes and write the PPM.
     const pixels: [*]const f32 = @ptrCast(@alignCast(readback.cpu));
-    try writePpm(io, path, pixels, surface_size.width, surface_size.height, gpa);
+    try writePpm(gpa, io, path, pixels, surface_size.width, surface_size.height);
 }

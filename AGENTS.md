@@ -81,10 +81,13 @@ glslangValidator -V shaders/file.vert -o shaders/file_vert.spv  # Compile shader
 - `zig build` full validation
 - `zig build lint` — the gateable lint step. Runs on the ACTIVE tree
   (`src/v7` + `src/v7_demo`) only; `src/proto/*` is prototype debt (see below).
-  - ziglint (`~/.local/bin/ziglint`, 0.5.3) with `--ignore Z004,Z020,Z024,Z006,Z023,Z030`:
-    the ignored codes are the documented pre-existing style debt + Z030
-    (poison-as-last-statement — house exclusion: on self-freeing deinits
-    its only compliant form writes through freed memory). Every other rule
+  - ziglint (`~/.local/bin/ziglint`, 0.5.3) with `--ignore Z023,Z030`:
+    the only remaining findings live in component.zig and are documented
+    (Z023: the type-erased vtable fn-ptr contract fn(*anyopaque,
+    Allocator) — the Allocator-first reorder breaks the vtable; Z030 ×2:
+    the type-erased deinit adapter whose poison cannot compile on
+    *anyopaque, and a test struct whose assertions read the fields after
+    deinit — the poison would change the test semantics). Every other rule
     (incl. Z010/Z011 deprecations) must be zero.
   - zlint (`~/.local/bin/zlint`, stdin mode only — the dir arg is broken):
     `find src/v7 src/v7_demo -name '*.zig' | zlint -S --deny-warnings` — every
@@ -98,7 +101,7 @@ glslangValidator -V shaders/file.vert -o shaders/file_vert.spv  # Compile shader
 - All linters/analyzers are locally built (~/.local/bin/*, ~/tools/*) and may be patched for this setup; prefer them over nixpkgs versions.
 - Lint debt ledger (pre-existing, not gate-blocking; fix as filed work):
   - `src/proto/*`: ~60 zlint findings (unsafe-undefined 13, suppressed-errors 10, no-print 4, unused-decls 11, avoid-as 13) + ziglint style findings — prototype debt, excluded from `zig build lint`
-  - `src/v7` + `src/v7_demo`: 176 ziglint style findings (Z004 ×76, Z024 ×48, Z020 ×35, Z006 ×17, Z023 ×15) — pre-existing style debt, excluded via `--ignore`
+  - `src/v7` + `src/v7_demo`: the ziglint style debt (Z004/Z024/Z020/Z006/Z023/Z030 — 317 findings) was systematically fixed 2026-08-12; the only remaining findings are the 3 documented component.zig exceptions above
   - `src/app_framework.zig` is an orphan (not in any build target)
 
 ## Anti-patterns (this project)

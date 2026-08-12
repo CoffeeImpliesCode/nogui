@@ -195,8 +195,14 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
 
         // The container's own box insets its content box on the main axis.
         const box = p.box;
-        const own_border_main = if (dir == .column) box.border.top + box.border.bottom else box.border.left + box.border.right;
-        const own_padding_main = if (dir == .column) box.padding.top + box.padding.bottom else box.padding.left + box.padding.right;
+        const own_border_main = if (dir == .column)
+            box.border.top + box.border.bottom
+        else
+            box.border.left + box.border.right;
+        const own_padding_main = if (dir == .column)
+            box.padding.top + box.padding.bottom
+        else
+            box.padding.left + box.padding.right;
         const inset_main = own_border_main + own_padding_main;
 
         // Children's FINAL border-box mains + margins + gaps.
@@ -368,10 +374,22 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
 
     // The container's own box insets its content box on both axes.
     const box = node.box;
-    const own_border_main = if (dir == .column) box.border.top + box.border.bottom else box.border.left + box.border.right;
-    const own_padding_main = if (dir == .column) box.padding.top + box.padding.bottom else box.padding.left + box.padding.right;
-    const own_border_cross = if (dir == .column) box.border.left + box.border.right else box.border.top + box.border.bottom;
-    const own_padding_cross = if (dir == .column) box.padding.left + box.padding.right else box.padding.top + box.padding.bottom;
+    const own_border_main = if (dir == .column)
+        box.border.top + box.border.bottom
+    else
+        box.border.left + box.border.right;
+    const own_padding_main = if (dir == .column)
+        box.padding.top + box.padding.bottom
+    else
+        box.padding.left + box.padding.right;
+    const own_border_cross = if (dir == .column)
+        box.border.left + box.border.right
+    else
+        box.border.top + box.border.bottom;
+    const own_padding_cross = if (dir == .column)
+        box.padding.left + box.padding.right
+    else
+        box.padding.top + box.padding.bottom;
     const inset_main = own_border_main + own_padding_main;
     const inset_cross = own_border_cross + own_padding_cross;
 

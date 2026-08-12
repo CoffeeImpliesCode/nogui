@@ -93,7 +93,7 @@ const palette = struct {
 const ClipStackEntry = struct { container: Id, clip_id: u32 };
 
 /// The no-clip sentinel (matches the shader's `vClipId != 0xFFFFFFFFu`).
-const NO_CLIP: u32 = 0xFFFFFFFF;
+const no_clip: u32 = 0xFFFFFFFF;
 
 /// Is `container` an ancestor of `node_id` (or `node_id` itself)? Walks
 /// the parent chain — the clip stack pops a container once the walk
@@ -121,7 +121,7 @@ fn clipContains(tree: *const WidgetTree, container: Id, node_id: Id) bool {
 /// (the deepest enclosing one for nesting). The tree must be mutable:
 /// the walk appends clip rects and stamps each node's `clip_id` (the
 /// renderer clips the node's glyphs with it).
-pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Allocator, press_alpha: f32) ![]DrawCmd {
+pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_id: ?Id, press_alpha: f32) ![]DrawCmd {
     const zone = tracy.Zone.begin(.{ .name = "collectDrawCmds", .src = @src() });
     defer zone.end();
     var list: std.ArrayList(DrawCmd) = .empty;
@@ -131,7 +131,9 @@ pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Al
     // reversed walk meets a container before its subtree, so a clip
     // container's entry is pushed when the container is reached and
     // popped once the walk leaves its subtree (the pop loop below).
-    var clip_stack: [64]ClipStackEntry = undefined; // SAFETY: entries are written before any read; clip_len tracks the filled count
+    // SAFETY: entries are written before any read; clip_len tracks the
+    // filled count.
+    var clip_stack: [64]ClipStackEntry = undefined;
     var clip_len: u32 = 0;
 
     const nodes = tree.nodes.items;
@@ -153,7 +155,7 @@ pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Al
                 clip_len += 1;
             }
         }
-        const clip_id: u32 = if (clip_len > 0) clip_stack[clip_len - 1].clip_id else NO_CLIP;
+        const clip_id: u32 = if (clip_len > 0) clip_stack[clip_len - 1].clip_id else no_clip;
         node.clip_id = clip_id;
 
         // Node rects are parent-relative; resolve to surface space. Skip
@@ -231,7 +233,7 @@ pub fn collectDrawCmds(tree: *WidgetTree, pressed_id: ?Id, allocator: std.mem.Al
 
         // Fill = border box inset by the border (ring area stays clear).
         // Skip fills the border fully consumes (zero/negative size).
-        const fill_rect = Rect{
+        const fill_rect: Rect = .{
             .x = abs.x + b.border.left,
             .y = abs.y + b.border.top,
             .w = @max(0, abs.w - b.border.left - b.border.right),
@@ -317,16 +319,16 @@ test "collectDrawCmds: paint order — container before children, spacer skipped
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 },
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // column + button; labels and spacer produce no cmd.
     try std.testing.expectEqual(@as(usize, 2), cmds.len);
 
-    const col_rect = Rect{ .x = 0, .y = 0, .w = 100, .h = 200 };
-    const l1_rect = Rect{ .x = 10, .y = 10, .w = 80, .h = 20 };
-    const l2_rect = Rect{ .x = 10, .y = 40, .w = 80, .h = 20 };
-    const btn_rect = Rect{ .x = 10, .y = 70, .w = 80, .h = 30 };
+    const col_rect: Rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 };
+    const l1_rect: Rect = .{ .x = 10, .y = 10, .w = 80, .h = 20 };
+    const l2_rect: Rect = .{ .x = 10, .y = 40, .w = 80, .h = 20 };
+    const btn_rect: Rect = .{ .x = 10, .y = 70, .w = 80, .h = 30 };
 
     const col_idx = indexOfRect(cmds, col_rect) orelse return error.MissingColumnCmd;
     const btn_idx = indexOfRect(cmds, btn_rect) orelse return error.MissingButtonCmd;
@@ -359,11 +361,11 @@ test "collectDrawCmds: colors — button accent, container dim" {
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 },
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
-    const col_rect = Rect{ .x = 0, .y = 0, .w = 100, .h = 200 };
-    const btn_rect = Rect{ .x = 10, .y = 70, .w = 80, .h = 30 };
+    const col_rect: Rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 };
+    const btn_rect: Rect = .{ .x = 10, .y = 70, .w = 80, .h = 30 };
 
     const col_idx = indexOfRect(cmds, col_rect) orelse return error.MissingColumnCmd;
     const btn_idx = indexOfRect(cmds, btn_rect) orelse return error.MissingButtonCmd;
@@ -385,7 +387,7 @@ test "collectDrawCmds: pressed button fill eases to the pressed color at press_a
     });
 
     // press_alpha 1: the old instant-swap behavior, fully pressed color.
-    const cmds = try collectDrawCmds(&tree, btn, std.testing.allocator, 1);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, btn, 1);
     defer std.testing.allocator.free(cmds);
 
     try std.testing.expectEqual(@as(usize, 1), cmds.len);
@@ -404,7 +406,7 @@ test "collectDrawCmds: pressed button fill is the midpoint at press_alpha 0.5" {
         .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
     });
 
-    const cmds = try collectDrawCmds(&tree, btn, std.testing.allocator, 0.5);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, btn, 0.5);
     defer std.testing.allocator.free(cmds);
 
     try std.testing.expectEqual(@as(usize, 1), cmds.len);
@@ -454,7 +456,7 @@ test "collectDrawCmds: zero-size nodes are skipped" {
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 },
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // Only the column and the full-size button remain.
@@ -467,7 +469,7 @@ test "collectDrawCmds: empty tree yields zero cmds" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.nodes.deinit(std.testing.allocator);
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     try std.testing.expectEqual(@as(usize, 0), cmds.len);
@@ -478,7 +480,7 @@ test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
     defer tree.nodes.deinit(std.testing.allocator);
 
     const btn: Id = @enumFromInt(1);
-    const box = Box{
+    const box: Box = .{
         .border = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 },
         .border_color = .{ 1, 0, 0, 1 },
     };
@@ -490,7 +492,7 @@ test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
         .box = box,
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // Ring cmd first: the full absolute border box, border color.
@@ -527,7 +529,7 @@ test "collectDrawCmds: nested node under a column resolves to its absolute rect"
         .rect = .{ .x = 5, .y = 5, .w = 100, .h = 200 },
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // Column at absolute (5,5); the button's RELATIVE (5,5) resolves to
@@ -542,7 +544,7 @@ test "collectDrawCmds: shadowed node emits one shadow cmd first with offset rect
     defer tree.nodes.deinit(std.testing.allocator);
 
     const btn: Id = @enumFromInt(1);
-    const box = Box{ .shadow = 3 };
+    const box: Box = .{ .shadow = 3 };
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
         .kind = .{ .button = .{ .label = "go" } },
@@ -551,7 +553,7 @@ test "collectDrawCmds: shadowed node emits one shadow cmd first with offset rect
         .box = box,
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // Shadow cmd first: the absolute border box translated (+2, +3), soft
@@ -580,7 +582,7 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
     // fill) — every one must carry the node's layer key so the drawable
     // bag sorts the whole node as one unit onto its z level.
     const btn: Id = @enumFromInt(1);
-    const box = Box{ .layer = 2, .shadow = 3, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    const box: Box = .{ .layer = 2, .shadow = 3, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 } };
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
         .kind = .{ .button = .{ .label = "go" } },
@@ -589,7 +591,7 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
         .box = box,
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     try std.testing.expectEqual(@as(usize, 3), cmds.len);
@@ -606,7 +608,7 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
         .parent = .root,
         .rect = .{ .x = 10, .y = 60, .w = 80, .h = 30 },
     });
-    const cmds2 = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds2 = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds2);
     // Reversed post-order: the plain button (appended last) emits first.
     try std.testing.expectEqual(@as(usize, 4), cmds2.len);
@@ -619,7 +621,7 @@ test "collectDrawCmds: bordered label emits exactly one ring cmd" {
     defer tree.nodes.deinit(std.testing.allocator);
 
     const lbl: Id = @enumFromInt(1);
-    const box = Box{
+    const box: Box = .{
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
         .border_color = .{ 0.42, 0.42, 0.48, 1 },
     };
@@ -631,7 +633,7 @@ test "collectDrawCmds: bordered label emits exactly one ring cmd" {
         .box = box,
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // One ring, no fill: the label's own background is unpainted.
@@ -672,7 +674,7 @@ test "collectDrawCmds: a .clip container stamps its clip id on its own and desce
         .rect = .{ .x = 100, .y = 10, .w = 40, .h = 20 },
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // The clip list holds the card's absolute border box as id 0.
@@ -688,7 +690,7 @@ test "collectDrawCmds: a .clip container stamps its clip id on its own and desce
     try std.testing.expectEqual(@as(usize, 3), cmds.len);
     for (cmds) |c| {
         if (c.rect.x == 100) {
-            try std.testing.expectEqual(NO_CLIP, c.clip_id);
+            try std.testing.expectEqual(no_clip, c.clip_id);
         } else {
             try std.testing.expectEqual(@as(u32, 0), c.clip_id);
         }
@@ -697,7 +699,7 @@ test "collectDrawCmds: a .clip container stamps its clip id on its own and desce
     // Node clip ids (the glyph path reads these): inside = 0, sibling = ~0.
     try std.testing.expectEqual(@as(u32, 0), tree.node(inner_btn).?.clip_id);
     try std.testing.expectEqual(@as(u32, 0), tree.node(card).?.clip_id);
-    try std.testing.expectEqual(NO_CLIP, tree.node(sibling_btn).?.clip_id);
+    try std.testing.expectEqual(no_clip, tree.node(sibling_btn).?.clip_id);
 }
 
 test "collectDrawCmds: nested clip containers stamp the deepest enclosing clip" {
@@ -731,7 +733,7 @@ test "collectDrawCmds: nested clip containers stamp the deepest enclosing clip" 
         .box = .{ .clip = true },
     });
 
-    const cmds = try collectDrawCmds(&tree, null, std.testing.allocator, 0);
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     try std.testing.expectEqual(@as(u32, 2), tree.clip_count);

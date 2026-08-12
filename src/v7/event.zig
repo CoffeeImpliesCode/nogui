@@ -117,28 +117,29 @@ pub fn sliderSet(tree: *const WidgetTree, id: Id, x: f32) bool {
 // --- tests ---------------------------------------------------------------
 
 const TestCounter = struct {
+    const Self = TestCounter;
     clicks: u32 = 0,
 
-    pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+    pub fn draw(self: *Self, ctx: *DrawCtx) !void {
         _ = self;
         _ = ctx;
     }
 
-    pub fn onClick(self: *@This()) void {
+    pub fn onClick(self: *Self) void {
         self.clicks += 1;
     }
 };
 
-const BUTTON_ID: Id = @enumFromInt(10); // button, owner = OWNER_ID, has a handler
-const LABEL_ID: Id = @enumFromInt(11); // not a button
-const NO_HANDLER_ID: Id = @enumFromInt(12); // button, on_click == null
-const ORPHAN_BUTTON_ID: Id = @enumFromInt(13); // button, owner never registered
-const MISSING_ID: Id = @enumFromInt(999); // no node
-const OWNER_ID: Id = @enumFromInt(1); // registered component
-const ORPHAN_OWNER_ID: Id = @enumFromInt(99); // never registered
+const button_id: Id = @enumFromInt(10); // button, owner = owner_id, has a handler
+const label_id: Id = @enumFromInt(11); // not a button
+const no_handler_id: Id = @enumFromInt(12); // button, on_click == null
+const orphan_button_id: Id = @enumFromInt(13); // button, owner never registered
+const missing_id: Id = @enumFromInt(999); // no node
+const owner_id: Id = @enumFromInt(1); // registered component
+const orphan_owner_id: Id = @enumFromInt(99); // never registered
 
 /// Tree covering every no-op path plus one live button; `components` maps
-/// OWNER_ID → the counter component.
+/// owner_id → the counter component.
 const Harness = struct {
     tree: WidgetTree,
     components: std.AutoHashMapUnmanaged(Id, Component),
@@ -148,37 +149,37 @@ const Harness = struct {
         errdefer tree.nodes.deinit(std.testing.allocator);
 
         try tree.nodes.append(std.testing.allocator, .{
-            .id = BUTTON_ID,
+            .id = button_id,
             .kind = .{ .button = .{
                 .label = "Go",
                 .on_click = callback.wrap(TestCounter.onClick),
-                .owner = OWNER_ID,
+                .owner = owner_id,
             } },
             .parent = .root,
         });
         try tree.nodes.append(std.testing.allocator, .{
-            .id = LABEL_ID,
+            .id = label_id,
             .kind = .{ .label = .{ .text = "plain" } },
             .parent = .root,
         });
         try tree.nodes.append(std.testing.allocator, .{
-            .id = NO_HANDLER_ID,
-            .kind = .{ .button = .{ .label = "Dead", .owner = OWNER_ID } },
+            .id = no_handler_id,
+            .kind = .{ .button = .{ .label = "Dead", .owner = owner_id } },
             .parent = .root,
         });
         try tree.nodes.append(std.testing.allocator, .{
-            .id = ORPHAN_BUTTON_ID,
+            .id = orphan_button_id,
             .kind = .{ .button = .{
                 .label = "Orphan",
                 .on_click = callback.wrap(TestCounter.onClick),
-                .owner = ORPHAN_OWNER_ID,
+                .owner = orphan_owner_id,
             } },
             .parent = .root,
         });
 
         var components: std.AutoHashMapUnmanaged(Id, Component) = .empty;
         errdefer components.deinit(std.testing.allocator);
-        try components.put(std.testing.allocator, OWNER_ID, Component.make(TestCounter, counter));
+        try components.put(std.testing.allocator, owner_id, Component.make(TestCounter, counter));
 
         return .{ .tree = tree, .components = components };
     }
@@ -186,45 +187,46 @@ const Harness = struct {
     fn deinit(self: *Harness) void {
         self.components.deinit(std.testing.allocator);
         self.tree.nodes.deinit(std.testing.allocator);
+        self.* = undefined;
     }
 };
 
 test "dispatchClick: calls the wrapped handler on the registered owner" {
-    var counter = TestCounter{};
+    var counter: TestCounter = .{};
     var h = try Harness.init(&counter);
     defer h.deinit();
 
-    dispatchClick(&h.tree, .{ .click = .{ .button_id = BUTTON_ID } }, &h.components);
+    dispatchClick(&h.tree, .{ .click = .{ .button_id = button_id } }, &h.components);
 
     try std.testing.expectEqual(@as(u32, 1), counter.clicks);
 }
 
 test "dispatchClick: missing button id is a no-op" {
-    var counter = TestCounter{};
+    var counter: TestCounter = .{};
     var h = try Harness.init(&counter);
     defer h.deinit();
 
-    dispatchClick(&h.tree, .{ .click = .{ .button_id = MISSING_ID } }, &h.components);
+    dispatchClick(&h.tree, .{ .click = .{ .button_id = missing_id } }, &h.components);
 
     try std.testing.expectEqual(@as(u32, 0), counter.clicks);
 }
 
 test "dispatchClick: non-button node is a no-op" {
-    var counter = TestCounter{};
+    var counter: TestCounter = .{};
     var h = try Harness.init(&counter);
     defer h.deinit();
 
-    dispatchClick(&h.tree, .{ .click = .{ .button_id = LABEL_ID } }, &h.components);
+    dispatchClick(&h.tree, .{ .click = .{ .button_id = label_id } }, &h.components);
 
     try std.testing.expectEqual(@as(u32, 0), counter.clicks);
 }
 
 test "dispatchClick: button with null on_click is a no-op" {
-    var counter = TestCounter{};
+    var counter: TestCounter = .{};
     var h = try Harness.init(&counter);
     defer h.deinit();
 
-    dispatchClick(&h.tree, .{ .click = .{ .button_id = NO_HANDLER_ID } }, &h.components);
+    dispatchClick(&h.tree, .{ .click = .{ .button_id = no_handler_id } }, &h.components);
 
     try std.testing.expectEqual(@as(u32, 0), counter.clicks);
 }
@@ -311,15 +313,15 @@ test "sliderSet: non-slider and missing nodes return false, value untouched" {
     defer tree.nodes.deinit(std.testing.allocator);
 
     var volume: f32 = 0.5;
-    const label_id: Id = @enumFromInt(30);
+    const nope_id: Id = @enumFromInt(30);
     try tree.nodes.append(std.testing.allocator, .{
-        .id = label_id,
+        .id = nope_id,
         .kind = .{ .label = .{ .text = "nope" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 50, .h = 20 },
     });
 
-    try std.testing.expect(!sliderSet(&tree, label_id, 25));
+    try std.testing.expect(!sliderSet(&tree, nope_id, 25));
     try std.testing.expect(!sliderSet(&tree, @enumFromInt(999), 25));
     // And a slider with a zero-size rect never writes.
     const zero_id: Id = @enumFromInt(31);
@@ -334,11 +336,11 @@ test "sliderSet: non-slider and missing nodes return false, value untouched" {
 }
 
 test "dispatchClick: unregistered owner is a no-op" {
-    var counter = TestCounter{};
+    var counter: TestCounter = .{};
     var h = try Harness.init(&counter);
     defer h.deinit();
 
-    dispatchClick(&h.tree, .{ .click = .{ .button_id = ORPHAN_BUTTON_ID } }, &h.components);
+    dispatchClick(&h.tree, .{ .click = .{ .button_id = orphan_button_id } }, &h.components);
 
     try std.testing.expectEqual(@as(u32, 0), counter.clicks);
 }

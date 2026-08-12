@@ -45,10 +45,10 @@ pub fn main(init: std.process.Init) !void {
 
     var app = App.init(alloc);
     defer app.deinit();
-    var todo = ui.TodoApp{};
+    var todo: ui.TodoApp = .{};
     _ = try app.register(ui.TodoApp, &todo);
-    var tiger = ui.TigerApp{}; // registered at the --tiger dispatch (the App holds ONE root)
-    var strokes = ui.TestStrokesApp{}; // --strokes: the stroke test scene
+    var tiger: ui.TigerApp = .{}; // registered at the --tiger dispatch (the App holds ONE root)
+    var strokes: ui.TestStrokesApp = .{}; // --strokes: the stroke test scene
 
     var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, alloc);
     defer args_it.deinit();
@@ -96,7 +96,11 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--frames")) {
             // Profiling: run the REAL windowed loop (swapchain presents
             // included) for N frames, then exit — tracy-capture friendly.
-            frames = std.fmt.parseUnsigned(u32, args_it.next() orelse return errMissingArg("--frames"), 10) catch return error.BadFramesArg;
+            frames = std.fmt.parseUnsigned(
+                u32,
+                args_it.next() orelse return errMissingArg("--frames"),
+                10,
+            ) catch return error.BadFramesArg;
         } else if (std.mem.eql(u8, arg, "--shot")) {
             shot_path = args_it.next() orelse return errMissingArg("--shot");
         } else if (std.mem.eql(u8, arg, "--layout")) {
@@ -155,13 +159,17 @@ pub fn main(init: std.process.Init) !void {
             if (out) |o| {
                 // The frame dump: layout (tree) + state decisions (focus,
                 // hover, pressed — 0 = none). Enough to debug any session.
-                const dump = try std.fmt.allocPrint(alloc, "{{\"frame\":{d},\"focus\":{d},\"hover\":{d},\"pressed\":{d},\"tree\":{s}}}\n", .{
-                    o.frame_number,
-                    if (o.focus) |f| f.index() else 0,
-                    if (o.hover) |h| h.index() else 0,
-                    if (o.pressed) |p| p.index() else 0,
-                    if (o.json) |j| j else "",
-                });
+                const dump = try std.fmt.allocPrint(
+                    alloc,
+                    "{{\"frame\":{d},\"focus\":{d},\"hover\":{d},\"pressed\":{d},\"tree\":{s}}}\n",
+                    .{
+                        o.frame_number,
+                        if (o.focus) |f| f.index() else 0,
+                        if (o.hover) |h| h.index() else 0,
+                        if (o.pressed) |p| p.index() else 0,
+                        if (o.json) |j| j else "",
+                    },
+                );
                 defer alloc.free(dump);
                 try stdout.writeStreamingAll(io, dump);
                 if (o.json) |j| alloc.free(j);
@@ -173,50 +181,112 @@ pub fn main(init: std.process.Init) !void {
     if (strokes_mode) {
         _ = try app.register(ui.TestStrokesApp, &strokes);
         if (frames) |n| {
-            window_backend.run(&app, ui.TestStrokesApp, &strokes, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
+            window_backend.run(
+                ui.TestStrokesApp,
+                &app,
+                &strokes,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+                n,
+            ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
             };
             return;
         }
         if (shot_path) |p| {
-            window_backend.runShot(&app, ui.TestStrokesApp, &strokes, p, shot_hover, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
+            window_backend.runShot(
+                ui.TestStrokesApp,
+                &app,
+                &strokes,
+                p,
+                shot_hover,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+            ) catch |e| {
                 std.log.err("runShot failed: {s}", .{@errorName(e)});
                 return e;
             };
             return;
         }
-        try window_backend.run(&app, ui.TestStrokesApp, &strokes, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
+        try window_backend.run(
+            ui.TestStrokesApp,
+            &app,
+            &strokes,
+            subpixel,
+            quad_debug,
+            bgr,
+            damp,
+            gpu_sort_verify,
+            null,
+        );
         return;
     }
 
     if (tiger_mode) {
         _ = try app.register(ui.TigerApp, &tiger);
         if (frames) |n| {
-            window_backend.run(&app, ui.TigerApp, &tiger, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
+            window_backend.run(
+                ui.TigerApp,
+                &app,
+                &tiger,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+                n,
+            ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
             };
             return;
         }
         if (shot_path) |p| {
-            window_backend.runShot(&app, ui.TigerApp, &tiger, p, shot_hover, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
+            window_backend.runShot(
+                ui.TigerApp,
+                &app,
+                &tiger,
+                p,
+                shot_hover,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+            ) catch |e| {
                 std.log.err("runShot failed: {s}", .{@errorName(e)});
                 return e;
             };
             return;
         }
-        try window_backend.run(&app, ui.TigerApp, &tiger, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
+        try window_backend.run(
+            ui.TigerApp,
+            &app,
+            &tiger,
+            subpixel,
+            quad_debug,
+            bgr,
+            damp,
+            gpu_sort_verify,
+            null,
+        );
         return;
     }
 
     if (window_mode) {
-        try window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
+        try window_backend.run(ui.TodoApp, &app, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
         return;
     }
 
     if (frames) |n| {
-        window_backend.run(&app, ui.TodoApp, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
+        window_backend.run(ui.TodoApp, &app, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
             std.log.err("run failed: {s}", .{@errorName(e)});
             return e;
         };
@@ -224,7 +294,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (shot_path) |p| {
-        window_backend.runShot(&app, ui.TodoApp, &todo, p, shot_hover, subpixel, quad_debug, bgr, damp, gpu_sort_verify) catch |e| {
+        window_backend.runShot(
+            ui.TodoApp,
+            &app,
+            &todo,
+            p,
+            shot_hover,
+            subpixel,
+            quad_debug,
+            bgr,
+            damp,
+            gpu_sort_verify,
+        ) catch |e| {
             std.log.err("runShot failed: {s}", .{@errorName(e)});
             return e;
         };
@@ -249,13 +330,13 @@ pub fn main(init: std.process.Init) !void {
         const stdout = std.Io.File.stdout();
 
         const hover_id = if (shot_hover) |p| hitTest(out.tree, p) else null;
-        const report = try headless.verifyLayout(out.tree, app.measure, .{ .width = 1100, .height = 1160 }, alloc);
+        const report = try headless.verifyLayout(alloc, out.tree, app.measure, .{ .width = 1100, .height = 1160 });
         defer alloc.free(report);
         try stdout.writeStreamingAll(io, report);
 
         // Golden fingerprint: rects only (labels/values/frame counters are
         // dynamic and would make a map diff flaky).
-        const fp = try headless.layoutFingerprint(out.tree, alloc);
+        const fp = try headless.layoutFingerprint(alloc, out.tree);
         defer alloc.free(fp);
         if (layout_write_golden) |gp| {
             try Io.Dir.cwd().writeFile(io, .{ .sub_path = gp, .data = fp });
@@ -276,7 +357,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        const map = try headless.renderAscii(out.tree, hover_id, alloc);
+        const map = try headless.renderAscii(alloc, out.tree, hover_id);
         defer alloc.free(map);
         const rows = std.mem.count(u8, map, "\n");
         if (lp.len > 0) {

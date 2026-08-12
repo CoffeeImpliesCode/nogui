@@ -62,9 +62,10 @@ pub const Component = struct {
 
 test "make: vtable.draw dispatches with the correct receiver and ctx" {
     const Comp = struct {
+        const Self = @This();
         text: []const u8,
 
-        fn draw(self: *@This(), ctx: *DrawCtx) anyerror!void {
+        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = try ctx.label(.{ .text = self.text });
         }
     };
@@ -73,10 +74,10 @@ test "make: vtable.draw dispatches with the correct receiver and ctx" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
-    var a = Comp{ .text = "alpha" };
-    var b = Comp{ .text = "beta" };
+    var a: Comp = .{ .text = "alpha" };
+    var b: Comp = .{ .text = "beta" };
     const ca = Component.make(Comp, &a);
     const cb = Component.make(Comp, &b);
 
@@ -92,13 +93,14 @@ test "make: vtable.draw dispatches with the correct receiver and ctx" {
 
 test "make: on_event and deinit are null when the type omits them" {
     const Comp = struct {
-        fn draw(self: *@This(), ctx: *DrawCtx) anyerror!void {
+        const Self = @This();
+        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
     };
 
-    var comp = Comp{};
+    var comp: Comp = .{};
     const c = Component.make(Comp, &comp);
 
     try std.testing.expectEqual(
@@ -113,44 +115,46 @@ test "make: on_event and deinit are null when the type omits them" {
 
 test "make: on_event dispatches through the vtable when declared" {
     const Comp = struct {
+        const Self = @This();
         clicked: bool = false,
 
-        fn draw(self: *@This(), ctx: *DrawCtx) anyerror!void {
+        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
-        fn onEvent(self: *@This(), ev: *const Event) void {
+        fn onEvent(self: *Self, ev: *const Event) void {
             _ = ev;
             self.clicked = true;
         }
     };
 
-    var comp = Comp{};
+    var comp: Comp = .{};
     const c = Component.make(Comp, &comp);
 
     try std.testing.expect(c.vtable.on_event != null);
-    const ev = Event{ .click = .{ .button_id = .root } };
+    const ev: Event = .{ .click = .{ .button_id = .root } };
     c.vtable.on_event.?(c.ptr, &ev);
     try std.testing.expect(comp.clicked);
 }
 
 test "make: deinit adapter passes the receiver and allocator" {
     const Comp = struct {
+        const Self = @This();
         freed: bool = false,
         // SAFETY: assigned via init before use; the test asserts it was set.
         received_allocator: std.mem.Allocator = undefined,
 
-        fn draw(self: *@This(), ctx: *DrawCtx) anyerror!void {
+        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
-        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.freed = true;
             self.received_allocator = allocator;
         }
     };
 
-    var comp = Comp{};
+    var comp: Comp = .{};
     const c = Component.make(Comp, &comp);
 
     try std.testing.expect(c.vtable.deinit != null);

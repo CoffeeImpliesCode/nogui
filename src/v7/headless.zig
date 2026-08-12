@@ -66,7 +66,7 @@ pub const FrameOutput = struct {
 /// Serialize the tree as a JSON array of node objects (see the file doc
 /// comment for the shape). The returned slice is allocator-owned; the
 /// caller frees it with `allocator`.
-pub fn treeToJson(tree: *const WidgetTree, allocator: std.mem.Allocator) ![]u8 {
+pub fn treeToJson(allocator: std.mem.Allocator, tree: *const WidgetTree) ![]u8 {
     const zone = tracy.Zone.begin(.{ .name = "treeToJson", .src = @src() });
     defer zone.end();
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -124,8 +124,8 @@ pub fn eventFromJson(allocator: std.mem.Allocator, line: []const u8) !Event {
 
     if (std.mem.eql(u8, kind, "frame")) {
         return .{ .frame = .{
-            .tick = try objUint(obj, "tick", u32),
-            .time_ms = try objUint(obj, "time_ms", u64),
+            .tick = try objUint(u32, obj, "tick"),
+            .time_ms = try objUint(u64, obj, "time_ms"),
         } };
     }
     if (std.mem.eql(u8, kind, "resize")) {
@@ -168,7 +168,7 @@ pub fn eventFromJson(allocator: std.mem.Allocator, line: []const u8) !Event {
         // A missing or non-bool "shift" is treated as false (lenient), so
         // key events never crash on an optional field.
         const shift = if (obj.get("shift")) |s| s == .bool and s.bool else false;
-        const ev = KeyEvent{ .key = key, .shift = shift };
+        const ev: KeyEvent = .{ .key = key, .shift = shift };
         return if (std.mem.eql(u8, kind, "key_down"))
             .{ .key_down = ev }
         else
@@ -218,7 +218,7 @@ fn objInteger(obj: std.json.ObjectMap, name: []const u8) !i64 {
 
 /// Unsigned integer field with a range check: negative or over-max values
 /// are `error.BadNumber`, so the `@intCast` below can never panic.
-fn objUint(obj: std.json.ObjectMap, name: []const u8, comptime T: type) !T {
+fn objUint(comptime T: type, obj: std.json.ObjectMap, name: []const u8) !T {
     const i = try objInteger(obj, name);
     if (i < 0 or i > std.math.maxInt(T)) return error.BadNumber;
     return @intCast(i);
@@ -295,12 +295,12 @@ fn writeNode(w: *std.Io.Writer, node: *const WidgetNode) !void {
 /// drawn as its characters at the layout positions, sliders '-' with the
 /// thumb 'O' at the value fraction, spacer nothing, hover '@' border.
 /// Scale: map chars per layout pixel (2px per char both axes).
-const MAP_PX = 2;
+const map_px = 2;
 
 /// Render the layout as an ASCII map, `hover` gets an '@' border. The
 /// returned slice is allocator-owned (caller frees). Bounds = the union of
 /// all node rects, so a 900x700 surface maps to 451x351 chars.
-pub fn renderAscii(tree: *const WidgetTree, hover: ?Id, allocator: std.mem.Allocator) ![]u8 {
+pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover: ?Id) ![]u8 {
     // Bounds from the union of all ABSOLUTE rects (relative rects resolved
     // through the parent chain — a nested node sits at its resolved
     // position, not at its raw coordinates).
@@ -317,8 +317,8 @@ pub fn renderAscii(tree: *const WidgetTree, hover: ?Id, allocator: std.mem.Alloc
         max_y = @max(max_y, r.y + r.h);
     }
     if (std.math.isInf(min_x)) return allocator.dupe(u8, "");
-    const cols: usize = @as(usize, @intFromFloat(@floor((max_x - min_x) / MAP_PX))) + 1;
-    const rows: usize = @as(usize, @intFromFloat(@floor((max_y - min_y) / MAP_PX))) + 1;
+    const cols: usize = @as(usize, @intFromFloat(@floor((max_x - min_x) / map_px))) + 1;
+    const rows: usize = @as(usize, @intFromFloat(@floor((max_y - min_y) / map_px))) + 1;
 
     var grid = try allocator.alloc(u8, rows * (cols + 1)); // +1 for '\n'
     @memset(grid, ' ');
@@ -326,8 +326,8 @@ pub fn renderAscii(tree: *const WidgetTree, hover: ?Id, allocator: std.mem.Alloc
 
     const put = struct {
         fn f(g: []u8, c: usize, x: f32, y: f32, ch: u8) void {
-            const cx: usize = @intFromFloat(@floor(x / MAP_PX));
-            const cy: usize = @intFromFloat(@floor(y / MAP_PX));
+            const cx: usize = @intFromFloat(@floor(x / map_px));
+            const cy: usize = @intFromFloat(@floor(y / map_px));
             if (cx >= c) return;
             const line = cy * (c + 1);
             if (line + cx >= g.len - 1) return;
@@ -347,16 +347,16 @@ pub fn renderAscii(tree: *const WidgetTree, hover: ?Id, allocator: std.mem.Alloc
             .column, .row => {
                 // Container fill: '.'.
                 var y: f32 = r.y;
-                while (y < r.y + r.h) : (y += MAP_PX) {
+                while (y < r.y + r.h) : (y += map_px) {
                     var x: f32 = r.x;
-                    while (x < r.x + r.w) : (x += MAP_PX) put(grid, cols, x, y, '.');
+                    while (x < r.x + r.w) : (x += map_px) put(grid, cols, x, y, '.');
                 }
             },
             .button => {
                 var y: f32 = r.y;
-                while (y < r.y + r.h) : (y += MAP_PX) {
+                while (y < r.y + r.h) : (y += map_px) {
                     var x: f32 = r.x;
-                    while (x < r.x + r.w) : (x += MAP_PX) put(grid, cols, x, y, '#');
+                    while (x < r.x + r.w) : (x += map_px) put(grid, cols, x, y, '#');
                 }
                 drawText(grid, cols, n.kind.button.label, r);
             },
@@ -364,7 +364,7 @@ pub fn renderAscii(tree: *const WidgetTree, hover: ?Id, allocator: std.mem.Alloc
             .slider => |s| {
                 const y: f32 = r.y + r.h / 2;
                 var x: f32 = r.x;
-                while (x < r.x + r.w) : (x += MAP_PX) put(grid, cols, x, y, '-');
+                while (x < r.x + r.w) : (x += map_px) put(grid, cols, x, y, '-');
                 const frac = std.math.clamp((s.value.* - s.min) / (s.max - s.min), 0, 1);
                 put(grid, cols, r.x + frac * r.w, y, 'O');
             },
@@ -378,19 +378,19 @@ pub fn renderAscii(tree: *const WidgetTree, hover: ?Id, allocator: std.mem.Alloc
             if (n.id != hid) continue;
             const r = widget.absoluteRect(tree, n.id);
             // A node smaller than one map cell (2px/char) cannot draw a
-            // 4-edge border: the inner edge offsets (r.y + r.h - MAP_PX,
-            // r.x + r.w - MAP_PX) would go negative and @intFromFloat
+            // 4-edge border: the inner edge offsets (r.y + r.h - map_px,
+            // r.x + r.w - map_px) would go negative and @intFromFloat
             // would panic (UB in ReleaseFast). Skip it — no border.
-            if (r.w < MAP_PX or r.h < MAP_PX) break;
+            if (r.w < map_px or r.h < map_px) break;
             var x: f32 = r.x;
-            while (x < r.x + r.w) : (x += MAP_PX) {
+            while (x < r.x + r.w) : (x += map_px) {
                 put(grid, cols, x, r.y, '@');
-                put(grid, cols, x, r.y + r.h - MAP_PX, '@');
+                put(grid, cols, x, r.y + r.h - map_px, '@');
             }
             var y: f32 = r.y;
-            while (y < r.y + r.h) : (y += MAP_PX) {
+            while (y < r.y + r.h) : (y += map_px) {
                 put(grid, cols, r.x, y, '@');
-                put(grid, cols, r.x + r.w - MAP_PX, y, '@');
+                put(grid, cols, r.x + r.w - map_px, y, '@');
             }
             break;
         }
@@ -405,8 +405,8 @@ pub fn renderAscii(tree: *const WidgetTree, hover: ?Id, allocator: std.mem.Alloc
 fn drawText(grid: []u8, cols: usize, text: []const u8, r: Rect) void {
     const put = struct {
         fn f(g: []u8, c: usize, x: f32, y: f32, ch: u8) void {
-            const cx: usize = @intFromFloat(@floor(x / MAP_PX));
-            const cy: usize = @intFromFloat(@floor(y / MAP_PX));
+            const cx: usize = @intFromFloat(@floor(x / map_px));
+            const cy: usize = @intFromFloat(@floor(y / map_px));
             if (cx >= c) return;
             const line = cy * (c + 1);
             if (line + cx >= g.len - 1) return;
@@ -439,7 +439,7 @@ fn findNodeConst(tree: *const WidgetTree, id: Id) ?*const WidgetNode {
 /// golden LAYOUT comparison wants. No labels, no values, no frame
 /// counters — two runs with the same layout always produce the same
 /// bytes, so it is safe to check in and diff.
-pub fn layoutFingerprint(tree: *const WidgetTree, allocator: std.mem.Allocator) ![]u8 {
+pub fn layoutFingerprint(allocator: std.mem.Allocator, tree: *const WidgetTree) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     const w = &out.writer;
@@ -487,14 +487,14 @@ fn isLayered(tree: *const WidgetTree, id: Id) bool {
     return false;
 }
 
-pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size, allocator: std.mem.Allocator) ![]u8 {
+pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     const w = &out.writer;
     var problems: usize = 0;
 
     const add = struct {
-        fn f(writer: *std.Io.Writer, count: *usize, comptime fmt: []const u8, args: anytype) !void {
+        fn f(comptime fmt: []const u8, writer: *std.Io.Writer, count: *usize, args: anytype) !void {
             count.* += 1;
             try writer.print(fmt ++ "\n", args);
         }
@@ -504,7 +504,7 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
     for (nodes) |*n| {
         const r = n.rect;
         if (r.w < 0 or r.h < 0) {
-            try add(w, &problems, "negative size: id {d} {d}x{d}", .{ n.id.index(), r.w, r.h });
+            try add("negative size: id {d} {d}x{d}", w, &problems, .{ n.id.index(), r.w, r.h });
         }
 
         // Box sides: borders and paddings must not be negative. Margins may
@@ -516,7 +516,7 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
         };
         for (side_vals) |v| {
             if (v < -0.001) {
-                try add(w, &problems, "negative box side: id {d} value {d:.1}", .{ n.id.index(), v });
+                try add("negative box side: id {d} value {d:.1}", w, &problems, .{ n.id.index(), v });
                 break;
             }
         }
@@ -527,15 +527,26 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
         // constrains it — the border box does not.
         if (n.parent != .root) {
             const p = findNodeConst(tree, n.parent) orelse {
-                try add(w, &problems, "missing parent: id {d}", .{n.id.index()});
+                try add("missing parent: id {d}", w, &problems, .{n.id.index()});
                 continue;
             };
-            const pw = @max(0, p.rect.w - p.box.border.left - p.box.border.right - p.box.padding.left - p.box.padding.right);
-            const ph = @max(0, p.rect.h - p.box.border.top - p.box.border.bottom - p.box.padding.top - p.box.padding.bottom);
+            const pw = @max(
+                0,
+                p.rect.w - p.box.border.left - p.box.border.right - p.box.padding.left - p.box.padding.right,
+            );
+            const ph = @max(
+                0,
+                p.rect.h - p.box.border.top - p.box.border.bottom - p.box.padding.top - p.box.padding.bottom,
+            );
             if (r.x < -0.001 or r.y < -0.001 or
                 r.x + r.w > pw + 0.001 or r.y + r.h > ph + 0.001)
             {
-                try add(w, &problems, "child outside parent: id {d} rect {d:.1},{d:.1} {d:.1}x{d:.1} vs parent content {d:.1}x{d:.1}", .{ n.id.index(), r.x, r.y, r.w, r.h, pw, ph });
+                try add(
+                    "child outside parent: id {d} rect {d:.1},{d:.1} {d:.1}x{d:.1} vs parent content {d:.1}x{d:.1}",
+                    w,
+                    &problems,
+                    .{ n.id.index(), r.x, r.y, r.w, r.h, pw, ph },
+                );
             }
         }
 
@@ -554,7 +565,12 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
                 const overlap_x = a.x < b.x + b.w - 0.001 and b.x < a.x + a.w - 0.001;
                 const overlap_y = a.y < b.y + b.h - 0.001 and b.y < a.y + a.h - 0.001;
                 if (overlap_x and overlap_y) {
-                    try add(w, &problems, "sibling overlap in id {d}: {d} and {d}", .{ n.id.index(), cid.index(), oid.index() });
+                    try add(
+                        "sibling overlap in id {d}: {d} and {d}",
+                        w,
+                        &problems,
+                        .{ n.id.index(), cid.index(), oid.index() },
+                    );
                 }
             }
         }
@@ -581,10 +597,20 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
                     else => ms.width,
                 };
                 if (r.w + 0.001 < need_w) {
-                    try add(w, &problems, "text overflow: id {d} '{s}' needs {d:.1} wide, rect {d:.1}", .{ n.id.index(), t, need_w, r.w });
+                    try add(
+                        "text overflow: id {d} '{s}' needs {d:.1} wide, rect {d:.1}",
+                        w,
+                        &problems,
+                        .{ n.id.index(), t, need_w, r.w },
+                    );
                 }
                 if (r.h + 0.001 < ms.height) {
-                    try add(w, &problems, "text overflow: id {d} '{s}' needs {d:.1} tall, rect {d:.1}", .{ n.id.index(), t, ms.height, r.h });
+                    try add(
+                        "text overflow: id {d} '{s}' needs {d:.1} tall, rect {d:.1}",
+                        w,
+                        &problems,
+                        .{ n.id.index(), t, ms.height, r.h },
+                    );
                 }
             }
         }
@@ -593,7 +619,12 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
         switch (n.kind) {
             .slider => |s| {
                 if (s.value.* < s.min or s.value.* > s.max) {
-                    try add(w, &problems, "slider value out of range: id {d} value {d:.1} not in [{d:.1}, {d:.1}]", .{ n.id.index(), s.value.*, s.min, s.max });
+                    try add(
+                        "slider value out of range: id {d} value {d:.1} not in [{d:.1}, {d:.1}]",
+                        w,
+                        &problems,
+                        .{ n.id.index(), s.value.*, s.min, s.max },
+                    );
                 }
             },
             else => {},
@@ -615,7 +646,7 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
             const overlap_x = ra.x < rb.x + rb.w - 0.001 and rb.x < ra.x + ra.w - 0.001;
             const overlap_y = ra.y < rb.y + rb.h - 0.001 and rb.y < ra.y + ra.h - 0.001;
             if (overlap_x and overlap_y and !isLayered(tree, a.id) and !isLayered(tree, b.id)) {
-                try add(w, &problems, "root overlap: {d} and {d}", .{ a.id.index(), b.id.index() });
+                try add("root overlap: {d} and {d}", w, &problems, .{ a.id.index(), b.id.index() });
             }
         }
     }
@@ -630,7 +661,12 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
             if (r.x < -0.001 or r.y < -0.001 or
                 r.x + r.w > s.width + 0.001 or r.y + r.h > s.height + 0.001)
             {
-                try add(w, &problems, "root outside surface: id {d} rect {d:.1},{d:.1} {d:.1}x{d:.1} vs surface {d:.1}x{d:.1}", .{ n.id.index(), r.x, r.y, r.w, r.h, s.width, s.height });
+                try add(
+                    "root outside surface: id {d} rect {d:.1},{d:.1} {d:.1}x{d:.1} vs surface {d:.1}x{d:.1}",
+                    w,
+                    &problems,
+                    .{ n.id.index(), r.x, r.y, r.w, r.h, s.width, s.height },
+                );
             }
         }
     }
@@ -690,7 +726,12 @@ pub fn verifyLayout(tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size
                 }
                 if (skip) continue;
                 if (isLayered(tree, boxes.items[i].id) or isLayered(tree, boxes.items[j].id)) continue;
-                try add(w, &problems, "text overlap: id {d} and id {d}", .{ boxes.items[i].id.index(), boxes.items[j].id.index() });
+                try add(
+                    "text overlap: id {d} and id {d}",
+                    w,
+                    &problems,
+                    .{ boxes.items[i].id.index(), boxes.items[j].id.index() },
+                );
             }
         }
     }
@@ -733,7 +774,7 @@ test "treeToJson: label text with quotes and backslashes round-trips" {
     tree.node(col).?.children.items[0] = @enumFromInt(1);
     tree.node(col).?.children.len = 1;
 
-    const json = try treeToJson(&tree, std.testing.allocator);
+    const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
 
     // No raw quote-backslash-quote sequence may appear in the document:
@@ -790,7 +831,7 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     tree.node(col_id).?.children.items[0] = row_id;
     tree.node(col_id).?.children.len = 1;
 
-    const json = try treeToJson(&tree, std.testing.allocator);
+    const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
@@ -837,7 +878,7 @@ test "treeToJson: empty tree serializes as []" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.nodes.deinit(std.testing.allocator);
 
-    const json = try treeToJson(&tree, std.testing.allocator);
+    const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings("[]", json);
@@ -901,7 +942,7 @@ test "renderAscii: label text, button fill, slider thumb, hover border" {
         .rect = .{ .x = 0, .y = 70, .w = 100, .h = 24 },
     });
 
-    const map = try renderAscii(&tree, button_id, std.testing.allocator);
+    const map = try renderAscii(std.testing.allocator, &tree, button_id);
     defer std.testing.allocator.free(map);
 
     // Text chars at their layout positions (glyphs are spaced 5 map chars
@@ -924,7 +965,7 @@ test "renderAscii: empty tree yields an empty map" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.nodes.deinit(std.testing.allocator);
 
-    const map = try renderAscii(&tree, null, std.testing.allocator);
+    const map = try renderAscii(std.testing.allocator, &tree, null);
     defer std.testing.allocator.free(map);
     try std.testing.expectEqual(@as(usize, 0), map.len);
 }
@@ -956,7 +997,7 @@ test "verifyLayout: clean tree reports OK" {
         .rect = .{ .x = 0, .y = 0, .w = 40, .h = 40 },
     });
 
-    const report = try verifyLayout(&tree, null, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.startsWith(u8, report, "OK"));
 }
@@ -1000,7 +1041,7 @@ test "verifyLayout: overlap, escape, and out-of-range value are reported" {
     tree.node(col).?.children.items[2] = s;
     tree.node(col).?.children.len = 3;
 
-    const report = try verifyLayout(&tree, null, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "sibling overlap") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "child outside parent") != null);
@@ -1025,7 +1066,7 @@ test "layoutFingerprint: deterministic, rects only" {
         .rect = .{ .x = 0, .y = 30, .w = 56, .h = 32 },
     });
 
-    const fp = try layoutFingerprint(&tree, std.testing.allocator);
+    const fp = try layoutFingerprint(std.testing.allocator, &tree);
     defer std.testing.allocator.free(fp);
 
     // Rects only — no label text anywhere in the fingerprint.
@@ -1034,7 +1075,7 @@ test "layoutFingerprint: deterministic, rects only" {
     try std.testing.expect(std.mem.indexOf(u8, fp, "\"kind\":\"button\"") != null);
 
     // Deterministic: two runs produce identical bytes.
-    const fp2 = try layoutFingerprint(&tree, std.testing.allocator);
+    const fp2 = try layoutFingerprint(std.testing.allocator, &tree);
     defer std.testing.allocator.free(fp2);
     try std.testing.expectEqualStrings(fp, fp2);
 }
@@ -1065,7 +1106,7 @@ test "verifyLayout: overlapping text boxes are reported, adjacent are not" {
         .rect = .{ .x = 20, .y = 0, .w = 52, .h = 24 }, // boxes collide
     });
 
-    const report = try verifyLayout(&tree, fakeMeasure, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "text overlap") != null);
 }
@@ -1089,7 +1130,7 @@ test "verifyLayout: text boxes that merely touch are not an overlap" {
         .rect = .{ .x = 52, .y = 0, .w = 52, .h = 24 },
     });
 
-    const report = try verifyLayout(&tree, fakeMeasure, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.startsWith(u8, report, "OK"));
 }
@@ -1106,7 +1147,7 @@ test "treeToJson: rect values round-trip exactly" {
         .rect = rect,
     });
 
-    const json = try treeToJson(&tree, std.testing.allocator);
+    const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
@@ -1144,7 +1185,7 @@ test "renderAscii: nested node renders at its absolute position" {
     tree.node(col).?.children.items[0] = btn;
     tree.node(col).?.children.len = 1;
 
-    const map = try renderAscii(&tree, null, std.testing.allocator);
+    const map = try renderAscii(std.testing.allocator, &tree, null);
     defer std.testing.allocator.free(map);
 
     // Bounds = union of absolute rects (0,0)-(100,100): cols = 100/2+1 =
@@ -1185,7 +1226,7 @@ test "verifyLayout: nested tree with padding and border verifies OK" {
     tree.node(col).?.children.items[0] = btn;
     tree.node(col).?.children.len = 1;
 
-    const report = try verifyLayout(&tree, null, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.startsWith(u8, report, "OK"));
 }
@@ -1215,7 +1256,7 @@ test "verifyLayout: child outside the parent's content box is flagged" {
     tree.node(col).?.children.items[0] = child;
     tree.node(col).?.children.len = 1;
 
-    const report = try verifyLayout(&tree, null, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "child outside parent") != null);
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
@@ -1233,7 +1274,7 @@ test "verifyLayout: negative box sides are reported" {
         .box = .{ .padding = .{ .top = -2 } },
     });
 
-    const report = try verifyLayout(&tree, null, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "negative box side") != null);
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
@@ -1247,21 +1288,45 @@ test "eventFromJson: malformed lines return errors, never panic" {
     // Non-object line (string).
     try testing.expectError(error.WrongType, eventFromJson(testing.allocator, "\"nope\""));
     // Missing type field.
-    try testing.expectError(error.MissingField, eventFromJson(testing.allocator, "{\"tick\":1}"));
+    try testing.expectError(
+        error.MissingField,
+        eventFromJson(testing.allocator, "{\"tick\":1}"),
+    );
     // Float tick where an integer is required.
-    try testing.expectError(error.WrongType, eventFromJson(testing.allocator, "{\"type\":\"frame\",\"tick\":1.5,\"time_ms\":0}"));
+    try testing.expectError(
+        error.WrongType,
+        eventFromJson(testing.allocator, "{\"type\":\"frame\",\"tick\":1.5,\"time_ms\":0}"),
+    );
     // Negative tick is out of range for u32.
-    try testing.expectError(error.BadNumber, eventFromJson(testing.allocator, "{\"type\":\"frame\",\"tick\":-1,\"time_ms\":0}"));
+    try testing.expectError(
+        error.BadNumber,
+        eventFromJson(testing.allocator, "{\"type\":\"frame\",\"tick\":-1,\"time_ms\":0}"),
+    );
     // Missing required field (x).
-    try testing.expectError(error.MissingField, eventFromJson(testing.allocator, "{\"type\":\"mouse_move\",\"y\":1}"));
+    try testing.expectError(
+        error.MissingField,
+        eventFromJson(testing.allocator, "{\"type\":\"mouse_move\",\"y\":1}"),
+    );
     // Non-numeric where a number is required.
-    try testing.expectError(error.BadNumber, eventFromJson(testing.allocator, "{\"type\":\"mouse_move\",\"x\":\"abc\",\"y\":1}"));
+    try testing.expectError(
+        error.BadNumber,
+        eventFromJson(testing.allocator, "{\"type\":\"mouse_move\",\"x\":\"abc\",\"y\":1}"),
+    );
     // Unknown event type.
-    try testing.expectError(error.UnknownEvent, eventFromJson(testing.allocator, "{\"type\":\"nope\"}"));
+    try testing.expectError(
+        error.UnknownEvent,
+        eventFromJson(testing.allocator, "{\"type\":\"nope\"}"),
+    );
     // Unknown key name.
-    try testing.expectError(error.UnknownKey, eventFromJson(testing.allocator, "{\"type\":\"key_down\",\"key\":\"f5\"}"));
+    try testing.expectError(
+        error.UnknownKey,
+        eventFromJson(testing.allocator, "{\"type\":\"key_down\",\"key\":\"f5\"}"),
+    );
     // Missing key on a key event.
-    try testing.expectError(error.MissingField, eventFromJson(testing.allocator, "{\"type\":\"key_down\"}"));
+    try testing.expectError(
+        error.MissingField,
+        eventFromJson(testing.allocator, "{\"type\":\"key_down\"}"),
+    );
 }
 
 test "verifyLayout: text-overlap pass handles more than 64 text nodes" {
@@ -1279,7 +1344,7 @@ test "verifyLayout: text-overlap pass handles more than 64 text nodes" {
         });
     }
 
-    const report = try verifyLayout(&tree, fakeMeasure, null, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.startsWith(u8, report, "OK"));
 }
@@ -1310,7 +1375,7 @@ test "verifyLayout: root-level sibling overlap and surface bounds are flagged" {
         .rect = .{ .x = 250, .y = 0, .w = 200, .h = 20 }, // 450 > 300
     });
 
-    const report = try verifyLayout(&tree, null, .{ .width = 300, .height = 200 }, std.testing.allocator);
+    const report = try verifyLayout(std.testing.allocator, &tree, null, .{ .width = 300, .height = 200 });
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "root overlap") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "root outside surface") != null);
@@ -1339,9 +1404,9 @@ test "layoutFingerprint: identical rects with different box sides differ" {
         .box = .{ .padding = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 } },
     });
 
-    const fpa = try layoutFingerprint(&tree_a, std.testing.allocator);
+    const fpa = try layoutFingerprint(std.testing.allocator, &tree_a);
     defer std.testing.allocator.free(fpa);
-    const fpb = try layoutFingerprint(&tree_b, std.testing.allocator);
+    const fpb = try layoutFingerprint(std.testing.allocator, &tree_b);
     defer std.testing.allocator.free(fpb);
 
     try std.testing.expect(!std.mem.eql(u8, fpa, fpb));
@@ -1377,9 +1442,9 @@ test "layoutFingerprint: paint-only box fields (layer) are excluded" {
         .box = .{ .layer = 5 },
     });
 
-    const fpa = try layoutFingerprint(&tree_a, std.testing.allocator);
+    const fpa = try layoutFingerprint(std.testing.allocator, &tree_a);
     defer std.testing.allocator.free(fpa);
-    const fpb = try layoutFingerprint(&tree_b, std.testing.allocator);
+    const fpb = try layoutFingerprint(std.testing.allocator, &tree_b);
     defer std.testing.allocator.free(fpb);
 
     try std.testing.expectEqualStrings(fpa, fpb);
@@ -1389,8 +1454,8 @@ test "renderAscii: hover on a sub-2px node draws no border and does not panic" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.nodes.deinit(std.testing.allocator);
 
-    // h = 1 < MAP_PX (2): the hover border's inner edge offset
-    // (r.y + r.h - MAP_PX) would be negative and @intFromFloat would
+    // h = 1 < map_px (2): the hover border's inner edge offset
+    // (r.y + r.h - map_px) would be negative and @intFromFloat would
     // panic; the guard must skip the border entirely.
     const tiny: Id = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
@@ -1400,7 +1465,7 @@ test "renderAscii: hover on a sub-2px node draws no border and does not panic" {
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 1 },
     });
 
-    const map = try renderAscii(&tree, tiny, std.testing.allocator);
+    const map = try renderAscii(std.testing.allocator, &tree, tiny);
     defer std.testing.allocator.free(map);
     try std.testing.expect(std.mem.indexOfScalar(u8, map, '@') == null);
 }

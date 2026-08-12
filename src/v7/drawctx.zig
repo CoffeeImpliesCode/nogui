@@ -71,7 +71,7 @@ fn asColor(x: anytype) [4]f32 {
 }
 
 fn boxFromOpts(opts: anytype) Box {
-    var box = Box{};
+    var box: Box = .{};
     const T = @TypeOf(opts);
     if (@hasField(T, "margin")) box.margin = asSides(opts.margin);
     if (@hasField(T, "padding")) box.padding = asSides(opts.padding);
@@ -170,7 +170,12 @@ pub const DrawCtx = struct {
     pub fn column(self: *DrawCtx, opts: anytype) !Id {
         var gap: f32 = 0;
         if (@hasField(@TypeOf(opts), "gap")) gap = opts.gap;
-        const id = try self.create(.{ .column = .{ .gap = gap } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        const id = try self.create(
+            .{ .column = .{ .gap = gap } },
+            boxFromOpts(opts),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
         var grow: f32 = 0;
         if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
         if (grow > 0) self.tree.node(id).?.flex.grow = grow;
@@ -192,7 +197,12 @@ pub const DrawCtx = struct {
     pub fn row(self: *DrawCtx, opts: anytype) !Id {
         var gap: f32 = 0;
         if (@hasField(@TypeOf(opts), "gap")) gap = opts.gap;
-        const id = try self.create(.{ .row = .{ .gap = gap } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        const id = try self.create(
+            .{ .row = .{ .gap = gap } },
+            boxFromOpts(opts),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
         var grow: f32 = 0;
         if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
         if (grow > 0) self.tree.node(id).?.flex.grow = grow;
@@ -356,8 +366,8 @@ pub const DrawCtx = struct {
     /// The returned T lives in the frame arena: no gpa allocations, no
     /// flush — the double-buffered arenas ARE the store. A frame-arena OOM
     /// propagates as error.OutOfMemory.
-    pub fn state(self: *DrawCtx, name: []const u8, comptime T: type, init: T) !*T {
-        const key = StateKey{ .node = @enumFromInt(self.tree.next_id), .name_hash = stateHash(name) };
+    pub fn state(self: *DrawCtx, comptime T: type, name: []const u8, init: T) !*T {
+        const key: StateKey = .{ .node = @enumFromInt(self.tree.next_id), .name_hash = stateHash(name) };
         const cur = self.state_cur orelse {
             // No state mode (single-frame tests): a plain init copy.
             const p = try self.arena.create(T);
@@ -405,7 +415,7 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const col = try ctx.column(.{});
     const inner_label = try ctx.label(.{ .text = "a" });
@@ -451,7 +461,7 @@ test "DrawCtx: pop() restores the cursor" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const col = try ctx.column(.{});
     const inner = try ctx.label(.{ .text = "inner" });
@@ -474,19 +484,21 @@ test "DrawCtx: button owner binds to component_id, incl. inside component()" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     // At the root the owner is .root (the implicit root component).
     const root_button = try ctx.button(.{ .label = "root" });
     try std.testing.expectEqual(Id.root, tree.node(root_button).?.kind.button.owner);
 
     const Child = struct {
-        pub fn draw(self: *@This(), c: *DrawCtx) anyerror!void {
+        const Self = @This();
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
             _ = self;
             _ = try c.button(.{ .label = "child" });
         }
     };
-    var child = Child{};
+    var child: Child = .{};
     try ctx.component(Child, &child);
 
     // The component took the next id (3 — 2 was the root button's child
@@ -508,15 +520,17 @@ test "DrawCtx: component() draws into the current cursor" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const Child = struct {
-        pub fn draw(self: *@This(), c: *DrawCtx) anyerror!void {
+        const Self = @This();
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
             _ = self;
             _ = try c.label(.{ .text = "in-child" });
         }
     };
-    var child = Child{};
+    var child: Child = .{};
 
     // Drawn at root level: the child's node is root-level.
     // component() reserves id 1 for the child component, so its label is 2.
@@ -529,7 +543,7 @@ test "DrawCtx: component() draws into the current cursor" {
     defer arena2.deinit();
     var tree2 = WidgetTree.init(arena2.allocator());
     defer tree2.nodes.deinit(arena2.allocator());
-    var ctx2 = DrawCtx{ .tree = &tree2, .arena = arena2.allocator() };
+    var ctx2: DrawCtx = .{ .tree = &tree2, .arena = arena2.allocator() };
 
     const col = try ctx2.column(.{});
     try ctx2.component(Child, &child);
@@ -548,7 +562,7 @@ test "DrawCtx: justify and align flow into the node's FlexStyle" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const jcol = try ctx.column(.{ .justify = .space_between });
     ctx.pop();
@@ -571,7 +585,7 @@ test "DrawCtx: container gap comes from opts, defaults to 0" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const gapped_col = try ctx.column(.{ .gap = 4 });
     ctx.pop();
@@ -595,7 +609,7 @@ test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     // No on_click in opts -> null callback.
     const plain = try ctx.button(.{ .label = "no handler" });
@@ -603,13 +617,15 @@ test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
 
     // With on_click -> a type-erased callback that reaches the receiver.
     const Counter = struct {
+        const Self = @This();
+
         n: u32 = 0,
 
-        fn click(self: *@This()) void {
+        fn click(self: *Self) void {
             self.n += 1;
         }
     };
-    var counter = Counter{};
+    var counter: Counter = .{};
     const wired = try ctx.button(.{ .label = "go", .on_click = Counter.click });
     const cb = tree.node(wired).?.kind.button.on_click.?;
     cb(@ptrCast(&counter));
@@ -623,7 +639,7 @@ test "DrawCtx: box fields from opts flow into the node's box" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const id = try ctx.label(.{
         .text = "boxed",
@@ -660,7 +676,7 @@ test "DrawCtx: absent box fields leave Box defaults" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const plain_label = try ctx.label(.{ .text = "plain" });
     const plain_button = try ctx.button(.{ .label = "B" });
@@ -685,7 +701,7 @@ test "DrawCtx: the .layer box option lands on the node's box" {
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     // Any widget kind carries the option: a container, a label, a button.
     const layered_col = try ctx.column(.{ .layer = 3 });
@@ -705,7 +721,7 @@ test "DrawCtx: the .clip opt lands on the container box; pushClip appends to the
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.nodes.deinit(arena.allocator());
-    var ctx = DrawCtx{ .tree = &tree, .arena = arena.allocator() };
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const card = try ctx.column(.{ .clip = true });
     ctx.pop();

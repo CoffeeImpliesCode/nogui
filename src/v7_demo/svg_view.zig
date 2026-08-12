@@ -157,7 +157,15 @@ fn distToSegment(p: Point, a0: Point, a1: Point) f32 {
     return @sqrt((p.x - qx) * (p.x - qx) + (p.y - qy) * (p.y - qy));
 }
 
-fn flattenCubic(a: std.mem.Allocator, curves: *std.ArrayList(Curve), p0: Point, c1: Point, c2: Point, p3: Point, tol: f32) !void {
+fn flattenCubic(
+    a: std.mem.Allocator,
+    curves: *std.ArrayList(Curve),
+    p0: Point,
+    c1: Point,
+    c2: Point,
+    p3: Point,
+    tol: f32,
+) !void {
     // Flatness: the control points' deviation from the chord. A flat
     // cubic is within ~3/4 of this of its midpoint-matching conic, so the
     // tolerance here is the final curve error's ceiling.
@@ -201,7 +209,7 @@ fn flattenCubic(a: std.mem.Allocator, curves: *std.ArrayList(Curve), p0: Point, 
 /// moveto, or a closepath with no segments).
 fn convertPath(a: std.mem.Allocator, path: *const svg.SvgPath) !?[]Curve {
     var curves = std.ArrayList(Curve).empty;
-    var st = WalkState{};
+    var st: WalkState = .{};
     for (path.commands) |cmd| {
         switch (cmd) {
             .move_to => |m| {
@@ -307,8 +315,20 @@ fn normalOf(a0: [2]f32, a1: [2]f32) ?[2]f32 {
 /// Recursively sample the conic p0,p1,p2 by flatness: subdivide while the
 /// control point's deviation from the chord exceeds `tol`, capped at 2^depth
 /// segments. Appends the leaf endpoints (the caller appends p0).
-fn sampleConic(a: std.mem.Allocator, pts: *std.ArrayList([2]f32), p0: [2]f32, p1: [2]f32, p2: [2]f32, tol: f32, depth: u8) !void {
-    if (depth == 0 or distToSegment(.{ .x = p1[0], .y = p1[1] }, .{ .x = p0[0], .y = p0[1] }, .{ .x = p2[0], .y = p2[1] }) <= tol) {
+fn sampleConic(
+    a: std.mem.Allocator,
+    pts: *std.ArrayList([2]f32),
+    p0: [2]f32,
+    p1: [2]f32,
+    p2: [2]f32,
+    tol: f32,
+    depth: u8,
+) !void {
+    if (depth == 0 or distToSegment(
+        .{ .x = p1[0], .y = p1[1] },
+        .{ .x = p0[0], .y = p0[1] },
+        .{ .x = p2[0], .y = p2[1] },
+    ) <= tol) {
         try pts.append(a, p2);
         return;
     }
@@ -535,7 +555,14 @@ pub const SvgView = struct {
     /// with ONE material BDA — the text engine's) at `base_slot + index`;
     /// the caller reserves the slot range (see the window's
     /// SVG_MATERIAL_BASE).
-    pub fn init(gpu: *noapi.Gpu, gpa: std.mem.Allocator, doc: *const svg_xml.SvgDoc, materials: noapi.GpuPtr, material_bda: u64, base_slot: u32) !SvgView {
+    pub fn init(
+        gpa: std.mem.Allocator,
+        gpu: *noapi.Gpu,
+        doc: *const svg_xml.SvgDoc,
+        materials: noapi.GpuPtr,
+        material_bda: u64,
+        base_slot: u32,
+    ) !SvgView {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const a = arena.allocator();
@@ -664,7 +691,8 @@ pub const SvgView = struct {
             // bbox-relative, same as the fill). The stroke's slots sit
             // above the fills: base + paths_len + stroke_index.
             if (path.stroke) |stroke| {
-                const stroke_slot: u32 = base_slot + @as(u32, @intCast(doc.paths.len)) + @as(u32, @intCast(stroke_count));
+                const stroke_slot: u32 = base_slot + @as(u32, @intCast(doc.paths.len)) +
+                    @as(u32, @intCast(stroke_count));
                 GlyphSweeper.writeStrokeMaterial(sweeper.curve_buf_bda, materials, stroke_slot, path.stroke_width);
                 try stroke_widths.append(a, path.stroke_width);
                 // The offset-outline polygon for mode 2 (the exact Cairo
@@ -674,7 +702,9 @@ pub const SvgView = struct {
                 // close_path command closes the loop (the runs wrap with
                 // closing chords); otherwise the subpath is open and the
                 // band gets butt caps and no loop-closing chords.
-                const closed = path.commands.len > 0 and std.meta.activeTag(path.commands[path.commands.len - 1]) == .close_path;
+                const closed = path.commands.len > 0 and std.meta.activeTag(
+                    path.commands[path.commands.len - 1],
+                ) == .close_path;
                 const edge_list = try buildStrokeOutline(a, sweep_curves, path.stroke_width / 2, closed);
                 const edge_buf_size: u64 = @sizeOf(StrokeEdge) * edge_list.len + 16;
                 const edge_buf = try gpu.gpuMalloc(edge_buf_size, 16, .default);
@@ -988,6 +1018,7 @@ pub const SvgView = struct {
         for (self.stroke_band_bufs) |b| if (b) |bb| gpu.gpuFree(bb);
         for (self.band_bufs) |b| if (b) |bb| gpu.gpuFree(bb);
         self.arena.deinit();
+        self.* = undefined;
     }
 
     /// The cached per-frame draw input: one SceneRect per rendered path.
@@ -1133,7 +1164,16 @@ test "unsupported commands skip the path" {
     try testing.expectEqual(@as(?[]Curve, null), try convertPath(a, &quad));
     const arc = testPath(&.{
         .{ .move_to = .{ .abs = true, .x = 0, .y = 0 } },
-        .{ .arc_to = .{ .abs = true, .rx = 5, .ry = 5, .x_axis_rotation = 0, .large_arc_flag = false, .sweep_flag = true, .x = 10, .y = 0 } },
+        .{ .arc_to = .{
+            .abs = true,
+            .rx = 5,
+            .ry = 5,
+            .x_axis_rotation = 0,
+            .large_arc_flag = false,
+            .sweep_flag = true,
+            .x = 10,
+            .y = 0,
+        } },
     }, .{ .x = 0, .y = 0, .w = 10, .h = 5 });
     try testing.expectEqual(@as(?[]Curve, null), try convertPath(a, &arc));
 }

@@ -105,6 +105,7 @@ pub const App = struct {
         self.components.deinit(self.gpa);
         self.arenas[0].deinit();
         self.arenas[1].deinit();
+        self.* = undefined;
     }
 
     /// Register the root component. Its id is 1. The map stores the
@@ -375,7 +376,7 @@ pub const App = struct {
         // alive — that is the store state() seeds from.
         const state_dir = try arena_alloc.create(StateDir);
         state_dir.* = .empty;
-        var ctx = DrawCtx{
+        var ctx: DrawCtx = .{
             .tree = tree,
             .arena = arena_alloc,
             .component_id = @enumFromInt(1), // buttons drawn by the root bind here
@@ -444,7 +445,7 @@ pub const App = struct {
         const json: ?[]const u8 = if (self.serialize_json) blk: {
             const zone = tracy.Zone.begin(.{ .name = "treeToJson", .src = @src() });
             defer zone.end();
-            break :blk try headless.treeToJson(tree, self.gpa);
+            break :blk try headless.treeToJson(self.gpa, tree);
         } else null;
         // Swap the state directory: next frame seeds from THIS frame's
         // live values (their arena survives the next build).
@@ -484,7 +485,7 @@ const Counter = struct {
     // SAFETY: bufPrint fills label_buf before any read; the catch fallback never reads uninit.
     label_buf: [32]u8 = undefined,
 
-    pub fn draw(self: *@This(), ctx: *DrawCtx) anyerror!void {
+    pub fn draw(self: *Counter, ctx: *DrawCtx) anyerror!void {
         const text = std.fmt.bufPrint(&self.label_buf, "Count: {d}", .{self.count}) catch "err";
         _ = try ctx.column(.{ .gap = 8 });
         defer ctx.pop();
@@ -492,7 +493,7 @@ const Counter = struct {
         _ = try ctx.button(.{ .label = "Increment", .on_click = Counter.onClick });
     }
 
-    pub fn onClick(self: *@This()) void {
+    pub fn onClick(self: *Counter) void {
         self.count += 1;
     }
 };
@@ -512,7 +513,7 @@ test "App: three frames with click injection persist state across frames" {
     defer app.deinit();
     app.serialize_json = true;
 
-    var counter = Counter{};
+    var counter: Counter = .{};
     _ = try app.register(Counter, &counter);
 
     // Frame 1: find the first .button node in the frame tree and click it
@@ -538,7 +539,7 @@ test "App: frame tree exposes button nodes owned by the registered root" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
 
-    var counter = Counter{};
+    var counter: Counter = .{};
     _ = try app.register(Counter, &counter);
 
     const out = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
@@ -560,7 +561,7 @@ test "App: click on an unknown id is a no-op and the next frame still renders" {
     defer app.deinit();
     app.serialize_json = true;
 
-    var counter = Counter{};
+    var counter: Counter = .{};
     _ = try app.register(Counter, &counter);
 
     const out1 = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
@@ -590,18 +591,20 @@ test "App: ctx.state persists per node across frames, resets after unmount" {
     defer app.deinit();
 
     const Comp = struct {
+        const Self = @This();
+
         show: bool = true,
         last: ?*u32 = null, // the state pointer from the most recent draw
 
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             self.last = null;
             if (!self.show) return; // node unmounted this frame
-            const n = try ctx.state("count", u32, 0);
+            const n = try ctx.state(u32, "count", 0);
             self.last = n;
             n.* += 1;
         }
     };
-    var comp = Comp{};
+    var comp: Comp = .{};
     _ = try app.register(Comp, &comp);
 
     // Frame 1: fresh node -> init 0, incremented to 1.
@@ -631,7 +634,7 @@ test "App: ctx.state persists per node across frames, resets after unmount" {
 test "App: double-buffer — prev_tree is the previous frame's tree with stable ids" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
-    var counter = Counter{};
+    var counter: Counter = .{};
     _ = try app.register(Counter, &counter);
 
     // Frame 1: no previous tree yet.
@@ -690,21 +693,23 @@ test "App: driver — hover, click and slider drag through handle()" {
     defer app.deinit();
 
     const Widgets = struct {
+        const Self = @This();
+
         clicks: u32 = 0,
         volume: f32 = 0.5,
 
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = try ctx.column(.{});
             defer ctx.pop();
             _ = try ctx.slider(.{ .label = "s", .value = &self.volume, .min = 0, .max = 1 });
-            _ = try ctx.button(.{ .label = "go", .on_click = @This().onClick });
+            _ = try ctx.button(.{ .label = "go", .on_click = Self.onClick });
         }
 
-        fn onClick(self: *@This()) void {
+        fn onClick(self: *Self) void {
             self.clicks += 1;
         }
     };
-    var widgets = Widgets{};
+    var widgets: Widgets = .{};
     _ = try app.register(Widgets, &widgets);
 
     // The driver sizes the surface first; then frame 1 draws at 200x200.
@@ -747,22 +752,24 @@ test "App: keyboard — focus traversal, activate, slider arrows, escape" {
     defer app.deinit();
 
     const Widgets = struct {
+        const Self = @This();
+
         clicks: u32 = 0,
         volume: f32 = 0.5,
 
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = try ctx.column(.{});
             defer ctx.pop();
             _ = try ctx.slider(.{ .label = "s", .value = &self.volume, .min = 0, .max = 1 });
-            _ = try ctx.button(.{ .label = "a", .on_click = @This().onClick });
-            _ = try ctx.button(.{ .label = "b", .on_click = @This().onClick });
+            _ = try ctx.button(.{ .label = "a", .on_click = Self.onClick });
+            _ = try ctx.button(.{ .label = "b", .on_click = Self.onClick });
         }
 
-        fn onClick(self: *@This()) void {
+        fn onClick(self: *Self) void {
             self.clicks += 1;
         }
     };
-    var widgets = Widgets{};
+    var widgets: Widgets = .{};
     _ = try app.register(Widgets, &widgets);
 
     _ = try app.handle(Widgets, &widgets, .{ .resize = .{ .width = 200, .height = 200 } });
@@ -819,22 +826,24 @@ test "App: focus/pressed cleared when a draw-order change renumbers ids" {
     defer app.deinit();
 
     const Comp = struct {
+        const Self = @This();
+
         show_extra: bool = false,
 
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = try ctx.column(.{});
             defer ctx.pop();
             // The demo pattern: a conditional node ABOVE the button shifts
             // every following id when it appears.
             if (self.show_extra) _ = try ctx.label(.{ .text = "extra" });
-            _ = try ctx.button(.{ .label = "go", .on_click = @This().noop });
+            _ = try ctx.button(.{ .label = "go", .on_click = Self.noop });
         }
 
-        fn noop(self: *@This()) void {
+        fn noop(self: *Self) void {
             _ = self;
         }
     };
-    var comp = Comp{};
+    var comp: Comp = .{};
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
@@ -874,7 +883,9 @@ test "App: keyboard — no focus: Tab lands on the first, Shift-Tab on the last"
     defer app.deinit();
 
     const Comp = struct {
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        const Self = @This();
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = self;
             _ = try ctx.column(.{});
             defer ctx.pop();
@@ -883,7 +894,7 @@ test "App: keyboard — no focus: Tab lands on the first, Shift-Tab on the last"
             _ = try ctx.button(.{ .label = "c" });
         }
     };
-    var comp = Comp{};
+    var comp: Comp = .{};
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
@@ -922,16 +933,18 @@ test "App: mouse_leave clears pressed and drag_slider without a mouse_up" {
     defer app.deinit();
 
     const Comp = struct {
+        const Self = @This();
+
         volume: f32 = 0.5,
 
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = try ctx.column(.{});
             defer ctx.pop();
             _ = try ctx.slider(.{ .label = "s", .value = &self.volume, .min = 0, .max = 1 });
             _ = try ctx.button(.{ .label = "go" });
         }
     };
-    var comp = Comp{};
+    var comp: Comp = .{};
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
@@ -967,21 +980,23 @@ test "App: keyboard — Space on a focused slider jumps to max; Enter stays butt
     defer app.deinit();
 
     const Comp = struct {
+        const Self = @This();
+
         clicks: u32 = 0,
         volume: f32 = 0.2,
 
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = try ctx.column(.{});
             defer ctx.pop();
             _ = try ctx.slider(.{ .label = "s", .value = &self.volume, .min = 0, .max = 1 });
-            _ = try ctx.button(.{ .label = "go", .on_click = @This().onClick });
+            _ = try ctx.button(.{ .label = "go", .on_click = Self.onClick });
         }
 
-        fn onClick(self: *@This()) void {
+        fn onClick(self: *Self) void {
             self.clicks += 1;
         }
     };
-    var comp = Comp{};
+    var comp: Comp = .{};
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
@@ -1006,7 +1021,9 @@ test "App: keyboard — focus traversal reaches the 70th focusable (no 64 cap)" 
     defer app.deinit();
 
     const Many = struct {
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        const Self = @This();
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = self;
             _ = try ctx.column(.{});
             defer ctx.pop();
@@ -1015,7 +1032,7 @@ test "App: keyboard — focus traversal reaches the 70th focusable (no 64 cap)" 
             }
         }
     };
-    var comp = Many{};
+    var comp: Many = .{};
     _ = try app.register(Many, &comp);
 
     _ = try app.handle(Many, &comp, .{ .resize = .{ .width = 200, .height = 600 } });
@@ -1049,7 +1066,7 @@ test "App: register records the root type name — the present() type guard" {
     defer app.deinit();
     app.serialize_json = true;
 
-    var counter = Counter{};
+    var counter: Counter = .{};
     _ = try app.register(Counter, &counter);
 
     // The guard's contract: frame()/handle()/present() must be called with
@@ -1071,7 +1088,9 @@ test "App: persistent registries stay bounded across many frames (flat memory)" 
     defer app.deinit();
 
     const Comp = struct {
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        const Self = @This();
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = self;
             _ = try ctx.column(.{});
             defer ctx.pop();
@@ -1079,7 +1098,7 @@ test "App: persistent registries stay bounded across many frames (flat memory)" 
             _ = try ctx.button(.{ .label = "b" });
         }
     };
-    var comp = Comp{};
+    var comp: Comp = .{};
     _ = try app.register(Comp, &comp);
 
     // 150 frames: the per-frame arenas retain their high-water, and the
@@ -1105,7 +1124,7 @@ test "App: persistent registries stay bounded across many frames (flat memory)" 
 
 test "App: deinit frees the component registry" {
     var app = App.init(std.testing.allocator);
-    var counter = Counter{};
+    var counter: Counter = .{};
     _ = try app.register(Counter, &counter);
     // deinit without defer: the testing allocator's leak check after this
     // test is the assertion — a leak here fails the whole run.
@@ -1117,7 +1136,9 @@ test "present: press_alpha ramps over time and decays" {
     defer app.deinit();
 
     const Comp = struct {
-        pub fn draw(self: *@This(), ctx: *DrawCtx) !void {
+        const Self = @This();
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = self;
             _ = try ctx.column(.{ .gap = 8 });
             defer ctx.pop();
@@ -1125,7 +1146,7 @@ test "present: press_alpha ramps over time and decays" {
             _ = try ctx.label(.{ .text = "x" });
         }
     };
-    var comp = Comp{};
+    var comp: Comp = .{};
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });

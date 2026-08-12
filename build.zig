@@ -265,14 +265,12 @@ pub fn build(b: *std.Build) void {
     const lint_step = b.step("lint", "Run ziglint (enforced rules) + zlint on src/v7 + src/v7_demo");
     const ziglint_cmd = b.addSystemCommand(&.{
         "~/.local/bin/ziglint",
-        "--ignore",
-        "Z004",
-        "--ignore",
-        "Z020",
-        "--ignore",
-        "Z024",
-        "--ignore",
-        "Z006",
+        // The only remaining findings (component.zig, documented): Z023
+        // (the vtable fn-ptr contract fn(*anyopaque, Allocator) — the
+        // reorder breaks the type-erased vtable) + Z030 ×2 (the
+        // type-erased deinit adapter whose poison cannot compile on
+        // *anyopaque, and a test struct whose assertions read the fields
+        // after deinit).
         "--ignore",
         "Z023",
         "--ignore",
