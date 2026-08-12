@@ -66,15 +66,14 @@ pub const Cmd = union(enum) {
 /// A sink for pushing events during custom Cmd execution.
 /// Simple wrapper around an ArrayList to avoid exposing allocator.
 pub const EventSink = struct {
-    events: *std.ArrayListUnmanaged(Event),
-    allocator: std.mem.Allocator,
+    events: *std.ArrayList(Event),
 
-    pub fn push(self: *@This(), event: Event) void {
-        self.events.append(self.allocator, event) catch {};
+    pub fn push(self: *EventSink, event: Event) void {
+        self.events.append(event) catch return;
     }
 };
 
-// ─── Timer Queue ─────────────────────────────────────────
+// ─── Timer Queue ─────────────────────────────
 
 /// A single timer entry.
 pub const TimerEntry = struct {
@@ -101,27 +100,28 @@ pub const TimerEntry = struct {
 /// Manages a queue of timers. Called once per frame by App.run() to
 /// advance time and produce events for any timers that have fired.
 pub const TimerQueue = struct {
-    entries: std.ArrayListUnmanaged(TimerEntry) = .empty,
+    entries: std.ArrayList(TimerEntry) = .empty,
     next_id: u64 = 1,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) @This() {
+    pub fn init(allocator: std.mem.Allocator) TimerQueue {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *@This()) void {
-        self.entries.deinit(self.allocator);
+    pub fn deinit(self: *TimerQueue) void {
+        self.entries.deinit();
+        self.* = undefined;
     }
 
     /// Add a Cmd to the timer queue. Returns the timer ID for cancellation.
-    pub fn add(self: *@This(), cmd: Cmd, now_frame: u64, now_ms: u64) !?u64 {
+    pub fn add(self: *TimerQueue, cmd: Cmd, now_frame: u64, now_ms: u64) !?u64 {
         const id = self.next_id;
         self.next_id += 1;
 
         switch (cmd) {
             .none => return null,
             .immediate => |ev| {
-                try self.entries.append(self.allocator, .{
+                try self.entries.append(.{
                     .id = id,
                     .event = ev,
                     .fire_type = .{ .frame = now_frame },
@@ -130,7 +130,7 @@ pub const TimerQueue = struct {
                 return id;
             },
             .after_frames => |af| {
-                try self.entries.append(self.allocator, .{
+                try self.entries.append(.{
                     .id = id,
                     .event = af.event,
                     .fire_type = .{ .frame = now_frame + af.frames },
@@ -139,7 +139,7 @@ pub const TimerQueue = struct {
                 return id;
             },
             .sleep => |s| {
-                try self.entries.append(self.allocator, .{
+                try self.entries.append(.{
                     .id = id,
                     .event = s.event,
                     .fire_type = .{ .ms = now_ms + s.ms },
@@ -148,7 +148,7 @@ pub const TimerQueue = struct {
                 return id;
             },
             .every_frame => |ef| {
-                try self.entries.append(self.allocator, .{
+                try self.entries.append(.{
                     .id = id,
                     .event = ef.event,
                     .fire_type = .{ .frame = now_frame + ef.interval },
@@ -158,7 +158,7 @@ pub const TimerQueue = struct {
                 return id;
             },
             .every_ms => |em| {
-                try self.entries.append(self.allocator, .{
+                try self.entries.append(.{
                     .id = id,
                     .event = em.event,
                     .fire_type = .{ .ms = now_ms + em.interval_ms },
@@ -178,15 +178,14 @@ pub const TimerQueue = struct {
                 return id;
             },
             .custom => |cb| {
-                var sink_events = std.ArrayListUnmanaged(Event).empty;
-                defer sink_events.deinit(self.allocator);
+                var sink_events = std.ArrayList(Event).empty;
+                defer sink_events.deinit();
                 var sink = EventSink{
                     .events = &sink_events,
-                    .allocator = self.allocator,
                 };
                 cb(&sink);
                 for (sink_events.items) |ev| {
-                    try self.entries.append(self.allocator, .{
+                    try self.entries.append(.{
                         .id = id,
                         .event = ev,
                         .fire_type = .{ .frame = now_frame },
@@ -199,7 +198,7 @@ pub const TimerQueue = struct {
     }
 
     /// Cancel a timer by ID. No-op if already fired or not found.
-    pub fn cancel(self: *@This(), id: u64) void {
+    pub fn cancel(self: *TimerQueue, id: u64) void {
         for (self.entries.items) |*entry| {
             if (entry.id == id) {
                 entry.active = false;
@@ -212,10 +211,10 @@ pub const TimerQueue = struct {
     /// Event to `out_events` and either reschedules (recurring) or
     /// marks inactive (one-shot).
     pub fn advance(
-        self: *@This(),
+        self: *TimerQueue,
         current_frame: u64,
         current_ms: u64,
-        out_events: *std.ArrayListUnmanaged(Event),
+        out_events: *std.ArrayList(Event),
     ) void {
         for (self.entries.items) |*entry| {
             if (!entry.active) continue;
@@ -226,7 +225,7 @@ pub const TimerQueue = struct {
             };
 
             if (fired) {
-                out_events.append(self.allocator, entry.event) catch continue;
+                out_events.append(entry.event) catch continue;
 
                 if (entry.interval_frames > 0) {
                     // Recurring frame-based timer.
@@ -243,7 +242,7 @@ pub const TimerQueue = struct {
     }
 
     /// Remove all inactive entries and compact.
-    pub fn gc(self: *@This()) void {
+    pub fn gc(self: *TimerQueue) void {
         var i: usize = 0;
         while (i < self.entries.items.len) {
             if (!self.entries.items[i].active) {
@@ -255,15 +254,15 @@ pub const TimerQueue = struct {
     }
 };
 
-// ─── Tests ──────────────────────────────────────────────
+// ─── Tests ─────────────────────────────────
 
 const testing = std.testing;
 
 test "Cmd: none produces no timer" {
     var tq = TimerQueue.init(testing.allocator);
     defer tq.deinit();
-    var events = std.ArrayListUnmanaged(Event).empty;
-    defer events.deinit(testing.allocator);
+    var events = std.ArrayList(Event).empty;
+    defer events.deinit();
     tq.advance(0, 0, &events);
     try testing.expectEqual(@as(usize, 0), events.items.len);
 }
@@ -272,8 +271,8 @@ test "Cmd: immediate fires same frame" {
     var tq = TimerQueue.init(testing.allocator);
     defer tq.deinit();
     _ = try tq.add(.{ .immediate = .{ .custom = .{ .id = 42, .data = 0 } } }, 0, 0);
-    var events = std.ArrayListUnmanaged(Event).empty;
-    defer events.deinit(testing.allocator);
+    var events = std.ArrayList(Event).empty;
+    defer events.deinit();
     tq.advance(0, 0, &events);
     try testing.expectEqual(@as(usize, 1), events.items.len);
 }
@@ -282,8 +281,8 @@ test "Cmd: after_frames fires after N frames" {
     var tq = TimerQueue.init(testing.allocator);
     defer tq.deinit();
     _ = try tq.add(.{ .after_frames = .{ .frames = 3, .event = .{ .custom = .{ .id = 1, .data = 0 } } } }, 0, 0);
-    var events = std.ArrayListUnmanaged(Event).empty;
-    defer events.deinit(testing.allocator);
+    var events = std.ArrayList(Event).empty;
+    defer events.deinit();
     tq.advance(1, 0, &events); // not yet
     try testing.expectEqual(@as(usize, 0), events.items.len);
     tq.advance(3, 0, &events); // fires
@@ -294,8 +293,8 @@ test "Cmd: every_frame recurs" {
     var tq = TimerQueue.init(testing.allocator);
     defer tq.deinit();
     _ = try tq.add(.{ .every_frame = .{ .interval = 5, .event = .{ .custom = .{ .id = 1, .data = 0 } } } }, 0, 0);
-    var events = std.ArrayListUnmanaged(Event).empty;
-    defer events.deinit(testing.allocator);
+    var events = std.ArrayList(Event).empty;
+    defer events.deinit();
     tq.advance(5, 0, &events);
     try testing.expectEqual(@as(usize, 1), events.items.len);
     tq.advance(10, 0, &events);
@@ -307,8 +306,8 @@ test "Cmd: cancel removes timer" {
     defer tq.deinit();
     const id = (try tq.add(.{ .sleep = .{ .ms = 100, .event = .{ .custom = .{ .id = 1, .data = 0 } } } }, 0, 0)).?;
     tq.cancel(id);
-    var events = std.ArrayListUnmanaged(Event).empty;
-    defer events.deinit(testing.allocator);
+    var events = std.ArrayList(Event).empty;
+    defer events.deinit();
     tq.advance(0, 200, &events);
     try testing.expectEqual(@as(usize, 0), events.items.len);
 }
@@ -318,8 +317,8 @@ test "TimerQueue: gc removes inactive" {
     defer tq.deinit();
     _ = try tq.add(.{ .immediate = .{ .custom = .{ .id = 1, .data = 0 } } }, 0, 0);
     _ = try tq.add(.{ .immediate = .{ .custom = .{ .id = 2, .data = 0 } } }, 0, 0);
-    var events = std.ArrayListUnmanaged(Event).empty;
-    defer events.deinit(testing.allocator);
+    var events = std.ArrayList(Event).empty;
+    defer events.deinit();
     tq.advance(0, 0, &events); // both fire → inactive
     try testing.expectEqual(@as(usize, 2), tq.entries.items.len);
     tq.gc();

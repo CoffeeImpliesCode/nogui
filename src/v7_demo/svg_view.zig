@@ -364,7 +364,8 @@ fn buildStrokeOutline(a: std.mem.Allocator, curves: []const Curve, half: f32, cl
         if (pts.items.len - start < 9) { // fewer than 8 segments: uniform fallback
             pts.shrinkRetainingCapacity(start);
             for (0..9) |k| {
-                const t = @as(f32, @floatFromInt(k)) / 8.0;
+                const k_f: f32 = @floatFromInt(@min(k, 1 << 24));
+                const t = k_f / 8.0;
                 const mt = 1 - t;
                 try pts.append(a, .{
                     mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0],
@@ -470,8 +471,8 @@ fn buildStrokeOutline(a: std.mem.Allocator, curves: []const Curve, half: f32, cl
         // The end cap at the last end (a butt cap): outer.last -> inner.last
         try add(a, &edges, outer.items[m - 1], inner.items[m - 1]);
         // The inner (−half) run reversed, no closing chord:
-        for (0..m - 1) |i| {
-            const j = m - 1 - i;
+        var j = m - 1;
+        while (j >= 1) : (j -= 1) {
             try add(a, &edges, inner.items[j], inner.items[j - 1]);
         }
         // The leading cap: inner.first -> outer.first (a butt cap)
@@ -713,7 +714,7 @@ pub const SvgView = struct {
                 @as(*u32, @ptrCast(@alignCast(edge_dst))).* = @intCast(edge_list.len);
                 @as(*u32, @ptrCast(@alignCast(edge_dst + 4))).* = 0;
                 if (edge_list.len > 0) {
-                    const edges_src: [*]const StrokeEdge = @ptrCast(@alignCast(edge_list.ptr));
+                    const edges_src: [*]const StrokeEdge = edge_list.ptr;
                     const edges_out: [*]StrokeEdge = @ptrCast(@alignCast(edge_dst + 8));
                     @memcpy(edges_out[0..edge_list.len], edges_src[0..edge_list.len]);
                 }
@@ -773,27 +774,61 @@ pub const SvgView = struct {
         else
             .{ bounds.w, bounds.h };
 
+        // Own each toOwnedSlice allocation with an errdefer before the
+        // struct literal — a failure mid-literal would leak the slices
+        // already converted (errdefer can't appear inside a literal).
+        const curves_owned = try curves_list.toOwnedSlice(a);
+        errdefer a.free(curves_owned);
+        const sweepers_owned = try sweepers.toOwnedSlice(a);
+        errdefer {
+            for (sweepers_owned) |*s| s.deinit();
+        }
+        const rects_owned = try rect_list.toOwnedSlice(a);
+        errdefer a.free(rects_owned);
+        const stroke_widths_owned = try stroke_widths.toOwnedSlice(a);
+        errdefer a.free(stroke_widths_owned);
+        const stroke_edge_bufs_owned = try stroke_edge_bufs.toOwnedSlice(a);
+        errdefer {
+            for (stroke_edge_bufs_owned) |b| gpu.gpuFree(b);
+        }
+        const stroke_edge_bdas_owned = try stroke_edge_bdas.toOwnedSlice(a);
+        errdefer a.free(stroke_edge_bdas_owned);
+        const stroke_curve_bdas_owned = try stroke_curve_bdas.toOwnedSlice(a);
+        errdefer a.free(stroke_curve_bdas_owned);
+        const stroke_band_bufs_owned = try stroke_band_bufs.toOwnedSlice(a);
+        errdefer {
+            for (stroke_band_bufs_owned) |b| if (b) |bb| gpu.gpuFree(bb);
+        }
+        const stroke_band_bdas_owned = try stroke_band_bdas.toOwnedSlice(a);
+        errdefer a.free(stroke_band_bdas_owned);
+        const band_bufs_owned = try band_bufs.toOwnedSlice(a);
+        errdefer {
+            for (band_bufs_owned) |b| if (b) |bb| gpu.gpuFree(bb);
+        }
+        const band_bdas_owned = try band_bdas.toOwnedSlice(a);
+        errdefer a.free(band_bdas_owned);
+
         return .{
             .arena = arena,
-            .curves = try curves_list.toOwnedSlice(a),
-            .sweepers = try sweepers.toOwnedSlice(a),
+            .curves = curves_owned,
+            .sweepers = sweepers_owned,
             .materials = materials,
             .material_bda = material_bda,
-            .rects_storage = try rect_list.toOwnedSlice(a),
+            .rects_storage = rects_owned,
             .view_size = view_size,
             .bounds = bounds,
             .skipped = skipped,
             .base_slot = base_slot,
             .paths_len = doc.paths.len,
-            .stroke_widths = try stroke_widths.toOwnedSlice(a),
+            .stroke_widths = stroke_widths_owned,
             .stroke_count = stroke_count,
-            .stroke_edge_bufs = try stroke_edge_bufs.toOwnedSlice(a),
-            .stroke_edge_bdas = try stroke_edge_bdas.toOwnedSlice(a),
-            .stroke_curve_bdas = try stroke_curve_bdas.toOwnedSlice(a),
-            .stroke_band_bufs = try stroke_band_bufs.toOwnedSlice(a),
-            .stroke_band_bdas = try stroke_band_bdas.toOwnedSlice(a),
-            .band_bufs = try band_bufs.toOwnedSlice(a),
-            .band_bdas = try band_bdas.toOwnedSlice(a),
+            .stroke_edge_bufs = stroke_edge_bufs_owned,
+            .stroke_edge_bdas = stroke_edge_bdas_owned,
+            .stroke_curve_bdas = stroke_curve_bdas_owned,
+            .stroke_band_bufs = stroke_band_bufs_owned,
+            .stroke_band_bdas = stroke_band_bdas_owned,
+            .band_bufs = band_bufs_owned,
+            .band_bdas = band_bdas_owned,
             .gpu = gpu,
             .gpa = gpa,
             .scale = 0,
@@ -816,13 +851,13 @@ pub const SvgView = struct {
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
         for (0..self.stroke_widths.len) |j| {
             const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
-            const offset = slot * proto.MATERIAL_SIZE + @offsetOf(proto.GlyphMaterial, "win_w");
+            const offset = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "win_w");
             @as(*f32, @ptrCast(@alignCast(dst + offset))).* = @floatFromInt(algo);
             @as(*f32, @ptrCast(@alignCast(dst + offset + @sizeOf(f32)))).* = oversize;
             // Mode 2 reads the EDGE buffer (the offset outline) through the
             // material's curve_bda slot; modes 0/1 read the curves. Point
             // the BDA at the right buffer.
-            const bda_off = slot * proto.MATERIAL_SIZE + @offsetOf(proto.GlyphMaterial, "curve_bda");
+            const bda_off = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "curve_bda");
             const bda = if (algo == 2) self.stroke_edge_bdas[j] else self.stroke_curve_bdas[j];
             @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
         }
@@ -835,7 +870,7 @@ pub const SvgView = struct {
         // materials' bearing_y fields (offset 4 = after the type u32).
         for (self.stroke_widths, 0..) |w, j| {
             const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
-            const offset = slot * proto.MATERIAL_SIZE + @offsetOf(proto.GlyphMaterial, "bearing_y");
+            const offset = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "bearing_y");
             const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
             @as(*f32, @ptrCast(@alignCast(dst + offset))).* = w * scale;
         }
@@ -940,7 +975,7 @@ pub const SvgView = struct {
     fn writeBandBda(self: *SvgView, i: usize, bda: u64) void {
         const slot = self.base_slot + @as(u32, @intCast(i));
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
-        const bda_off = slot * proto.MATERIAL_SIZE + @offsetOf(proto.GlyphMaterial, "band_bda");
+        const bda_off = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "band_bda");
         @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
     }
 
@@ -1005,7 +1040,7 @@ pub const SvgView = struct {
     fn writeStrokeBandBda(self: *SvgView, j: usize, bda: u64) void {
         const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
-        const bda_off = slot * proto.MATERIAL_SIZE + @offsetOf(proto.GlyphMaterial, "band_bda");
+        const bda_off = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "band_bda");
         @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
     }
 

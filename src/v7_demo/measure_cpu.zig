@@ -88,8 +88,8 @@ fn entryFor(font_id: u8, px: u32) !*SizeState {
         .face = face,
         .hb_font = hb_font,
         .size = px,
-        .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
-        .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
+        .ascent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.ascender)) / 64.0)),
+        .descent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.descender)) / 64.0)),
         .font_id = font_id,
     };
     return &entries[idx].?;
@@ -123,14 +123,15 @@ pub fn measure(text: []const u8, font_size: f32, font_id: u8) WidgetSize {
     defer buf.destroy();
     var w: f32 = 0;
     for (buf.getGlyphPositions() orelse &.{}) |pos| {
-        w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
+        w += @as(f32, @floatCast(@as(f64, @floatFromInt(pos.x_advance)) / 64.0));
     }
     return .{ .width = w, .height = s.ascent - s.descent };
 }
 
 fn fallback(text: []const u8) WidgetSize {
+    const len_f: f32 = @floatFromInt(@min(text.len, 1 << 24));
     return .{
-        .width = @as(f32, @floatFromInt(text.len)) * 10,
+        .width = len_f * 10,
         .height = 24,
     };
 }

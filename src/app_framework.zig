@@ -41,11 +41,12 @@
 //! ```
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const vk = noapi.vk;
 
-// ─── ServiceRegistry ───────────────────────────────────────────────
+// ─── ServiceRegistry ──────────────────────────────
 
 /// Type-indexed singleton map. Keyed by type name hash.
 /// Each service type can be registered at most once.
@@ -61,8 +62,9 @@ const vk = noapi.vk;
 pub const ServiceRegistry = struct {
     entries: std.AutoHashMapUnmanaged(u64, *anyopaque) = .{},
 
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ServiceRegistry, allocator: std.mem.Allocator) void {
         self.entries.deinit(allocator);
+        self.* = undefined;
     }
 
     fn typeKey(comptime T: type) u64 {
@@ -71,7 +73,7 @@ pub const ServiceRegistry = struct {
 
     /// Register a service. Replaces any existing entry of the same type.
     /// `service` must be a pointer (`*T`). Keyed by `T`.
-    pub fn set(self: *@This(), allocator: std.mem.Allocator, service: anytype) !void {
+    pub fn set(self: *ServiceRegistry, allocator: std.mem.Allocator, service: anytype) !void {
         const info = @typeInfo(@TypeOf(service));
         const base_type = switch (info) {
             .pointer => |ptr_info| ptr_info.child,
@@ -88,28 +90,28 @@ pub const ServiceRegistry = struct {
     }
 
     /// Retrieve a service by type. Returns null if not registered.
-    pub fn get(self: *@This(), comptime T: type) ?*T {
+    pub fn get(self: *ServiceRegistry, comptime T: type) ?*T {
         const entry = self.entries.get(comptime typeKey(T)) orelse return null;
         return @ptrCast(@alignCast(entry));
     }
 
     /// Check if a service type is registered.
-    pub fn has(self: *@This(), comptime T: type) bool {
+    pub fn has(self: *ServiceRegistry, comptime T: type) bool {
         return self.entries.contains(comptime typeKey(T));
     }
 
     /// Remove a service.
-    pub fn remove(self: *@This(), comptime T: type) void {
+    pub fn remove(self: *ServiceRegistry, comptime T: type) void {
         _ = self.entries.remove(comptime typeKey(T));
     }
 
     /// Remove all entries (does NOT deallocate services — they are externally owned).
-    pub fn clear(self: *@This()) void {
+    pub fn clear(self: *ServiceRegistry) void {
         self.entries.clearRetainingCapacity();
     }
 };
 
-// ─── Plugin ─────────────────────────────────────────────────────────
+// ─── Plugin ─────────────────────────────────
 
 /// A plugin registers services and injects behavior at lifecycle points.
 /// Uses function-pointer vtable for interface dispatch — no trait system needed.
@@ -151,20 +153,21 @@ pub const Plugin = struct {
         deinit: ?*const fn (plugin: *anyopaque) void = null,
     };
 
-    pub fn onStart(self: *const @This(), ctx: *AppContext) !void {
+    pub fn onStart(self: *const Plugin, ctx: *AppContext) !void {
         try self.vtable.on_start(ctx, self.ptr);
     }
 
-    pub fn onShutdown(self: *const @This(), ctx: *AppContext) void {
+    pub fn onShutdown(self: *const Plugin, ctx: *AppContext) void {
         self.vtable.on_shutdown(ctx, self.ptr);
     }
 
-    pub fn deinit(self: *const @This()) void {
+    pub fn deinit(self: *Plugin) void {
         if (self.vtable.deinit) |cb| cb(self.ptr);
+        self.* = undefined;
     }
 };
 
-// ─── FrameData ──────────────────────────────────────────────────────
+// ─── FrameData ────────────────────────────────
 
 /// Per-frame render data produced by the main thread, consumed by
 /// the window's render thread.
@@ -192,7 +195,7 @@ pub const FrameData = struct {
     frame_number: u64 = 0,
 };
 
-// ─── WindowHandle ──────────────────────────────────────────────────
+// ─── WindowHandle ───────────────────────────────
 
 /// Opaque handle to a window. Returned by WindowManager.create().
 /// Identified by SDL_WindowID for event routing.
@@ -206,7 +209,7 @@ pub const WindowHandle = struct {
     should_close: bool = false,
     userdata: ?*anyopaque = null,
 
-    // ── Render thread ────────────────────────────────
+    // ── Render thread ──────────────────────────────
     render_thread: ?std.Thread = null,
 
     /// Signal to wake the render thread when new frame data is ready.
@@ -237,7 +240,7 @@ pub const WindowHandle = struct {
     }
 };
 
-// ─── WindowManager ─────────────────────────────────────────────────
+// ─── WindowManager ───────────────────────────────
 
 /// Manages window lifecycle and event routing.
 /// Each window has an SDL window, optional GPU surface, and its own
@@ -247,19 +250,20 @@ pub const WindowManager = struct {
     windows: std.ArrayListUnmanaged(*WindowHandle) = .{},
     allocator: std.mem.Allocator = undefined,
 
-    pub fn init(allocator: std.mem.Allocator) @This() {
+    pub fn init(allocator: std.mem.Allocator) WindowManager {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *WindowManager) void {
         // Windows are externally owned and destroyed.
         self.windows.deinit(self.allocator);
+        self.* = undefined;
     }
 
     /// Create a new window. Returns a handle.
     /// `gpu` may be null for headless windows.
     /// Spawns a dedicated render thread for this window.
-    pub fn create(self: *@This(), title: [:0]const u8, width: u32, height: u32, gpu: ?*noapi.Gpu) !*WindowHandle {
+    pub fn create(self: *WindowManager, title: [:0]const u8, width: u32, height: u32, gpu: ?*noapi.Gpu) !*WindowHandle {
         const sdl_win = try sdl3.video.Window.init(title, width, height, .{ .resizable = true });
         try sdl_win.show();
         const win_id = try sdl_win.getId();
@@ -292,7 +296,7 @@ pub const WindowManager = struct {
 
     /// Destroy a window and remove it from the manager.
     /// Joins the render thread before destroying GPU resources.
-    pub fn destroy(self: *@This(), handle: *WindowHandle, gpu: ?*noapi.Gpu) void {
+    pub fn destroy(self: *WindowManager, handle: *WindowHandle, gpu: ?*noapi.Gpu) void {
         // Signal render thread to stop
         handle.shutdown_requested = true;
         handle.frame_ready.set();
@@ -323,7 +327,7 @@ pub const WindowManager = struct {
 
     /// Route an SDL event to the correct window.  Returns the window
     /// whose ID matches, or null if no match.
-    pub fn routeEvent(self: *@This(), sdl_win_id: u32) ?*WindowHandle {
+    pub fn routeEvent(self: *WindowManager, sdl_win_id: u32) ?*WindowHandle {
         for (self.windows.items) |win| {
             if (win.sdl_win_id == sdl_win_id) return win;
         }
@@ -331,12 +335,12 @@ pub const WindowManager = struct {
     }
 
     /// Number of open windows.
-    pub fn count(self: *@This()) usize {
+    pub fn count(self: *WindowManager) usize {
         return self.windows.items.len;
     }
 
     /// Iterate all windows.
-    pub fn iter(self: *@This()) std.SliceIterator(*WindowHandle) {
+    pub fn iter(self: *WindowManager) std.SliceIterator(*WindowHandle) {
         return .{ .items = self.windows.items };
     }
 
@@ -344,7 +348,7 @@ pub const WindowManager = struct {
     /// after building the widget tree and collecting render commands.
     /// Non-blocking: writes to the current write slot, then signals
     /// the render thread.
-    pub fn publishFrame(_: *@This(), _: *WindowHandle) void {
+    pub fn publishFrame(_: *WindowManager, _: *WindowHandle) void {
         // TODO: atomic triple-buffer swap + signal
         // handle.write_slot → mark as readable
         // advance write_slot to free_slot
@@ -352,7 +356,7 @@ pub const WindowManager = struct {
     }
 };
 
-// ─── Command ────────────────────────────────────────────────────────
+// ─── Command ─────────────────────────────────
 
 /// A deferred async operation. When the command completes, it produces
 /// an Event that is delivered to the component tree on the next frame.
@@ -383,7 +387,7 @@ pub const Command = struct {
     allocator: ?std.mem.Allocator = null,
 
     /// Create a command from a bare function.
-    pub fn from(comptime run_fn: anytype) @This() {
+    pub fn from(comptime run_fn: anytype) Command {
         const T = @TypeOf(run_fn);
         return switch (@typeInfo(T)) {
             .@"fn" => .{
@@ -394,7 +398,7 @@ pub const Command = struct {
     }
 
     /// Create a command with a closure-like userdata payload.
-    pub fn withData(comptime run_fn: anytype, data: anytype) @This() {
+    pub fn withData(comptime run_fn: anytype, data: anytype) Command {
         const T = @TypeOf(data);
         const ptr = if (@sizeOf(T) > 0)
             // Heap-allocate a copy to pass as userdata.
@@ -408,7 +412,7 @@ pub const Command = struct {
     }
 
     /// Convenience: a no-op command (fires immediately with event).
-    pub fn immediate(event: Event) @This() {
+    pub fn immediate(event: Event) Command {
         return .{
             .run_fn = struct {
                 fn run(_: std.Io, _: ?*anyopaque) anyerror!Event {
@@ -419,7 +423,7 @@ pub const Command = struct {
     }
 };
 
-// ─── Hooks ─────────────────────────────────────────────────────────
+// ─── Hooks ─────────────────────────────────
 
 /// Lifecycle hooks. Part of AppConfig. All optional.
 pub const Hooks = struct {
@@ -437,7 +441,7 @@ pub const Hooks = struct {
     on_shutdown: ?*const fn (ctx: *AppContext) void = null,
 };
 
-// ─── AppContext ────────────────────────────────────────────────────
+// ─── AppContext ────────────────────────────────
 
 /// Lightweight context reference passed to plugins, commands, and hooks.
 /// Provides access to App services without exposing the full App.
@@ -449,23 +453,23 @@ pub const AppContext = struct {
 
     /// Submit an async command. The runtime will execute it and deliver
     /// the resulting Event to the widget tree on the next frame.
-    pub fn submitCommand(_: *@This(), _: Command) !void {
+    pub fn submitCommand(_: *AppContext, _: Command) !void {
         // TODO: wire into App's command queue
         @compileError("commands not yet wired into main loop");
     }
 };
 
-// ─── Event (re-export for Command) ─────────────────────────────────
+// ─── Event (re-export for Command) ─────────────────────────
 
 /// Minimal event type for the app framework.
 /// Re-uses the existing proto event model.
 pub const Event = @import("proto/event.zig").Event;
 
-// ─── AppConfig ─────────────────────────────────────────────────────
+// ─── AppConfig ────────────────────────────────
 
 /// Configuration for App initialization.
 pub const AppConfig = struct {
-    // ── Required ────────────────────────────────────
+    // ── Required ────────────────────────────────
     io: std.Io,
     gpa: std.mem.Allocator,
 
@@ -474,28 +478,28 @@ pub const AppConfig = struct {
     width: u32 = 800,
     height: u32 = 600,
 
-    // ── GPU ─────────────────────────────────────────
+    // ── GPU ──────────────────────────────────
     /// Set to null to run in headless mode (no rendering).
     gpu_options: ?GpuOptions = null,
 
-    // ── Threading ───────────────────────────────────
+    // ── Threading ────────────────────────────────
     thread_pool_size: u32 = 0, // 0 = no thread pool
 
     // ── Lifecycle hooks ─────────────────────────────
     hooks: Hooks = .{},
 
-    // ── Plugins ─────────────────────────────────────
+    // ── Plugins ────────────────────────────────
     // Plugins are installed via App.install(), not in config.
 };
 
 pub const GpuOptions = struct {
     frames_in_flight: u32 = 2,
     app_name: [:0]const u8 = "nogui",
-    validation: bool = @import("builtin").mode == .Debug,
+    validation: bool = builtin.mode == .Debug,
     loader: noapi.Gpu.LoaderOptions,
 };
 
-// ─── App ────────────────────────────────────────────────────────────
+// ─── App ──────────────────────────────────
 
 /// nogui Application. Single entry point for the entire lifecycle.
 ///
@@ -543,7 +547,7 @@ pub const GpuOptions = struct {
 ///
 /// ```text
 /// Main Thread           Per-Window Render Thread
-/// ────────────          ─────────────────────────
+/// ────────────          ───────────────────────
 /// poll events
 /// build widget tree
 /// run layout
@@ -566,19 +570,19 @@ pub const App = struct {
     // ── Optional ThreadPool ────────────────────────
     thread_pool: ?std.Thread.Pool = null,
 
-    // ── Plugins ─────────────────────────────────────
+    // ── Plugins ────────────────────────────────
     plugins: std.ArrayListUnmanaged(Plugin) = .{},
 
     // ── GPU state (initialized at run()) ────────────
     /// Vulkan loader functions from SDL
     spv_extensions: []const [*:0]const u8 = &.{},
 
-    // ── Window state ────────────────────────────────
+    // ── Window state ───────────────────────────────
     primary_window: ?*WindowHandle = null,
 
-    // ── Init ────────────────────────────────────────
+    // ── Init ─────────────────────────────────
 
-    pub fn init(config: AppConfig) @This() {
+    pub fn init(config: AppConfig) App {
         return .{
             .io = config.io,
             .gpa = config.gpa,
@@ -588,9 +592,9 @@ pub const App = struct {
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *App) void {
         // Notify shutdown hooks
-        const shutdown_ctx = AppContext{
+        const shutdown_ctx: AppContext = .{
             .services = &self.services_,
             .window_manager = &self.window_manager,
             .allocator = self.gpa,
@@ -622,30 +626,31 @@ pub const App = struct {
         if (self.thread_pool) |*tp| {
             tp.deinit();
         }
+        self.* = undefined;
     }
 
     // ── Plugin management ──────────────────────────
 
     /// Install a plugin. Registered before App.run().
-    pub fn install(self: *@This(), plugin: Plugin) !void {
+    pub fn install(self: *App, plugin: Plugin) !void {
         try self.plugins.append(self.gpa, plugin);
     }
 
     // ── Service access ─────────────────────────────
 
-    pub fn services(self: *@This()) *ServiceRegistry {
+    pub fn services(self: *App) *ServiceRegistry {
         return &self.services_;
     }
 
-    pub fn windowManager(self: *@This()) *WindowManager {
+    pub fn windowManager(self: *App) *WindowManager {
         return &self.window_manager;
     }
 
-    pub fn window(self: *@This()) ?*WindowHandle {
+    pub fn window(self: *App) ?*WindowHandle {
         return self.primary_window;
     }
 
-    // ── Run ─────────────────────────────────────────
+    // ── Run ──────────────────────────────────
 
     /// The single entry point. Sets up SDL, initializes the GPU,
     /// starts plugins, runs the main loop, then shuts down cleanly.
@@ -655,12 +660,12 @@ pub const App = struct {
     ///
     /// The user's draw() function builds and returns the widget tree
     /// each frame.
-    pub fn run(self: *@This(), gui: anytype) !void {
+    pub fn run(self: *App, gui: anytype) !void {
         _ = gui;
-        // ── 0. Validate ───────────────────────────────
+        // ── 0. Validate ──────────────────────────────
         const has_gpu = self.config.gpu_options != null;
 
-        // ── 1. SDL init ────────────────────────────────
+        // ── 1. SDL init ──────────────────────────────
         try sdl3.hints.set(.video_driver, "wayland");
         try sdl3.hints.set(.render_driver, "vulkan");
         try sdl3.init(.{ .video = has_gpu, .events = true });
@@ -707,7 +712,7 @@ pub const App = struct {
 
         // ── 5. Start plugins ───────────────────────────
         {
-            const ctx = AppContext{
+            const ctx: AppContext = .{
                 .services = &self.services_,
                 .window_manager = &self.window_manager,
                 .allocator = self.gpa,
@@ -718,14 +723,14 @@ pub const App = struct {
             }
         }
 
-        // ── 6. Main loop ───────────────────────────────
+        // ── 6. Main loop ─────────────────────────────
         var should_close = false;
         const gpu_ptr = if (self.gpu) |*g| g else null;
 
         while (!should_close) {
             // ── a. Hooks.on_frame() ────────────────────
             {
-                const ctx = AppContext{
+                const ctx: AppContext = .{
                     .services = &self.services_,
                     .window_manager = &self.window_manager,
                     .allocator = self.gpa,
@@ -737,7 +742,7 @@ pub const App = struct {
             // ── b. Poll events ─────────────────────────
             var any_closed = false;
             while (sdl3.events.poll()) |ev| {
-                const ctx = AppContext{
+                const ctx: AppContext = .{
                     .services = &self.services_,
                     .window_manager = &self.window_manager,
                     .allocator = self.gpa,
@@ -789,12 +794,12 @@ pub const App = struct {
         sdl3.quit(.{ .video = has_gpu, .events = true });
     }
 
-    fn getSdlExtensions(self: *@This()) []const [*:0]const u8 {
+    fn getSdlExtensions(self: *App) []const [*:0]const u8 {
         return self.spv_extensions;
     }
 };
 
-// ─── SDL Event → App Event translation ────────────────────────────
+// ─── SDL Event → App Event translation ───────────────────────
 
 fn sdlEventToAppEvent(ev: sdl3.events.Event) Event {
     _ = ev;

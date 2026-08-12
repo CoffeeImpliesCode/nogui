@@ -11,10 +11,13 @@ const Event = @import("event.zig").Event;
 const WidgetTree = @import("widget.zig").WidgetTree;
 
 /// Type-erased operations for a component of any concrete type T.
+/// `deinit` takes the allocator first, then the opaque receiver: it frees
+/// the component's internals and poisons the receiver; the OWNER of the
+/// concrete allocation calls `allocator.destroy` after it returns.
 pub const ComponentVTable = struct {
     draw: *const fn (*anyopaque, *DrawCtx) anyerror!void,
     on_event: ?*const fn (*anyopaque, *const Event) void,
-    deinit: ?*const fn (*anyopaque, std.mem.Allocator) void,
+    deinit: ?*const fn (std.mem.Allocator, *anyopaque) void,
 };
 
 /// A type-erased component: an opaque pointer plus its vtable.
@@ -40,9 +43,10 @@ pub const Component = struct {
                 const t: *T = @ptrCast(@alignCast(p));
                 @call(.auto, T.onEvent, .{ t, ev });
             }
-            fn deinit(p: *anyopaque, allocator: std.mem.Allocator) void {
+            fn deinit(allocator: std.mem.Allocator, p: *anyopaque) void {
                 const t: *T = @ptrCast(@alignCast(p));
                 @call(.auto, T.deinit, .{ t, allocator });
+                t.* = undefined; // poison last; the allocation is still live
             }
         };
 
@@ -108,7 +112,7 @@ test "make: on_event and deinit are null when the type omits them" {
         c.vtable.on_event,
     );
     try std.testing.expectEqual(
-        @as(?*const fn (*anyopaque, std.mem.Allocator) void, null),
+        @as(?*const fn (std.mem.Allocator, *anyopaque) void, null),
         c.vtable.deinit,
     );
 }
@@ -138,27 +142,35 @@ test "make: on_event dispatches through the vtable when declared" {
 }
 
 test "make: deinit adapter passes the receiver and allocator" {
+    // The component's deinit poisons its own memory, so the flags it writes
+    // must land in a tracker that survives the poison.
+    const Tracker = struct {
+        freed: bool = false,
+        // SAFETY: assigned via deinit before use; the test asserts it was set.
+        received_allocator: std.mem.Allocator = undefined,
+    };
+
     const Comp = struct {
         const Self = @This();
-        freed: bool = false,
-        // SAFETY: assigned via init before use; the test asserts it was set.
-        received_allocator: std.mem.Allocator = undefined,
+        tracker: *Tracker,
 
         fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
         fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.freed = true;
-            self.received_allocator = allocator;
+            self.tracker.freed = true;
+            self.tracker.received_allocator = allocator;
+            self.* = undefined;
         }
     };
 
-    var comp: Comp = .{};
+    var tracker: Tracker = .{};
+    var comp: Comp = .{ .tracker = &tracker };
     const c = Component.make(Comp, &comp);
 
     try std.testing.expect(c.vtable.deinit != null);
-    c.vtable.deinit.?(c.ptr, std.testing.allocator);
-    try std.testing.expect(comp.freed);
-    try std.testing.expectEqual(std.testing.allocator, comp.received_allocator);
+    c.vtable.deinit.?(std.testing.allocator, c.ptr);
+    try std.testing.expect(tracker.freed);
+    try std.testing.expectEqual(std.testing.allocator, tracker.received_allocator);
 }

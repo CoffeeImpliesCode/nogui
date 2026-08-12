@@ -173,7 +173,7 @@ pub const TestStrokesApp = struct {
                 _ = try card(false, ctx, false);
                 defer ctx.pop();
                 _ = try caption(ctx, "CONTROLS", 0);
-                const algo_idx: u32 = @intFromFloat(stroke_algo);
+                const algo_idx: u32 = @intFromFloat(@min(@max(stroke_algo, 0), 2));
                 const algo_name = switch (algo_idx) {
                     0 => "naive SDF",
                     1 => "marching quads",

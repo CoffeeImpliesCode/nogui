@@ -150,20 +150,19 @@ const MandelDrag = struct {
 /// own scale would make the content lag the mouse); the wheel zooms the
 /// texture_scale exponentially (no maximum — the user can zoom arbitrarily
 /// deep), clamped only at a small minimum so the view can't invert.
-fn applyMandelbrot(drag: ?*?MandelDrag, pos: [2]f32, wheel_y: f32, rect: Rect, scale: f64) void {
+fn applyMandelbrot(drag: ?*MandelDrag, pos: [2]f32, wheel_y: f32, rect: Rect, scale: f64) void {
     if (drag) |d| {
-        if (d.*) |st| {
-            // Grab the content 1:1 in SCREEN space: the complex-plane delta
-            // per pixel differs per axis because the mandelbrot texture is
-            // 4:3 (512x384) but its box may be a different aspect — a single
-            // width-derived scale makes the y pan wrong. Each axis divides
-            // by ITS OWN display scale (px-per-unit: rect.{w,h} shows
-            // MANDEL_{W,H}/scale units).
-            const s_x = scale * @as(f64, rect.w / @as(f32, mandel_w));
-            const s_y = scale * @as(f64, rect.h / @as(f32, mandel_h));
-            ui.mandelbrot_center[0] = st.center[0] - @as(f64, pos[0] - st.mouse[0]) / s_x;
-            ui.mandelbrot_center[1] = st.center[1] - @as(f64, pos[1] - st.mouse[1]) / s_y;
-        }
+        // Grab the content 1:1 in SCREEN space: the complex-plane delta
+        // per pixel differs per axis because the mandelbrot texture is
+        // 4:3 (512x384) but its box may be a different aspect — a single
+        // width-derived scale makes the y pan wrong. Each axis divides
+        // by ITS OWN display scale (px-per-unit: rect.{w,h} shows
+        // MANDEL_{W,H}/scale units).
+        const st = d.*;
+        const s_x = scale * @as(f64, rect.w / @as(f32, mandel_w));
+        const s_y = scale * @as(f64, rect.h / @as(f32, mandel_h));
+        ui.mandelbrot_center[0] = st.center[0] - @as(f64, pos[0] - st.mouse[0]) / s_x;
+        ui.mandelbrot_center[1] = st.center[1] - @as(f64, pos[1] - st.mouse[1]) / s_y;
     }
     if (wheel_y != 0) {
         const k: f64 = 0.05;
@@ -177,9 +176,13 @@ fn applyMandelbrot(drag: ?*?MandelDrag, pos: [2]f32, wheel_y: f32, rect: Rect, s
 fn toSurfacePoint(sdl_win: sdl3.video.Window, gw: *noapi.Surface, p: [2]f32) ![2]f32 {
     const win_size = try sdl_win.getSize();
     const surface_size = gw.surfaceSize();
+    const sw: f32 = @floatFromInt(@min(surface_size.width, 1 << 24));
+    const sh: f32 = @floatFromInt(@min(surface_size.height, 1 << 24));
+    const ww: f32 = @floatFromInt(@min(win_size[0], 1 << 24));
+    const wh: f32 = @floatFromInt(@min(win_size[1], 1 << 24));
     return .{
-        p[0] * @as(f32, @floatFromInt(surface_size.width)) / @as(f32, @floatFromInt(win_size[0])),
-        p[1] * @as(f32, @floatFromInt(surface_size.height)) / @as(f32, @floatFromInt(win_size[1])),
+        p[0] * sw / ww,
+        p[1] * sh / wh,
     };
 }
 
@@ -405,7 +408,7 @@ fn recordMandelbrot(
         .size = .{ mandel_w, mandel_h },
         .center = ui.mandelbrot_center,
         .scale = ui.mandelbrot_scale,
-        .time = @as(f32, @floatFromInt(time_ms)) / 1000.0,
+        .time = @as(f32, @floatCast(@as(f64, @floatFromInt(time_ms)) / 1000.0)),
         .max_iter = mandel_max_iter,
         .precision = ui.mandelbrot_precision,
     };
@@ -840,7 +843,7 @@ fn buildSliceRects(
             // The stroke test scene's algo + oversize sliders, applied to
             // the stroke materials each frame (the tiger's defaults: algo
             // 0, oversize 1).
-            sv.setStrokeStyle(@intFromFloat(ui.stroke_algo), ui.stroke_oversize);
+            sv.setStrokeStyle(@intFromFloat(@min(@max(ui.stroke_algo, 0), 2)), ui.stroke_oversize);
             // Fit the paths' ACTUAL union bounds (the tiger's paths extend
             // beyond its viewBox with negative coords — the viewBox fit
             // would land them off-card), translated so the bounds' origin
@@ -1117,10 +1120,10 @@ pub fn run(
                 },
                 .mouse_motion => |mm| {
                     const pos = try toSurfacePoint(sdl_win, &gw, .{ mm.x, mm.y });
-                    if (mandel_drag != null) {
+                    if (mandel_drag) |*md| {
                         // Panning the mandelbrot: consume the motion (the
                         // core never sees the drag).
-                        applyMandelbrot(&mandel_drag, pos, 0, mandel_rect, ui.mandelbrot_scale);
+                        applyMandelbrot(md, pos, 0, mandel_rect, ui.mandelbrot_scale);
                         continue;
                     }
                     _ = try app.handle(T, root, .{ .mouse_move = .{ .x = pos[0], .y = pos[1] } });
@@ -1187,10 +1190,11 @@ pub fn run(
                         if (kc == .a) {
                             // Cycle the stroke algo: 0 = naive SDF, 1 =
                             // marching quads, 2 = the spec'd marching quads.
-                            ui.stroke_algo = @floatFromInt((@as(u32, @intFromFloat(ui.stroke_algo)) + 1) % 3);
+                            const algo_idx: u32 = @intFromFloat(@min(@max(ui.stroke_algo, 0), 2));
+                            ui.stroke_algo = @floatFromInt((algo_idx + 1) % 3);
                             std.log.info("stroke algo: {d} ({s})", .{
                                 ui.stroke_algo,
-                                switch (@as(u32, @intFromFloat(ui.stroke_algo))) {
+                                switch (@as(u32, @intFromFloat(@min(@max(ui.stroke_algo, 0), 2)))) {
                                     0 => "naive SDF",
                                     1 => "marching quads",
                                     else => "spec'd marching quads",
@@ -1344,7 +1348,8 @@ pub fn run(
         // and added latency; the swapchain's FIFO/MAILBOX mode paces now.
         const now_ms = sdl3.timer.getMillisecondsSinceInit();
         if (last_frame_ms != 0) {
-            const dt: f32 = @as(f32, @floatFromInt(now_ms -| last_frame_ms)) / 1000.0;
+            const dt_ms: f32 = @floatFromInt(@min(now_ms -| last_frame_ms, 1 << 24));
+            const dt: f32 = dt_ms / 1000.0;
             if (dt > 0) ui.fps = ui.fps * 0.9 + (1.0 / dt) * 0.1;
         }
         last_frame_ms = now_ms;

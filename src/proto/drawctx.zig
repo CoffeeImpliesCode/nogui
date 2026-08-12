@@ -25,6 +25,7 @@ const Widget = @import("widget.zig").Widget;
 const Sizing = @import("widget.zig").Sizing;
 const Size = @import("widget.zig").Size;
 const Id = @import("widget.zig").Id;
+const Key = @import("widget.zig").Key;
 const Context = @import("context.zig").Context;
 const WidgetState = @import("context.zig").WidgetState;
 const layout = @import("layout.zig");
@@ -53,7 +54,7 @@ pub const DrawCtx = struct {
     /// The available area for the root widget.
     surface_size: Size,
 
-    // ── Parent ID stack ───────────────────────────────
+    // ── Parent ID stack ─────────────────────────────
     // Used by the final API (@src() constructors) for
     // deterministic hierarchical ID generation.
     // Begin at root: top-level widgets get parent = Id.root.
@@ -61,19 +62,19 @@ pub const DrawCtx = struct {
     parent_depth: u32 = 0,
 
     /// Current parent ID from the top of the parent stack.
-    pub fn parentId(self: *@This()) Id {
+    pub fn parentId(self: *DrawCtx) Id {
         return self.parent_stack[self.parent_depth];
     }
 
     /// Push a new parent onto the stack (called by begin containers).
-    pub fn pushParent(self: *@This(), id: Id) void {
+    pub fn pushParent(self: *DrawCtx, id: Id) void {
         std.debug.assert(self.parent_depth < self.parent_stack.len - 1);
         self.parent_depth += 1;
         self.parent_stack[self.parent_depth] = id;
     }
 
     /// Pop back to the previous parent (called by end containers).
-    pub fn popParent(self: *@This()) void {
+    pub fn popParent(self: *DrawCtx) void {
         std.debug.assert(self.parent_depth > 0);
         self.parent_depth -= 1;
     }
@@ -83,49 +84,49 @@ pub const DrawCtx = struct {
 
     /// Get the persistent WidgetState for a given widget ID.
     /// Returns null if the widget has never been registered.
-    pub fn widgetState(_: *@This(), ctx: *Context, id: Id) ?*WidgetState {
+    pub fn widgetState(_: *DrawCtx, ctx: *Context, id: Id) ?*WidgetState {
         return ctx.state_map.getPtr(id) orelse null;
     }
 
     /// True if the widget was clicked this frame (down→up on same widget).
-    pub fn wasClicked(_: *@This(), state: *WidgetState) bool {
+    pub fn wasClicked(_: *DrawCtx, state: *WidgetState) bool {
         return event.wasClicked(state);
     }
 
     /// True if the widget is hovered (mouse over).
-    pub fn isHot(_: *@This(), state: *const WidgetState) bool {
+    pub fn isHot(_: *DrawCtx, state: *const WidgetState) bool {
         return event.isHot(state);
     }
 
     /// True if the widget is currently pressed.
-    pub fn isActive(_: *@This(), state: *const WidgetState) bool {
+    pub fn isActive(_: *DrawCtx, state: *const WidgetState) bool {
         return event.isActive(state);
     }
 
     /// True if the widget has keyboard focus.
-    pub fn isFocused(_: *@This(), state: *const WidgetState) bool {
+    pub fn isFocused(_: *DrawCtx, state: *const WidgetState) bool {
         return event.isFocused(state);
     }
 
     /// Read and clear the last key pressed on a focused widget.
-    pub fn keyPressed(_: *@This(), state: *WidgetState) ?@import("widget.zig").Key {
+    pub fn keyPressed(_: *DrawCtx, state: *WidgetState) ?Key {
         const k = state.key_pressed;
         state.key_pressed = null;
         return k;
     }
 
     /// Read and clear the last text codepoint input on a focused widget.
-    pub fn textInput(_: *@This(), state: *WidgetState) ?u21 {
+    pub fn textInput(_: *DrawCtx, state: *WidgetState) ?u21 {
         const cp = state.text_codepoint;
         state.text_codepoint = null;
         return cp;
     }
 
-    // ─────────────────────────────────────────────────────
+    // ─────────────────────────────────────
     // FINAL API — deterministic IDs via @src()
-    // ─────────────────────────────────────────────────────
+    // ─────────────────────────────────────
 
-    // ── Leaf widgets ─────────────────────────────────
+    // ── Leaf widgets ──────────────────────────────
 
     /// Options shared by all final-API widget constructors.
     pub const WidgetOpts = struct {
@@ -139,7 +140,7 @@ pub const DrawCtx = struct {
         id_extra: usize = 0,
     };
 
-    pub fn label(self: *@This(), src: std.builtin.SourceLocation, text: []const u8, opts: WidgetOpts) !*Widget {
+    pub fn label(self: *DrawCtx, src: std.builtin.SourceLocation, text: []const u8, opts: WidgetOpts) !*Widget {
         const id = Id.widgetId(src, self.parentId(), opts.id_extra);
         const w = try self.allocator.create(Widget);
         w.* = .{
@@ -154,7 +155,7 @@ pub const DrawCtx = struct {
         return w;
     }
 
-    pub fn button(self: *@This(), src: std.builtin.SourceLocation, btn_label: []const u8, opts: WidgetOpts) !*Widget {
+    pub fn button(self: *DrawCtx, src: std.builtin.SourceLocation, btn_label: []const u8, opts: WidgetOpts) !*Widget {
         const id = Id.widgetId(src, self.parentId(), opts.id_extra);
         const w = try self.allocator.create(Widget);
         w.* = .{
@@ -169,7 +170,15 @@ pub const DrawCtx = struct {
         return w;
     }
 
-    pub fn slider(self: *@This(), src: std.builtin.SourceLocation, slider_label: []const u8, value: *f32, min: f32, max: f32, opts: WidgetOpts) !*Widget {
+    pub fn slider(
+        self: *DrawCtx,
+        src: std.builtin.SourceLocation,
+        slider_label: []const u8,
+        value: *f32,
+        min: f32,
+        max: f32,
+        opts: WidgetOpts,
+    ) !*Widget {
         const id = Id.widgetId(src, self.parentId(), opts.id_extra);
         const w = try self.allocator.create(Widget);
         w.* = .{
@@ -208,7 +217,7 @@ pub const DrawCtx = struct {
     ///
     /// Returns the column widget with no children yet.
     /// Call `endColumn()` to finalise (pops parent, does nothing else).
-    pub fn beginColumn(self: *@This(), src: std.builtin.SourceLocation, opts: ContainerOpts) !*Widget {
+    pub fn beginColumn(self: *DrawCtx, src: std.builtin.SourceLocation, opts: ContainerOpts) !*Widget {
         const id = Id.widgetId(src, self.parentId(), opts.id_extra);
         const w = try self.allocator.create(Widget);
         w.* = .{
@@ -218,11 +227,13 @@ pub const DrawCtx = struct {
             .corner_radius = opts.corner_radius,
             .border = opts.border,
             .border_color = opts.border_color,
-            .kind = .{ .column = .{
-                .children = &.{}, // populated by caller
-                .padding = opts.padding,
-                .gap = opts.gap,
-            } },
+            .kind = .{
+                .column = .{
+                    .children = &.{}, // populated by caller
+                    .padding = opts.padding,
+                    .gap = opts.gap,
+                },
+            },
         };
         self.pushParent(id);
         return w;
@@ -231,12 +242,12 @@ pub const DrawCtx = struct {
     /// Finalise a column begun with `beginColumn()`.
     /// Pops the parent stack.  (Children are set externally by the caller
     /// before `endColumn()` via `w.kind.column.children = ...`.)
-    pub fn endColumn(self: *@This()) void {
+    pub fn endColumn(self: *DrawCtx) void {
         self.popParent();
     }
 
     /// Begin a row container.  Pushes the row's ID as current parent.
-    pub fn beginRow(self: *@This(), src: std.builtin.SourceLocation, opts: ContainerOpts) !*Widget {
+    pub fn beginRow(self: *DrawCtx, src: std.builtin.SourceLocation, opts: ContainerOpts) !*Widget {
         const id = Id.widgetId(src, self.parentId(), opts.id_extra);
         const w = try self.allocator.create(Widget);
         w.* = .{
@@ -257,15 +268,15 @@ pub const DrawCtx = struct {
     }
 
     /// Finalise a row begun with `beginRow()`.
-    pub fn endRow(self: *@This()) void {
+    pub fn endRow(self: *DrawCtx) void {
         self.popParent();
     }
 
-    // ─────────────────────────────────────────────────────
+    // ─────────────────────────────────────
     // PROTOTYPE API — temporary sequential IDs (backward compat)
-    // ─────────────────────────────────────────────────────
+    // ─────────────────────────────────────
 
-    pub fn tempLabel(self: *@This(), text: []const u8, opts: struct {
+    pub fn tempLabel(self: *DrawCtx, text: []const u8, opts: struct {
         sizing: Sizing = .{ .x = .fit, .y = .fit },
         color: [4]f32 = .{ 0, 0, 0, 0 },
         corner_radius: f32 = 0,
@@ -285,7 +296,7 @@ pub const DrawCtx = struct {
         return w;
     }
 
-    pub fn tempButton(self: *@This(), btn_label: []const u8, opts: struct {
+    pub fn tempButton(self: *DrawCtx, btn_label: []const u8, opts: struct {
         sizing: Sizing = .{ .x = .fit, .y = .fit },
         color: [4]f32 = .{ 0, 0, 0, 0 },
         corner_radius: f32 = 0,
@@ -305,7 +316,7 @@ pub const DrawCtx = struct {
         return w;
     }
 
-    pub fn tempSlider(self: *@This(), slider_label: []const u8, value: *f32, min: f32, max: f32, opts: struct {
+    pub fn tempSlider(self: *DrawCtx, slider_label: []const u8, value: *f32, min: f32, max: f32, opts: struct {
         sizing: Sizing = .{ .x = .grow, .y = .fit },
         color: [4]f32 = .{ 0, 0, 0, 0 },
         corner_radius: f32 = 0,
@@ -330,7 +341,7 @@ pub const DrawCtx = struct {
         return w;
     }
 
-    pub fn tempColumn(self: *@This(), children: []const *Widget, opts: struct {
+    pub fn tempColumn(self: *DrawCtx, children: []const *Widget, opts: struct {
         padding: f32 = 0,
         gap: f32 = 4,
         sizing: Sizing = .{ .x = .grow, .y = .grow },
@@ -356,7 +367,7 @@ pub const DrawCtx = struct {
         return w;
     }
 
-    pub fn tempRow(self: *@This(), children: []const *Widget, opts: struct {
+    pub fn tempRow(self: *DrawCtx, children: []const *Widget, opts: struct {
         padding: f32 = 0,
         gap: f32 = 4,
         sizing: Sizing = .{ .x = .grow, .y = .grow },
@@ -382,10 +393,10 @@ pub const DrawCtx = struct {
         return w;
     }
 
-    // ─── Layout runner ──────────────────────────────
+    // ─── Layout runner ─────────────────────────────
 
     /// Run two-phase layout on the widget tree.
-    pub fn layoutAndRender(self: *@This(), root: *Widget) void {
+    pub fn layoutAndRender(self: *DrawCtx, root: *Widget) void {
         const result = layout.measure(root, self.surface_size);
 
         // For grow root, expand to fill surface. Otherwise center.

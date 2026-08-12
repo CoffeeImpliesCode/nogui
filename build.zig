@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const release_safe = std.builtin.OptimizeMode.ReleaseSafe;
 
-    // ── Dependencies ───────────────────────────────────────
+    // ── Dependencies ──────────────────────────────
     const sdl3 = b.dependency("sdl3", .{ .target = target, .optimize = release_safe });
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = release_safe });
     const noapi_dep = b.dependency("noapi", .{ .target = target, .optimize = optimize });
@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     // ── noapi module (borrowed from dependency) ────────────
     const noapi_mod = noapi_dep.module("noapi");
 
-    // ── nogui module ───────────────────────────────────────
+    // ── nogui module ──────────────────────────────
     const mod = b.addModule("nogui", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // Library artifact for C dep propagation
     const lib = b.addLibrary(.{ .name = "nogui", .root_module = mod });
 
-    // ── Executable ─────────────────────────────────────────
+    // ── Executable ───────────────────────────────
     const exe = b.addExecutable(.{
         .name = "nogui",
         .root_module = b.createModule(.{
@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
 
-    // ── Prototype module ─────────────────────────────────
+    // ── Prototype module ─────────────────────────────
     const proto_mod = b.addModule("proto", .{
         .root_source_file = b.path("src/proto.zig"),
         .target = target,
@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // ── Prototype executable ────────────────────────────────
+    // ── Prototype executable ───────────────────────────
     const proto_exe = b.addExecutable(.{
         .name = "nogui-proto",
         .root_module = b.createModule(.{
@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
     // (0.25,0.75,0.5,1.0) → the noapi storage-image write works in
     // isolation; (0,0,0,0) → the noapi storage-image path is broken.
 
-    // ── v7 demo executable ────────────────────────────────
+    // ── v7 demo executable ────────────────────────────
     const v7_demo = b.addExecutable(.{
         .name = "v7-demo",
         .root_module = b.createModule(.{
@@ -146,7 +146,8 @@ pub fn build(b: *std.Build) void {
     });
     v7_run_cmd.step.dependOn(&blit_spv_step.step);
     const fullscreen_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/fullscreen_vert.spv", "shaders/fullscreen_vert.slang",
+        "slangc", "-target",                     "spirv",                         "-I", "shaders",
+        "-o",     "shaders/fullscreen_vert.spv", "shaders/fullscreen_vert.slang",
     });
     v7_run_cmd.step.dependOn(&fullscreen_spv_step.step);
     // The mandelbrot compute shader — compiled here too so the .spv can
@@ -154,7 +155,8 @@ pub fn build(b: *std.Build) void {
     // with an f64 layout mismatch read the scale's low bytes as max_iter
     // and hung the GPU on scroll).
     const mandelbrot_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/mandelbrot_comp.spv", "shaders/mandelbrot.comp.slang",
+        "slangc", "-target",                     "spirv",                         "-I", "shaders",
+        "-o",     "shaders/mandelbrot_comp.spv", "shaders/mandelbrot.comp.slang",
     });
     v7_run_cmd.step.dependOn(&mandelbrot_spv_step.step);
     // The CS1 radix-sort compute shader (V1b) — same staleness rule: the
@@ -164,7 +166,7 @@ pub fn build(b: *std.Build) void {
     });
     v7_run_cmd.step.dependOn(&sort_spv_step.step);
 
-    // ── Tests ─────────────────────────────────────────────
+    // ── Tests ────────────────────────────────
     const v7_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7/root.zig"),
@@ -255,7 +257,7 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     test_step.dependOn(&run_exe_tests.step);
 
-    // ── Layout check ──────────────────────────────────────
+    // ── Layout check ──────────────────────────────
     const layout_check_step = b.step("layout-check", "Verify the headless layout against notes/layout-golden.json");
     const layout_check_cmd = b.addRunArtifact(v7_demo);
     layout_check_cmd.addArgs(&.{ "--layout", "/tmp/layout-check.txt", "--diff", "notes/layout-golden.json" });
@@ -265,16 +267,6 @@ pub fn build(b: *std.Build) void {
     const lint_step = b.step("lint", "Run ziglint (enforced rules) + zlint on src/v7 + src/v7_demo");
     const ziglint_cmd = b.addSystemCommand(&.{
         "~/.local/bin/ziglint",
-        // The only remaining findings (component.zig, documented): Z023
-        // (the vtable fn-ptr contract fn(*anyopaque, Allocator) — the
-        // reorder breaks the type-erased vtable) + Z030 ×2 (the
-        // type-erased deinit adapter whose poison cannot compile on
-        // *anyopaque, and a test struct whose assertions read the fields
-        // after deinit).
-        "--ignore",
-        "Z023",
-        "--ignore",
-        "Z030",
         "src/v7",
         "src/v7_demo",
     });

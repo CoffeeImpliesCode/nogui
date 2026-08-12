@@ -41,7 +41,7 @@ pub const ClipRect = extern struct {
 
 /// GPU clip-rect buffer cap (matches the widget core's per-frame list;
 /// the fragment shader indexes it by clip_id).
-pub const MAX_CLIP_RECTS = 64;
+pub const max_clip_rects = 64;
 
 /// One 9-slice rectangle to render. Compact scene record — the DRAWABLE
 /// of the v1 bag contract: the CPU appends in ANY order, the GPU sort
@@ -65,7 +65,7 @@ pub const SceneRect = extern struct {
 };
 
 /// One sort-dispatch parameter entry (48 B — layout MUST match SortParams
-/// in shaders/sort.comp.slang). The batch writes SORT_DISPATCHES entries
+/// in shaders/sort.comp.slang). The batch writes sort_dispatches entries
 /// per frame; the push constant of each dispatch is the BDA of its entry
 /// (the mandelbrot u64-BDA precedent).
 pub const SortParams = extern struct {
@@ -80,13 +80,13 @@ pub const SortParams = extern struct {
 };
 
 /// Radix passes: the 8 key bytes (order×4 first — the LSD — then z×4).
-pub const SORT_PASSES = 8;
+pub const sort_passes = 8;
 /// Dispatches per frame: the identity init + histogram + scatter per pass.
-pub const SORT_DISPATCHES = 1 + 2 * SORT_PASSES;
+pub const sort_dispatches = 1 + 2 * sort_passes;
 /// Workgroup size of the sort (one element per thread).
-const SORT_GROUP = 256;
+const sort_group = 256;
 /// Sort scratch histogram entries per group (one per radix digit).
-const SORT_BUCKETS = 256;
+const sort_buckets = 256;
 
 /// Manages GPU buffers for 9-slice rendering.
 pub const Batch9Slice = struct {
@@ -99,11 +99,11 @@ pub const Batch9Slice = struct {
     /// frame N's GPU is still reading: the GPU driver crash); the shared
     /// quad, the indirect/count buffers and the clip buffer are
     /// frame-agnostic.
-    bag_buf: [3]noapi.GpuPtr = .{ .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 } }, // host: N × SceneRect (112 B)
-    perm_a: [3]noapi.GpuPtr = .{ .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 } }, // gpu: N × u32 (CS1 out, even passes)
-    perm_b: [3]noapi.GpuPtr = .{ .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 } }, // gpu: N × u32 (CS1 out, odd passes)
-    hist_buf: [3]noapi.GpuPtr = .{ .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 } }, // gpu: groups × 256 u32 scratch
-    params_buf: [3]noapi.GpuPtr = .{ .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 }, .{ .cpu = undefined, .gpu = 0 } }, // host: SORT_DISPATCHES × SortParams
+    bag_buf: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // host: N × SceneRect (112 B)
+    perm_a: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // gpu: N × u32 (even passes)
+    perm_b: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // gpu: N × u32 (odd passes)
+    hist_buf: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // gpu: groups × 256 u32 scratch
+    params_buf: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // host: sort dispatch params
     idx_buf: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 },
     capacity: u32 = 0,
 
@@ -115,7 +115,7 @@ pub const Batch9Slice = struct {
     indirect_buf: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 },
     count_buf: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 },
 
-    /// GPU clip-rect buffer (fixed cap MAX_CLIP_RECTS, host-visible):
+    /// GPU clip-rect buffer (fixed cap max_clip_rects, host-visible):
     /// the fragment shader's clip test reads it via push.indirect (the
     /// PushData field the noapi surface reserves at offset 16). The batch
     /// rewrites it from the frame's clip list before every draw.
@@ -157,11 +157,11 @@ pub const Batch9Slice = struct {
     /// The SHARED quad: 6 indices (TL,TR,BR / TL,BR,BL) reused by every
     /// instance. Base vertex 0 — each instance's corners come from
     /// gl_VertexIndex (0-3), not from a vertex buffer.
-    const QUAD_INDICES: [6]u32 = .{ 0, 1, 2, 0, 2, 3 };
+    const quad_indices: [6]u32 = .{ 0, 1, 2, 0, 2, 3 };
     /// Sub-quads per rect (the 3×3 grid) — one instance per sub-quad.
-    const SUB_QUADS_PER_RECT = 9;
+    const sub_quads_per_rect = 9;
 
-    pub fn init(gpu: *noapi.Gpu, vert_spv: []const u32, frag_spv: []const u32, sort_spv: []const u32) !@This() {
+    pub fn init(gpu: *noapi.Gpu, vert_spv: []const u32, frag_spv: []const u32, sort_spv: []const u32) !Batch9Slice {
         const vert = try gpu.shaderCreate(vert_spv, .vertex, "main", "quad_vert");
         errdefer gpu.shaderDestroy(vert);
         const frag = try gpu.shaderCreate(frag_spv, .fragment, "main", "quad_frag");
@@ -175,7 +175,7 @@ pub const Batch9Slice = struct {
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *Batch9Slice) void {
         if (self.capacity > 0) {
             for (&self.bag_buf) |b| self.gpu.gpuFree(b);
             for (&self.perm_a) |b| self.gpu.gpuFree(b);
@@ -190,18 +190,19 @@ pub const Batch9Slice = struct {
         self.gpu.shaderDestroy(self.vert_shader);
         self.gpu.shaderDestroy(self.frag_shader);
         self.gpu.shaderDestroy(self.sort_shader);
+        self.* = undefined;
     }
 
-    fn ensureCapacity(self: *@This(), rect_count: u32) !void {
+    fn ensureCapacity(self: *Batch9Slice, rect_count: u32) !void {
         const needed = @max(rect_count, 1);
         if (needed <= self.capacity) return;
 
-        const groups = (needed + SORT_GROUP - 1) / SORT_GROUP;
+        const groups = (needed + sort_group - 1) / sort_group;
         const bag_bytes = needed * @sizeOf(SceneRect);
         const perm_bytes = needed * @sizeOf(u32);
-        const hist_bytes = groups * SORT_BUCKETS * @sizeOf(u32);
-        const params_bytes = SORT_DISPATCHES * @sizeOf(SortParams);
-        const idx_bytes = QUAD_INDICES.len * @sizeOf(u32);
+        const hist_bytes = groups * sort_buckets * @sizeOf(u32);
+        const params_bytes = sort_dispatches * @sizeOf(SortParams);
+        const idx_bytes = quad_indices.len * @sizeOf(u32);
         const indirect_bytes = needed * @sizeOf(noapi.DrawIndexedIndirectCommand);
 
         // Free old buffers before allocating new ones.
@@ -225,33 +226,33 @@ pub const Batch9Slice = struct {
         self.idx_buf = try self.gpu.gpuMalloc(idx_bytes, 16, .default);
         self.indirect_buf = try self.gpu.gpuMalloc(indirect_bytes, 16, .default);
         self.count_buf = try self.gpu.gpuMalloc(@sizeOf(u32), 4, .default);
-        self.clip_buf = try self.gpu.gpuMalloc(MAX_CLIP_RECTS * @sizeOf(ClipRect), 64, .default);
+        self.clip_buf = try self.gpu.gpuMalloc(max_clip_rects * @sizeOf(ClipRect), 64, .default);
         self.capacity = needed;
 
         // The shared 6-index quad, written once at allocation — every
         // instance draws corners 0-3 of its own sub-quad via
         // gl_VertexIndex (base vertex 0).
         const idxs: [*]u32 = @ptrCast(@alignCast(self.idx_buf.cpu));
-        for (QUAD_INDICES, 0..) |ix, i| idxs[i] = ix;
+        for (quad_indices, 0..) |ix, i| idxs[i] = ix;
     }
 
     /// CS1 — record the GPU z-sort OUTSIDE the render pass: upload the
     /// bag (ONE SceneRect per drawable — the 9-copies-per-rect instance
     /// buffer is gone; the VS builds all 9 sub-quads from the single
-    /// record) + the clip rects, write the SORT_DISPATCHES parameter
+    /// record) + the clip rects, write the sort_dispatches parameter
     /// entries, dispatch the stable radix (identity, then 8 passes ×
     /// histogram + scatter), and barrier compute → graphics so the draw
     /// sees the permutation. The permutation ends in perm_a[slot] (pass 7
     /// writes A) — draw() reads it through the push constant.
-    pub fn sort(self: *@This(), cmd: anytype, rects: []const SceneRect, clip_rects: []const ClipRect) !void {
+    pub fn sort(self: *Batch9Slice, cmd: anytype, rects: []const SceneRect, clip_rects: []const ClipRect) !void {
         if (rects.len == 0) {
             self.draw_instance_count = 0;
             return;
         }
-        std.debug.assert(rects.len <= std.math.maxInt(u32) / SUB_QUADS_PER_RECT);
+        std.debug.assert(rects.len <= std.math.maxInt(u32) / sub_quads_per_rect);
         try self.ensureCapacity(@intCast(rects.len));
         const n: u32 = @intCast(rects.len);
-        self.draw_instance_count = n * SUB_QUADS_PER_RECT;
+        self.draw_instance_count = n * sub_quads_per_rect;
         const slot = self.frame % 3;
         self.cur_slot = slot;
         self.frame +%= 1;
@@ -264,13 +265,13 @@ pub const Batch9Slice = struct {
         // Clip rects → the host-visible clip buffer (the shader's clip
         // test reads them via pc.indirect + 16 * clip_id).
         const clips: [*]ClipRect = @ptrCast(@alignCast(self.clip_buf.cpu));
-        std.debug.assert(clip_rects.len <= MAX_CLIP_RECTS);
+        std.debug.assert(clip_rects.len <= max_clip_rects);
         for (clip_rects, 0..) |c, i| clips[i] = c;
 
         // Sort params: one 48 B entry per dispatch; the push constant of
         // each dispatch is its entry's BDA (the mandelbrot u64 pattern).
-        const groups: u32 = (n + SORT_GROUP - 1) / SORT_GROUP;
-        const base = SortParams{
+        const groups: u32 = (n + sort_group - 1) / sort_group;
+        const base: SortParams = .{
             .bag_bda = self.bag_buf[slot].gpu,
             .perm_a_bda = self.perm_a[slot].gpu,
             .perm_b_bda = self.perm_b[slot].gpu,
@@ -281,14 +282,30 @@ pub const Batch9Slice = struct {
         };
         const params: [*]SortParams = @ptrCast(@alignCast(self.params_buf[slot].cpu));
         params[0] = base;
-        for (0..SORT_PASSES) |p| {
-            params[1 + 2 * p] = .{ .bag_bda = base.bag_bda, .perm_a_bda = base.perm_a_bda, .perm_b_bda = base.perm_b_bda, .hist_bda = base.hist_bda, .count = base.count, .mode = 1, .pass = @intCast(p) };
-            params[2 + 2 * p] = .{ .bag_bda = base.bag_bda, .perm_a_bda = base.perm_a_bda, .perm_b_bda = base.perm_b_bda, .hist_bda = base.hist_bda, .count = base.count, .mode = 2, .pass = @intCast(p) };
+        for (0..sort_passes) |p| {
+            params[1 + 2 * p] = .{
+                .bag_bda = base.bag_bda,
+                .perm_a_bda = base.perm_a_bda,
+                .perm_b_bda = base.perm_b_bda,
+                .hist_bda = base.hist_bda,
+                .count = base.count,
+                .mode = 1,
+                .pass = @intCast(p),
+            };
+            params[2 + 2 * p] = .{
+                .bag_bda = base.bag_bda,
+                .perm_a_bda = base.perm_a_bda,
+                .perm_b_bda = base.perm_b_bda,
+                .hist_bda = base.hist_bda,
+                .count = base.count,
+                .mode = 2,
+                .pass = @intCast(p),
+            };
         }
 
         cmd.setComputeShader(self.sort_shader);
         var d: usize = 0;
-        while (d < SORT_DISPATCHES) : (d += 1) {
+        while (d < sort_dispatches) : (d += 1) {
             // Explicit compute→compute barrier BEFORE every dispatch after
             // the first: dispatch-to-dispatch visibility is NOT reliable on
             // this stack (verified: the histogram's writes were invisible to
@@ -309,7 +326,7 @@ pub const Batch9Slice = struct {
     /// shared 6-index quad × (rects.len * 9) instances, the vertex shader
     /// fetching bag[perm[instance / 9]] through the push-constant BDAs.
     /// Must follow sort() in the same frame.
-    pub fn draw(self: *@This(), cmd: anytype, screen_w: f32, screen_h: f32) void {
+    pub fn draw(self: *Batch9Slice, cmd: anytype, screen_w: f32, screen_h: f32) void {
         const instance_count = self.draw_instance_count;
         if (instance_count == 0) return;
         const slot = self.cur_slot;
@@ -326,7 +343,7 @@ pub const Batch9Slice = struct {
         // frag_data; the clip-rect buffer BDA in indirect; the framebuffer
         // size (px) in screen; the bag + sorted permutation BDAs in
         // scene_bda/perm_bda (V1b).
-        const push = noapi.PushData{
+        const push: noapi.PushData = .{
             .vert_data = self.material_buf_bda,
             .frag_data = (if (self.subpixel) @as(u64, 1) else 0) |
                 (if (self.quad_debug) @as(u64, 2) else 0) |
@@ -346,13 +363,21 @@ pub const Batch9Slice = struct {
         const indirect: [*]noapi.DrawIndexedIndirectCommand = @ptrCast(@alignCast(self.indirect_buf.cpu));
         const count: [*]u32 = @ptrCast(@alignCast(self.count_buf.cpu));
         indirect[0] = .{
-            .index_count = QUAD_INDICES.len,
+            .index_count = quad_indices.len,
             .instance_count = instance_count,
             .first_index = 0,
             .vertex_offset = 0,
             .first_instance = 0,
         };
         count[0] = 1;
-        cmd.drawIndexedIndirectMulti(push, self.idx_buf, self.indirect_buf, @sizeOf(noapi.DrawIndexedIndirectCommand), self.count_buf, 0, 1);
+        cmd.drawIndexedIndirectMulti(
+            push,
+            self.idx_buf,
+            self.indirect_buf,
+            @sizeOf(noapi.DrawIndexedIndirectCommand),
+            self.count_buf,
+            0,
+            1,
+        );
     }
 };

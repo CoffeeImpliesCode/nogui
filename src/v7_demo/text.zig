@@ -142,7 +142,7 @@ pub const TextEngine = struct {
     // sweepers[i] owns the GPU curve buffer backing entries[i].
     sweepers: std.ArrayList(proto.GlyphSweeper) = .empty, // per glyph
     entries: std.ArrayList(GlyphEntry) = .empty, // per glyph
-    materials: noapi.GpuPtr, // max_materials * MATERIAL_SIZE, .default
+    materials: noapi.GpuPtr, // max_materials * material_size, .default
     next_slot: u32 = 1,
     material_bda: u64 = 0,
 
@@ -204,7 +204,7 @@ pub const TextEngine = struct {
         var font_ext: c.hb_font_extents_t = undefined;
         _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
 
-        const materials = try gpu.gpuMalloc(max_materials * proto.MATERIAL_SIZE, 64, .default);
+        const materials = try gpu.gpuMalloc(max_materials * proto.material_size, 64, .default);
 
         var self: TextEngine = .{
             .gpu = gpu,
@@ -220,8 +220,8 @@ pub const TextEngine = struct {
             .hb_font = hb_font,
             .font_id = 0,
             .size = font_size_px,
-            .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
-            .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
+            .ascent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.ascender)) / 64.0)),
+            .descent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.descender)) / 64.0)),
         };
         return self;
     }
@@ -269,8 +269,8 @@ pub const TextEngine = struct {
             .hb_font = hb_font,
             .font_id = font_id,
             .size = size,
-            .ascent = @as(f32, @floatFromInt(font_ext.ascender)) / 64.0,
-            .descent = @as(f32, @floatFromInt(font_ext.descender)) / 64.0,
+            .ascent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.ascender)) / 64.0)),
+            .descent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.descender)) / 64.0)),
         };
         return &self.fonts[idx].?;
     }
@@ -362,7 +362,7 @@ pub const TextEngine = struct {
         // is empty the width is 0 and no glyphs are copied — no crash).
         var w: f32 = 0;
         for (positions) |pos| {
-            w += @as(f32, @floatFromInt(pos.x_advance)) / 64.0;
+            w += @as(f32, @floatCast(@as(f64, @floatFromInt(pos.x_advance)) / 64.0));
         }
         const glyphs = try self.gpa.alloc(GlyphPos, @min(infos.len, positions.len));
         errdefer self.gpa.free(glyphs);
@@ -370,10 +370,10 @@ pub const TextEngine = struct {
             const pos = positions[i];
             g.* = .{
                 .gid = infos[i].codepoint,
-                .x_advance = @as(f32, @floatFromInt(pos.x_advance)) / 64.0,
-                .y_advance = @as(f32, @floatFromInt(pos.y_advance)) / 64.0,
-                .x_offset = @as(f32, @floatFromInt(pos.x_offset)) / 64.0,
-                .y_offset = @as(f32, @floatFromInt(pos.y_offset)) / 64.0,
+                .x_advance = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.x_advance)) / 64.0)),
+                .y_advance = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.y_advance)) / 64.0)),
+                .x_offset = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.x_offset)) / 64.0)),
+                .y_offset = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.y_offset)) / 64.0)),
             };
         }
 
@@ -438,7 +438,10 @@ pub const TextEngine = struct {
 
         // Metrics from HarfBuzz (the same 26.6 fixed-point scale as the
         // shaped positions; /64.0 → pixels). No FreeType in our code.
-        const advance = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(font.hb_font.handle, gid))) / 64.0;
+        const advance = @as(
+            f32,
+            @floatCast(@as(f64, @floatFromInt(c.hb_font_get_glyph_h_advance(font.hb_font.handle, gid))) / 64.0),
+        );
         // SAFETY: assigned by hb_font_get_glyph_extents before any read; a
         // zero return (no ink) skips the glyph.
         var ext: c.hb_glyph_extents_t = undefined;
@@ -449,12 +452,12 @@ pub const TextEngine = struct {
             sweeper.deinit();
             return; // no ink
         }
-        const bearing_x = @as(f32, @floatFromInt(ext.x_bearing)) / 64.0;
-        const bearing_y = @as(f32, @floatFromInt(ext.y_bearing)) / 64.0;
-        const glyph_w = @as(f32, @floatFromInt(ext.width)) / 64.0;
+        const bearing_x: f32 = @floatCast(@as(f64, @floatFromInt(ext.x_bearing)) / 64.0);
+        const bearing_y: f32 = @floatCast(@as(f64, @floatFromInt(ext.y_bearing)) / 64.0);
+        const glyph_w: f32 = @floatCast(@as(f64, @floatFromInt(ext.width)) / 64.0);
         // hb extents: height is NEGATIVE for y-up fonts (the box extends
         // downward from the top bearing) — the magnitude is the ink height.
-        const glyph_h = @as(f32, @floatFromInt(@abs(ext.height))) / 64.0;
+        const glyph_h: f32 = @floatCast(@as(f64, @floatFromInt(@abs(ext.height))) / 64.0);
 
         // The shader sweeps the curves per fragment at DISPLAY resolution
         // (analytic AA — no intermediate bitmap), so the material only
@@ -584,13 +587,13 @@ pub const TextEngine = struct {
     pub fn measureText(self: *TextEngine, text: []const u8, size: u32, font_id: u8) WidgetSize {
         const zone = tracy.Zone.begin(.{ .name = "measureText", .src = @src() });
         defer zone.end();
-        const font = self.fontFor(font_id, size) catch return .{
-            .width = @as(f32, @floatFromInt(text.len)) * 10,
-            .height = 24,
+        const font = self.fontFor(font_id, size) catch {
+            const len_f: f32 = @floatFromInt(@min(text.len, 1 << 24));
+            return .{ .width = len_f * 10, .height = 24 };
         };
-        const run = self.getOrShape(font, text) catch return .{
-            .width = @as(f32, @floatFromInt(text.len)) * 10,
-            .height = 24,
+        const run = self.getOrShape(font, text) catch {
+            const len_f: f32 = @floatFromInt(@min(text.len, 1 << 24));
+            return .{ .width = len_f * 10, .height = 24 };
         };
         return .{ .width = run.width, .height = run.line_height };
     }
@@ -1063,10 +1066,10 @@ test "quad policy: hb extents bound the ink, the 2px surround keeps the outer pi
             const hull = proto.glyphExtent(curves);
             var ext: c.hb_glyph_extents_t = undefined;
             try std.testing.expectEqual(@as(c_int, 1), c.hb_font_get_glyph_extents(h, gid, &ext));
-            const bbx = @as(f32, @floatFromInt(ext.x_bearing)) / 64.0;
-            const bby = @as(f32, @floatFromInt(ext.y_bearing)) / 64.0;
-            const bbw = @as(f32, @floatFromInt(ext.width)) / 64.0;
-            const bbh = @as(f32, @floatFromInt(@abs(ext.height))) / 64.0;
+            const bbx: f32 = @floatCast(@as(f64, @floatFromInt(ext.x_bearing)) / 64.0);
+            const bby: f32 = @floatCast(@as(f64, @floatFromInt(ext.y_bearing)) / 64.0);
+            const bbw: f32 = @floatCast(@as(f64, @floatFromInt(ext.width)) / 64.0);
+            const bbh: f32 = @floatCast(@as(f64, @floatFromInt(@abs(ext.height))) / 64.0);
             try std.testing.expect(hull.min_x >= bbx - 0.001);
             try std.testing.expect(hull.min_y >= bby - bbh - 0.001);
             try std.testing.expect(hull.min_x + hull.w <= bbx + bbw + 0.001);
@@ -1088,7 +1091,9 @@ test "quad policy: hb extents bound the ink, the 2px surround keeps the outer pi
                     // Interior (rings >= 2) is skipped; only the two outer rings are swept.
                     if (col >= 2 and col < @as(usize, @intFromFloat(qw)) - 2 and
                         row >= 2 and row < @as(usize, @intFromFloat(qh)) - 2) continue;
-                    const px_ = [2]f32{ qx0 + @as(f32, @floatFromInt(col)), qy0 + @as(f32, @floatFromInt(row)) };
+                    const col_f: f32 = @floatFromInt(@min(col, 1 << 24));
+                    const row_f: f32 = @floatFromInt(@min(row, 1 << 24));
+                    const px_ = [2]f32{ qx0 + col_f, qy0 + row_f };
                     var total: f32 = 0;
                     for (curves) |cv| {
                         total += sweepSegment(win, px_, .{ cv.p0x, cv.p0y }, .{ cv.p1x, cv.p1y }, .{ cv.p2x, cv.p2y });
@@ -1141,8 +1146,8 @@ test "shaping: the hb-ft font scale is 26.6 fixed-point pixels" {
     // with FreeType's own UNHINTED advance at any pixel size (the scale
     // test is size-independent).
     _ = c.FT_Load_Glyph(face, c.FT_Get_Char_Index(face, 'A'), c.FT_LOAD_NO_HINTING);
-    const ft_adv = @as(f32, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0;
-    const shaped_adv = @as(f32, @floatFromInt(positions[0].x_advance)) / 64.0;
+    const ft_adv: f32 = @floatCast(@as(f64, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0);
+    const shaped_adv: f32 = @floatCast(@as(f64, @floatFromInt(positions[0].x_advance)) / 64.0);
     try std.testing.expectApproxEqAbs(ft_adv, shaped_adv, 0.2);
 }
 
@@ -1171,7 +1176,9 @@ test "shaping: kerned AV pair is narrower than the advance sum" {
             buf.setScript(.latin);
             hb.shape(fnt, buf, null);
             var total: f32 = 0;
-            for (buf.getGlyphPositions() orelse &.{}) |p| total += @as(f32, @floatFromInt(p.x_advance)) / 64.0;
+            for (buf.getGlyphPositions() orelse &.{}) |p| {
+                total += @as(f32, @floatCast(@as(f64, @floatFromInt(p.x_advance)) / 64.0));
+            }
             return total;
         }
     }.w;
@@ -1245,7 +1252,9 @@ test "shaping: the kern feature applies GPOS pair adjustments in px" {
             buf.setScript(.latin);
             hb.shape(fnt, buf, features);
             var total: f32 = 0;
-            for (buf.getGlyphPositions() orelse &.{}) |p| total += @as(f32, @floatFromInt(p.x_advance)) / 64.0;
+            for (buf.getGlyphPositions() orelse &.{}) |p| {
+                total += @as(f32, @floatCast(@as(f64, @floatFromInt(p.x_advance)) / 64.0));
+            }
             return total;
         }
     }.w;
@@ -1265,11 +1274,11 @@ test "shaping: the kern feature applies GPOS pair adjustments in px" {
     // hinted FT metrics the old pipeline used for the bitmaps.
     const s_gid = c.FT_Get_Char_Index(face, 's');
     const e_gid = c.FT_Get_Char_Index(face, 'e');
-    const s_adv = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(handle, s_gid))) / 64.0;
-    const e_adv = @as(f32, @floatFromInt(c.hb_font_get_glyph_h_advance(handle, e_gid))) / 64.0;
+    const s_adv: f32 = @floatCast(@as(f64, @floatFromInt(c.hb_font_get_glyph_h_advance(handle, s_gid))) / 64.0);
+    const e_adv: f32 = @floatCast(@as(f64, @floatFromInt(c.hb_font_get_glyph_h_advance(handle, e_gid))) / 64.0);
     try std.testing.expectApproxEqAbs(se_off, s_adv + e_adv, 0.01);
     _ = c.FT_Load_Glyph(face, s_gid, c.FT_LOAD_DEFAULT);
-    const ft_hinted = @as(f32, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0;
+    const ft_hinted: f32 = @floatCast(@as(f64, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0);
     try std.testing.expect(@abs(s_adv - ft_hinted) > 0.1); // unhinted ≠ hinted
 }
 

@@ -415,7 +415,8 @@ fn drawText(grid: []u8, cols: usize, text: []const u8, r: Rect) void {
     }.f;
     const baseline = r.y + r.h * 0.75;
     for (text, 0..) |ch, k| {
-        put(grid, cols, r.x + 6 + @as(f32, @floatFromInt(k)) * 10, baseline, ch);
+        const k_f: f32 = @floatFromInt(@min(k, 1 << 24));
+        put(grid, cols, r.x + 6 + k_f * 10, baseline, ch);
     }
 }
 
@@ -1336,11 +1337,12 @@ test "verifyLayout: text-overlap pass handles more than 64 text nodes" {
     // 70 labels in a non-overlapping column: previously the fixed [64]
     // TextBox array asserted (panicked) past 64 text-bearing nodes.
     for (0..70) |i| {
+        const y_f: f32 = @floatFromInt(@min(i * 30, 1 << 24));
         try tree.nodes.append(std.testing.allocator, .{
             .id = @enumFromInt(@as(u32, @intCast(i + 1))),
             .kind = .{ .label = .{ .text = "x" } },
             .parent = .root,
-            .rect = .{ .x = 0, .y = @as(f32, @floatFromInt(i * 30)), .w = 50, .h = 24 },
+            .rect = .{ .x = 0, .y = y_f, .w = 50, .h = 24 },
         });
     }
 

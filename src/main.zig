@@ -80,7 +80,10 @@ pub fn main(init: std.process.Init) !void {
                     if (ke.key == .escape) should_close = true;
                 },
                 .window_resized => |we| {
-                    if (we.id == win_id) gw.notifyResize(.{ .width = @intCast(@max(0, we.width)), .height = @intCast(@max(0, we.height)) });
+                    if (we.id == win_id) gw.notifyResize(.{
+                        .width = @intCast(@max(0, we.width)),
+                        .height = @intCast(@max(0, we.height)),
+                    });
                 },
                 else => {},
             }
@@ -95,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
         const surface_size = gw.surfaceSize();
         const tu32: u32 = @bitCast(time_sec);
         const time_bits: u64 = tu32;
-        const push = noapi.PushData{ .frag_data = time_bits };
+        const push: noapi.PushData = .{ .frag_data = time_bits };
         var cmd = gw.commandsBegin();
 
         const sc = gw.currentImage();

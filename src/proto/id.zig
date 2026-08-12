@@ -15,7 +15,7 @@
 
 const std = @import("std");
 
-const Fnv1a = std.hash.Fnv1a_64;
+const fnv1a = std.hash.Fnv1a_64;
 
 /// 64-bit widget identifier. Deterministic across builds, runs,
 /// and compilations.
@@ -33,7 +33,7 @@ pub const Id = enum(u64) {
     /// All real widget IDs occupy remaining values.
     _,
 
-    // ── Construction ────────────────────────────────────
+    // ── Construction ───────────────────────────────
 
     /// Build a widget ID from the callsite's `@src()`.
     ///
@@ -46,7 +46,7 @@ pub const Id = enum(u64) {
     /// produces the same Id.  The hash is seeded by the parent
     /// so the widget hierarchy provides implicit scoping.
     pub fn widgetId(src: std.builtin.SourceLocation, parent: Id, extra: usize) Id {
-        var h = Fnv1a.init();
+        var h = fnv1a.init();
         // Seed with parent ID — this gives us hierarchical
         // namespacing without an explicit PushID/PopID stack.
         h.update(std.mem.asBytes(&@intFromEnum(parent)));
@@ -68,13 +68,13 @@ pub const Id = enum(u64) {
     /// `widgetId(@src(), self, hash(name))` but avoids
     /// consuming a comptime source location.
     pub fn withName(self: Id, name: []const u8) Id {
-        var h = Fnv1a.init();
+        var h = fnv1a.init();
         h.update(std.mem.asBytes(&@intFromEnum(self)));
         h.update(name);
         return @enumFromInt(h.final());
     }
 
-    // ── Queries ─────────────────────────────────────────
+    // ── Queries ────────────────────────────────
 
     pub fn asU64(self: Id) u64 {
         return @intFromEnum(self);

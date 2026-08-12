@@ -19,6 +19,9 @@ const Window = @import("window.zig").Window;
 const Cmd = @import("cmd.zig").Cmd;
 const TimerQueue = @import("cmd.zig").TimerQueue;
 const FramePacer = @import("frame_pacer.zig").FramePacer;
+const Widget = @import("widget.zig").Widget;
+const DrawCtx = @import("drawctx.zig").DrawCtx;
+const builtin = @import("builtin");
 
 /// A screen in the window stack. Analogous to zigzag's ScreenStack.
 pub const Screen = struct {
@@ -29,7 +32,7 @@ pub const Screen = struct {
     onDeactivate: ?*const fn (ctx: ?*Context) void = null,
 
     /// Called every frame to build the widget tree.
-    drawFn: *const fn (ctx: *Context, dc: *@import("drawctx.zig").DrawCtx) anyerror!*@import("widget.zig").Widget,
+    drawFn: *const fn (ctx: *Context, dc: *DrawCtx) anyerror!*Widget,
 
     /// Optional event filter. If returns true, the event is consumed
     /// and not propagated to the screen's widget tree.
@@ -41,33 +44,36 @@ pub const Screen = struct {
 
 /// Stack of screens for in-window modal navigation.
 pub const ScreenStack = struct {
-    screens: std.ArrayListUnmanaged(*Screen) = .empty,
+    const Self = ScreenStack;
+
+    screens: std.ArrayList(*Screen) = .empty,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) @This() {
+    pub fn init(allocator: std.mem.Allocator) ScreenStack {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *Self) void {
         self.screens.deinit(self.allocator);
+        self.* = undefined;
     }
 
-    pub fn top(self: *@This()) ?*Screen {
+    pub fn top(self: *Self) ?*Screen {
         if (self.screens.items.len == 0) return null;
         return self.screens.items[self.screens.items.len - 1];
     }
 
-    pub fn push(self: *@This(), screen: *Screen) !void {
+    pub fn push(self: *Self, screen: *Screen) !void {
         try self.screens.append(self.allocator, screen);
         if (screen.onActivate) |cb| cb(null);
     }
 
-    pub fn pop(self: *@This()) void {
+    pub fn pop(self: *Self) void {
         const s = self.screens.pop() orelse return;
         if (s.onDeactivate) |cb| cb(null);
     }
 
-    pub fn replace(self: *@This(), screen: *Screen) !void {
+    pub fn replace(self: *Self, screen: *Screen) !void {
         if (self.screens.items.len > 0) {
             const old = self.screens.items[self.screens.items.len - 1];
             if (old.onDeactivate) |cb| cb(null);
@@ -78,7 +84,7 @@ pub const ScreenStack = struct {
 
     /// Filter an event through the screen stack.
     /// Top screen gets first chance. If it consumes, return true.
-    pub fn filterEvent(self: *@This(), ev: *const Event) bool {
+    pub fn filterEvent(self: *Self, ev: *const Event) bool {
         const s = self.top() orelse return false;
         if (s.filterEvent) |cb| return cb(null, ev);
         return false;
@@ -98,8 +104,10 @@ pub const AppConfig = struct {
 /// Application — owns the top-level event loop with frame pacing
 /// and timer/Cmd dispatch.
 pub const App = struct {
+    const Self = App;
+
     context: *Context,
-    windows: std.ArrayListUnmanaged(*Window) = .{},
+    windows: std.ArrayList(*Window) = .empty,
     timer_queue: TimerQueue,
     frame_pacer: FramePacer,
     config: AppConfig,
@@ -109,7 +117,7 @@ pub const App = struct {
     clock_start_ms: u64 = 0,
 
     /// Per-window screen stacks for modal navigation.
-    screen_stacks: std.ArrayListUnmanaged(ScreenStack) = .{},
+    screen_stacks: std.ArrayList(ScreenStack) = .empty,
 
     /// Cached wall-clock time for timer dispatch (updated once per frame).
     /// Uses std.Io.Clock.monotonic converted to ms.
@@ -117,10 +125,10 @@ pub const App = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         context: *Context,
         config: AppConfig,
-        io: std.Io,
-    ) @This() {
+    ) App {
         const now = std.Io.Clock.monotonic.now(io).nanoseconds / 1_000_000;
         return .{
             .context = context,
@@ -138,36 +146,38 @@ pub const App = struct {
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *Self) void {
         // Note: windows and context are externally owned.
         self.timer_queue.deinit();
         for (self.screen_stacks.items) |*ss| ss.deinit();
         self.screen_stacks.deinit(self.allocator);
         self.windows.deinit(self.allocator);
+        self.* = undefined;
     }
 
     /// Register a window with the App.
-    pub fn addWindow(self: *@This(), win: *Window) !void {
+    pub fn addWindow(self: *Self, win: *Window) !void {
         try self.windows.append(self.allocator, win);
         // Create a screen stack for this window.
         // (In the prototype, the first screen is the gui.draw fn.)
     }
 
     /// Add a Cmd to the timer queue.
-    pub fn addCmd(self: *@This(), cmd: Cmd) !?u64 {
-        return try self.timer_queue.add(
+    pub fn addCmd(self: *Self, cmd: Cmd) !?u64 {
+        const id = try self.timer_queue.add(
             cmd,
             self.context.frame_count,
             self.clockStartMs() + self.context.frame_count * self.frame_pacer.target_ns / 1_000_000,
         );
+        return id;
     }
 
     /// Cancel a timer.
-    pub fn cancelTimer(self: *@This(), id: u64) void {
+    pub fn cancelTimer(self: *Self, id: u64) void {
         self.timer_queue.cancel(id);
     }
 
-    fn clockStartMs(self: *const @This()) u64 {
+    fn clockStartMs(self: *const Self) u64 {
         return self.clock_start_ms;
     }
 
@@ -181,15 +191,15 @@ pub const App = struct {
     ///   5. Draw each window (beginFrame → draw → layout → dispatchEvents → endFrame)
     ///   6. FramePacer.endFrame()
     ///   7. GC stale widget states periodically
-    pub fn run(self: *@This(), io: std.Io) !void {
-        var timer_events: std.ArrayListUnmanaged(Event) = .{};
+    pub fn run(self: *Self, io: std.Io) !void {
+        var timer_events: std.ArrayList(Event) = .empty;
         defer timer_events.deinit(self.allocator);
 
         while (true) {
             const dt = self.frame_pacer.beginFrame(io);
             _ = dt;
 
-            // ── 1. Timer queue ──────────────────────────────────
+            // ── 1. Timer queue ───────────────────────────
             timer_events.clearRetainingCapacity();
             const now_mono = std.Io.Clock.monotonic.now(io).nanoseconds;
             self.now_ms = now_mono / 1_000_000;
@@ -205,11 +215,13 @@ pub const App = struct {
             // ── 3. Inject timer events into each window's queue ─
             for (self.windows.items) |win| {
                 for (timer_events.items) |ev| {
-                    win.event_queue.append(self.allocator, ev) catch {};
+                    win.event_queue.append(self.allocator, ev) catch |e| {
+                        std.log.err("failed to enqueue timer event: {}", .{e});
+                    };
                 }
             }
 
-            // ── 4. Draw each window ─────────────────────────────
+            // ── 4. Draw each window ──────────────────────────
             for (self.windows.items) |win| {
                 if (win.should_close) continue;
 
@@ -239,15 +251,15 @@ pub const App = struct {
                 try win.endFrame(root);
 
                 // Debug print tree
-                if (@import("builtin").mode == .Debug) {
+                if (builtin.mode == .Debug) {
                     debugPrintTree(root, 0);
                 }
             }
 
-            // ── 5. Frame pacing ─────────────────────────────────
+            // ── 5. Frame pacing ───────────────────────────
             self.frame_pacer.endFrame(io);
 
-            // ── 6. GC stale states ─────────────────────────────
+            // ── 6. GC stale states ──────────────────────────
             self.context.frame_count += 1;
             if (self.config.state_gc_interval > 0 and
                 self.context.frame_count % self.config.state_gc_interval == 0)
@@ -255,7 +267,7 @@ pub const App = struct {
                 self.context.gcStates(self.config.state_gc_interval * 2);
             }
 
-            // ── 7. Exit check ───────────────────────────────────
+            // ── 7. Exit check ────────────────────────────
             if (any_closed) {
                 // Draining: one more frame for any close animations.
                 // Then break.
@@ -268,7 +280,7 @@ pub const App = struct {
     }
 };
 
-fn debugPrintTree(w: *@import("widget.zig").Widget, depth: u32) void {
+fn debugPrintTree(w: *Widget, depth: u32) void {
     const indent = "  " ** 10;
     const off = @min(2 * depth, @as(u32, 10));
     const prefix = indent[0..off];
@@ -279,7 +291,10 @@ fn debugPrintTree(w: *@import("widget.zig").Widget, depth: u32) void {
         .slider => "slider",
         .label => "label",
     };
-    std.debug.print("{s}{s} rect=({d:.0},{d:.0} {d:.0}x{d:.0})\n", .{ prefix, name, w.rect.x, w.rect.y, w.rect.w, w.rect.h });
+    std.debug.print(
+        "{s}{s} rect=({d:.0},{d:.0} {d:.0}x{d:.0})\n",
+        .{ prefix, name, w.rect.x, w.rect.y, w.rect.w, w.rect.h },
+    );
     if (w.children()) |kids| {
         for (kids) |child| {
             debugPrintTree(child, depth + 1);
@@ -293,9 +308,9 @@ test "App: ScreenStack push/pop/top" {
     var ss = ScreenStack.init(testing.allocator);
     defer ss.deinit();
 
-    var screen = Screen{
+    var screen: Screen = .{
         .drawFn = struct {
-            fn draw(_: *Context, dc: *@import("drawctx.zig").DrawCtx) anyerror!*@import("widget.zig").Widget {
+            fn draw(_: *Context, dc: *DrawCtx) anyerror!*Widget {
                 return dc.tempLabel("modal", .{});
             }
         }.draw,

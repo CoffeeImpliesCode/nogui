@@ -23,7 +23,7 @@ const Completion = @import("comp_queue.zig").Completion;
 const CompletionQueue = @import("comp_queue.zig").CompletionQueue;
 
 /// Maximum number of registered components.
-pub const MAX_COMPONENTS = 256;
+pub const max_components = 256;
 
 /// Tags for the Completion.tag field — identifies which bg task completed.
 /// Components can extend this with their own tag space (tags >= USER_TAG_BASE).
@@ -62,7 +62,7 @@ pub const ComponentVTable = struct {
     isExpired: *const fn (ptr: *anyopaque, last_frame: u64, current_frame: u64) bool,
 
     /// Clean up component resources.
-    deinit: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
+    deinit: *const fn (allocator: std.mem.Allocator, ptr: *anyopaque) void,
 };
 
 /// Opaque component handle wrapping a vtable + pointer.
@@ -79,7 +79,7 @@ pub const Component = struct {
     }
 
     pub fn deinit(self: Component, allocator: std.mem.Allocator) void {
-        self.vtable.deinit(self.ptr, allocator);
+        self.vtable.deinit(allocator, self.ptr);
     }
 };
 
@@ -95,10 +95,10 @@ pub const ComponentRef = struct {
 /// Provides O(1) lookup by component_id for completion dispatch.
 pub const ComponentRegistry = struct {
     /// Flat array of component slots. A slot is active when .ptr != null.
-    slots: [MAX_COMPONENTS]?Component = .{null} ** MAX_COMPONENTS,
+    slots: [max_components]?Component = .{null} ** max_components,
 
     /// Last-frame-touched timestamp for GC.
-    last_frame: [MAX_COMPONENTS]u64 = .{0} ** MAX_COMPONENTS,
+    last_frame: [max_components]u64 = .{0} ** max_components,
 
     pub fn init() ComponentRegistry {
         return .{};
@@ -120,7 +120,7 @@ pub const ComponentRegistry = struct {
     /// Unregister a component by ID. Does NOT call deinit — the caller
     /// must deinit first if needed.
     pub fn unregister(self: *ComponentRegistry, id: u32) void {
-        if (id < MAX_COMPONENTS) {
+        if (id < max_components) {
             self.slots[id] = null;
         }
     }
@@ -128,13 +128,13 @@ pub const ComponentRegistry = struct {
     /// Look up a component by ID.
     /// Returns null if the slot is empty or out of range.
     pub fn get(self: *const ComponentRegistry, id: u32) ?Component {
-        if (id >= MAX_COMPONENTS) return null;
+        if (id >= max_components) return null;
         return self.slots[id];
     }
 
     /// Touch a component to mark it as active this frame.
     pub fn touch(self: *ComponentRegistry, id: u32, frame: u64) void {
-        if (id < MAX_COMPONENTS) {
+        if (id < max_components) {
             self.last_frame[id] = frame;
         }
     }
@@ -154,7 +154,7 @@ pub const ComponentRegistry = struct {
     }
 
     /// GC stale components that haven't been touched in `max_age` frames.
-    pub fn gc(self: *ComponentRegistry, current_frame: u64, max_age: u64, allocator: std.mem.Allocator) void {
+    pub fn gc(self: *ComponentRegistry, allocator: std.mem.Allocator, current_frame: u64, max_age: u64) void {
         for (&self.slots, 0..) |*slot, i| {
             const comp = slot.* orelse continue;
             if (current_frame - self.last_frame[i] > max_age) {
@@ -167,7 +167,7 @@ pub const ComponentRegistry = struct {
     }
 };
 
-// ─── Tests ─────────────────────────────────────────────
+// ─── Tests ─────────────────────────────────
 
 const testing = std.testing;
 
@@ -177,18 +177,22 @@ test "ComponentRegistry: register and lookup" {
     // A minimal test component.
     const TestComp = struct {
         fn onComplete(_: *anyopaque, _: *const Completion) void {}
-        fn isExpired(_: *anyopaque, _: u64, _: u64) bool { return true; }
-        fn deinit(_: *anyopaque, _: std.mem.Allocator) void {}
+        fn isExpired(_: *anyopaque, _: u64, _: u64) bool {
+            return true;
+        }
+        fn deinit(_: std.mem.Allocator, ptr: *anyopaque) void {
+            ptr.* = undefined;
+        }
 
-        const vtable = ComponentVTable{
+        const vtable: ComponentVTable = .{
             .onComplete = onComplete,
             .isExpired = isExpired,
             .deinit = deinit,
         };
     };
 
-    var test_comp = TestComp{};
-    const component = Component{
+    var test_comp: TestComp = .{};
+    const component: Component = .{
         .ptr = &test_comp,
         .vtable = &TestComp.vtable,
     };
@@ -204,16 +208,20 @@ test "ComponentRegistry: unregister frees slot" {
 
     const TestComp = struct {
         fn onComplete(_: *anyopaque, _: *const Completion) void {}
-        fn isExpired(_: *anyopaque, _: u64, _: u64) bool { return true; }
-        fn deinit(_: *anyopaque, _: std.mem.Allocator) void {}
-        const vtable = ComponentVTable{
+        fn isExpired(_: *anyopaque, _: u64, _: u64) bool {
+            return true;
+        }
+        fn deinit(_: std.mem.Allocator, ptr: *anyopaque) void {
+            ptr.* = undefined;
+        }
+        const vtable: ComponentVTable = .{
             .onComplete = onComplete,
             .isExpired = isExpired,
             .deinit = deinit,
         };
     };
 
-    var comp = TestComp{};
+    var comp: TestComp = .{};
     const id = try registry.register(.{ .ptr = &comp, .vtable = &TestComp.vtable }, 0);
     registry.unregister(id);
     try testing.expect(registry.get(id) == null);

@@ -24,10 +24,10 @@ const Spinlock = @import("comp_queue.zig").Spinlock;
 
 /// Default number of worker threads.
 /// Set to logical CPU count minus 1 (reserve one for the main thread).
-pub const DEFAULT_WORKER_COUNT: u32 = @max(1, if (builtin.cpu.count > 1) builtin.cpu.count - 1 else 1);
+pub const default_worker_count: u32 = @max(1, if (builtin.cpu.count > 1) builtin.cpu.count - 1 else 1);
 
 /// Active-poll spin count before falling back to nanosleep.
-const SPIN_LIMIT = 100_000;
+const spin_limit = 100_000;
 
 /// A work item wrapping a BgTask with intrusive list node.
 const WorkItem = struct {
@@ -65,7 +65,7 @@ pub const ThreadPool = struct {
         completion_queue: *CompletionQueue,
         worker_count: ?u32,
     ) !*ThreadPool {
-        const count = worker_count orelse DEFAULT_WORKER_COUNT;
+        const count = worker_count orelse default_worker_count;
         const workers = try allocator.alloc(Thread, count);
         errdefer allocator.free(workers);
 
@@ -81,7 +81,7 @@ pub const ThreadPool = struct {
         // Spawn workers. `pool` is heap-allocated so the pointer passed
         // to each worker stays valid after init returns.
         for (workers, 0..) |*worker, i| {
-            worker.* = Thread.spawn(.{}, workerFn, .{pool, @as(u32, @intCast(i))}) catch |err| {
+            worker.* = Thread.spawn(.{}, workerFn, .{ pool, @as(u32, @intCast(i)) }) catch |err| {
                 // Join already-spawned workers, then let the errdefers free
                 // `workers` and `pool` on the return — freeing them here
                 // too would double-free.
@@ -152,7 +152,7 @@ pub const ThreadPool = struct {
             const item = pool.tryPopWork() orelse {
                 // No work available — back off.
                 spin_count += 1;
-                if (spin_count >= SPIN_LIMIT) {
+                if (spin_count >= spin_limit) {
                     spin_count = 0;
                     // Sleep 1ms to reduce CPU usage.
                     std.time.sleep(1_000_000);

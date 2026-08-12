@@ -42,7 +42,7 @@ const SceneRect = @import("render_9slice.zig").SceneRect;
 const Widget = @import("widget.zig").Widget;
 const Rect = @import("widget.zig").Rect;
 
-// ─── RenderCommand enum ───────────────────────────────────────
+// ─── RenderCommand enum ───────────────────────
 
 /// One draw command. Lives in a flat []RenderCommand per frame.
 /// No hierarchy, no Scene wrapper, no batch iterator.
@@ -97,7 +97,7 @@ pub const RenderCommand = union(enum) {
     blit_oklab: void,
 };
 
-// ─── RenderCommand arena ──────────────────────────────────────
+// ─── RenderCommand arena ───────────────────────
 
 /// Growable arena for RenderCommand collection.
 /// Allocated from the frame arena; reset every frame.
@@ -130,7 +130,7 @@ pub const MaterialRef = struct {
     curve_ref: ?[]const u8 = null,
 };
 
-// ─── RectCollectCtx ──────────────────────────────────────────
+// ─── RectCollectCtx ───────────────────────────
 
 /// Parameterizes collectWidgetRects for windowed vs headless mode.
 /// No code duplication: the same DFS walks the widget tree and
@@ -249,7 +249,7 @@ pub fn borderCommandToSliceRects(cmd: *const RenderCommand, buf: *[2]SceneRect) 
     return 2;
 }
 
-// ─── Process pipeline ───────────────────────────────────────
+// ─── Process pipeline ─────────────────────────
 
 /// Process a RenderCommand array into the output buffers Batch9Slice needs.
 /// Returns the count of SceneRects written to slice_rects_out.

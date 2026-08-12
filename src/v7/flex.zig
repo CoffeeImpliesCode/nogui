@@ -598,7 +598,8 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
                 // tall; an explicit font_size scales both dims (0 = the
                 // baked 20px default).
                 const scale: f32 = if (node.font_size > 0) node.font_size / 20 else 1;
-                break :blk Size{ .width = @as(f32, @floatFromInt(l.text.len)) * 10 * scale, .height = 20 * scale };
+                const len_f: f32 = @floatFromInt(@min(l.text.len, 1 << 24));
+                break :blk Size{ .width = len_f * 10 * scale, .height = 20 * scale };
             };
             node.rect.w = s.width + border.w + padding.w;
             node.rect.h = s.height + border.h + padding.h;

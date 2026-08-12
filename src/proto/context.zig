@@ -10,6 +10,7 @@ const Id = @import("widget.zig").Id;
 const InteractionState = @import("widget.zig").InteractionState;
 const Key = @import("widget.zig").Key;
 const KeyMods = @import("widget.zig").KeyMods;
+const MouseButton = @import("widget.zig").MouseButton;
 
 /// Aggregated per-frame input state.
 /// Lives in Context so it persists across frames (needed for
@@ -21,7 +22,7 @@ pub const InputState = struct {
     mouse_y: f32 = 0,
 
     /// Mouse button currently held, or null.
-    held_button: ?@import("widget.zig").MouseButton = null,
+    held_button: ?MouseButton = null,
 
     /// ID of the widget that received mouse_down (track for release).
     active_id: ?Id = null,
@@ -34,7 +35,7 @@ pub const InputState = struct {
 
     /// Frame counter for click detection (double-click timing).
     last_click_frame: u64 = 0,
-    last_click_button: ?@import("widget.zig").MouseButton = null,
+    last_click_button: ?MouseButton = null,
 
     /// True when the active widget is dragged (mouse moved > threshold while held).
     dragging: bool = false,
@@ -94,7 +95,7 @@ pub const WidgetState = struct {
 
     /// Advance animation values by one frame.
     /// Called by `processFrameAdvanceEvents` after layout completes.
-    pub fn advanceAnim(self: *@This(), is_hot: bool, is_active: bool) void {
+    pub fn advanceAnim(self: *WidgetState, is_hot: bool, is_active: bool) void {
         const target_hot: f32 = if (is_hot or is_active) 1.0 else 0.0;
         self.hot_t += (target_hot - self.hot_t) * self.anim.hot_speed;
 
@@ -119,7 +120,7 @@ pub const Context = struct {
     /// Per-frame input state — updated by dispatchEvents().
     input_state: InputState = .{},
 
-    pub fn init(gpa: std.mem.Allocator, gpu: noapi.Gpu) @This() {
+    pub fn init(gpa: std.mem.Allocator, gpu: noapi.Gpu) Context {
         return .{
             .gpu = gpu,
             .state_map = std.AutoHashMap(Id, WidgetState).init(gpa),
@@ -127,14 +128,15 @@ pub const Context = struct {
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *Context) void {
         self.state_map.deinit();
         self.gpu.deinit();
+        self.* = undefined;
     }
 
     /// Get or create persistent state for a widget ID.
     /// Returns null if the widget wasn't active last frame.
-    pub fn getOrCreateState(self: *@This(), id: Id) !*WidgetState {
+    pub fn getOrCreateState(self: *Context, id: Id) !*WidgetState {
         const entry = try self.state_map.getOrPut(id);
         if (!entry.found_existing) {
             entry.value_ptr.* = .{ .last_frame = self.frame_count };
@@ -144,7 +146,7 @@ pub const Context = struct {
     }
 
     /// Evict states that haven't been touched in N frames.
-    pub fn gcStates(self: *@This(), max_age: u64) void {
+    pub fn gcStates(self: *Context, max_age: u64) void {
         var it = self.state_map.iterator();
         while (it.next()) |entry| {
             if (self.frame_count - entry.value_ptr.last_frame > max_age) {

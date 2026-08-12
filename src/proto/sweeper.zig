@@ -16,7 +16,7 @@ pub const Curve = extern struct {
     p2y: f32,
 };
 
-/// One edge of the stroke's offset-outline polygon (the mode-2 TYPE_STROKE
+/// One edge of the stroke's offset-outline polygon (the mode-2 type_stroke
 /// reference): a straight segment (x0,y0) -> (x1,y1) in the sweep space.
 /// The GPU buffer layout is the shader's Edge/EdgeBuf: a u32 count + u32
 /// pad header, then 16-byte Edges. (The SvgView aliases this type for its
@@ -36,7 +36,7 @@ pub const GlyphMaterial = extern struct {
     win_w: f32, // pixel window width / rect width
     win_h: f32, // pixel window height / rect height
     curve_bda: u64, // BDA to curve buffer (0 for rounded/shadow)
-    /// BDA to the path's fill-band buffer (the TYPE_SWEEP optimization:
+    /// BDA to the path's fill-band buffer (the type_sweep optimization:
     /// the interior box + the per-pixel-row curve runs); 0 = no band
     /// data → the fragment sweeps the full curve loop.
     band_bda: u64 = 0,
@@ -45,14 +45,14 @@ pub const GlyphMaterial = extern struct {
     gradient_to: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
-pub const MATERIAL_SIZE = @sizeOf(GlyphMaterial); // 56 bytes
+pub const material_size = @sizeOf(GlyphMaterial); // 56 bytes
 
-pub const TYPE_SOLID: u32 = 0;
-pub const TYPE_GLYPH: u32 = 1;
-pub const TYPE_ROUNDED_RECT: u32 = 2;
-pub const TYPE_SHADOW: u32 = 3;
-pub const TYPE_STROKE: u32 = 4; // a path stroked at width bearing_y (the distance branch)
-pub const TYPE_SWEEP: u32 = 5; // an SVG fill: the SDF-based sweep AA (no subpixel)
+pub const type_solid: u32 = 0;
+pub const type_glyph: u32 = 1;
+pub const type_rounded_rect: u32 = 2;
+pub const type_shadow: u32 = 3;
+pub const type_stroke: u32 = 4; // a path stroked at width bearing_y (the distance branch)
+pub const type_sweep: u32 = 5; // an SVG fill: the SDF-based sweep AA (no subpixel)
 
 /// Compute the AABB extent of a set of curves.
 pub fn glyphExtent(curves: []const Curve) struct { min_x: f32, min_y: f32, w: f32, h: f32 } {
@@ -89,7 +89,7 @@ pub const GlyphSweeper = struct {
     bearing_y: f32,
     num_curves: u32,
 
-    pub fn init(gpu: *noapi.Gpu, curves: []const Curve) !@This() {
+    pub fn init(gpu: *noapi.Gpu, curves: []const Curve) !GlyphSweeper {
         const buf_size = @max(@as(u64, @sizeOf(Curve) * curves.len + 16), 64);
         const curve_buf = try gpu.gpuMalloc(buf_size, 16, .default);
         const dst: [*]u8 = @ptrCast(@alignCast(curve_buf.cpu));
@@ -114,19 +114,21 @@ pub const GlyphSweeper = struct {
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *GlyphSweeper) void {
         self.gpu.gpuFree(self.curve_buf);
+        self.* = undefined;
     }
 
     /// Grow the curve buffer to hold `extra` additional bytes after the
     /// curve array (used by the demo to append a coverage bitmap). The BDA
     /// may change; callers must re-write materials after growing.
-    pub fn growCurveBuffer(self: *@This(), extra: usize) !void {
+    pub fn growCurveBuffer(self: *GlyphSweeper, extra: usize) !void {
         const base = @sizeOf(u32) * 2 + @as(usize, self.num_curves) * @sizeOf(Curve);
         const padded = (extra + 3) & ~@as(usize, 3);
         const new_size = base + padded;
         const new_buf = try self.gpu.gpuMalloc(new_size, 16, .default);
-        @memcpy(@as([*]u8, @ptrCast(@alignCast(new_buf.cpu)))[0..base], @as([*]const u8, @ptrCast(@alignCast(self.curve_buf.cpu)))[0..base]);
+        const src: [*]const u8 = @ptrCast(@alignCast(self.curve_buf.cpu));
+        @memcpy(@as([*]u8, @ptrCast(@alignCast(new_buf.cpu)))[0..base], src[0..base]);
         self.gpu.gpuFree(self.curve_buf);
         self.curve_buf = new_buf;
         self.curve_buf_bda = new_buf.gpu;
@@ -143,7 +145,7 @@ pub const GlyphSweeper = struct {
         win_w: f32,
         win_h: f32,
     ) void {
-        const mat = GlyphMaterial{
+        const mat: GlyphMaterial = .{
             .type = 1,
             .bearing_y = bearing_y,
             .curve_w = curve_w,
@@ -153,14 +155,14 @@ pub const GlyphSweeper = struct {
             .curve_bda = curve_bda,
             .band_bda = 0,
         };
-        const offset = slot * MATERIAL_SIZE;
+        const offset = slot * material_size;
         const dst: [*]u8 = @ptrCast(@alignCast(material_buf.cpu));
         @as(*GlyphMaterial, @ptrCast(@alignCast(dst + offset))).* = mat;
     }
 
     /// Write a stroke material (type 4): the same curve BDA as the fill,
     /// with the stroke width in bearing_y (user units; the SvgView scales
-    /// it with the view). The fragment's TYPE_STROKE branch computes the
+    /// it with the view). The fragment's type_stroke branch computes the
     /// distance to the curves instead of the sweep coverage.
     pub fn writeStrokeMaterial(
         curve_bda: u64,
@@ -168,8 +170,8 @@ pub const GlyphSweeper = struct {
         slot: u32,
         width: f32,
     ) void {
-        const mat = GlyphMaterial{
-            .type = TYPE_STROKE,
+        const mat: GlyphMaterial = .{
+            .type = type_stroke,
             .bearing_y = width,
             .curve_w = 0,
             .curve_h = 0,
@@ -178,16 +180,16 @@ pub const GlyphSweeper = struct {
             .curve_bda = curve_bda,
             .band_bda = 0,
         };
-        const offset = slot * MATERIAL_SIZE;
+        const offset = slot * material_size;
         const dst: [*]u8 = @ptrCast(@alignCast(material_buf.cpu));
         @as(*GlyphMaterial, @ptrCast(@alignCast(dst + offset))).* = mat;
     }
 
     /// Write an SVG fill material (type 5): the same curve BDA + extent
-    /// as TYPE_GLYPH, but the fragment uses the SDF-based sweep AA (the
+    /// as type_glyph, but the fragment uses the SDF-based sweep AA (the
     /// fwidth band + gamma) and — crucially — NOT the subpixel branch:
     /// the tiger's colored fills must never be RGB-striped. The text's
-    /// glyphs keep TYPE_GLYPH, so the two render independently.
+    /// glyphs keep type_glyph, so the two render independently.
     /// `band_bda` points at the path's fill-band buffer (the interior
     /// box + the per-row curve runs — see buildFillBands); 0 = no band
     /// data → the fragment sweeps the full curve loop.
@@ -199,8 +201,8 @@ pub const GlyphSweeper = struct {
         curve_w: f32,
         curve_h: f32,
     ) void {
-        const mat = GlyphMaterial{
-            .type = TYPE_SWEEP,
+        const mat: GlyphMaterial = .{
+            .type = type_sweep,
             .bearing_y = 0,
             .curve_w = curve_w,
             .curve_h = curve_h,
@@ -209,7 +211,7 @@ pub const GlyphSweeper = struct {
             .curve_bda = curve_bda,
             .band_bda = band_bda,
         };
-        const offset = slot * MATERIAL_SIZE;
+        const offset = slot * material_size;
         const dst: [*]u8 = @ptrCast(@alignCast(material_buf.cpu));
         @as(*GlyphMaterial, @ptrCast(@alignCast(dst + offset))).* = mat;
     }
@@ -230,8 +232,8 @@ pub const GlyphSweeper = struct {
         rect_h: f32,
         gradient_to: [4]f32,
     ) void {
-        const mat = GlyphMaterial{
-            .type = TYPE_ROUNDED_RECT,
+        const mat: GlyphMaterial = .{
+            .type = type_rounded_rect,
             .bearing_y = border,
             .curve_w = x_radius,
             .curve_h = y_radius,
@@ -241,7 +243,7 @@ pub const GlyphSweeper = struct {
             .band_bda = 0,
             .gradient_to = gradient_to,
         };
-        const offset = slot * MATERIAL_SIZE;
+        const offset = slot * material_size;
         const dst: [*]u8 = @ptrCast(@alignCast(material_buf.cpu));
         @as(*GlyphMaterial, @ptrCast(@alignCast(dst + offset))).* = mat;
     }
@@ -259,8 +261,8 @@ pub const GlyphSweeper = struct {
         rect_w: f32,
         rect_h: f32,
     ) void {
-        const mat = GlyphMaterial{
-            .type = TYPE_SHADOW,
+        const mat: GlyphMaterial = .{
+            .type = type_shadow,
             .bearing_y = feather,
             .curve_w = x_radius,
             .curve_h = y_radius,
@@ -269,13 +271,13 @@ pub const GlyphSweeper = struct {
             .curve_bda = 0,
             .band_bda = 0,
         };
-        const offset = slot * MATERIAL_SIZE;
+        const offset = slot * material_size;
         const dst: [*]u8 = @ptrCast(@alignCast(material_buf.cpu));
         @as(*GlyphMaterial, @ptrCast(@alignCast(dst + offset))).* = mat;
     }
 };
 
-// ─── The fill-band optimization (TYPE_SWEEP) ────────────────────────────
+// ─── The fill-band optimization (type_sweep) ─────────────────
 // The per-path band buffer holds (1) a conservative interior box — the
 // pixels whose whole 2x2 sweep window is inside the shape render at full
 // coverage without sweeping any curve — and (2) per-pixel-row runs of the
@@ -291,7 +293,7 @@ pub const GlyphSweeper = struct {
 /// degenerate hull (a straight line) has zero thickness and would sit
 /// exactly ON the rect edge, where a boundary window would still include
 /// its area — breaking the interior early-out.
-const BAND_EPS: f32 = 1e-3;
+const band_eps: f32 = 1e-3;
 
 /// The axis-aligned hull (bbox) of a quadratic's three control points.
 /// The curve itself lies inside this hull, so a hull disjoint from a box
@@ -396,10 +398,10 @@ fn interiorRect(curves: []const Curve) ?[4]f32 {
             const pokes_left = hx0 <= x0;
             const pokes_right = hx1 >= x1;
             if (pokes_left and !pokes_right) {
-                x0 = @max(x0, hx1 + BAND_EPS);
+                x0 = @max(x0, hx1 + band_eps);
                 changed = true;
             } else if (pokes_right and !pokes_left) {
-                x1 = @min(x1, hx0 - BAND_EPS);
+                x1 = @min(x1, hx0 - band_eps);
                 changed = true;
             } else {
                 // The hull spans the rect's full x-range (or sits inside
@@ -407,10 +409,10 @@ fn interiorRect(curves: []const Curve) ?[4]f32 {
                 const pokes_bottom = hy0 <= y0;
                 const pokes_top = hy1 >= y1;
                 if (pokes_bottom and !pokes_top) {
-                    y0 = @max(y0, hy1 + BAND_EPS);
+                    y0 = @max(y0, hy1 + band_eps);
                     changed = true;
                 } else if (pokes_top and !pokes_bottom) {
-                    y1 = @min(y1, hy0 - BAND_EPS);
+                    y1 = @min(y1, hy0 - band_eps);
                     changed = true;
                 }
             }
@@ -478,12 +480,16 @@ pub fn buildFillBands(a: std.mem.Allocator, curves: []const Curve) !FillBands {
     }
     if (row_min > row_max) {
         // No curve participates in any row (an empty set): no band data.
+        const pairs = try a.alloc(u32, 0);
+        errdefer a.free(pairs);
+        const indices = try a.alloc(u32, 0);
+        errdefer a.free(indices);
         return .{
             .interior = interior,
             .row_base = 0,
             .row_count = 0,
-            .pairs = try a.alloc(u32, 0),
-            .indices = try a.alloc(u32, 0),
+            .pairs = pairs,
+            .indices = indices,
         };
     }
     const row_count: u32 = @intCast(row_max - row_min + 1);
@@ -534,7 +540,7 @@ pub fn buildFillBands(a: std.mem.Allocator, curves: []const Curve) !FillBands {
     };
 }
 
-// ─── The stroke-band optimization (TYPE_STROKE mode 2) ─────────────────
+// ─── The stroke-band optimization (type_stroke mode 2) ─────────────────
 // The mode-2 stroke integrates the offset-outline polygon's edges over
 // the pixel via Cairo's running-cover model. Like the fill bands, the
 // per-path band buffer holds per-pixel-row runs of the EDGE indices, so
@@ -601,12 +607,16 @@ pub fn buildStrokeBands(a: std.mem.Allocator, edges: []const StrokeEdge, window:
     }
     if (row_min > row_max) {
         // No edge participates in any row (an empty set): no band data.
+        const pairs = try a.alloc(u32, 0);
+        errdefer a.free(pairs);
+        const indices = try a.alloc(u32, 0);
+        errdefer a.free(indices);
         return .{
             .interior = .{ 0, 0, -1, -1 },
             .row_base = 0,
             .row_count = 0,
-            .pairs = try a.alloc(u32, 0),
-            .indices = try a.alloc(u32, 0),
+            .pairs = pairs,
+            .indices = indices,
         };
     }
     const row_count: u32 = @intCast(row_max - row_min + 1);

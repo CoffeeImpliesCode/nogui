@@ -25,15 +25,15 @@ const DrawCtx = @import("drawctx.zig").DrawCtx;
 const GlyphSweeper = @import("sweeper.zig").GlyphSweeper;
 const Curve = @import("sweeper.zig").Curve;
 const GlyphMaterial = @import("sweeper.zig").GlyphMaterial;
-const MaterialType = @import("sweeper.zig");
+const drawctx = @import("drawctx.zig");
 const RenderCommand = @import("render_command.zig").RenderCommand;
 const RenderCommandList = @import("render_command.zig").RenderCommandList;
 const RectCollectCtx = @import("render_command.zig").RectCollectCtx;
 const processRenderCommands = @import("render_command.zig").processRenderCommands;
 
-const FRAME_ARENAS = 2;
+const frame_arenas = 2;
 
-// ─── Headless Context ──────────────────────────────────────────────
+// ─── Headless Context ──────────────────────────────
 
 /// Application context without GPU dependency. Replaces `Context`
 /// in headless mode — no GPU instance, no SDL3, no Vulkan.
@@ -46,14 +46,15 @@ pub const HeadlessContext = struct {
     /// character references in draw list serialization.
     glyph_entries: ?[]const GlyphInfo = null,
 
-    pub fn init(gpa: std.mem.Allocator, test_name: []const u8) @This() {
+    pub fn init(gpa: std.mem.Allocator, test_name: []const u8) HeadlessContext {
         return .{ .gpa = gpa, .test_name = test_name };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *HeadlessContext) void {
         if (self.glyph_entries) |entries| {
             self.gpa.free(entries);
         }
+        self.* = undefined;
     }
 };
 
@@ -69,7 +70,7 @@ pub const GlyphInfo = struct {
     curve_ref: ?[]const u8, // e.g. "A" for the glyph character
 };
 
-// ─── Headless Window ───────────────────────────────────────────────
+// ─── Headless Window ──────────────────────────────
 
 /// Drop-in replacement for `Window`. Same `run()` / `beginFrame()` /
 /// `endFrame()` lifecycle, but instead of GPU rendering, serializes
@@ -82,7 +83,7 @@ pub const HeadlessWindow = struct {
     /// Window dimensions for the frame.
     size: WindowSize,
     /// Ping-pong frame arenas (same pattern as Window).
-    arenas: [FRAME_ARENAS]std.heap.ArenaAllocator,
+    arenas: [frame_arenas]std.heap.ArenaAllocator,
     current_arena: usize = 0,
     should_close: bool = false,
 
@@ -94,10 +95,10 @@ pub const HeadlessWindow = struct {
 
     /// Per-frame material refs for headless JSON serialization.
     /// Reset each frame; populated by emitGlyphCommands.
-    material_refs: std.ArrayListUnmanaged(MaterialRef) = .empty,
+    material_refs: std.ArrayList(MaterialRef) = .empty,
 
-    pub fn init(ctx: *HeadlessContext, size: WindowSize) !@This() {
-        var arenas: [FRAME_ARENAS]std.heap.ArenaAllocator = undefined;
+    pub fn init(ctx: *HeadlessContext, size: WindowSize) !HeadlessWindow {
+        var arenas: [frame_arenas]std.heap.ArenaAllocator = undefined;
         for (&arenas) |*a| {
             a.* = std.heap.ArenaAllocator.init(ctx.gpa);
         }
@@ -110,17 +111,18 @@ pub const HeadlessWindow = struct {
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *HeadlessWindow) void {
         for (&self.arenas) |*a| a.deinit();
         self.context.gpa.free(self.rect_buf);
         self.material_refs.deinit(self.context.gpa);
+        self.* = undefined;
     }
 
     /// Begin a new frame. Returns a DrawCtx with a fresh arena allocator.
     /// Identical API to Window.beginFrame() but skip GPU swapchain acquire.
-    pub fn beginFrame(self: *@This()) DrawCtx {
-        self.current_arena = (self.current_arena + 1) % FRAME_ARENAS;
-        @import("drawctx.zig").resetTempId();
+    pub fn beginFrame(self: *HeadlessWindow) DrawCtx {
+        self.current_arena = (self.current_arena + 1) % frame_arenas;
+        drawctx.resetTempId();
         const arena = &self.arenas[self.current_arena];
         _ = arena.reset(.retain_capacity);
 
@@ -131,7 +133,7 @@ pub const HeadlessWindow = struct {
         // Reset material refs (retain backing alloc but clear entries)
         self.material_refs.clearRetainingCapacity();
 
-        return DrawCtx{
+        return .{
             .allocator = arena.allocator(),
             .surface_size = .{ .width = self.size.width, .height = self.size.height },
         };
@@ -139,9 +141,9 @@ pub const HeadlessWindow = struct {
 
     /// End the frame: collect RenderCommands → process → serialize.
     /// Returns a FrameOutput that can be JSON-encoded for snapshot comparison.
-    pub fn endFrame(self: *@This(), root: *Widget, allocator: std.mem.Allocator) !FrameOutput {
+    pub fn endFrame(self: *HeadlessWindow, allocator: std.mem.Allocator, root: *Widget) !FrameOutput {
         // Phase 1: Collect RenderCommands from widget tree
-        const ctx = RectCollectCtx{ .headless = .{
+        const ctx: RectCollectCtx = .{ .headless = .{
             .ctx = self.context,
             .material_refs = &self.material_refs,
         } };
@@ -159,10 +161,10 @@ pub const HeadlessWindow = struct {
         );
 
         // Phase 3: Serialize to JSON
-        const draw_cmds = try collectDrawCommands(self.rect_buf[0..rect_count], allocator, self.context);
-        const tree = try serializeWidgetTree(root, allocator);
+        const draw_cmds = try collectDrawCommands(allocator, self.rect_buf[0..rect_count], self.context);
+        const tree = try serializeWidgetTree(allocator, root);
 
-        return FrameOutput{
+        return .{
             .frame_number = self.context.frame_count,
             .timestamp_ms = std.time.milliTimestamp(),
             .window_size = self.size,
@@ -175,7 +177,7 @@ pub const HeadlessWindow = struct {
     /// Run the event loop for `max_frames` frames. Each frame:
     ///   beginFrame() → gui.draw(dc) → dc.layoutAndRender(root) → endFrame(root)
     /// Returns all captured frame outputs.
-    pub fn run(self: *@This(), gui: anytype, max_frames: u64) ![]FrameOutput {
+    pub fn run(self: *HeadlessWindow, gui: anytype, max_frames: u64) ![]FrameOutput {
         const frames = try self.context.gpa.alloc(FrameOutput, max_frames);
         errdefer self.context.gpa.free(frames);
 
@@ -187,7 +189,7 @@ pub const HeadlessWindow = struct {
             const root = try gui.draw(&dc);
             dc.layoutAndRender(root);
 
-            frames[fi] = try self.endFrame(root, self.context.gpa);
+            frames[fi] = try self.endFrame(self.context.gpa, root);
             self.context.frame_count += 1;
         }
 
@@ -195,7 +197,7 @@ pub const HeadlessWindow = struct {
     }
 };
 
-// ─── Frame Output ──────────────────────────────────────────────────
+// ─── Frame Output ────────────────────────
 
 /// Complete frame snapshot: widget tree + draw list + metadata.
 /// This is the top-level JSON object emitted per frame.
@@ -222,7 +224,10 @@ pub const FrameOutput = struct {
         try writer.writeAll("{");
 
         try writer.writeAll("\"meta\":{");
-        try writer.print("\"frame\":{d},\"ts\":{d},\"win_w\":{d},\"win_h\":{d}", .{ self.frame_number, self.timestamp_ms, self.window_size.width, self.window_size.height });
+        try writer.print(
+            "\"frame\":{d},\"ts\":{d},\"win_w\":{d},\"win_h\":{d}",
+            .{ self.frame_number, self.timestamp_ms, self.window_size.width, self.window_size.height },
+        );
         try writer.print(",\"test\":\"{s}\"", .{self.test_name});
         if (self.debug_info) |di| {
             try writer.print(",\"commit\":\"{s}\",\"build_mode\":\"{s}\"", .{ di.commit_hash, di.build_mode });
@@ -249,7 +254,7 @@ pub const DebugInfo = struct {
     build_mode: []const u8,
 };
 
-// ─── Widget Tree Serialization ─────────────────────────────────────
+// ─── Widget Tree Serialization ───────────────────────────
 
 /// Serialized widget node — recursive tree structure.
 /// Fields are nullable; only relevant fields are populated per kind.
@@ -273,17 +278,21 @@ pub const WidgetNode = struct {
     gap: ?f32 = null,
     children: ?[]const WidgetNode = null,
 
-    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *WidgetNode, allocator: std.mem.Allocator) void {
         if (self.children) |kids| {
-            for (kids) |*child| child.deinit(allocator);
+            for (kids) |*child| @constCast(child).deinit(allocator);
             allocator.free(kids);
         }
+        self.* = undefined;
     }
 
     pub fn writeJson(self: *const WidgetNode, writer: anytype) !void {
         try writer.writeAll("{");
         try writer.print("\"id\":{d},\"kind\":\"{s}\"", .{ self.id, self.kind });
-        try writer.print(",\"rect\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ self.rect.x, self.rect.y, self.rect.w, self.rect.h });
+        try writer.print(
+            ",\"rect\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}",
+            .{ self.rect.x, self.rect.y, self.rect.w, self.rect.h },
+        );
         try writer.print(",\"sizing\":{{\"x\":\"{s}\",\"y\":\"{s}\"", .{
             @tagName(self.sizing.x),
             @tagName(self.sizing.y),
@@ -296,8 +305,14 @@ pub const WidgetNode = struct {
         }
         try writer.writeAll("}");
         try writer.print(",\"border\":{d},\"corner_radius\":{d}", .{ self.border, self.corner_radius });
-        try writer.print(",\"color\":[{d},{d},{d},{d}]", .{ self.color[0], self.color[1], self.color[2], self.color[3] });
-        try writer.print(",\"border_color\":[{d},{d},{d},{d}]", .{ self.border_color[0], self.border_color[1], self.border_color[2], self.border_color[3] });
+        try writer.print(
+            ",\"color\":[{d},{d},{d},{d}]",
+            .{ self.color[0], self.color[1], self.color[2], self.color[3] },
+        );
+        try writer.print(
+            ",\"border_color\":[{d},{d},{d},{d}]",
+            .{ self.border_color[0], self.border_color[1], self.border_color[2], self.border_color[3] },
+        );
 
         if (self.label) |l| try writer.print(",\"label\":\"{s}\"", .{l});
         if (self.value) |v| try writer.print(",\"value\":{d}", .{v});
@@ -329,7 +344,7 @@ pub const SizingNode = struct {
 };
 
 /// Recursively serialize a widget tree into WidgetNodes.
-pub fn serializeWidgetTree(root: *const Widget, allocator: std.mem.Allocator) std.mem.Allocator.Error!WidgetNode {
+pub fn serializeWidgetTree(allocator: std.mem.Allocator, root: *const Widget) std.mem.Allocator.Error!WidgetNode {
     const kind_str = switch (root.kind) {
         .column => "column",
         .row => "row",
@@ -338,7 +353,7 @@ pub fn serializeWidgetTree(root: *const Widget, allocator: std.mem.Allocator) st
         .label => "label",
     };
 
-    var node = WidgetNode{
+    var node: WidgetNode = .{
         .id = @intFromEnum(root.id),
         .kind = kind_str,
         .rect = .{ .x = root.rect.x, .y = root.rect.y, .w = root.rect.w, .h = root.rect.h },
@@ -372,27 +387,27 @@ pub fn serializeWidgetTree(root: *const Widget, allocator: std.mem.Allocator) st
         .column => |c| {
             node.padding = c.padding;
             node.gap = c.gap;
-            node.children = try allocChildren(c.children, allocator);
+            node.children = try allocChildren(allocator, c.children);
         },
         .row => |r| {
             node.padding = r.padding;
             node.gap = r.gap;
-            node.children = try allocChildren(r.children, allocator);
+            node.children = try allocChildren(allocator, r.children);
         },
     }
 
     return node;
 }
 
-fn allocChildren(kids: []const *Widget, allocator: std.mem.Allocator) ![]const WidgetNode {
+fn allocChildren(allocator: std.mem.Allocator, kids: []const *Widget) ![]const WidgetNode {
     const out = try allocator.alloc(WidgetNode, kids.len);
     for (kids, out) |child, *out_node| {
-        out_node.* = try serializeWidgetTree(child, allocator);
+        out_node.* = try serializeWidgetTree(allocator, child);
     }
     return out;
 }
 
-// ─── Draw List Serialization ───────────────────────────────────────
+// ─── Draw List Serialization ───────────────────────────
 
 /// One draw command — JSON-friendly representation of a SceneRect.
 pub const DrawCommand = struct {
@@ -414,8 +429,14 @@ pub const DrawCommand = struct {
     pub fn writeJson(self: *const DrawCommand, writer: anytype) !void {
         try writer.writeAll("{");
         try writer.print("\"cmd\":\"{s}\"", .{self.cmd_type});
-        try writer.print(",\"dst\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ self.dst.x, self.dst.y, self.dst.w, self.dst.h });
-        try writer.print(",\"color\":[{d},{d},{d},{d}]", .{ self.color[0], self.color[1], self.color[2], self.color[3] });
+        try writer.print(
+            ",\"dst\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}",
+            .{ self.dst.x, self.dst.y, self.dst.w, self.dst.h },
+        );
+        try writer.print(
+            ",\"color\":[{d},{d},{d},{d}]",
+            .{ self.color[0], self.color[1], self.color[2], self.color[3] },
+        );
 
         if (self.corners) |c| {
             try writer.print(",\"corners\":{{\"l\":{d},\"r\":{d},\"t\":{d},\"b\":{d}}}", .{ c.l, c.r, c.t, c.b });
@@ -424,7 +445,10 @@ pub const DrawCommand = struct {
             try writer.print(",\"src_uv\":{{\"u\":{d},\"v\":{d},\"w\":{d},\"h\":{d}}}", .{ uv.u, uv.v, uv.w, uv.h });
         }
         if (self.glyph) |g| {
-            try writer.print(",\"glyph\":{{\"char\":\"{c}\",\"advance\":{d},\"bearing\":[{d},{d}]}}", .{ g.char, g.advance, g.bearing_x, g.bearing_y });
+            try writer.print(
+                ",\"glyph\":{{\"char\":\"{c}\",\"advance\":{d},\"bearing\":[{d},{d}]}}",
+                .{ g.char, g.advance, g.bearing_x, g.bearing_y },
+            );
         }
         if (self.material) |m| {
             try writer.print(",\"material\":{{\"type\":\"{s}\",\"slot\":{d}}}", .{ m.mat_type, m.slot });
@@ -454,8 +478,8 @@ pub const MaterialRef = struct {
 
 /// Convert SceneRect array into DrawCommand array.
 pub fn collectDrawCommands(
-    rects: []const SceneRect,
     allocator: std.mem.Allocator,
+    rects: []const SceneRect,
     ctx: *const HeadlessContext,
 ) ![]const DrawCommand {
     const cmds = try allocator.alloc(DrawCommand, rects.len);
@@ -506,7 +530,7 @@ fn sliceRectToCommand(r: SceneRect, ctx: *const HeadlessContext) DrawCommand {
         };
     }
 
-    return DrawCommand{
+    return .{
         .cmd_type = cmd_type,
         .dst = .{ .x = r.dst[0], .y = r.dst[1], .w = r.dst[2], .h = r.dst[3] },
         .color = r.color,
@@ -574,7 +598,10 @@ fn collectWidgetRectsHeadless(
             switch (w.kind) {
                 .button => |btn| emitGlyphRectsHeadless(btn.label, w.rect, cmds, ctx),
                 .slider => |s| {
-                    const frac = if (s.max == s.min) @as(f32, 0.5) else @max(0, @min(1, (s.value.* - s.min) / (s.max - s.min)));
+                    const frac = if (s.max == s.min)
+                        @as(f32, 0.5)
+                    else
+                        @max(0, @min(1, (s.value.* - s.min) / (s.max - s.min)));
                     const fill_w = @max(4, w.rect.w * frac);
                     const b = w.border;
                     cmds.push(.{ .solid_rect = .{
@@ -634,7 +661,7 @@ fn emitGlyphRectsHeadless(
             .mat_type = "glyph",
             .slot = entry.material_slot + 1,
             .curve_ref = &.{ch},
-        }) catch {};
+        }) catch unreachable;
 
         if (ch_w > 0 and ch_h > 0) {
             cmds.push(.{ .glyph = .{
@@ -651,7 +678,7 @@ fn emitGlyphRectsHeadless(
     }
 }
 
-// ─── LLM Snapshot Comparison ───────────────────────────────────────
+// ─── LLM Snapshot Comparison ───────────────────────────
 
 /// Compare mode: what an LLM (or test harness) checks between two snapshots.
 pub const SnapshotDiffMode = enum {
@@ -665,18 +692,18 @@ pub const SnapshotDiffMode = enum {
 };
 
 /// Float comparison epsilon for snapshot diffs.
-pub const FLOAT_EPSILON: f32 = 0.001;
+pub const float_epsilon: f32 = 0.001;
 
 /// Compare two FrameOutputs. Returns a list of differences (empty = pass).
 /// Designed to produce human-readable diff descriptions that an LLM can
 /// interpret for regression testing.
 pub fn diffSnapshots(
+    allocator: std.mem.Allocator,
     baseline: *const FrameOutput,
     current: *const FrameOutput,
     mode: SnapshotDiffMode,
-    allocator: std.mem.Allocator,
 ) ![]const []const u8 {
-    var diffs = std.ArrayListUnmanaged([]const u8).empty;
+    var diffs = std.ArrayList([]const u8).empty;
     errdefer {
         for (diffs.items) |d| allocator.free(d);
         diffs.deinit(allocator);
@@ -686,30 +713,65 @@ pub fn diffSnapshots(
     if (baseline.window_size.width != current.window_size.width or
         baseline.window_size.height != current.window_size.height)
     {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "window_size: baseline={d}x{d} current={d}x{d}", .{ baseline.window_size.width, baseline.window_size.height, current.window_size.width, current.window_size.height }));
+        try diffs.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "window_size: baseline={d}x{d} current={d}x{d}",
+            .{
+                baseline.window_size.width,
+                baseline.window_size.height,
+                current.window_size.width,
+                current.window_size.height,
+            },
+        ));
     }
 
     // Widget tree diff
-    try diffWidgetNodes(&baseline.widget_tree, &current.widget_tree, mode, &diffs, allocator, "root");
+    try diffWidgetNodes(allocator, &baseline.widget_tree, &current.widget_tree, mode, &diffs, "root");
 
     // Draw list count
     if (baseline.draw_list.len != current.draw_list.len) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw_list length: baseline={d} current={d}", .{ baseline.draw_list.len, current.draw_list.len }));
+        try diffs.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "draw_list length: baseline={d} current={d}",
+            .{ baseline.draw_list.len, current.draw_list.len },
+        ));
     } else if (mode == .exact) {
         // Per-command diff (only for exact mode)
         for (baseline.draw_list, current.draw_list, 0..) |bl, cur, i| {
             if (!std.mem.eql(u8, bl.cmd_type, cur.cmd_type)) {
-                try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw[{d}].cmd_type: baseline={s} current={s}", .{ i, bl.cmd_type, cur.cmd_type }));
+                try diffs.append(allocator, try std.fmt.allocPrint(
+                    allocator,
+                    "draw[{d}].cmd_type: baseline={s} current={s}",
+                    .{ i, bl.cmd_type, cur.cmd_type },
+                ));
             }
             if (!floatsEqual(bl.dst.x, cur.dst.x) or !floatsEqual(bl.dst.y, cur.dst.y) or
                 !floatsEqual(bl.dst.w, cur.dst.w) or !floatsEqual(bl.dst.h, cur.dst.h))
             {
-                try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw[{d}].dst: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})", .{ i, bl.dst.x, bl.dst.y, bl.dst.w, bl.dst.h, cur.dst.x, cur.dst.y, cur.dst.w, cur.dst.h }));
+                try diffs.append(allocator, try std.fmt.allocPrint(
+                    allocator,
+                    "draw[{d}].dst: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})",
+                    .{ i, bl.dst.x, bl.dst.y, bl.dst.w, bl.dst.h, cur.dst.x, cur.dst.y, cur.dst.w, cur.dst.h },
+                ));
             }
             if (!floatsEqual(bl.color[0], cur.color[0]) or !floatsEqual(bl.color[1], cur.color[1]) or
                 !floatsEqual(bl.color[2], cur.color[2]) or !floatsEqual(bl.color[3], cur.color[3]))
             {
-                try diffs.append(allocator, try std.fmt.allocPrint(allocator, "draw[{d}].color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]", .{ i, bl.color[0], bl.color[1], bl.color[2], bl.color[3], cur.color[0], cur.color[1], cur.color[2], cur.color[3] }));
+                try diffs.append(allocator, try std.fmt.allocPrint(
+                    allocator,
+                    "draw[{d}].color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]",
+                    .{
+                        i,
+                        bl.color[0],
+                        bl.color[1],
+                        bl.color[2],
+                        bl.color[3],
+                        cur.color[0],
+                        cur.color[1],
+                        cur.color[2],
+                        cur.color[3],
+                    },
+                ));
             }
         }
     }
@@ -718,36 +780,70 @@ pub fn diffSnapshots(
 }
 
 fn diffWidgetNodes(
+    allocator: std.mem.Allocator,
     bl: *const WidgetNode,
     cur: *const WidgetNode,
     mode: SnapshotDiffMode,
-    diffs: *std.ArrayListUnmanaged([]const u8),
-    allocator: std.mem.Allocator,
+    diffs: *std.ArrayList([]const u8),
     path: []const u8,
 ) !void {
     if (!std.mem.eql(u8, bl.kind, cur.kind)) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.kind: baseline={s} current={s}", .{ path, bl.kind, cur.kind }));
+        try diffs.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "{s}.kind: baseline={s} current={s}",
+            .{ path, bl.kind, cur.kind },
+        ));
         return; // different kind = different structure, stop recursing
     }
 
     if (mode == .exact) {
         if (bl.id != cur.id) {
-            try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.id: baseline={d} current={d}", .{ path, bl.id, cur.id }));
+            try diffs.append(allocator, try std.fmt.allocPrint(
+                allocator,
+                "{s}.id: baseline={d} current={d}",
+                .{ path, bl.id, cur.id },
+            ));
         }
         if (!rectEqual(bl.rect, cur.rect)) {
-            try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.rect: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})", .{ path, bl.rect.x, bl.rect.y, bl.rect.w, bl.rect.h, cur.rect.x, cur.rect.y, cur.rect.w, cur.rect.h }));
+            try diffs.append(allocator, try std.fmt.allocPrint(
+                allocator,
+                "{s}.rect: baseline=({d:.1},{d:.1} {d:.1}x{d:.1}) current=({d:.1},{d:.1} {d:.1}x{d:.1})",
+                .{ path, bl.rect.x, bl.rect.y, bl.rect.w, bl.rect.h, cur.rect.x, cur.rect.y, cur.rect.w, cur.rect.h },
+            ));
         }
         if (!colorEqual(bl.color, cur.color)) {
-            try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]", .{ path, bl.color[0], bl.color[1], bl.color[2], bl.color[3], cur.color[0], cur.color[1], cur.color[2], cur.color[3] }));
+            try diffs.append(allocator, try std.fmt.allocPrint(
+                allocator,
+                "{s}.color: baseline=[{d},{d},{d},{d}] current=[{d},{d},{d},{d}]",
+                .{
+                    path,
+                    bl.color[0],
+                    bl.color[1],
+                    bl.color[2],
+                    bl.color[3],
+                    cur.color[0],
+                    cur.color[1],
+                    cur.color[2],
+                    cur.color[3],
+                },
+            ));
         }
     }
 
     // Leaf payload comparison (all modes)
     if (!std.mem.eql(u8, bl.label orelse "", cur.label orelse "")) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.label: baseline=\"{s}\" current=\"{s}\"", .{ path, bl.label orelse "", cur.label orelse "" }));
+        try diffs.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "{s}.label: baseline=\"{s}\" current=\"{s}\"",
+            .{ path, bl.label orelse "", cur.label orelse "" },
+        ));
     }
     if (bl.value != null and cur.value != null and !floatsEqual(bl.value.?, cur.value.?)) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.value: baseline={d} current={d}", .{ path, bl.value.?, cur.value.? }));
+        try diffs.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "{s}.value: baseline={d} current={d}",
+            .{ path, bl.value.?, cur.value.? },
+        ));
     }
 
     // Recursive children comparison
@@ -756,21 +852,25 @@ fn diffWidgetNodes(
     const min_kids = @min(bl_kids.len, cur_kids.len);
 
     if (bl_kids.len != cur_kids.len and mode != .semantic) {
-        try diffs.append(allocator, try std.fmt.allocPrint(allocator, "{s}.children count: baseline={d} current={d}", .{ path, bl_kids.len, cur_kids.len }));
+        try diffs.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "{s}.children count: baseline={d} current={d}",
+            .{ path, bl_kids.len, cur_kids.len },
+        ));
     }
 
     for (0..min_kids) |i| {
         const child_path = try std.fmt.allocPrint(allocator, "{s}.children[{d}]", .{ path, i });
-        try diffWidgetNodes(&bl_kids[i], &cur_kids[i], mode, diffs, allocator, child_path);
+        try diffWidgetNodes(allocator, &bl_kids[i], &cur_kids[i], mode, diffs, child_path);
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────
 
 fn floatsEqual(a: anytype, b: @TypeOf(a)) bool {
     if (a == b) return true;
     const diff = if (a > b) a - b else b - a;
-    return diff < FLOAT_EPSILON;
+    return diff < float_epsilon;
 }
 
 fn rectEqual(a: anytype, b: @TypeOf(a)) bool {
@@ -794,21 +894,22 @@ pub const SoftRasterizer = struct {
     /// RGBA8 pixel buffer (row-major, bottom-left origin).
     pixels: []u8,
 
-    pub fn init(width: u32, height: u32, allocator: std.mem.Allocator) !@This() {
+    pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) !SoftRasterizer {
         const pixels = try allocator.alloc(u8, width * height * 4);
         @memset(pixels, 0);
         return .{ .width = width, .height = height, .pixels = pixels };
     }
 
-    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *SoftRasterizer, allocator: std.mem.Allocator) void {
         allocator.free(self.pixels);
+        self.* = undefined;
     }
 
     /// Rasterize a draw list into the pixel buffer.
     /// Simple approach: fill rects, ignore glyphs (no curve rasterizer yet).
     /// For full visual comparison, glyphs need distance-field or scanline
     /// curve rasterization — left as future work.
-    pub fn rasterize(self: *@This(), draw_list: []const DrawCommand) void {
+    pub fn rasterize(self: *SoftRasterizer, draw_list: []const DrawCommand) void {
         for (draw_list) |cmd| {
             switch (cmd.cmd_type[0]) {
                 'f', 'b' => self.fillRect(cmd),
@@ -818,7 +919,7 @@ pub const SoftRasterizer = struct {
         }
     }
 
-    fn fillRect(self: *@This(), cmd: DrawCommand) void {
+    fn fillRect(self: *SoftRasterizer, cmd: DrawCommand) void {
         const max_w: f32 = @floatFromInt(self.width);
         const max_h: f32 = @floatFromInt(self.height);
         const x0 = @as(u32, @intFromFloat(@min(@max(0, cmd.dst.x), max_w)));
@@ -839,14 +940,25 @@ pub const SoftRasterizer = struct {
                 const idx = (y * self.width + x) * 4;
                 // Alpha blending: over operator
                 const src_a: f32 = @as(f32, @floatFromInt(a)) / 255.0;
-                const dst_r: f32 = @as(f32, @floatFromInt(self.pixels[idx]));
-                const dst_g: f32 = @as(f32, @floatFromInt(self.pixels[idx + 1]));
-                const dst_b: f32 = @as(f32, @floatFromInt(self.pixels[idx + 2]));
+                const dst_r: f32 = @floatFromInt(self.pixels[idx]);
+                const dst_g: f32 = @floatFromInt(self.pixels[idx + 1]);
+                const dst_b: f32 = @floatFromInt(self.pixels[idx + 2]);
 
                 self.pixels[idx] = @intFromFloat(@min(255, dst_r * (1 - src_a) + @as(f32, @floatFromInt(r)) * src_a));
-                self.pixels[idx + 1] = @intFromFloat(@min(255, dst_g * (1 - src_a) + @as(f32, @floatFromInt(g)) * src_a));
-                self.pixels[idx + 2] = @intFromFloat(@min(255, dst_b * (1 - src_a) + @as(f32, @floatFromInt(b)) * src_a));
-                self.pixels[idx + 3] = @intFromFloat(@min(255, @as(f32, @floatFromInt(self.pixels[idx + 3])) + @as(f32, @floatFromInt(a)) * (1 - @as(f32, @floatFromInt(self.pixels[idx + 3])) / 255.0)));
+                self.pixels[idx + 1] = @intFromFloat(@min(
+                    255,
+                    dst_g * (1 - src_a) + @as(f32, @floatFromInt(g)) * src_a,
+                ));
+                self.pixels[idx + 2] = @intFromFloat(@min(
+                    255,
+                    dst_b * (1 - src_a) + @as(f32, @floatFromInt(b)) * src_a,
+                ));
+                self.pixels[idx + 3] = @intFromFloat(@min(
+                    255,
+                    @as(f32, @floatFromInt(self.pixels[idx + 3])) +
+                        @as(f32, @floatFromInt(a)) *
+                            (1 - @as(f32, @floatFromInt(self.pixels[idx + 3])) / 255.0),
+                ));
             }
         }
     }
@@ -879,7 +991,7 @@ fn colorComponentToU8(l: f32, a: f32, b: f32, component: u2) u8 {
     return @intFromFloat(@min(255.0, @max(0.0, val * 255.0)));
 }
 
-// ─── JSON Snapshot File Format ─────────────────────────────────────
+// ─── JSON Snapshot File Format ───────────────────────────
 
 /// Write a FrameOutput to a `.json` snapshot file.
 /// The file format is a single JSON object per line (JSONL-friendly)
@@ -898,7 +1010,7 @@ pub fn readSnapshot(allocator: std.mem.Allocator, json: []const u8) !FrameOutput
     return error.NotImplemented;
 }
 
-// ─── Tests ────────────────────────────────────────────────────────
+// ─── Tests ──────────────────────────────
 
 const testing = std.testing;
 
@@ -917,7 +1029,7 @@ test "HeadlessWindow: beginFrame creates DrawCtx" {
 }
 
 test "WidgetNode: leaf widget serialization" {
-    var w = Widget{
+    var w: Widget = .{
         .id = testId(42),
         .sizing = .{ .x = .fit, .y = .fit },
         .rect = .{ .x = 10, .y = 20, .w = 100, .h = 30 },
@@ -926,7 +1038,7 @@ test "WidgetNode: leaf widget serialization" {
         .kind = .{ .label = .{ .text = "hello" } },
     };
 
-    const node = try serializeWidgetTree(&w, testing.allocator);
+    var node = try serializeWidgetTree(testing.allocator, &w);
     defer node.deinit(testing.allocator);
 
     try testing.expectEqualStrings("label", node.kind);
@@ -937,17 +1049,17 @@ test "WidgetNode: leaf widget serialization" {
 }
 
 test "WidgetNode: container with children" {
-    var child1 = Widget{
+    var child1: Widget = .{
         .id = testId(1),
         .sizing = .{},
         .kind = .{ .label = .{ .text = "a" } },
     };
-    var child2 = Widget{
+    var child2: Widget = .{
         .id = testId(2),
         .sizing = .{},
         .kind = .{ .label = .{ .text = "b" } },
     };
-    var col = Widget{
+    var col: Widget = .{
         .id = testId(0),
         .sizing = .{},
         .kind = .{ .column = .{
@@ -957,7 +1069,7 @@ test "WidgetNode: container with children" {
         } },
     };
 
-    const node = try serializeWidgetTree(&col, testing.allocator);
+    var node = try serializeWidgetTree(testing.allocator, &col);
     defer node.deinit(testing.allocator);
 
     try testing.expectEqualStrings("column", node.kind);
@@ -978,8 +1090,8 @@ test "floatsEqual: within epsilon" {
 }
 
 test "diffSnapshots: identical widgets produce no diffs" {
-    var frame1 = makeTestFrame(0, testing.allocator);
-    var frame2 = makeTestFrame(0, testing.allocator);
+    var frame1 = makeTestFrame(testing.allocator, 0);
+    var frame2 = makeTestFrame(testing.allocator, 0);
     defer {
         frame1.widget_tree.deinit(testing.allocator);
         frame2.widget_tree.deinit(testing.allocator);
@@ -987,7 +1099,7 @@ test "diffSnapshots: identical widgets produce no diffs" {
         testing.allocator.free(frame2.draw_list);
     }
 
-    const diffs = try diffSnapshots(&frame1, &frame2, .exact, testing.allocator);
+    const diffs = try diffSnapshots(testing.allocator, &frame1, &frame2, .exact);
     defer {
         for (diffs) |d| testing.allocator.free(d);
         testing.allocator.free(diffs);
@@ -996,8 +1108,8 @@ test "diffSnapshots: identical widgets produce no diffs" {
 }
 
 test "diffSnapshots: different rects produce diffs" {
-    var frame1 = makeTestFrame(0, testing.allocator);
-    var frame2 = makeTestFrame(10, testing.allocator); // offset rect by 10
+    var frame1 = makeTestFrame(testing.allocator, 0);
+    var frame2 = makeTestFrame(testing.allocator, 10); // offset rect by 10
     defer {
         frame1.widget_tree.deinit(testing.allocator);
         frame2.widget_tree.deinit(testing.allocator);
@@ -1005,7 +1117,7 @@ test "diffSnapshots: different rects produce diffs" {
         testing.allocator.free(frame2.draw_list);
     }
 
-    const diffs = try diffSnapshots(&frame1, &frame2, .exact, testing.allocator);
+    const diffs = try diffSnapshots(testing.allocator, &frame1, &frame2, .exact);
     defer {
         for (diffs) |d| testing.allocator.free(d);
         testing.allocator.free(diffs);
@@ -1014,8 +1126,8 @@ test "diffSnapshots: different rects produce diffs" {
 }
 
 test "SnapshotDiffMode: semantic ignores position" {
-    var frame1 = makeTestFrame(0, testing.allocator);
-    var frame2 = makeTestFrame(50, testing.allocator); // large position diff
+    var frame1 = makeTestFrame(testing.allocator, 0);
+    var frame2 = makeTestFrame(testing.allocator, 50); // large position diff
     defer {
         frame1.widget_tree.deinit(testing.allocator);
         frame2.widget_tree.deinit(testing.allocator);
@@ -1023,7 +1135,7 @@ test "SnapshotDiffMode: semantic ignores position" {
         testing.allocator.free(frame2.draw_list);
     }
 
-    const diffs = try diffSnapshots(&frame1, &frame2, .semantic, testing.allocator);
+    const diffs = try diffSnapshots(testing.allocator, &frame1, &frame2, .semantic);
     defer {
         for (diffs) |d| testing.allocator.free(d);
         testing.allocator.free(diffs);
@@ -1032,8 +1144,8 @@ test "SnapshotDiffMode: semantic ignores position" {
     try testing.expectEqual(@as(usize, 0), diffs.len);
 }
 
-fn makeTestFrame(offset: f32, allocator: std.mem.Allocator) FrameOutput {
-    const label_node = WidgetNode{
+fn makeTestFrame(allocator: std.mem.Allocator, offset: f32) FrameOutput {
+    const label_node: WidgetNode = .{
         .id = 1,
         .kind = "label",
         .rect = .{ .x = 10 + offset, .y = 20 + offset, .w = 100, .h = 24 },
@@ -1046,13 +1158,13 @@ fn makeTestFrame(offset: f32, allocator: std.mem.Allocator) FrameOutput {
     };
 
     const draw_cmds = allocator.alloc(DrawCommand, 1) catch unreachable;
-    draw_cmds[0] = DrawCommand{
+    draw_cmds[0] = .{
         .cmd_type = "fill_rect",
         .dst = .{ .x = 10 + offset, .y = 20 + offset, .w = 100, .h = 24 },
         .color = .{ 0.5, 0.1, 0.0, 1.0 },
     };
 
-    return FrameOutput{
+    return .{
         .frame_number = 0,
         .timestamp_ms = 0,
         .window_size = .{ .width = 800, .height = 600 },

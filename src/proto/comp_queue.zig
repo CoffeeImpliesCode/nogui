@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const atomic = std.atomic;
-const SLL = std.SinglyLinkedList;
+const Sll = std.SinglyLinkedList;
 
 /// Spinlock wrapper around atomic.Mutex to provide a blocking lock().
 pub const Spinlock = struct {
@@ -35,7 +35,7 @@ pub const Spinlock = struct {
 
 /// Maximum inline result data — zero-copy for the common case.
 /// Font metadata, image headers, file read results all fit.
-pub const MAX_INLINE_DATA = 128;
+pub const max_inline_data = 128;
 
 /// A completed background task result.
 /// 16 bytes header + 128 bytes data = 144 bytes total.
@@ -55,16 +55,16 @@ pub const Completion = struct {
     /// copies directly here. For heap-allocated results, the worker
     /// stores a pointer as bytes; the component's onComplete must
     /// free it.
-    data: [MAX_INLINE_DATA]u8,
+    data: [max_inline_data]u8,
 
     /// Intrusive list node — must be first field for @fieldParentPtr.
-    node: SLL.Node = .{},
+    node: Sll.Node = .{},
 
     /// Pack result into the inline buffer.
     pub fn pack(completion: *Completion, component_id: u32, tag: u32, result: anytype) void {
         const T = @TypeOf(result);
         const result_bytes = std.mem.asBytes(&result);
-        comptime std.debug.assert(@sizeOf(T) <= MAX_INLINE_DATA);
+        comptime std.debug.assert(@sizeOf(T) <= max_inline_data);
 
         completion.component_id = component_id;
         completion.tag = tag;
@@ -74,7 +74,7 @@ pub const Completion = struct {
 
     /// Unpack result from the inline buffer.
     pub fn unpack(completion: *const Completion, comptime T: type) T {
-        comptime std.debug.assert(@sizeOf(T) <= MAX_INLINE_DATA);
+        comptime std.debug.assert(@sizeOf(T) <= max_inline_data);
         var result: T = undefined;
         const result_bytes = std.mem.asBytes(&result);
         @memcpy(result_bytes, completion.data[0..@sizeOf(T)]);
@@ -92,11 +92,11 @@ pub const CompletionQueue = struct {
     /// Intrusive singly-linked list of Completion nodes.
     /// Nodes are heap-allocated by the worker and freed by the
     /// main thread after dispatching.
-    list: SLL = .{},
+    list: Sll = .{},
 
     /// Pool of pre-allocated Completion nodes to avoid per-task
-    /// allocation. Stored as an SLL of free nodes.
-    free_list: SLL = .{},
+    /// allocation. Stored as an Sll of free nodes.
+    free_list: Sll = .{},
     free_lock: Spinlock = .{},
 
     allocator: std.mem.Allocator,
@@ -116,6 +116,7 @@ pub const CompletionQueue = struct {
             const comp_ptr: *Completion = @fieldParentPtr("node", free_node);
             self.allocator.destroy(comp_ptr);
         }
+        self.* = undefined;
     }
 
     /// Push a completion from any thread.
@@ -151,7 +152,7 @@ pub const CompletionQueue = struct {
 
     /// Atomically detach the entire list and return the head.
     /// The caller owns the detached list and must walk it.
-    fn detachAll(self: *CompletionQueue) ?*SLL.Node {
+    fn detachAll(self: *CompletionQueue) ?*Sll.Node {
         self.lock.lock();
         const head = self.list.first;
         self.list.first = null;
@@ -166,7 +167,7 @@ pub const CompletionQueue = struct {
         const head = self.detachAll() orelse return 0;
 
         var count: usize = 0;
-        var it: ?*SLL.Node = head;
+        var it: ?*Sll.Node = head;
         while (it) |node| : (it = node.next) {
             if (count >= buf.len) break;
             buf[count] = @fieldParentPtr("node", node);
@@ -197,7 +198,7 @@ pub const CompletionQueue = struct {
     }
 };
 
-// ─── Tests ─────────────────────────────────────────────
+// ─── Tests ─────────────────────────────────
 
 const testing = std.testing;
 
@@ -205,7 +206,7 @@ test "CompletionQueue: push and pop" {
     var cq = CompletionQueue.init(testing.allocator);
     defer cq.deinit();
 
-    const comp = Completion{
+    const comp: Completion = .{
         .component_id = 42,
         .tag = 1,
         .data_len = 0,
@@ -249,7 +250,7 @@ test "CompletionQueue: pack/unpack roundtrip" {
         height: u32,
     };
 
-    var comp = Completion{
+    var comp: Completion = .{
         .component_id = 1,
         .tag = 99,
         .data_len = 0,

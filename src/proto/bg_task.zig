@@ -61,7 +61,6 @@ pub const BgTask = union(enum) {
 
 /// Results produced by background tasks.
 /// These are packed into the Completion.data field (≤128 bytes).
-
 /// Result of loading a font.
 pub const LoadFontResult = packed struct(u64) {
     /// Number of glyphs loaded.

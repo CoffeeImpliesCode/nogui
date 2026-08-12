@@ -35,7 +35,7 @@ rec {
     INCLUDE_DIRECTORIES = "${pkgs.lib.makeIncludePath packages}";
     VULKAN_SDK = "${pkgs.vulkan-headers.out}";
     # zig-gate tuning (per AGENTS.md house rules): ziglint ignores + proto debt excluded
-    ZIGLINT_ARGS = "--ignore Z023,Z030"; // remaining: component.zig vtable/type-erased exceptions
+    ZIGLINT_ARGS = ""; # the tree is ziglint-clean (all codes, no ignores)
     GATE_EXCLUDE = "src/proto";
   };
 

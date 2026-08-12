@@ -23,7 +23,7 @@ pub const LayoutResult = struct {
     size: Size,
 };
 
-/// ── Phase 1: Measure ─────────────────────────────────────────
+/// ── Phase 1: Measure ──────────────────────────────
 /// Measure a widget tree and return the total size.
 /// `available` is the space the parent has for this widget.
 pub fn measure(root: *Widget, available: Size) LayoutResult {
@@ -40,7 +40,7 @@ fn measureNode(w: *Widget, available: Size) LayoutResult {
     };
 
     // Clamp to sizing min/max
-    const clamped = Size{
+    const clamped: Size = .{
         .width = clampToSizing(w.sizing, sz.width, .x),
         .height = clampToSizing(w.sizing, sz.height, .y),
     };
@@ -63,14 +63,16 @@ fn clampToSizing(sizing: anytype, value: f32, axis: enum { x, y }) f32 {
 fn measureButton(b: anytype, sizing: Sizing, available: Size) Size {
     _ = available;
     // Rough: 8px per char + 16px horizontal padding
-    const text_w: f32 = @max(30, @as(f32, @floatFromInt(b.label.len)) * 8 + 16);
+    const label_len: f32 = @floatFromInt(@min(b.label.len, 1 << 24));
+    const text_w: f32 = @max(30, label_len * 8 + 16);
     const text_h: f32 = 24;
     return clampToAxis(sizing, text_w, text_h);
 }
 
 fn measureLabel(l: anytype, sizing: Sizing, available: Size) Size {
     _ = available;
-    const text_w: f32 = @max(20, @as(f32, @floatFromInt(l.text.len)) * 8 + 8);
+    const text_len: f32 = @floatFromInt(@min(l.text.len, 1 << 24));
+    const text_w: f32 = @max(20, text_len * 8 + 8);
     const text_h: f32 = 12;
     return clampToAxis(sizing, text_w, text_h);
 }
@@ -78,7 +80,8 @@ fn measureLabel(l: anytype, sizing: Sizing, available: Size) Size {
 fn measureSlider(s: anytype, sizing: Sizing, available: Size) Size {
     _ = available;
     // Label + slider thumb space
-    const label_w: f32 = @as(f32, @floatFromInt(s.label.len)) * 8 + 16;
+    const label_len: f32 = @floatFromInt(@min(s.label.len, 1 << 24));
+    const label_w: f32 = label_len * 8 + 16;
     const text_w: f32 = @max(120, label_w + 40);
     const text_h: f32 = 24;
     return clampToAxis(sizing, text_w, text_h);
@@ -95,13 +98,14 @@ fn measureColumn(c: anytype, sizing: Sizing, available: Size) Size {
 
     for (c.children) |child| {
         if (child.sizing.y == .grow) grow_count += 1;
-        const child_available = Size{ .width = inner_w, .height = std.math.floatMax(f32) };
+        const child_available: Size = .{ .width = inner_w, .height = std.math.floatMax(f32) };
         const result = measureNode(child, child_available);
         total_h += result.size.height;
         max_w = @max(max_w, result.size.width);
     }
 
-    total_h += c.gap * @max(0, @as(f32, @floatFromInt(c.children.len)) - 1);
+    const child_count: f32 = @floatFromInt(@min(c.children.len, 1 << 24));
+    total_h += c.gap * @max(0, child_count - 1);
 
     // If we have grow children, the height might expand
     // (handled in position phase). Report content size.
@@ -116,13 +120,14 @@ fn measureRow(r: anytype, sizing: Sizing, available: Size) Size {
 
     for (r.children) |child| {
         if (child.sizing.x == .grow) grow_count += 1;
-        const child_available = Size{ .width = std.math.floatMax(f32), .height = inner_h };
+        const child_available: Size = .{ .width = std.math.floatMax(f32), .height = inner_h };
         const result = measureNode(child, child_available);
         total_w += result.size.width;
         max_h = @max(max_h, result.size.height);
     }
 
-    total_w += r.gap * @max(0, @as(f32, @floatFromInt(r.children.len)) - 1);
+    const child_count: f32 = @floatFromInt(@min(r.children.len, 1 << 24));
+    total_w += r.gap * @max(0, child_count - 1);
 
     return clampToAxis(sizing, total_w, max_h + 2 * r.padding);
 }
@@ -134,7 +139,7 @@ fn clampToAxis(sizing: Sizing, w: f32, h: f32) Size {
     };
 }
 
-/// ── Phase 2: Position ─────────────────────────────────────────
+/// ── Phase 2: Position ─────────────────────────────
 /// Layout a widget tree at the given position within the given size.
 pub fn layout(root: *Widget, pos: Pos, size: Size) void {
     root.rect = .{ .x = pos.x, .y = pos.y, .w = size.width, .h = size.height };
@@ -162,11 +167,13 @@ fn layoutColumn(c: anytype, w: *Widget, pos: Pos, size: Size) void {
             content_h += child.rect.h;
         }
     }
-    const gap_total = c.gap * @max(0, @as(f32, @floatFromInt(c.children.len)) - 1);
+    const child_count: f32 = @floatFromInt(@min(c.children.len, 1 << 24));
+    const gap_total = c.gap * @max(0, child_count - 1);
 
     // Distribute remaining space to grow children
     const remain = @max(0, inner_h - content_h - gap_total);
-    const grow_h = if (grow_count > 0) remain / @as(f32, @floatFromInt(grow_count)) else 0;
+    const grow_count_f: f32 = @floatFromInt(@min(grow_count, 1 << 24));
+    const grow_h = if (grow_count > 0) remain / grow_count_f else 0;
 
     var y_pos = inner_y;
     for (c.children) |child| {
@@ -193,10 +200,12 @@ fn layoutRow(r: anytype, w: *Widget, pos: Pos, size: Size) void {
             content_w += child.rect.w;
         }
     }
-    const gap_total = r.gap * @max(0, @as(f32, @floatFromInt(r.children.len)) - 1);
+    const child_count: f32 = @floatFromInt(@min(r.children.len, 1 << 24));
+    const gap_total = r.gap * @max(0, child_count - 1);
 
     const remain = @max(0, inner_w - content_w - gap_total);
-    const grow_w = if (grow_count > 0) remain / @as(f32, @floatFromInt(grow_count)) else 0;
+    const grow_count_f: f32 = @floatFromInt(@min(grow_count, 1 << 24));
+    const grow_w = if (grow_count > 0) remain / grow_count_f else 0;
 
     var x_pos = inner_x;
     for (r.children) |child| {
@@ -207,14 +216,14 @@ fn layoutRow(r: anytype, w: *Widget, pos: Pos, size: Size) void {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+// ── Tests ──────────────────────────────────
 
 fn testId(n: usize) Id {
     return @enumFromInt(n + 100);
 }
 
 test "column: empty returns padding" {
-    var col = Widget{
+    var col: Widget = .{
         .id = testId(1),
         .sizing = .{ .x = .grow, .y = .fit },
         .kind = .{ .column = .{
@@ -222,18 +231,18 @@ test "column: empty returns padding" {
             .padding = 10,
         } },
     };
-    const result = measure(&col, Size{ .width = 100, .height = 100 });
+    const result = measure(&col, .{ .width = 100, .height = 100 });
     try testing.expectEqual(@as(f32, 20), result.size.width);
     try testing.expectEqual(@as(f32, 20), result.size.height);
 }
 
 test "column: single fixed child" {
-    var child = Widget{
+    var child: Widget = .{
         .id = testId(1),
         .sizing = .{ .x_min = 30, .x_max = 30, .y_min = 40, .y_max = 40 },
         .kind = .{ .label = .{ .text = "abc" } },
     };
-    var col = Widget{
+    var col: Widget = .{
         .id = testId(2),
         .sizing = .{ .x = .grow, .y = .fit },
         .kind = .{ .column = .{
@@ -241,23 +250,23 @@ test "column: single fixed child" {
             .padding = 5,
         } },
     };
-    const result = measure(&col, Size{ .width = 100, .height = 100 });
+    const result = measure(&col, .{ .width = 100, .height = 100 });
     try testing.expectEqual(@as(f32, 40), result.size.width);
     try testing.expectEqual(@as(f32, 50), result.size.height);
 }
 
 test "column: two children with gap" {
-    var child1 = Widget{
+    var child1: Widget = .{
         .id = testId(1),
         .sizing = .{ .x_min = 30, .x_max = 30, .y_min = 40, .y_max = 40 },
         .kind = .{ .label = .{ .text = "abc" } },
     };
-    var child2 = Widget{
+    var child2: Widget = .{
         .id = testId(2),
         .sizing = .{ .x_min = 30, .x_max = 30, .y_min = 40, .y_max = 40 },
         .kind = .{ .label = .{ .text = "def" } },
     };
-    var col = Widget{
+    var col: Widget = .{
         .id = testId(3),
         .sizing = .{ .x = .grow, .y = .fit },
         .kind = .{ .column = .{
@@ -266,23 +275,23 @@ test "column: two children with gap" {
             .gap = 10,
         } },
     };
-    const result = measure(&col, Size{ .width = 100, .height = 100 });
+    const result = measure(&col, .{ .width = 100, .height = 100 });
     try testing.expectEqual(@as(f32, 40), result.size.width);
     try testing.expectEqual(@as(f32, 100), result.size.height);
 }
 
 test "column: grow child fills remaining" {
-    var fixed = Widget{
+    var fixed: Widget = .{
         .id = testId(1),
         .sizing = .{ .x_min = 30, .x_max = 30, .y_min = 40, .y_max = 40 },
         .kind = .{ .label = .{ .text = "fix" } },
     };
-    var grow = Widget{
+    var grow: Widget = .{
         .id = testId(2),
         .sizing = .{ .y = .grow },
         .kind = .{ .label = .{ .text = "grow" } },
     };
-    var col = Widget{
+    var col: Widget = .{
         .id = testId(3),
         .sizing = .{ .x = .grow, .y = .fit },
         .kind = .{ .column = .{
@@ -291,8 +300,8 @@ test "column: grow child fills remaining" {
             .gap = 0,
         } },
     };
-    _ = measure(&col, Size{ .width = 100, .height = 100 });
-    layout(&col, .{ .x = 0, .y = 0 }, Size{ .width = 100, .height = 100 });
+    _ = measure(&col, .{ .width = 100, .height = 100 });
+    layout(&col, .{ .x = 0, .y = 0 }, .{ .width = 100, .height = 100 });
 
     // Inner height = 100 - 2*5 = 90
     // Content = fixed child rect.h = 40, gap = 0
@@ -303,17 +312,17 @@ test "column: grow child fills remaining" {
 }
 
 test "row: mixed grow and fixed" {
-    var fixed = Widget{
+    var fixed: Widget = .{
         .id = testId(1),
         .sizing = .{ .x = .fixed, .x_min = 50, .x_max = 50, .y_min = 20, .y_max = 20 },
         .kind = .{ .label = .{ .text = "fix" } },
     };
-    var grow = Widget{
+    var grow: Widget = .{
         .id = testId(2),
         .sizing = .{ .x = .grow },
         .kind = .{ .label = .{ .text = "grow" } },
     };
-    var row = Widget{
+    var row: Widget = .{
         .id = testId(3),
         .sizing = .{ .x = .grow, .y = .fit },
         .kind = .{ .row = .{
@@ -322,8 +331,8 @@ test "row: mixed grow and fixed" {
             .gap = 0,
         } },
     };
-    _ = measure(&row, Size{ .width = 200, .height = 100 });
-    layout(&row, .{ .x = 0, .y = 0 }, Size{ .width = 200, .height = 100 });
+    _ = measure(&row, .{ .width = 200, .height = 100 });
+    layout(&row, .{ .x = 0, .y = 0 }, .{ .width = 200, .height = 100 });
 
     // Inner width = 200 - 2*5 = 190
     // Content = fixed child rect.w = 50, gap = 0
@@ -332,12 +341,12 @@ test "row: mixed grow and fixed" {
 }
 
 test "column: clamped sizing respects min/max" {
-    var child = Widget{
+    var child: Widget = .{
         .id = testId(1),
         .sizing = .{ .x_min = 100, .x_max = 200, .x = .fit },
         .kind = .{ .label = .{ .text = "small" } },
     };
-    var col = Widget{
+    var col: Widget = .{
         .id = testId(2),
         .sizing = .{ .x = .grow, .y = .fit },
         .kind = .{ .column = .{
@@ -346,7 +355,7 @@ test "column: clamped sizing respects min/max" {
             .gap = 0,
         } },
     };
-    const result = measure(&col, Size{ .width = 200, .height = 100 });
+    const result = measure(&col, .{ .width = 200, .height = 100 });
     // Child content width = 48 (label "small" = 5 chars), clamped to x_min=100
     try testing.expectEqual(@as(f32, 100), result.size.width);
 }

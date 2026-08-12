@@ -9,6 +9,9 @@
 
 const std = @import("std");
 
+const app_framework_test = @import("app_framework.zig");
+const proto_headless_test = @import("proto/headless.zig");
+
 pub const Context = @import("proto/context.zig").Context;
 pub const Window = @import("proto/window.zig").Window;
 pub const DrawCtx = @import("proto/drawctx.zig").DrawCtx;
@@ -21,7 +24,7 @@ pub const Direction = @import("proto/widget.zig").Direction;
 pub const GlyphSweeper = @import("proto/sweeper.zig").GlyphSweeper;
 pub const Curve = @import("proto/sweeper.zig").Curve;
 
-// ─── Event system ─────────────────────────────────────
+// ─── Event system ───────────────────────────────
 pub const Event = @import("proto/event.zig").Event;
 pub const InputState = @import("proto/context.zig").InputState;
 pub const InteractionState = @import("proto/widget.zig").InteractionState;
@@ -38,7 +41,7 @@ pub const wasClicked = @import("proto/event.zig").wasClicked;
 test {
     _ = @import("proto/widget.zig");
     _ = @import("proto/sweeper.zig");
-    @import("std").testing.refAllDecls(@This());
+    std.testing.refAllDecls(@This());
 }
 
 test {
@@ -57,6 +60,6 @@ test {
 }
 
 test {
-    std.testing.refAllDecls(@import("app_framework.zig"));
-    std.testing.refAllDecls(@import("proto/headless.zig"));
+    std.testing.refAllDecls(app_framework_test);
+    std.testing.refAllDecls(proto_headless_test);
 }

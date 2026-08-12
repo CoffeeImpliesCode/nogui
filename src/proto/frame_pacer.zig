@@ -39,14 +39,14 @@ pub const FramePacer = struct {
     pacing_disabled: bool = false,
 
     /// Initialize with a target frame rate.
-    pub fn init(target_fps: u32) @This() {
+    pub fn init(target_fps: u32) FramePacer {
         return .{
             .target_ns = @divTrunc(1_000_000_000 + @as(u64, target_fps) / 2, target_fps),
         };
     }
 
     /// Initialize with an explicit interval in nanoseconds.
-    pub fn initNs(target_ns: u64) @This() {
+    pub fn initNs(target_ns: u64) FramePacer {
         return .{
             .target_ns = target_ns,
         };
@@ -60,7 +60,7 @@ pub const FramePacer = struct {
     ///
     /// Suspend detection: if we overshot the previous deadline by >2×,
     /// we were suspended. Rebase the deadline to now.
-    pub fn beginFrame(self: *@This(), io: std.Io) f64 {
+    pub fn beginFrame(self: *FramePacer, io: std.Io) f64 {
         const now_ns = self.clock.now(.monotonic, io).nanoseconds;
         defer {
             self.frame_start_ns = now_ns;
@@ -90,7 +90,7 @@ pub const FramePacer = struct {
     /// Call at the END of each frame. Sleeps until the deadline.
     ///
     /// Returns the actual frame duration in nanoseconds (for statistics).
-    pub fn endFrame(self: *@This(), io: std.Io) u64 {
+    pub fn endFrame(self: *FramePacer, io: std.Io) u64 {
         const now_ns = self.clock.now(.monotonic, io).nanoseconds;
         const actual = now_ns -| self.frame_start_ns;
 
@@ -127,18 +127,18 @@ pub const FramePacer = struct {
     }
 
     /// Get a smoothed FPS estimate.
-    pub fn fpsEstimate(self: *const @This()) f64 {
+    pub fn fpsEstimate(self: *const FramePacer) f64 {
         if (self.actual_frame_ns_ema == 0) return 0;
         return 1_000_000_000.0 / @as(f64, @floatFromInt(self.actual_frame_ns_ema));
     }
 
     /// Get the target frame rate.
-    pub fn targetFps(self: *const @This()) f64 {
+    pub fn targetFps(self: *const FramePacer) f64 {
         return 1_000_000_000.0 / @as(f64, @floatFromInt(self.target_ns));
     }
 
     /// True if the last frame missed its deadline.
-    pub fn missedDeadline(self: *const @This(), io: std.Io) bool {
+    pub fn missedDeadline(self: *const FramePacer, io: std.Io) bool {
         const now_ns = self.clock.now(.monotonic, io).nanoseconds;
         return now_ns > self.deadline_ns;
     }

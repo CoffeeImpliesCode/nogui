@@ -13,7 +13,17 @@ const c = @cImport({
 
 const QuadCurve = struct { p0x: f32, p0y: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32 };
 
-fn cubicToQuads(p0x: f32, p0y: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32, p3x: f32, p3y: f32, out: []QuadCurve) usize {
+fn cubicToQuads(
+    p0x: f32,
+    p0y: f32,
+    p1x: f32,
+    p1y: f32,
+    p2x: f32,
+    p2y: f32,
+    p3x: f32,
+    p3y: f32,
+    out: []QuadCurve,
+) usize {
     const t: f32 = 0.5;
     const mt: f32 = 1.0 - t;
     const b0x = mt * p0x + t * p1x;
@@ -72,10 +82,10 @@ fn ensureMonotonic(q: QuadCurve, out: *[2]QuadCurve) usize {
     return 2;
 }
 
-const MAX_CURVES = 4096;
+const max_curves = 4096;
 
 const OutlineCollector = struct {
-    curves: [MAX_CURVES]QuadCurve = undefined,
+    curves: [max_curves]QuadCurve = undefined,
     count: usize = 0,
     first_x: f32 = 0,
     first_y: f32 = 0,
@@ -113,28 +123,53 @@ const OutlineCollector = struct {
         self.last_y = to_y;
     }
     fn close(self: *OutlineCollector) void {
-        if (@abs(self.last_x - self.first_x) > 0.001 or @abs(self.last_y - self.first_y) > 0.001) self.lineTo(self.first_x, self.first_y);
+        if (@abs(self.last_x - self.first_x) > 0.001 or @abs(self.last_y - self.first_y) > 0.001) {
+            self.lineTo(self.first_x, self.first_y);
+        }
     }
 };
 
 fn ftMoveTo(to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
     const col: *OutlineCollector = @ptrCast(@alignCast(user));
-    col.moveTo(@as(f32, @floatFromInt(to.*.x)) / 64.0, @as(f32, @floatFromInt(to.*.y)) / 64.0);
+    col.moveTo(
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.x)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.y)) / 64.0)),
+    );
     return 0;
 }
 fn ftLineTo(to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
     const col: *OutlineCollector = @ptrCast(@alignCast(user));
-    col.lineTo(@as(f32, @floatFromInt(to.*.x)) / 64.0, @as(f32, @floatFromInt(to.*.y)) / 64.0);
+    col.lineTo(
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.x)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.y)) / 64.0)),
+    );
     return 0;
 }
 fn ftConicTo(control: [*c]const c.FT_Vector, to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
     const col: *OutlineCollector = @ptrCast(@alignCast(user));
-    col.conicTo(@as(f32, @floatFromInt(control.*.x)) / 64.0, @as(f32, @floatFromInt(control.*.y)) / 64.0, @as(f32, @floatFromInt(to.*.x)) / 64.0, @as(f32, @floatFromInt(to.*.y)) / 64.0);
+    col.conicTo(
+        @as(f32, @floatCast(@as(f64, @floatFromInt(control.*.x)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(control.*.y)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.x)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.y)) / 64.0)),
+    );
     return 0;
 }
-fn ftCubicTo(c1: [*c]const c.FT_Vector, c2: [*c]const c.FT_Vector, to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {
+fn ftCubicTo(
+    c1: [*c]const c.FT_Vector,
+    c2: [*c]const c.FT_Vector,
+    to: [*c]const c.FT_Vector,
+    user: ?*anyopaque,
+) callconv(.c) c_int {
     const col: *OutlineCollector = @ptrCast(@alignCast(user));
-    col.cubicTo(@as(f32, @floatFromInt(c1.*.x)) / 64.0, @as(f32, @floatFromInt(c1.*.y)) / 64.0, @as(f32, @floatFromInt(c2.*.x)) / 64.0, @as(f32, @floatFromInt(c2.*.y)) / 64.0, @as(f32, @floatFromInt(to.*.x)) / 64.0, @as(f32, @floatFromInt(to.*.y)) / 64.0);
+    col.cubicTo(
+        @as(f32, @floatCast(@as(f64, @floatFromInt(c1.*.x)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(c1.*.y)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(c2.*.x)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(c2.*.y)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.x)) / 64.0)),
+        @as(f32, @floatCast(@as(f64, @floatFromInt(to.*.y)) / 64.0)),
+    );
     return 0;
 }
 
@@ -174,8 +209,8 @@ pub fn main() !void {
     const outline = &face.*.glyph.*.outline;
     std.debug.print("\n=== 'A' contours={d} points={d} ===\n", .{ outline.*.n_contours, outline.*.n_points });
 
-    var col = OutlineCollector{};
-    var funcs = c.FT_Outline_Funcs{
+    var col: OutlineCollector = .{};
+    var funcs: c.FT_Outline_Funcs = .{
         .move_to = ftMoveTo,
         .line_to = ftLineTo,
         .conic_to = ftConicTo,
@@ -187,7 +222,15 @@ pub fn main() !void {
 
     std.debug.print("Curves: {d}\n", .{col.count});
     for (col.curves[0..@min(col.count, 8)], 0..) |q, i|
-        std.debug.print("  [{d}] ({d:.1},{d:.1})->({d:.1},{d:.1})->({d:.1},{d:.1})\n", .{ i, q.p0x, q.p0y, q.p1x, q.p1y, q.p2x, q.p2y });
+        std.debug.print("  [{d}] ({d:.1},{d:.1})->({d:.1},{d:.1})->({d:.1},{d:.1})\n", .{
+            i,
+            q.p0x,
+            q.p0y,
+            q.p1x,
+            q.p1y,
+            q.p2x,
+            q.p2y,
+        });
     if (col.count > 8) std.debug.print("  ...\n", .{});
 
     var mono: [8192]QuadCurve = undefined;
@@ -218,5 +261,6 @@ pub fn main() !void {
         }
     }
     std.debug.print("AABB: ({d:.1},{d:.1})->({d:.1},{d:.1})\n", .{ min_x, min_y, max_x, max_y });
-    std.debug.print("Advance: {d:.1}px\n", .{@as(f32, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0});
+    const adv = @as(f32, @floatCast(@as(f64, @floatFromInt(face.*.glyph.*.metrics.horiAdvance)) / 64.0));
+    std.debug.print("Advance: {d:.1}px\n", .{adv});
 }

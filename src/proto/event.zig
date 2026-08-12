@@ -37,14 +37,16 @@ const MouseButton = @import("widget.zig").MouseButton;
 const Key = @import("widget.zig").Key;
 const KeyMods = @import("widget.zig").KeyMods;
 const Context = @import("context.zig").Context;
+const InputState = @import("context.zig").InputState;
+const WidgetState = @import("context.zig").WidgetState;
 
-// ─── Event Tagged Union ───────────────────────────────
+// ─── Event Tagged Union ─────────────────────────────
 
 /// A single input event, translated from SDL3.
 /// Pure data — no pointers, no allocator dependencies.
 /// Copyable, serializable, replayable.
 pub const Event = union(enum) {
-    // ── Mouse ────────────────────────────────────────
+    // ── Mouse ─────────────────────────────────
     mouse_move: struct {
         x: f32,
         y: f32,
@@ -68,7 +70,7 @@ pub const Event = union(enum) {
         scroll_y: f32,
     },
 
-    // ── Keyboard ─────────────────────────────────────
+    // ── Keyboard ────────────────────────────────
     key_down: struct {
         key: Key,
         mods: KeyMods,
@@ -82,7 +84,7 @@ pub const Event = union(enum) {
         codepoint: u21,
     },
 
-    // ── Window ───────────────────────────────────────
+    // ── Window ─────────────────────────────────
     window_close: struct {
         win_id: u32,
     },
@@ -103,7 +105,7 @@ pub const Event = union(enum) {
     },
 };
 
-// ─── Hit-testing ──────────────────────────────────────
+// ─── Hit-testing ───────────────────────────────
 
 /// Result of hit-testing the widget tree at a point.
 pub const HitResult = struct {
@@ -171,23 +173,22 @@ pub fn hitTest(root: *Widget, x: f32, y: f32) ?HitResult {
     return hits[hit_count - 1];
 }
 
-// ─── Dispatch Engine ──────────────────────────────────
+// ─── Dispatch Engine ──────────────────────────────
 
 /// State machine transitions for a single widget interaction.
 ///
 /// ```
 ///          mouse enter           mouse_down on self
-/// INACTIVE ──────────→ HOT ───────────────────────→ ACTIVE
+/// INACTIVE ──────────→ HOT ───────────────────→ ACTIVE
 ///   ↑                     ↑                              │
 ///   │ mouse leave         │ mouse_down on other          │ mouse_up
-///   └─────────────────────┘◄─────────────────────────────┘
+///   └───────────────┘◄───────────────────┘
 ///                          ←── active_id released ──────┘
 /// ```
 ///
 /// Focus is tracked independently:
 ///   mouse_down on widget → focus_id = widget.id
 ///   tab                  → focus_id = next focusable widget
-
 /// Translate SDL3 events to our Event type and dispatch them against
 /// the laid-out widget tree.
 ///
@@ -330,7 +331,7 @@ pub fn dispatchEvents(ctx: *Context, root: *Widget, events: []const Event) void 
 ///
 /// Separated from `dispatchEvents` so it can be called independently
 /// in headless mode or replayed traces.
-pub fn processFrameAdvanceEvents(ctx: *Context, root: *Widget, input: *const @import("context.zig").InputState) void {
+pub fn processFrameAdvanceEvents(ctx: *Context, root: *Widget, input: *const InputState) void {
     var stack: [512]*Widget = undefined;
     var sp: u32 = 0;
     stack[sp] = root;
@@ -431,25 +432,25 @@ fn cycleFocus(ctx: *Context, root: *Widget, reverse: bool) void {
 // ─── Query helpers (called by widget constructors) ──
 
 /// Returns true if the widget is hovered this frame.
-pub fn isHot(state: *const @import("context.zig").WidgetState) bool {
+pub fn isHot(state: *const WidgetState) bool {
     return state.interaction == .hot or state.interaction == .active;
 }
 
 /// Returns true if the widget is pressed this frame.
-pub fn isActive(state: *const @import("context.zig").WidgetState) bool {
+pub fn isActive(state: *const WidgetState) bool {
     return state.interaction == .active;
 }
 
 /// Returns true if the widget was just clicked this frame.
 /// Consumed by widget constructor — resets to false after read.
-pub fn wasClicked(state: *@import("context.zig").WidgetState) bool {
+pub fn wasClicked(state: *WidgetState) bool {
     const result = state.clicked;
     state.clicked = false; // one-shot
     return result;
 }
 
 /// Returns true if the widget has keyboard focus.
-pub fn isFocused(state: *const @import("context.zig").WidgetState) bool {
+pub fn isFocused(state: *const WidgetState) bool {
     return state.interaction == .focused;
 }
 
@@ -457,10 +458,12 @@ pub fn isFocused(state: *const @import("context.zig").WidgetState) bool {
 
 /// Reader interface for injecting events from a non-SDL source.
 pub const EventReader = struct {
+    const Self = EventReader;
+
     buf: []const Event,
     pos: usize,
 
-    pub fn read(self: *@This()) ?Event {
+    pub fn read(self: *Self) ?Event {
         if (self.pos >= self.buf.len) return null;
         const ev = self.buf[self.pos];
         self.pos += 1;
@@ -468,7 +471,7 @@ pub const EventReader = struct {
     }
 };
 
-// ─── Tests ────────────────────────────────────────────
+// ─── Tests ─────────────────────────────────
 
 const testing = std.testing;
 
@@ -477,14 +480,14 @@ fn testId(n: usize) Id {
 }
 
 test "hitTest: returns null for empty tree" {
-    var root = Widget{ .id = Id.zero, .sizing = .{}, .kind = .{ .label = .{ .text = "" } } };
+    var root: Widget = .{ .id = Id.zero, .sizing = .{}, .kind = .{ .label = .{ .text = "" } } };
     root.rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
     const result = hitTest(&root, 200, 200);
     try testing.expect(result == null);
 }
 
 test "hitTest: finds widget at point" {
-    var root = Widget{ .id = Id.root, .sizing = .{}, .kind = .{ .label = .{ .text = "" } } };
+    var root: Widget = .{ .id = Id.root, .sizing = .{}, .kind = .{ .label = .{ .text = "" } } };
     root.rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
     const result = hitTest(&root, 50, 50);
     try testing.expect(result != null);
@@ -493,10 +496,10 @@ test "hitTest: finds widget at point" {
 
 test "hitTest: picks deepest widget" {
     const child_id = testId(0);
-    var child = Widget{ .id = child_id, .sizing = .{}, .kind = .{ .button = .{ .label = "" } } };
+    var child: Widget = .{ .id = child_id, .sizing = .{}, .kind = .{ .button = .{ .label = "" } } };
     child.rect = .{ .x = 10, .y = 10, .w = 30, .h = 30 };
 
-    var root = Widget{ .id = Id.root, .sizing = .{}, .kind = .{ .column = .{ .children = &.{&child} } } };
+    var root: Widget = .{ .id = Id.root, .sizing = .{}, .kind = .{ .column = .{ .children = &.{&child} } } };
     root.rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
 
     const result = hitTest(&root, 25, 25);
@@ -505,7 +508,7 @@ test "hitTest: picks deepest widget" {
 }
 
 test "KeyMods: default is empty" {
-    const mods = KeyMods{};
+    const mods: KeyMods = .{};
     try testing.expect(!mods.shift);
     try testing.expect(!mods.ctrl);
     try testing.expect(!mods.alt);
@@ -513,7 +516,7 @@ test "KeyMods: default is empty" {
 }
 
 test "Event: is plain-data union (no dangling ptrs)" {
-    const ev = Event{ .mouse_move = .{ .x = 100, .y = 200, .rel_x = 0, .rel_y = 0 } };
+    const ev: Event = .{ .mouse_move = .{ .x = 100, .y = 200, .rel_x = 0, .rel_y = 0 } };
     try testing.expectEqual(@as(f32, 100), ev.mouse_move.x);
 }
 
@@ -523,7 +526,7 @@ test "EventReader: replays event sequence" {
         .{ .mouse_button_down = .{ .button = .left, .x = 10, .y = 20, .clicks = 1 } },
         .{ .mouse_button_up = .{ .button = .left, .x = 10, .y = 20, .clicks = 1 } },
     };
-    var reader = EventReader{ .buf = &events, .pos = 0 };
+    var reader: EventReader = .{ .buf = &events, .pos = 0 };
     try testing.expect(reader.read() != null);
     try testing.expect(reader.read() != null);
     try testing.expect(reader.read() != null);
