@@ -535,18 +535,38 @@ float4 main(
                     QuadCurve cv = curveAt(m.curve_bda, ci);
                     total_f += sweepSegment(win_f, off_f, cv.p0, cv.p1, cv.p2);
                 }
+                // ZERO-COVERAGE DISCARD: the run summed to exactly 0.0
+                // (a fragment whose window misses every curve in the row —
+                // e.g. a column outside the path's x-extent). The coverage
+                // is then clamp(0/4) == 0, pow(0, 1/GAMMA) == 0, alpha 0 —
+                // the blend would leave the dst untouched, so discard is
+                // pixel-identical and saves the ROP write.
+                if (total_f == 0.0) discard;
                 float cov_f = clamp(abs(total_f) / (SWEEP_WINDOW * SWEEP_WINDOW), 0.0, 1.0);
                 cov_f = pow(cov_f, 1.0 / COVERAGE_GAMMA);
                 return float4(vColor.rgb, cov_f * vColor.a);
             }
             // The row is outside the band (e.g. the rect's 2px AA
-            // surround): fall through to the full loop — never drop curves.
+            // surround): the band's row range is the union over the
+            // curves' sweep-window overlaps — the same endpoint extremes
+            // (min/max of p0.y, p2.y) as sweepSegment's first-line y-clip,
+            // so a row outside it has EVERY curve's y-clip firing (max(p0.y,
+            // p2.y) <= off.y above, min(p0.y, p2.y) >= off.y + size.y
+            // below) and every sweepSegment returns exactly 0.0 — the full
+            // loop's sum is exactly 0.0, bit-identical. Return the
+            // coverage-0 result directly; the full loop only runs when the
+            // band data is absent (band_bda == 0, kept above).
+            return float4(vColor.rgb, 0.0);
         }
         float total_f = 0.0;
         for (uint i = 0u; i < nf; i++) {
             QuadCurve cv = curveAt(m.curve_bda, i);
             total_f += sweepSegment(win_f, off_f, cv.p0, cv.p1, cv.p2);
         }
+        // ZERO-COVERAGE DISCARD (the no-band fallback): identical to the
+        // banded path — total 0.0 → cov 0 → alpha 0, so discard is
+        // pixel-identical and skips the ROP write.
+        if (total_f == 0.0) discard;
         float cov_f = clamp(abs(total_f) / (SWEEP_WINDOW * SWEEP_WINDOW), 0.0, 1.0);
         cov_f = pow(cov_f, 1.0 / COVERAGE_GAMMA);
         return float4(vColor.rgb, cov_f * vColor.a);
@@ -623,6 +643,13 @@ float4 main(
                         uint ei = vk::BufferPointer<uint>(m.band_bda + uint64_t(4) * uint64_t(bh.indices_base + idx_off + i)).Get();
                         accumulateStrokeEdge(edgeAt(m.curve_bda, ei), px, py, cover, h_here, u_here);
                     }
+                    // ZERO-COVERAGE DISCARD: the accumulated total is
+                    // exactly 0.0 (every edge in the run fails the y-clip
+                    // for this fragment) → cov == 0 → alpha 0 — the blend
+                    // would leave the dst untouched, so discard is
+                    // pixel-identical and saves the ROP write.
+                    float c = cover + h_here - u_here;
+                    if (c == 0.0) discard;
                     // |.| takes the winding magnitude: the accumulated
                     // value is the SIGNED covered area (negative for
                     // CW-wound bands, e.g. horizontal strokes whose caps
@@ -630,10 +657,20 @@ float4 main(
                     // magnitude. With the running cover in place the abs
                     // no longer complements right edges — it only flips
                     // the whole-band sign.
-                    float cov = clamp(abs(cover + h_here - u_here), 0.0, 1.0);
+                    float cov = clamp(abs(c), 0.0, 1.0);
                     cov = pow(cov, 1.0 / COVERAGE_GAMMA);
                     return float4(vColor.rgb, cov * vColor.a);
                 }
+                // The row is outside the band (e.g. the rect's 2px AA
+                // surround): the band's row range is the union over the
+                // edges' window overlaps — a row outside it has EVERY edge
+                // failing the y-clip (ymax <= py above, ymin >= py + 1.0
+                // below) → accumulateStrokeEdge returns before any
+                // accumulation → the total is exactly 0.0, bit-identical
+                // to the full loop. Return the coverage-0 result directly;
+                // the full loop only runs when the band data is absent
+                // (band_bda == 0, kept above).
+                return float4(vColor.rgb, 0.0);
             }
             float cover = 0.0;   // running covered height (columns < px)
             float h_here = 0.0;  // covered height in this column
@@ -641,13 +678,18 @@ float4 main(
             for (uint i = 0u; i < ne; i++) {
                 accumulateStrokeEdge(edgeAt(m.curve_bda, i), px, py, cover, h_here, u_here);
             }
+            // ZERO-COVERAGE DISCARD (the no-band fallback): identical to
+            // the banded path — total 0.0 → cov 0 → alpha 0, so discard is
+            // pixel-identical and skips the ROP write.
+            float c = cover + h_here - u_here;
+            if (c == 0.0) discard;
             // |.| takes the winding magnitude: the accumulated value is
             // the SIGNED covered area (negative for CW-wound bands, e.g.
             // horizontal strokes whose caps run against the row), and the
             // coverage is its magnitude. With the running cover in place
             // the abs no longer complements right edges — it only flips
             // the whole-band sign.
-            float cov = clamp(abs(cover + h_here - u_here), 0.0, 1.0);
+            float cov = clamp(abs(c), 0.0, 1.0);
             cov = pow(cov, 1.0 / COVERAGE_GAMMA);
             return float4(vColor.rgb, cov * vColor.a);
         }

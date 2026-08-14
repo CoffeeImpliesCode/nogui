@@ -29,10 +29,13 @@
 //!      the material's gradient_to stays all-zero = flat fill — the
 //!      shader composites vColor, the rect's color, over the gradient,
 //!      the text-glyph precedent).
-//!   4. RECT — one SceneRect per path: dst = the bbox + the 2px surround
+//!   4. RECT — one SceneRect per path: dst = the INK extent (the flattened
+//!      conics' curve bbox, NOT the control-point hull) + the 2px surround
 //!      (the same quad padding as the glyph precedent, so the AA fringe
 //!      resolves fully inside the quad), origin = the bbox top-left (the
-//!      sweep anchor), clip_id = ~0, color = the Oklab fill.
+//!      sweep anchor), clip_id = ~0, color = the Oklab fill. Paths whose
+//!      fill alpha is 0 (fill="none", stroke-only) emit NO fill rect — the
+//!      alpha-0 sweep would be a no-op blend.
 //!
 //! The material's win_w/win_h carry the bbox extent, but the current
 //! shader's glyph branch sweeps a fixed 1x1 px window and ignores them
@@ -669,29 +672,58 @@ pub const SvgView = struct {
             // the text-glyph precedent.
             const color = srgbToOklab(path.fill);
             const bbox = path.bbox;
-            rect_list.append(a, .{
-                // The 2px surround on all sides (the glyph precedent): the
-                // ink's edge lands within ceil(w)-w of the bbox boundary
-                // and the outermost pixel ring must resolve its AA fully
-                // inside the quad.
-                .dst = .{ bbox.x - 2, bbox.y - 2, @ceil(bbox.w) + 4, @ceil(bbox.h) + 4 },
-                .src = .{ 0, 0, 1, 1 },
-                .corners = .{ 0, 0, 0, 0 },
-                .color = color,
-                .material_index = slot,
-                // The curve extent in sweep space (the CPU-side preview
-                // convention: curve_left/bottom/w/h).
-                .curve = .{ sweeper.curve_left, sweeper.curve_bottom, sweeper.curve_w, sweeper.curve_h },
-                .clip_id = std.math.maxInt(u32), // ~0: no clip
-                // The sweep anchor: the bbox's top-left (the curves are
-                // bbox-relative; fragPos - vOrigin locates the fragment
-                // in sweep space).
-                .origin = .{ bbox.x, bbox.y },
-            }) catch |e| {
-                var orphan = sweepers.pop().?;
-                orphan.deinit();
-                return e;
-            };
+            // The fill rect: SKIPPED when the fill is invisible (alpha 0
+            // — the tiger's 13 stroke-only paths carry fill="none"). The
+            // sweep writes alpha 0 everywhere (a no-op blend), so dropping
+            // the rect is pixel-identical and kills the whole TYPE_SWEEP
+            // draw. The SVG path model has no gradients, so alpha 0 is the
+            // full skip condition.
+            if (color[3] != 0) {
+                // The fill quad is sized from the INK extent — the
+                // flattened conics' curve bbox (the sweeper's rebased
+                // curve_w/curve_h) — NOT the parser's control-point hull
+                // (svg.zig's bbox includes every cubic's control points,
+                // which overhang the ink ~23% in y on the tiger).
+                // The ink + the 2px surround on all sides (the 2x2 sweep
+                // window and the AA fringe resolve inside it, the glyph
+                // precedent). The margin here is 2 USER units (the
+                // scale-1 form); setScale re-derives the dst with the
+                // scale-corrected margin 2/scale so the draw-time margin
+                // is exactly 2px at any scale (a user-unit margin would
+                // shrink below the window's 1.5px overhang at small
+                // scales and clip the ink's AA fringe). The rows the hull
+                // added above/below the ink are outside the fill band and
+                // fall through to the full curve loop for EXACTLY 0.0
+                // coverage — dropping them from the quad is pixel-identical
+                // (the shader's per-pixel math depends only on vOrigin +
+                // the cell, never the quad size) and removes those
+                // full-loop rows from the draw.
+                // The sweep space is y-up about the bbox top-left, so the
+                // ink's user-space (y-down) rect is:
+                //   x: bbox.x + curve_left .. + curve_w
+                //   y: bbox.y - (curve_bottom + curve_h) .. + curve_h.
+                const ink_x = bbox.x + sweeper.curve_left;
+                const ink_y = bbox.y - (sweeper.curve_bottom + sweeper.curve_h);
+                rect_list.append(a, .{
+                    .dst = .{ ink_x - 2, ink_y - 2, sweeper.curve_w + 4, sweeper.curve_h + 4 },
+                    .src = .{ 0, 0, 1, 1 },
+                    .corners = .{ 0, 0, 0, 0 },
+                    .color = color,
+                    .material_index = slot,
+                    // The curve extent in sweep space (the CPU-side preview
+                    // convention: curve_left/bottom/w/h).
+                    .curve = .{ sweeper.curve_left, sweeper.curve_bottom, sweeper.curve_w, sweeper.curve_h },
+                    .clip_id = std.math.maxInt(u32), // ~0: no clip
+                    // The sweep anchor: the bbox's top-left (the curves are
+                    // bbox-relative; fragPos - vOrigin locates the fragment
+                    // in sweep space).
+                    .origin = .{ bbox.x, bbox.y },
+                }) catch |e| {
+                    var orphan = sweepers.pop().?;
+                    orphan.deinit();
+                    return e;
+                };
+            }
 
             // The stroke: an ADDITIONAL rect (painted after the fill) with
             // the TYPE_STROKE material — the shader's distance branch. The
@@ -933,6 +965,32 @@ pub const SvgView = struct {
                 edges[i].y1 = pristine[i].y1 * scale;
             }
             self.buildStrokeBands(j, edges[0..count]);
+        }
+        // WIN 1 (the fill-quad sizing): the fill rects' dst carries the
+        // margin in USER units, but the margin must be 2px in PIXELS at
+        // the draw scale — the 2x2 sweep window extends 1.5px past the
+        // fragment's center on the low/left sides, so a sub-1.5px pixel
+        // margin would CLIP the ink's AA fringe (visible at small cards,
+        // e.g. the todo demo's ~0.2 scale). Re-derive the fill rects
+        // from the ink (the origin + the curve extent, both in user
+        // units) with the scale-corrected margin 2/scale: the injection
+        // scales the whole dst by `scale`, so the margin lands at exactly
+        // 2px at any scale. The fill rects are the rects whose material
+        // slot is a path's fill slot ([base_slot, base_slot +
+        // paths_len)); the stroke rects sit above paths_len and keep
+        // their bbox + stroke-width sizing (WIN 1 is fill-only).
+        const margin = 2.0 / scale;
+        const fill_lo = self.base_slot;
+        const fill_hi = self.base_slot + @as(u32, @intCast(self.paths_len));
+        for (self.rects_storage) |*r| {
+            if (r.material_index >= fill_lo and r.material_index < fill_hi) {
+                // The ink rect in user space, from the sweep extent:
+                // x: origin.x + curve_left .. + curve_w
+                // y: origin.y - (curve_bottom + curve_h) .. + curve_h.
+                const ink_x = r.origin[0] + r.curve[0];
+                const ink_y = r.origin[1] - (r.curve[1] + r.curve[3]);
+                r.dst = .{ ink_x - margin, ink_y - margin, r.curve[2] + 2.0 * margin, r.curve[3] + 2.0 * margin };
+            }
         }
     }
 

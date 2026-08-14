@@ -42,6 +42,19 @@ const MouseButton = @import("v7/event.zig").MouseButton;
 const Key = @import("v7/event.zig").Key;
 const hitTest = @import("v7/input.zig").hitTest; // runShot's forced --hover
 const Batch9Slice = @import("proto/render_9slice.zig").Batch9Slice;
+
+/// The offscreen Oklab render target format (the GUI pass's workspace).
+/// RGBA16F halves the blend ROP traffic vs RGBA32F: the Oklab values
+/// (L in [0,1], a/b in [-0.4,0.4]) need only 2^-11 relative precision —
+/// 8-20x headroom over the 8-bit sRGB output step. The fragment shader
+/// objects MUST be created with this format (the shader-object output
+/// override) or the attachment mismatch renders black.
+// The offscreen Oklab render target format. RGBA16F would halve the blend
+// ROP traffic, but it is BLOCKED on this stack: the shader-object output
+// override is unsupported (Vulkan 341 headers reject the flag/pNext) and
+// the half4 SPIR-V output needs shaderFloat16/storageInputOutput16, which
+// this GTX 1660 Ti driver does not expose (FeatureNotPresent). 32F stays.
+const render_target_format: noapi.Texture.TextureFormat = .rgba32_float;
 const SceneRect = @import("proto/render_9slice.zig").SceneRect;
 const BatchClipRect = @import("proto/render_9slice.zig").ClipRect;
 const TextEngine = @import("text.zig").TextEngine;
@@ -235,7 +248,7 @@ fn ensureRenderTarget(
     if (rt.texture.id != 0) gpu.textureDestroy(rt.*);
     rt.* = try gpu.textureCreate(.{
         .dimensions = .{ w, h, 1 },
-        .format = .rgba32_float,
+        .format = render_target_format,
         .usage = .{ .color_attachment = true, .sampled = true, .transfer_src = true },
     });
     rt_w.* = w;
@@ -1302,12 +1315,22 @@ pub fn run(
 
         var cmd = gw.commandsBegin();
 
-        // Mandelbrot compute pass BEFORE the GUI pass: the compute writes
-        // the fractal into the storage texture (set 1 of the GUI heap),
-        // then the barrier makes it visible to the GUI pass's sampled read.
-        cmd.beginZone(.{ .name = "mandelbrot_gpu", .src = @src() });
-        recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, time_ms);
-        cmd.endZone();
+        // Mandelbrot compute: dispatch only when this frame actually draws
+        // the fractal texture (the TodoApp's showcase box — the tiger and
+        // stroke scenes never sample it). It is window-level demo plumbing,
+        // not a v7 component; the per-frame texture check is the dynamic
+        // gate (a compute dispatch costs ~0.16ms even when unused).
+        const draws_mandelbrot = blk: {
+            if (ui.mandelbrot_idx) |mi| {
+                for (slice_rects.items) |r| if (r.tex_idx == mi) break :blk true;
+            }
+            break :blk false;
+        };
+        if (draws_mandelbrot) {
+            cmd.beginZone(.{ .name = "mandelbrot_gpu", .src = @src() });
+            recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, time_ms);
+            cmd.endZone();
+        }
 
         // Pass 1: GUI into the offscreen Oklab target.
         cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
@@ -1591,7 +1614,17 @@ pub fn runShot(
     // ±250 ms between runs (the fractal hue shifts with process timing),
     // which made runShot unreproducible at the byte level. The pinned
     // phase renders the same fractal as a typical interactive start.
-    recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, 1200);
+    // Dispatched only when the shot's frame actually draws the fractal
+    // (the same dynamic gate as the interactive loop).
+    const draws_mandelbrot = blk: {
+        if (ui.mandelbrot_idx) |mi| {
+            for (slice_rects.items) |r| if (r.tex_idx == mi) break :blk true;
+        }
+        break :blk false;
+    };
+    if (draws_mandelbrot) {
+        recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, 1200);
+    }
     try renderPass1(
         &batch,
         &cmd,
