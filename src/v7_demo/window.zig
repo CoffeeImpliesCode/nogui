@@ -30,6 +30,7 @@ const Io = std.Io;
 
 const App = @import("v7/app.zig").App;
 const tracy = @import("tracy");
+const FramePacer = @import("FramePacer.zig").FramePacer;
 const Id = @import("v7/id.zig").Id;
 const DrawCmd = @import("v7/drawcmd.zig").DrawCmd;
 const WidgetTree = @import("v7/widget.zig").WidgetTree;
@@ -1093,6 +1094,22 @@ pub fn run(
     var rt_h: u32 = 0;
     defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
 
+    // Frame pacer (Phase 2 — tier-2 frame pacing). The FIFO swapchain is
+    // vsync-paced and blocks the CPU on the GPU once the image queue is
+    // full; `Surface.slopNs()` reports that per-frame block. The pacer
+    // turns it into a sleep BEFORE the input poll so the frame lands just
+    // before the vblank instead of blocking after it. The refresh rate is
+    // queried once from the window's display (cheap at startup; 0 =
+    // unknown → the pacer's safe fallbacks). It is NOT polled per frame —
+    // on some platforms that is surprisingly performance intensive.
+    const refresh_hz: f32 = blk: {
+        const disp = sdl_win.getDisplayForWindow() catch break :blk 0.0;
+        const mode = disp.getCurrentMode() catch break :blk 0.0;
+        break :blk mode.refresh_rate orelse 0.0;
+    };
+    var pacer = FramePacer.init(io, refresh_hz);
+    var pacer_sleep_ns: u64 = 0;
+
     // Main loop — the WINDOW DRIVER: translate OS events into core Events
     // (the core never polls input or reads a clock itself), then emit one
     // .frame event per iteration with the driver's tick + clock.
@@ -1102,6 +1119,18 @@ pub fn run(
     var mandel_rect: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
     var mandel_drag: ?MandelDrag = null;
     while (!should_close) {
+        // Frame pacer: sleep the recommended delay BEFORE polling input so
+        // the frame lands just before the vblank instead of blocking after
+        // it (the swapchain FIFO queue full). The sleep is gated — the
+        // --frames benchmark measures raw throughput and must NOT be paced;
+        // its pacer.update still runs below for the ds/slop telemetry. The
+        // ui.frame_pacing toggle (OFF by default) parks the sleep while the
+        // cadence verification is blocked by system load.
+        if (ui.frame_pacing and max_frames == null and pacer_sleep_ns > 0) {
+            pacer.beginSleep(io);
+            try Io.sleep(io, Io.Duration.fromNanoseconds(pacer_sleep_ns), .real);
+            pacer.endSleep(io);
+        }
         // OS events -> core events. Input dispatches against the LAST
         // PRESENTED tree (valid — double-buffered); mutations show up on
         // the next frame.
@@ -1380,6 +1409,9 @@ pub fn run(
         // Mark the frame boundary — without this the tracy profiler thread
         // stays gated on its futex and never processes the connection.
         tracy.frameMark(null);
+        // Frame pacer: feed the slop (CPU ns blocked on the GPU this frame)
+        // and get the sleep recommendation for the next frame.
+        pacer_sleep_ns = pacer.update(io, gw.slopNs());
         if (max_frames) |mf| {
             if (tick >= mf) break;
         }

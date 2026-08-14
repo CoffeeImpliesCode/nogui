@@ -44,6 +44,11 @@ pub var svg_box_id: ?u32 = null;
 /// The window applies them to the SvgView each frame.
 pub var stroke_scale: f32 = 1.0;
 pub var stroke_algo: f32 = 2; // 2 = Cairo running-cover (the tiger's current look)
+/// Tier-2 frame pacing toggle: the FIFO swapchain + the slop-driven sleep
+/// before the input poll. OFF by default — the pacing's cadence must be
+/// verified on a quiet machine (the double-framing regression under load
+/// is why it's off). Flip to true once the measurements are trustworthy.
+pub var frame_pacing: bool = false;
 pub var stroke_oversize: f32 = 0.0;
 /// The tiger reference render's bindless heap index (the window uploads
 /// the rsvg-rendered tiger PNG as a texture; the tiger demo samples it
