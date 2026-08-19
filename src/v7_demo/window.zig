@@ -38,6 +38,7 @@ const Rect = @import("v7/widget.zig").Rect;
 const ClipRect = @import("v7/widget.zig").ClipRect;
 const absoluteRect = @import("v7/widget.zig").absoluteRect;
 const visualBorderRect = @import("v7/widget.zig").visualBorderRect;
+const sliderVisualLabel = @import("v7/widget.zig").sliderVisualLabel;
 const contentRect = @import("v7/widget.zig").contentRect;
 const visualContentRect = @import("v7/widget.zig").visualContentRect;
 const collectDrawCmds = @import("v7/drawcmd.zig").collectDrawCmds;
@@ -820,7 +821,7 @@ fn buildSliceRects(
         const text: ?[]const u8 = switch (n.kind) {
             // Buttons emit through their child label node — one text path.
             .label => |l| l.text,
-            .slider => |s| s.label,
+            .slider => sliderVisualLabel(n.kind),
             else => null,
         };
         const t = text orelse continue;

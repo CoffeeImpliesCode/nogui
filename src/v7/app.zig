@@ -423,6 +423,7 @@ pub const App = struct {
         var ctx: DrawCtx = .{
             .tree = tree,
             .arena = arena_alloc,
+            .surface = surface,
             .component_id = @enumFromInt(1), // buttons drawn by the root bind here
             .state_prev = self.state_prev,
             .state_cur = state_dir,

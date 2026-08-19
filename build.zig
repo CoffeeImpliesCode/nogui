@@ -133,42 +133,51 @@ pub fn build(b: *std.Build) void {
     v7_run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| v7_run_cmd.addArgs(args);
 
-    // Recompile the demo's shaders from the Slang sources before every run so
-    // a stale committed .spv can never silently render wrong toggles.
-    // Attached ONLY to the interactive demo run — test/check/lint gates stay
-    // hermetic (slangc is not guaranteed on PATH).
-    const quad_frag_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/quad_frag.spv", "shaders/quad_frag.slang",
-    });
-    v7_run_cmd.step.dependOn(&quad_frag_spv_step.step);
-    const quad_vert_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/quad_vert.spv", "shaders/quad_vert.slang",
-    });
-    v7_run_cmd.step.dependOn(&quad_vert_spv_step.step);
-    const blit_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/blit_oklab.spv", "shaders/blit_oklab.slang",
-    });
-    v7_run_cmd.step.dependOn(&blit_spv_step.step);
-    const fullscreen_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target",                     "spirv",                         "-I", "shaders",
-        "-o",     "shaders/fullscreen_vert.spv", "shaders/fullscreen_vert.slang",
-    });
-    v7_run_cmd.step.dependOn(&fullscreen_spv_step.step);
-    // The mandelbrot compute shader — compiled here too so the .spv can
-    // never silently lag the .slang source (it did once: a stale f32 .spv
-    // with an f64 layout mismatch read the scale's low bytes as max_iter
-    // and hung the GPU on scroll).
-    const mandelbrot_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target",                     "spirv",                         "-I", "shaders",
-        "-o",     "shaders/mandelbrot_comp.spv", "shaders/mandelbrot.comp.slang",
-    });
-    v7_run_cmd.step.dependOn(&mandelbrot_spv_step.step);
-    // The CS1 radix-sort compute shader (V1b) — same staleness rule: the
-    // sort key layout must never silently lag the batch's SceneRect.
-    const sort_spv_step = b.addSystemCommand(&.{
-        "slangc", "-target", "spirv", "-I", "shaders", "-o", "shaders/sort_comp.spv", "shaders/sort.comp.slang",
-    });
-    v7_run_cmd.step.dependOn(&sort_spv_step.step);
+    // Compile the demo shaders into Zig's cache, then update the committed
+    // runtime paths only when an input changes. Declared inputs and outputs
+    // make warm runs incremental while preventing stale SPIR-V binaries.
+    // These steps remain exclusive to the interactive demos because slangc
+    // is not guaranteed to be available to test/check/lint gates.
+    const Shader = struct {
+        source: []const u8,
+        output: []const u8,
+        imports: []const []const u8 = &.{},
+    };
+    const shaders = [_]Shader{
+        .{
+            .source = "shaders/quad_frag.slang",
+            .output = "quad_frag.spv",
+            .imports = &.{
+                "shaders/lib/color.slang",
+                "shaders/lib/coord.slang",
+                "shaders/lib/coverage.slang",
+            },
+        },
+        .{ .source = "shaders/quad_vert.slang", .output = "quad_vert.spv" },
+        .{
+            .source = "shaders/blit_oklab.slang",
+            .output = "blit_oklab.spv",
+            .imports = &.{"shaders/lib/color.slang"},
+        },
+        .{ .source = "shaders/fullscreen_vert.slang", .output = "fullscreen_vert.spv" },
+        .{
+            .source = "shaders/mandelbrot.comp.slang",
+            .output = "mandelbrot_comp.spv",
+            .imports = &.{"shaders/lib/color.slang"},
+        },
+        .{ .source = "shaders/sort.comp.slang", .output = "sort_comp.spv" },
+    };
+    const shader_updates = b.addUpdateSourceFiles();
+    for (shaders) |shader| {
+        const compile_shader = b.addSystemCommand(&.{
+            "slangc", "-target", "spirv", "-I", "shaders", "-o",
+        });
+        const emitted_spv = compile_shader.addOutputFileArg(shader.output);
+        compile_shader.addFileArg(b.path(shader.source));
+        for (shader.imports) |import| compile_shader.addFileInput(b.path(import));
+        shader_updates.addCopyFileToSource(emitted_spv, b.fmt("shaders/{s}", .{shader.output}));
+    }
+    v7_run_cmd.step.dependOn(&shader_updates.step);
 
     // The Spotify scene reuses the v7 renderer and differs only in its root
     // component. Keeping this as a separate run step makes the stress scene
@@ -176,12 +185,7 @@ pub fn build(b: *std.Build) void {
     const spotify_run_cmd = b.addRunArtifact(v7_demo);
     spotify_run_cmd.addArgs(&.{"--spotify"});
     spotify_run_cmd.step.dependOn(b.getInstallStep());
-    spotify_run_cmd.step.dependOn(&quad_frag_spv_step.step);
-    spotify_run_cmd.step.dependOn(&quad_vert_spv_step.step);
-    spotify_run_cmd.step.dependOn(&blit_spv_step.step);
-    spotify_run_cmd.step.dependOn(&fullscreen_spv_step.step);
-    spotify_run_cmd.step.dependOn(&mandelbrot_spv_step.step);
-    spotify_run_cmd.step.dependOn(&sort_spv_step.step);
+    spotify_run_cmd.step.dependOn(&shader_updates.step);
     if (b.args) |args| spotify_run_cmd.addArgs(args);
     const spotify_run_step = b.step("spotify", "Run the Spotify UI stress scene");
     spotify_run_step.dependOn(&spotify_run_cmd.step);

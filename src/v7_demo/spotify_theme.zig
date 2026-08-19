@@ -5,6 +5,72 @@ pub const srgbToOklab = @import("text.zig").srgbToOklab;
 const Id = @import("v7/id.zig").Id;
 const UserCallback = @import("v7/callback.zig").UserCallback;
 
+/// Outer breathing room between the application surface and its chrome.
+pub const app_inset: f32 = 8;
+/// Separation between the primary workspace regions.
+pub const workspace_gap: f32 = app_inset;
+/// Width of the complete library sidebar in the full desktop layout.
+pub const sidebar_width_full: f32 = 280;
+/// Width of the navigation-only sidebar in compact layouts.
+pub const sidebar_width_compact: f32 = 64;
+/// Width of the now-playing detail rail in the full desktop layout.
+pub const now_playing_width_full: f32 = 240;
+/// Horizontal inset applied to content scene sections.
+pub const content_gutter: f32 = 16;
+/// Vertical inset for the top navigation header.
+pub const header_gutter_y: f32 = 6;
+/// Separation between adjacent controls in the navigation header.
+pub const header_control_gap: f32 = 6;
+/// Hero section inset.
+pub const hero_gutter: f32 = 16;
+/// Hero artwork-to-copy separation.
+pub const hero_content_gap: f32 = 18;
+/// Hero top inset.
+pub const hero_gutter_top: f32 = 32;
+/// Hero bottom inset.
+pub const hero_gutter_bottom: f32 = 26;
+/// Actions rail inset.
+pub const action_gutter_y: f32 = 12;
+/// Separation between controls in the desktop actions rail.
+pub const action_control_gap: f32 = 12;
+/// Separation between controls in the compact actions rail.
+pub const action_control_gap_compact: f32 = 8;
+/// Track table horizontal inset.
+pub const table_gutter: f32 = 12;
+/// Track table header vertical inset.
+pub const table_header_gutter_y: f32 = 6;
+/// Track table row height.
+pub const track_row_height: f32 = 40;
+/// Track artwork edge length.
+pub const track_artwork_size: f32 = 28;
+/// Separation between track artwork and text.
+pub const track_artwork_gap: f32 = 8;
+/// Minimum width of the artwork-and-copy identity column.
+pub const track_identity_width_min: f32 = 120;
+/// Maximum text width when the identity column reaches its minimum.
+pub const track_identity_text_width_max: f32 =
+    track_identity_width_min - track_artwork_size - track_artwork_gap;
+/// Separation between title and artist in a table row.
+pub const track_text_gap: f32 = 2;
+/// Height reserved for the track title.
+pub const track_title_slot_height: f32 = 20;
+/// Height reserved for the track artist.
+pub const track_artist_slot_height: f32 = 17;
+/// Fixed height of the bottom playback bar.
+pub const player_height: f32 = 72;
+/// Inner inset shared by sidebar sections and navigation controls.
+pub const sidebar_padding: f32 = app_inset;
+/// Vertical separation between the sidebar's sections.
+pub const sidebar_section_gap: f32 = 8;
+/// Height of one primary navigation target.
+pub const sidebar_nav_row_height: f32 = 36;
+/// Square icon target used when the sidebar collapses.
+pub const sidebar_compact_nav_size: f32 = 36;
+/// Fixed height of one playlist row in the expanded sidebar.
+pub const sidebar_row_height: f32 = 44;
+/// Vertical separation between adjacent sidebar rows.
+pub const sidebar_row_gap: f32 = 4;
+
 // Spotify dark palette. Colors are authored in sRGB and converted at draw time.
 pub const c_bg: [4]f32 = .{ 0.07, 0.07, 0.07, 1.0 };
 pub const c_sidebar_bg: [4]f32 = .{ 0.02, 0.02, 0.02, 1.0 };
@@ -12,7 +78,21 @@ pub const c_card_bg: [4]f32 = .{ 0.09, 0.09, 0.09, 1.0 };
 pub const c_card_elevated: [4]f32 = .{ 0.14, 0.14, 0.14, 1.0 };
 pub const c_hover: [4]f32 = .{ 0.16, 0.16, 0.16, 1.0 };
 pub const c_active_row: [4]f32 = .{ 0.165, 0.165, 0.165, 1.0 };
+/// Table surfaces stay close to the page so individual tracks do not form wells.
+pub const c_track_inactive_bg: [4]f32 = c_bg;
+pub const c_track_active_bg: [4]f32 = .{ 0.10, 0.10, 0.10, 1.0 };
+pub const c_table_divider: [4]f32 = .{ 1.0, 1.0, 1.0, 0.06 };
+pub const playlist_artwork_size: f32 = 32.0;
+pub const hero_artwork_size: f32 = 148.0;
+pub const hero_overline_size: f32 = 10.0;
+pub const hero_title_size: f32 = 28.0;
+pub const hero_description_size: f32 = 12.0;
+pub const hero_metadata_size: f32 = 11.0;
 pub const c_player_bg: [4]f32 = .{ 0.09, 0.09, 0.09, 1.0 };
+/// Secondary player controls blend into the fixed player band.
+pub const c_player_control_bg: [4]f32 = c_player_bg;
+pub const c_player_progress: [4]f32 = .{ 0.08, 0.52, 0.24, 1.0 };
+pub const c_player_utility: [4]f32 = .{ 0.52, 0.52, 0.52, 1.0 };
 pub const c_accent: [4]f32 = .{ 0.11, 0.73, 0.33, 1.0 };
 pub const c_accent_hover: [4]f32 = .{ 0.12, 0.84, 0.38, 1.0 };
 pub const c_accent_dim: [4]f32 = .{ 0.08, 0.28, 0.14, 1.0 };
@@ -20,8 +100,8 @@ pub const c_text: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 };
 pub const c_text_sec: [4]f32 = .{ 0.70, 0.70, 0.70, 1.0 };
 pub const c_text_muted: [4]f32 = .{ 0.42, 0.42, 0.42, 1.0 };
 pub const c_border: [4]f32 = .{ 0.20, 0.20, 0.20, 0.5 };
-pub const c_hero_grad_top: [4]f32 = .{ 0.28, 0.15, 0.48, 1.0 };
-pub const c_hero_grad_bot: [4]f32 = .{ 0.09, 0.09, 0.10, 1.0 };
+pub const c_hero_grad_top: [4]f32 = .{ 0.20, 0.12, 0.30, 1.0 };
+pub const c_hero_grad_bot: [4]f32 = .{ 0.07, 0.07, 0.08, 1.0 };
 pub const c_like_active: [4]f32 = c_accent;
 
 // Existing names stay public for callers that predate the expanded palette.
@@ -52,25 +132,25 @@ const artwork_gradients = [_][2][4]f32{
     .{ .{ 0.92, 0.24, 0.38, 1.0 }, .{ 0.38, 0.06, 0.36, 1.0 } },
 };
 
-const artwork_emblems = [_][]const u8{ "✦", "♪", "◉", "◆", "≈", "△" };
-
+const artwork_emblems: [artwork_gradients.len][]const u8 = .{ "✦", "♪", "◉", "◆", "≈", "△" };
 pub fn drawArtworkTile(ctx: *DrawCtx, size: f32, seed: u8) !Id {
     const index: usize = @as(usize, seed) % artwork_gradients.len;
     const colors = artwork_gradients[index];
+    const radius: f32 = if (size <= track_artwork_size) 2.0 else 6.0;
     const tile = try ctx.column(.{
         .basis = size,
         .min_main = size,
-        .clip = true,
+        .box_sizing = .border_box,
         .fill = colors[0],
         .gradient = srgbToOklab(colors[1]),
-        .radius = .{ .top = 6, .right = 6, .bottom = 6, .left = 6 },
+        .radius = .{ .top = radius, .right = radius, .bottom = radius, .left = radius },
         .padding = .{
             .top = size * 0.28,
             .right = size * 0.18,
             .bottom = size * 0.18,
             .left = size * 0.18,
         },
-        .shadow = 8,
+        .shadow = @as(f32, if (size <= playlist_artwork_size) 0 else 4),
     });
     defer ctx.pop();
 

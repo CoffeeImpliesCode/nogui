@@ -3,108 +3,110 @@
 const std = @import("std");
 const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
 const widget = @import("v7/widget.zig");
+const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
 
+// Shared 3-column shell: wide stable Now-Playing, flexible Transport,
+// stable Volume. Side columns keep their width so play controls never
+// jitter as track metadata changes.
 const player_tracks = [_]widget.ColumnTrack{
-    .{ .basis = 270, .grow = 0, .shrink = 1, .min_main = 118 },
-    .{ .basis = 440, .grow = 1, .shrink = 1, .min_main = 142 },
-    .{ .basis = 210, .grow = 0, .shrink = 1, .min_main = 88 },
+    .{ .basis = 240, .grow = 0, .shrink = 1, .min_main = 120 },
+    .{ .basis = 0, .grow = 1, .shrink = 1, .min_main = 200 },
+    .{ .basis = 200, .grow = 0, .shrink = 1, .min_main = 120 },
 };
 const player_columns: widget.SharedColumns = .{ .tracks = &player_tracks };
 
-pub fn draw(app: anytype, ctx: *DrawCtx) !void {
+pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
+    _ = spec;
     const App = @TypeOf(app.*);
     const track_index = if (app.current_track_idx < app.tracks.len) app.current_track_idx else 0;
     const current_track = app.tracks[track_index];
 
     _ = try ctx.row(.{
         .columns = &player_columns,
-        .basis = 82,
+        .basis = theme.player_height,
+        .min_main = theme.player_height,
         .shrink = 0,
-        .gap = 12,
+        .gap = 16,
         .clip = true,
-        .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 8 },
-        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+        .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 8 },
         .fill = theme.c_player_bg,
         .gradient = theme.srgbToOklab(theme.c_player_bg),
-        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .border = .{ .top = 1 },
         .border_color = theme.c_border,
     });
     defer ctx.pop();
 
-    try drawTrackInfo(App, current_track, ctx);
+    try drawNowPlaying(App, current_track, ctx);
     try drawTransport(App, app, current_track, ctx);
-    try drawPlayerActions(app, ctx);
+    try drawVolume(app, ctx);
 }
 
-fn drawTrackInfo(comptime App: type, track: anytype, ctx: *DrawCtx) !void {
-    _ = try ctx.row(.{ .gap = 10, .shrink = 1, .clip = true, .@"align" = .center });
+fn drawNowPlaying(comptime App: type, track: anytype, ctx: *DrawCtx) !void {
+    _ = try ctx.row(.{ .gap = 8, .shrink = 1, .min_main = 0, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
-    _ = try theme.drawArtworkTile(ctx, 48, track.artwork_seed);
+    _ = try theme.drawArtworkTile(ctx, 36, track.artwork_seed);
 
     {
-        _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 24, .gap = 2, .clip = true });
+        _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 20, .gap = 2, .clip = true });
         defer ctx.pop();
         _ = try ctx.label(.{
             .text = track.title,
             .text_overflow = .ellipsis,
-            .max_width = 176,
             .color = theme.c_text,
-            .font_size = 13,
+            .font_size = 11,
         });
         _ = try ctx.label(.{
             .text = track.artist,
             .text_overflow = .ellipsis,
-            .max_width = 176,
-            .color = theme.c_text_sec,
-            .font_size = 11,
+            .color = theme.c_player_utility,
+            .font_size = 9,
         });
     }
 
     _ = try ctx.button(.{
         .label = if (track.is_liked) "♥" else "♡",
         .on_click = App.toggleCurrentLike,
-        .basis = 28,
+        .basis = 22,
         .shrink = 1,
-        .min_main = 24,
-        .color = if (track.is_liked) theme.c_like_active else theme.c_text_muted,
-        .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
-        .radius = .{ .top = 14, .right = 14, .bottom = 14, .left = 14 },
-        .fill = theme.c_player_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_bg),
-        .font_size = 15,
+        .min_main = 18,
+        .color = if (track.is_liked) theme.c_player_progress else theme.c_player_utility,
+        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
+        .font_size = 13,
+        .fill = theme.c_player_control_bg,
+        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
     });
 }
 
 fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx) !void {
-    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 142, .gap = 5, .clip = true });
+    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 200, .gap = 6, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
     {
         _ = try ctx.row(.{ .gap = 8, .clip = true, .justify = .center });
         defer ctx.pop();
-        try drawTransportButton(ctx, "⇄", App.toggleShuffle, app.shuffle, 26);
-        try drawTransportButton(ctx, "|◀", App.prevTrack, false, 30);
+        try drawTransportButton(ctx, "S", App.toggleShuffle, app.shuffle, 24);
+        try drawTransportButton(ctx, "|<", App.prevTrack, false, 24);
         _ = try ctx.button(.{
-            .label = if (app.is_playing) "⏸" else "▶",
+            .label = if (app.is_playing) "||" else ">",
             .on_click = App.togglePlay,
-            .basis = 36,
-            .shrink = 1,
+            .basis = 32,
+            .shrink = 0,
             .min_main = 32,
             .color = theme.c_bg,
-            .padding = .{ .left = 9, .right = 9, .top = 7, .bottom = 7 },
-            .radius = .{ .top = 20, .right = 20, .bottom = 20, .left = 20 },
+            .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 },
+            .radius = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 },
             .fill = theme.c_text,
             .gradient = theme.srgbToOklab(theme.c_text),
-            .font_size = 13,
+            .font_size = 12,
         });
-        try drawTransportButton(ctx, "▶|", App.nextTrack, false, 30);
-        try drawTransportButton(ctx, "↻", App.toggleRepeat, app.repeat, 26);
+        try drawTransportButton(ctx, ">|", App.nextTrack, false, 24);
+        try drawTransportButton(ctx, "R", App.toggleRepeat, app.repeat, 24);
     }
 
     {
-        _ = try ctx.row(.{ .gap = 7, .clip = true, .@"align" = .center });
+        _ = try ctx.row(.{ .gap = 6, .clip = true, .@"align" = .center });
         defer ctx.pop();
         const duration_sec: f32 = @floatFromInt(track.duration_sec);
         const elapsed_sec = @max(@as(f32, 0), @min(app.progress_sec, duration_sec));
@@ -115,27 +117,30 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
             "{d}:{d:0>2}",
             .{ elapsed_minutes, elapsed_seconds },
         );
-        _ = try ctx.label(.{
-            .text = elapsed_text,
-            .color = theme.c_text_muted,
-            .font_size = 10,
-        });
+        {
+            _ = try ctx.row(.{ .basis = 28, .shrink = 0, .justify = .end, .clip = true });
+            defer ctx.pop();
+            _ = try ctx.label(.{ .text = elapsed_text, .color = theme.c_player_utility, .font_size = 9 });
+        }
         _ = try ctx.slider(.{
             .label = "seek",
+            .visual_label = "",
             .value = &app.progress_sec,
             .min = 0,
             .max = duration_sec,
             .grow = 1,
             .shrink = 1,
             .basis = 100,
-            .min_main = 36,
-            .color = theme.c_accent,
-            .padding = .{ .left = 2, .right = 2 },
+            .min_main = 100,
+            .color = theme.c_player_progress,
+            .padding = .{ .left = 1, .right = 1 },
         });
         _ = try ctx.label(.{
             .text = track.duration_str,
-            .color = theme.c_text_muted,
-            .font_size = 10,
+            .color = theme.c_player_utility,
+            .font_size = 9,
+            .basis = 28,
+            .shrink = 0,
         });
     }
 }
@@ -153,54 +158,52 @@ fn drawTransportButton(
         .basis = basis,
         .shrink = 1,
         .min_main = basis,
-        .color = if (active) theme.c_accent else theme.c_text_sec,
-        .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
-        .radius = .{ .top = 14, .right = 14, .bottom = 14, .left = 14 },
-        .fill = theme.c_player_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_bg),
+        .color = if (active) theme.c_player_progress else theme.c_player_utility,
+        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
+        .fill = theme.c_player_control_bg,
+        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
         .font_size = 12,
     });
 }
 
-fn drawPlayerActions(app: anytype, ctx: *DrawCtx) !void {
-    _ = try ctx.row(.{ .gap = 7, .shrink = 1, .min_main = 88, .clip = true, .@"align" = .center });
+fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
+    _ = try ctx.row(.{ .gap = 6, .shrink = 1, .min_main = 0, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
     _ = try ctx.button(.{
-        .label = "☷",
-        .basis = 24,
+        .label = "=",
+        .basis = 22,
         .shrink = 1,
-        .min_main = 20,
-        .color = theme.c_text_sec,
-        .padding = .{ .left = 3, .right = 3, .top = 4, .bottom = 4 },
-        .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
-        .fill = theme.c_player_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_bg),
-        .font_size = 14,
+        .min_main = 18,
+        .color = theme.c_player_utility,
+        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
+        .fill = theme.c_player_control_bg,
+        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
+        .font_size = 12,
     });
     _ = try ctx.button(.{
-        .label = "▣",
-        .basis = 24,
+        .label = "[]",
+        .basis = 22,
         .shrink = 1,
-        .min_main = 20,
-        .color = theme.c_text_sec,
-        .padding = .{ .left = 3, .right = 3, .top = 4, .bottom = 4 },
-        .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
-        .fill = theme.c_player_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_bg),
-        .font_size = 14,
+        .min_main = 18,
+        .color = theme.c_player_utility,
+        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
+        .fill = theme.c_player_control_bg,
+        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
+        .font_size = 12,
     });
-    _ = try ctx.label(.{ .text = "🔊", .color = theme.c_text_sec, .font_size = 12 });
+    _ = try ctx.label(.{ .text = "<", .color = theme.c_player_utility, .font_size = 12 });
     _ = try ctx.slider(.{
         .label = "volume",
+        .visual_label = "",
         .value = &app.volume,
         .min = 0.0,
         .max = 1.0,
-        .grow = 1,
+        .grow = 0,
         .shrink = 1,
-        .basis = 72,
-        .min_main = 26,
-        .color = theme.c_accent,
-        .padding = .{ .left = 2, .right = 2 },
+        .basis = 100,
+        .min_main = 100,
+        .color = theme.c_player_utility,
+        .padding = .{ .left = 1, .right = 1 },
     });
 }

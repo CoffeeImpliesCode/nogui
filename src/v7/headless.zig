@@ -24,11 +24,14 @@ const Rect = widget.Rect;
 const Size = @import("widget.zig").Size;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const WidgetNode = @import("widget.zig").WidgetNode;
+const DrawCtx = @import("drawctx.zig").DrawCtx;
 const MeasureFn = @import("flex.zig").MeasureFn;
+const layoutWith = @import("flex.zig").layoutWith;
 const Event = @import("event.zig").Event;
 const Key = @import("event.zig").Key;
 const KeyEvent = @import("event.zig").KeyEvent;
 const MouseButton = @import("event.zig").MouseButton;
+const input = @import("input.zig");
 
 /// One frame of output: the frame index plus the serialized widget tree.
 pub const FrameOutput = struct {
@@ -255,7 +258,6 @@ fn objNumber(obj: std.json.ObjectMap, name: []const u8) !f64 {
     return num(try objField(obj, name));
 }
 
-/// JSON shape of one widget node; null optionals are omitted by the writer.
 const NodeView = struct {
     id: u32,
     kind: []const u8,
@@ -266,6 +268,8 @@ const NodeView = struct {
     children: ?[]const u32 = null, // containers
     gap: ?f32 = null, // column/row
     label: ?[]const u8 = null, // label/button/slider
+    accessible_label: ?[]const u8 = null, // button semantic label
+    visual_label: ?[]const u8 = null, // slider visible label override
     value: ?f32 = null, // slider
 };
 
@@ -298,7 +302,6 @@ fn writeNode(
         rectView(widget.visualBorderRect(tree, node.id))
     else
         null;
-
     const view: NodeView = .{
         .id = node.id.index(),
         .kind = @tagName(node.kind),
@@ -316,6 +319,14 @@ fn writeNode(
             .label => |l| l.text,
             .button => |b| b.label,
             .slider => |s| s.label,
+            else => null,
+        },
+        .accessible_label = switch (node.kind) {
+            .button => |b| b.accessible_label,
+            else => null,
+        },
+        .visual_label = switch (node.kind) {
+            .slider => |s| s.visual_label,
             else => null,
         },
         .value = switch (node.kind) {
@@ -479,6 +490,17 @@ fn findNodeConst(tree: *const WidgetTree, id: Id) ?*const WidgetNode {
     return null;
 }
 
+fn visualText(node: *const WidgetNode) ?[]const u8 {
+    return switch (node.kind) {
+        .label => |l| l.text,
+        // Button labels are retained only for semantic JSON/hit testing.
+        // DrawCtx emits visible text through the generated label child.
+        .button => null,
+        .slider => widget.sliderVisualLabel(node.kind),
+        else => null,
+    };
+}
+
 /// Deterministic layout fingerprint for golden comparisons: one compact
 /// JSON object per node — id, kind, the four rect values, and the box's
 /// layout-relevant sides (margin/border/padding, four floats each). The
@@ -522,9 +544,9 @@ pub fn layoutFingerprint(allocator: std.mem.Allocator, tree: *const WidgetTree) 
 }
 
 /// Verify layout invariants. Returns a human-readable report: "OK" or one
-/// line per violation. `measure` (optional) enables the text-fit check —
-/// labels/buttons/sliders must fit their measured text extent. `surface`
-/// (optional) is the surface size: when non-null, root-level nodes that
+/// line per violation. `measure` (optional) enables the visual text-fit check —
+/// labels, generated button labels, and sliders must fit their measured text extent.
+/// `surface` (optional) is the surface size: when non-null, root-level nodes that
 /// extend past it are flagged; null skips the bounds check (old behavior).
 /// True when the node or any ancestor is layered (z > 0): a layered node
 /// paints over siblings by design (the GPU z-sort decides the order), so
@@ -629,13 +651,9 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
 
         // Text fits its measured extent.
         if (measure) |m| {
-            const text: ?[]const u8 = switch (n.kind) {
-                .label => |l| l.text,
-                .button => |b| b.label,
-                .slider => |s| s.label,
-                else => null,
-            };
+            const text = visualText(n);
             if (text) |t| {
+                if (t.len == 0) continue;
                 const ms = m(t, n.font_size, n.font_id);
                 // flex.zig's measureLeaf adds the node's ACTUAL border +
                 // padding (widget.sidesSum) to the content measure; the old
@@ -648,7 +666,17 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
                     .slider => @max(100, ms.width + insets.w + pads.w),
                     else => ms.width,
                 };
-                if (r.w + 0.001 < need_w) {
+                // A positive cap plus clipped rendering intentionally permits
+                // measured text to exceed the rect; geometry checks stay
+                // independent.
+                const text_width_is_bounded = if (n.text_max_width) |max_width|
+                    max_width > 0 and (switch (n.text_overflow) {
+                        .visible => false,
+                        .clip, .ellipsis => true,
+                    })
+                else
+                    false;
+                if (!text_width_is_bounded and r.w + 0.001 < need_w) {
                     try add(
                         "text overflow: id {d} '{s}' needs {d:.1} wide, rect {d:.1}",
                         w,
@@ -734,21 +762,15 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
         var boxes: std.ArrayList(TextBox) = .empty;
         defer boxes.deinit(allocator);
         for (nodes) |*n| {
-            const text: ?[]const u8 = switch (n.kind) {
-                .label => |l| l.text,
-                .button => |b| b.label,
-                .slider => |s| s.label,
-                else => null,
-            };
+            const text = visualText(n);
             if (text == null) continue;
+            if (text.?.len == 0) continue;
             if (n.rect.w <= 0 or n.rect.h <= 0) continue;
             try boxes.append(allocator, .{ .id = n.id, .box = widget.contentRect(tree, n.id) });
         }
         // Strictly-ordered pairs (i < j): each overlap is reported once.
-        // Ancestor-descendant pairs are skipped: a button's label child sits
-        // in the button's own text box by construction (the same text, same
-        // box), so they always intersect — that is the design, not a
-        // collision.
+        // Ancestor-descendant pairs are skipped: nested text nodes can
+        // intentionally share a content box without colliding.
         for (0..boxes.items.len) |i| {
             for (i + 1..boxes.items.len) |j| {
                 const a = boxes.items[i].box;
@@ -1137,6 +1159,32 @@ const fakeMeasure = struct {
         return .{ .width = 40, .height = 24 };
     }
 }.f;
+
+test "verifyLayout: bounded ellipsis and clip text do not report overflow" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .label = .{ .text = "ellipsized" } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 20, .h = 24 },
+        .text_overflow = .ellipsis,
+        .text_max_width = 20,
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(2),
+        .kind = .{ .label = .{ .text = "clipped" } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 30, .w = 20, .h = 24 },
+        .text_overflow = .clip,
+        .text_max_width = 20,
+    });
+
+    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
+    defer std.testing.allocator.free(report);
+    try std.testing.expectEqualStrings("OK\n", report);
+}
 
 test "verifyLayout: overlapping text boxes are reported, adjacent are not" {
     var tree = WidgetTree.init(std.testing.allocator);
@@ -1602,4 +1650,74 @@ test "renderAscii: hover on a sub-2px node draws no border and does not panic" {
     const map = try renderAscii(std.testing.allocator, &tree, tiny);
     defer std.testing.allocator.free(map);
     try std.testing.expect(std.mem.indexOfScalar(u8, map, '@') == null);
+}
+
+test "verifyLayout: DrawCtx ellipsized button verifies its label child once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const button = try ctx.button(.{
+        .label = "A very long button label",
+        .max_width = 20,
+        .text_overflow = .ellipsis,
+    });
+
+    const measure = struct {
+        fn f(text: []const u8, _: f32, _: u8) widget.Size {
+            return .{ .width = @floatFromInt(text.len * 10), .height = 20 };
+        }
+    }.f;
+    const surface: Size = .{ .width = 20, .height = 40 };
+    layoutWith(&tree, surface, measure);
+
+    const report = try verifyLayout(
+        std.testing.allocator,
+        &tree,
+        measure,
+        surface,
+    );
+    defer std.testing.allocator.free(report);
+    try std.testing.expectEqualStrings("OK\n", report);
+
+    // The semantic payload remains available to JSON and click dispatch.
+    const json = try treeToJson(std.testing.allocator, &tree);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"button\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "A very long button label") != null);
+    try std.testing.expectEqualStrings(
+        "A very long button label",
+        tree.node(button).?.kind.button.label,
+    );
+    try std.testing.expectEqual(button, input.hitButton(&tree, .{ 10, 10 }).?);
+}
+
+test "verifyLayout: slider text fit uses visual_label" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    var value: f32 = 0.5;
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .slider = .{
+            .label = "semantic label that is much too long",
+            .visual_label = "x",
+            .value = &value,
+            .min = 0,
+            .max = 1,
+        } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 20 },
+    });
+
+    const measure = struct {
+        fn f(text: []const u8, _: f32, _: u8) Size {
+            return .{ .width = @floatFromInt(text.len * 10), .height = 20 };
+        }
+    }.f;
+    const report = try verifyLayout(std.testing.allocator, &tree, measure, null);
+    defer std.testing.allocator.free(report);
+    try std.testing.expectEqualStrings("OK\n", report);
 }

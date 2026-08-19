@@ -21,6 +21,7 @@
 //!
 //! Per the prototype spec (notes/v7-prototype-spec.md §4).
 const std = @import("std");
+const widget = @import("widget.zig");
 
 const Id = @import("id.zig").Id;
 const Box = @import("widget.zig").Box;
@@ -28,6 +29,7 @@ const Sides = @import("widget.zig").Sides;
 const BoxSizing = @import("widget.zig").BoxSizing;
 const Justify = @import("flex.zig").Justify;
 const Align = @import("flex.zig").Align;
+const layout = @import("flex.zig").layout;
 const StateKey = @import("state.zig").Key;
 const stateHash = @import("state.zig").hashName;
 const StateDir = @import("state.zig").StateDir;
@@ -67,6 +69,14 @@ fn applyFlexSizing(self: *DrawCtx, id: Id, opts: anytype) void {
     if (@hasField(T, "grow")) node.flex.grow = opts.grow;
     if (@hasField(T, "shrink")) node.flex.shrink = opts.shrink;
     if (@hasField(T, "basis")) node.flex.basis = opts.basis;
+    if (@hasField(T, "min_main")) node.flex.min_main = opts.min_main;
+}
+
+/// Apply only explicit shrink/min-main bounds to a generated button label.
+fn applyButtonLabelSizing(self: *DrawCtx, id: Id, opts: anytype) void {
+    const node = self.tree.node(id).?;
+    const T = @TypeOf(opts);
+    if (@hasField(T, "shrink")) node.flex.shrink = opts.shrink;
     if (@hasField(T, "min_main")) node.flex.min_main = opts.min_main;
 }
 
@@ -158,6 +168,9 @@ pub const DrawCtx = struct {
     /// scratch buffers: the allocation lives as long as the arena, and the
     /// double-buffered arenas keep the previous frame's text readable.
     arena: std.mem.Allocator,
+    /// The host surface for this frame. Null keeps direct-draw contexts
+    /// independent of an App and lets scenes choose their legacy layout.
+    surface: ?widget.Size = null,
     /// The App's component registry + its gpa: component() registers nested
     /// components here so their buttons dispatch (dispatchClick looks the
     /// owner up in this map). Null in single-frame tests — components still
@@ -186,6 +199,18 @@ pub const DrawCtx = struct {
     fn optsFontSize(opts: anytype) f32 {
         if (@hasField(@TypeOf(opts), "font_size")) return opts.font_size;
         return 0;
+    }
+    /// Duplicate text options into the frame arena. Options commonly carry a
+    /// plain slice (`.visual_label = "Volume"`), but accepting an optional
+    /// slice too keeps the payload's nullable contract natural for callers.
+    fn dupeOptionalText(self: *DrawCtx, value: anytype) !?[]const u8 {
+        switch (@typeInfo(@TypeOf(value))) {
+            .optional => {
+                if (value) |text| return try self.arena.dupe(u8, text);
+                return null;
+            },
+            else => return try self.arena.dupe(u8, value),
+        }
     }
 
     fn optsFontId(opts: anytype) u8 {
@@ -318,22 +343,34 @@ pub const DrawCtx = struct {
         if (@hasField(T, "on_click")) on_click = callback.wrap(opts.on_click);
         if (@hasField(T, "on_click_with_data")) user_callback = opts.on_click_with_data;
         if (@hasField(T, "user_callback")) user_callback = opts.user_callback;
+
         const label_copy = try self.arena.dupe(u8, opts.label);
+        var accessible_label: ?[]const u8 = null;
+        if (@hasField(T, "accessible_label")) {
+            accessible_label = try self.dupeOptionalText(opts.accessible_label);
+        }
         var kind: WidgetKind = .{ .button = .{
             .label = label_copy,
+            .accessible_label = accessible_label,
             .on_click = on_click,
             .owner = self.component_id,
             .user_callback = user_callback,
         } };
         if (@hasField(T, "color")) kind.button.color = asColor(opts.color);
+
         const font_size = optsFontSize(opts);
         const font_id = optsFontId(opts);
         const id = try self.create(kind, boxFromOpts(opts), font_size, font_id);
         applyFlexSizing(self, id, opts);
         applyTextOptions(self, id, opts);
+
+        // Buttons center generated labels unless the caller overrides either
+        // flex axis independently.
         const node = self.tree.node(id).?;
         node.style.justify = .center;
         node.style.@"align" = .center;
+        applyFlexStyle(self, id, opts);
+
         self.descend(id);
         const label_id = try self.label(.{
             .text = label_copy,
@@ -341,7 +378,20 @@ pub const DrawCtx = struct {
             .font_size = font_size,
             .font_id = font_id,
         });
+        applyButtonLabelSizing(self, label_id, opts);
         applyTextOptions(self, label_id, opts);
+        if (@hasField(T, "text_overflow")) {
+            const overflow: TextOverflow = opts.text_overflow;
+            if (overflow == .ellipsis or overflow == .clip) {
+                if (@hasField(T, "max_width")) {
+                    if (opts.max_width > 0) {
+                        // A bounded button label may shrink to its parent's
+                        // final content box instead of its natural width.
+                        self.tree.node(label_id).?.flex.min_main = 0;
+                    }
+                }
+            }
+        }
         self.pop();
         return id;
     }
@@ -349,14 +399,20 @@ pub const DrawCtx = struct {
     /// A slider bound to a live f32. Label text is duplicated into the
     /// frame arena (see label()).
     pub fn slider(self: *DrawCtx, opts: anytype) !Id {
+        const T = @TypeOf(opts);
         const label_copy = try self.arena.dupe(u8, opts.label);
+        var visual_label: ?[]const u8 = null;
+        if (@hasField(T, "visual_label")) {
+            visual_label = try self.dupeOptionalText(opts.visual_label);
+        }
         var kind: WidgetKind = .{ .slider = .{
             .label = label_copy,
+            .visual_label = visual_label,
             .value = opts.value,
             .min = opts.min,
             .max = opts.max,
         } };
-        if (@hasField(@TypeOf(opts), "color")) kind.slider.color = asColor(opts.color);
+        if (@hasField(T, "color")) kind.slider.color = asColor(opts.color);
         const id = try self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
         applyFlexSizing(self, id, opts);
         return id;
@@ -639,6 +695,73 @@ test "DrawCtx: justify and align flow into the node's FlexStyle" {
     // Defaults stay when the opts omit the fields.
     try std.testing.expectEqual(Justify.start, tree.node(plain).?.style.justify);
     try std.testing.expectEqual(Align.stretch, tree.node(plain).?.style.@"align");
+}
+test "DrawCtx: button label honors justify and align overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const button = try ctx.button(.{
+        .label = "start",
+        .justify = .start,
+        .@"align" = .end,
+    });
+    const button_node = tree.node(button).?;
+    const label_id = button_node.children.items[0];
+
+    try std.testing.expectEqual(Justify.start, button_node.style.justify);
+    try std.testing.expectEqual(Align.end, button_node.style.@"align");
+    try std.testing.expectEqualStrings("start", tree.node(label_id).?.kind.label.text);
+
+    layout(&tree, .{ .width = 120, .height = 40 });
+    try std.testing.expectEqual(@as(f32, 0), tree.node(label_id).?.rect.x);
+}
+test "DrawCtx: semantic and visual labels are copied, empty override stays explicit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    var button_text = [_]u8{ 'B', 'u', 't', 't', 'o', 'n' };
+    var semantic_text = [_]u8{ 'S', 'e', 'm' };
+    var slider_text = [_]u8{ 'S', 'l', 'i', 'd', 'e', 'r' };
+    var visual_text = [_]u8{ 'V', 'i', 's' };
+    var value: f32 = 0.5;
+
+    const button = try ctx.button(.{
+        .label = button_text[0..],
+        .accessible_label = semantic_text[0..],
+    });
+    const slider = try ctx.slider(.{
+        .label = slider_text[0..],
+        .visual_label = visual_text[0..],
+        .value = &value,
+        .min = 0,
+        .max = 1,
+    });
+    const hidden = try ctx.slider(.{
+        .label = "semantic only",
+        .visual_label = "",
+        .value = &value,
+        .min = 0,
+        .max = 1,
+    });
+
+    @memset(&button_text, 'x');
+    @memset(&semantic_text, 'x');
+    @memset(&slider_text, 'x');
+    @memset(&visual_text, 'x');
+
+    const button_kind = tree.node(button).?.kind.button;
+    try std.testing.expectEqualStrings("Button", button_kind.label);
+    try std.testing.expectEqualStrings("Sem", button_kind.accessible_label.?);
+    const slider_kind = tree.node(slider).?.kind.slider;
+    try std.testing.expectEqualStrings("Slider", slider_kind.label);
+    try std.testing.expectEqualStrings("Vis", slider_kind.visual_label.?);
+    try std.testing.expectEqualStrings("", tree.node(hidden).?.kind.slider.visual_label.?);
 }
 
 test "DrawCtx: container gap comes from opts, defaults to 0" {

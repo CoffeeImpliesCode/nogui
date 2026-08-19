@@ -152,13 +152,20 @@ pub const WidgetKind = union(enum) {
     label: struct { text: []const u8, color: [4]f32 = .{ 1, 1, 1, 1 } },
     button: struct {
         label: []const u8,
+        /// Optional semantic name for assistive technologies; `label` remains
+        /// the visual glyph/text emitted by the button's child label.
+        accessible_label: ?[]const u8 = null,
         color: [4]f32 = .{ 1, 1, 1, 1 },
         on_click: ?*const fn (*anyopaque) void = null, // set via callback.wrap()
         owner: Id = .root, // component_id at creation time
         user_callback: ?callback.UserCallback = null,
     },
     slider: struct {
+        /// Semantic label retained for diagnostics and machine-readable output.
         label: []const u8,
+        /// Optional text shown beside the slider. Null falls back to `label`;
+        /// an empty slice intentionally suppresses visible text.
+        visual_label: ?[]const u8 = null,
         color: [4]f32 = .{ 1, 1, 1, 1 },
         value: *f32,
         min: f32,
@@ -166,6 +173,16 @@ pub const WidgetKind = union(enum) {
     },
     spacer: struct { size: f32 = 0 },
 };
+
+/// Return the text a slider should display while preserving its semantic label
+/// in the slider payload. A null visual label falls back to that label; an
+/// explicitly empty visual label remains empty and suppresses visible text.
+pub fn sliderVisualLabel(kind: WidgetKind) []const u8 {
+    return switch (kind) {
+        .slider => |s| s.visual_label orelse s.label,
+        else => unreachable,
+    };
+}
 
 /// One node in the tree.
 pub const WidgetNode = struct {
@@ -510,6 +527,34 @@ test "WidgetNode: defaults are zero-valued" {
     try std.testing.expectEqual(@as(f32, 0), n.flex.grow);
     try std.testing.expectEqual(@as(f32, 1), n.flex.shrink);
     try std.testing.expectEqual(@as(f32, 0), n.flex.basis);
+}
+
+test "sliderVisualLabel: null falls back, empty suppresses visible text" {
+    var value: f32 = 0.5;
+    const fallback: WidgetKind = .{ .slider = .{
+        .label = "volume",
+        .value = &value,
+        .min = 0,
+        .max = 1,
+    } };
+    const override: WidgetKind = .{ .slider = .{
+        .label = "semantic",
+        .visual_label = "shown",
+        .value = &value,
+        .min = 0,
+        .max = 1,
+    } };
+    const hidden: WidgetKind = .{ .slider = .{
+        .label = "semantic",
+        .visual_label = "",
+        .value = &value,
+        .min = 0,
+        .max = 1,
+    } };
+
+    try std.testing.expectEqualStrings("volume", sliderVisualLabel(fallback));
+    try std.testing.expectEqualStrings("shown", sliderVisualLabel(override));
+    try std.testing.expectEqualStrings("", sliderVisualLabel(hidden));
 }
 
 test "visualBorderRect: scroll offset applies only to descendants" {

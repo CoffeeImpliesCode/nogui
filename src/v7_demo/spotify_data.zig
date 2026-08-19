@@ -41,7 +41,7 @@ pub const PlaylistSelection = enum {
     chill_lofi,
 };
 
-pub const default_tracks: [7]Track = .{
+pub const default_tracks = [_]Track{
     .{
         .id = 1,
         .title = "Resonance",
@@ -115,6 +115,58 @@ pub const default_tracks: [7]Track = .{
         .duration_sec = 349,
         .date_added = "Jan 10, 2026",
         .artwork_seed = 31,
+    },
+    .{
+        .id = 8,
+        .title = "Midnight City",
+        .artist = "M83",
+        .album = "Hurry Up, We're Dreaming",
+        .duration_str = "4:03",
+        .duration_sec = 243,
+        .date_added = "Dec 22, 2025",
+        .artwork_seed = 42,
+        .is_liked = true,
+    },
+    .{
+        .id = 9,
+        .title = "A Real Hero",
+        .artist = "College & Electric Youth",
+        .album = "Drive",
+        .duration_str = "4:27",
+        .duration_sec = 267,
+        .date_added = "Nov 9, 2025",
+        .artwork_seed = 9,
+    },
+    .{
+        .id = 10,
+        .title = "Running in the Night",
+        .artist = "FM-84 feat. Ollie Wride",
+        .album = "Atlas",
+        .duration_str = "4:30",
+        .duration_sec = 270,
+        .date_added = "Oct 17, 2025",
+        .artwork_seed = 28,
+        .is_liked = true,
+    },
+    .{
+        .id = 11,
+        .title = "Turbo Killer",
+        .artist = "Carpenter Brut",
+        .album = "Trilogy",
+        .duration_str = "3:33",
+        .duration_sec = 213,
+        .date_added = "Sep 4, 2025",
+        .artwork_seed = 51,
+    },
+    .{
+        .id = 12,
+        .title = "Ocean Drive",
+        .artist = "Miami Nights 1984",
+        .album = "Turbulence",
+        .duration_str = "4:53",
+        .duration_sec = 293,
+        .date_added = "Aug 16, 2025",
+        .artwork_seed = 15,
     },
 };
 

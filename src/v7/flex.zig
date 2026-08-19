@@ -2,19 +2,18 @@
 //!
 //! Pipeline: a bottom-up pass sizes every node and positions children
 //! relative to their container's CONTENT box; placeRoot places root-level
-//! nodes relative to the surface; two top-down passes (finalizeMain,
-//! finalizeCross) re-fit children against each container's FINAL content box —
-//! the main axis (grow/shrink/justify) first, then the cross axis
-//! (stretch/center/end). Both depend on the container's final size, which
-//! is only known once the container itself was sized — and the cross
-//! stretch needs the main pass first: a grown container must stretch its
-//! children across the GROWN cross, not the pre-grow hug. Node rects
-//! are RELATIVE BORDER boxes (see widget.zig's Rect doc): each rect = content
-//! + border + padding, positioned against its parent's content box; margins
-//! are handled by the parent when positioning. Absolute positions are
-//! resolved on demand via widget.absoluteRect — no offset folding. No
-//! allocation: only in-place `WidgetNode.rect` writes, byte-exact for the
-//! same input.
+//! nodes relative to the surface; top-down finalization alternates main-axis
+//! sizing (grow/shrink/justify) with cross-axis sizing (stretch/center/end),
+//! ending with cross sizing so descendants observe every final main-axis
+//! dimension. All passes depend on the container's final size, which is
+//! only known once the container itself was sized — and the cross stretch
+//! needs the main pass first: a grown container must stretch its children
+//! across the GROWN cross, not the pre-grow hug. Node rects are RELATIVE
+//! BORDER boxes (see widget.zig's Rect doc): each rect = content + border
+//! + padding, positioned against its parent's content box; margins are
+//! handled by the parent when positioning. Absolute positions are resolved
+//! on demand via widget.absoluteRect — no offset folding. No allocation:
+//! only in-place `WidgetNode.rect` writes, byte-exact for the same input.
 //!
 //! Per the prototype spec (notes/v7-prototype-spec.md §6).
 const std = @import("std");
@@ -72,9 +71,9 @@ pub const MeasureFn = *const fn (text: []const u8, font_size: f32, font_id: u8) 
 /// largest child cross size plus its own border + padding, or the available
 /// cross size under `align = .stretch`. Children live in the container's
 /// CONTENT box (its border box inset by its own border + padding). Because a
-/// container's real content box is only final once ITS parent was sized, two
-/// top-down passes (finalizeMain, finalizeCross) re-place every child against
-/// the FINAL content box. No allocation.
+/// container's real content box is only final once ITS parent was sized,
+/// top-down finalization uses main/cross/main/cross/main passes and ends with
+/// a final main-axis distribution against the FINAL content box. No allocation.
 pub fn layout(tree: *WidgetTree, available: Size) void {
     layoutWith(tree, available, null);
 }
@@ -95,19 +94,25 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
     // Root pseudo-container pass: place root-level nodes against `available`,
     // relative to the surface (rects are already relative, no offset folding).
     placeRoot(tree, available);
-    // the FINAL content main — nested containers never distribute space
+    // First final-main pass: nested containers never distribute space
     // bottom-up, their parent allocates it later. finalizeCross then
     // re-stretches every stretch-aligned child to the parent's FINAL content
     // cross, recursing so the propagation reaches nested containers (a
     // 776px grown card must stretch its slider to 758px, not leave it at
-    // the 125px hug width). The main pass runs FIRST: the stretch pass must
-    // see the container's grown main, or grown cards never fill their
-    // stretched children.
+    // the 125px hug width). The first main pass runs before the first cross
+    // pass: the stretch pass must see the container's grown main, or grown
+    // cards never fill their stretched children.
     finalizeMain(tree, .root, available);
     finalizeCross(tree, .root, available);
-    // The cross pass can change a row's final width when the row is nested
-    // inside a stretched column. Re-run main-axis distribution against those
-    // final cross dimensions before deriving scroll limits.
+    // The first cross pass can change a row's final width when the row is
+    // nested inside a stretched column. Re-run main-axis distribution against
+    // those final cross dimensions, then re-run cross sizing against any
+    // container dimensions changed by that second main pass. The final main
+    // pass propagates those cross allocations into same-axis descendants,
+    // such as a row button whose ellipsized label may shrink below its natural
+    // width. Update scroll offsets only after all five passes.
+    finalizeMain(tree, .root, available);
+    finalizeCross(tree, .root, available);
     finalizeMain(tree, .root, available);
     for (tree.nodes.items) |*node| updateScrollOffset(tree, node);
 }
@@ -613,8 +618,9 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     updateScrollOffset(tree, node);
 }
 
-/// Cap a measured text width when the node opts into a positive maximum.
+/// Cap a measured text width when clipped or ellipsized text opts into a positive maximum.
 fn capTextWidth(node: *const WidgetNode, width: f32) f32 {
+    if (node.text_overflow == .visible) return width;
     if (node.text_max_width) |max_width| {
         if (max_width > 0) return @min(width, max_width);
     }
@@ -644,9 +650,12 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
             node.rect.w = content_w + border.w + padding.w;
             node.rect.h = s.height + border.h + padding.h;
         },
-        .slider => |s| {
-            const ms = if (measure) |m|
-                m(s.label, node.font_size, node.font_id)
+        .slider => {
+            const visual_label = widget.sliderVisualLabel(node.kind);
+            const ms = if (visual_label.len == 0)
+                Size{ .width = 0, .height = 0 }
+            else if (measure) |m|
+                m(visual_label, node.font_size, node.font_id)
             else
                 Size{ .width = 84, .height = 20 };
             const content_w = @max(0, capTextWidth(node, ms.width));
@@ -1395,22 +1404,30 @@ test "nested stretch container keeps its own inset" {
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 30, .h = 20 }, tree.node(label).?.rect);
 }
 
-test "text_max_width caps measured content width" {
+test "text_max_width caps clipped text but not visible text" {
     var tree = WidgetTree.init(testing.allocator);
     defer tree.nodes.deinit(testing.allocator);
 
-    const label: Id = @enumFromInt(1);
-    const row: Id = @enumFromInt(2);
-    try appendNode(&tree, label, row, .{ .label = .{ .text = "abcdef" } });
+    const clipped_label: Id = @enumFromInt(1);
+    const visible_label: Id = @enumFromInt(2);
+    const row: Id = @enumFromInt(3);
+    try appendNode(&tree, clipped_label, row, .{ .label = .{ .text = "abcdef" } });
+    try appendNode(&tree, visible_label, row, .{ .label = .{ .text = "abcdef" } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
     wireChildren(&tree);
-    tree.node(label).?.text_max_width = 25;
-    tree.node(label).?.box.padding = .{ .left = 2, .right = 3 };
+    tree.node(clipped_label).?.text_overflow = .clip;
+    tree.node(clipped_label).?.text_max_width = 25;
+    tree.node(clipped_label).?.box.padding = .{ .left = 2, .right = 3 };
+    tree.node(visible_label).?.text_max_width = 25;
 
     layout(&tree, .{ .width = 200, .height = 40 });
 
     // The 60px fallback measurement is capped to 25px before box insets.
-    try testing.expectEqual(@as(f32, 30), tree.node(label).?.rect.w);
+    try testing.expectEqual(@as(f32, 30), tree.node(clipped_label).?.rect.w);
+    try testing.expectEqual(@as(f32, 30), tree.node(clipped_label).?.natural_main);
+    // A visible label ignores text_max_width and retains its natural width.
+    try testing.expectEqual(@as(f32, 60), tree.node(visible_label).?.rect.w);
+    try testing.expectEqual(@as(f32, 60), tree.node(visible_label).?.natural_main);
 }
 
 test "min_main overrides the natural shrink floor in a row" {
@@ -1484,6 +1501,48 @@ test "shared column row redistributes after ancestor cross stretch" {
     try testing.expectApproxEqAbs(@as(f32, 90), tree.node(a).?.rect.w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 110), tree.node(b).?.rect.w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 90), tree.node(b).?.rect.x, 0.01);
+}
+
+test "nested column button label stays within final content width" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+
+    const button_label: Id = @enumFromInt(1);
+    const button: Id = @enumFromInt(2);
+    const column: Id = @enumFromInt(3);
+    const row: Id = @enumFromInt(4);
+    const outer: Id = @enumFromInt(5);
+    try appendNode(&tree, button_label, button, .{ .label = .{ .text = "button" } });
+    try appendNode(&tree, button, column, .{ .button = .{ .label = "button" } });
+    try appendNode(&tree, column, row, .{ .column = .{} });
+    try appendNode(&tree, row, outer, .{ .row = .{} });
+    try appendNode(&tree, outer, .root, .{ .column = .{} });
+    wireChildren(&tree);
+
+    // Model a generated button label with ellipsis and a natural width wider
+    // than the nested column's final cross size.
+    tree.node(button_label).?.text_overflow = .ellipsis;
+    tree.node(button_label).?.text_max_width = 184;
+    tree.node(button_label).?.flex.min_main = 0;
+    tree.node(button).?.style.justify = .start;
+    tree.node(button).?.style.@"align" = .center;
+    tree.node(column).?.flex.min_main = 0;
+    tree.node(row).?.style.@"align" = .center;
+
+    const wideText = struct {
+        fn measure(_: []const u8, _: f32, _: u8) Size {
+            return .{ .width = 300, .height = 20 };
+        }
+    }.measure;
+    layoutWith(&tree, .{ .width = 84, .height = 80 }, wideText);
+
+    // The final cross pass narrows the button after the preceding main pass.
+    // The terminal main pass must then apply that width to the generated
+    // ellipsized label instead of leaving its stale natural width.
+    const column_content_width = widget.contentRect(&tree, column).w;
+    const button_content_width = widget.contentRect(&tree, button).w;
+    try testing.expectEqual(@as(f32, 84), column_content_width);
+    try testing.expect(tree.node(button_label).?.rect.w <= button_content_width);
 }
 
 test "scroll max_offset uses child margin-box extent" {

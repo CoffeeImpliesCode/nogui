@@ -5,11 +5,16 @@ const std = @import("std");
 const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
 const widget = @import("v7/widget.zig");
 const WidgetTree = widget.WidgetTree;
+const flex = @import("v7/flex.zig");
+const headless = @import("v7/headless.zig");
+const measure_cpu = @import("measure_cpu.zig");
 const theme = @import("spotify_theme.zig");
 const data = @import("spotify_data.zig");
 const sidebar = @import("spotify_sidebar.zig");
 const content = @import("spotify_content.zig");
 const player = @import("spotify_player.zig");
+const now_playing = @import("spotify_now_playing.zig");
+const spotify_layout = @import("spotify_layout.zig");
 
 pub const c_bg = theme.c_bg;
 pub const c_sidebar_bg = theme.c_sidebar_bg;
@@ -57,7 +62,7 @@ pub const SpotifyApp = struct {
     playlist_saved: bool = false,
 
     // Data set
-    tracks: [7]Track = data.default_tracks,
+    tracks: [data.default_tracks.len]Track = data.default_tracks,
     playlists: [6]PlaylistInfo = data.default_playlists,
 
     // Interaction callbacks.
@@ -183,7 +188,33 @@ pub const SpotifyApp = struct {
     }
 
     pub fn draw(self: *SpotifyApp, ctx: *DrawCtx) !void {
-        // Root container column spanning whole window
+        const spec = spotify_layout.forSurface(ctx.surface);
+        const workspace_tracks = [_]widget.ColumnTrack{
+            .{
+                .basis = spec.sidebar_width,
+                .grow = 0,
+                .shrink = 0,
+                .min_main = spec.sidebar_width,
+            },
+            .{
+                .grow = 1,
+                .shrink = 1,
+                .min_main = 360,
+            },
+            .{
+                .basis = spec.now_playing_width,
+                .grow = 0,
+                .shrink = 0,
+                .min_main = if (spec.show_now_playing) 220 else 0,
+            },
+        };
+        const workspace_columns: widget.SharedColumns = .{
+            .tracks = if (spec.show_now_playing)
+                workspace_tracks[0..]
+            else
+                workspace_tracks[0..2],
+        };
+
         _ = try ctx.column(.{
             .gap = 8,
             .grow = 1,
@@ -193,20 +224,36 @@ pub const SpotifyApp = struct {
         });
         defer ctx.pop();
 
-        // Upper workspace.
         {
-            _ = try ctx.row(.{ .gap = 8, .grow = 1 });
+            _ = try ctx.row(.{
+                .columns = &workspace_columns,
+                .gap = 8,
+                .grow = 1,
+                .shrink = 1,
+                .min_main = 0,
+                .clip = true,
+            });
             defer ctx.pop();
 
-            // Left Navigation Sidebar
-            try sidebar.draw(self, ctx);
+            try sidebar.draw(self, ctx, spec);
+            try content.draw(self, ctx, spec);
 
-            // Main Content Area (Playlist View / Catalog)
-            try content.draw(self, ctx);
+            if (spec.show_now_playing) {
+                _ = try ctx.row(.{
+                    .basis = spec.now_playing_width,
+                    .grow = 0,
+                    .shrink = 0,
+                    .min_main = spec.now_playing_width,
+                    .box_sizing = .border_box,
+                    .clip = true,
+                });
+                defer ctx.pop();
+
+                try now_playing.draw(self, ctx, spec);
+            }
         }
 
-        // Bottom player bar.
-        try player.draw(self, ctx);
+        try player.draw(self, ctx, spec);
     }
 };
 
@@ -246,4 +293,154 @@ test "SpotifyApp draws without error in DrawCtx" {
     try std.testing.expectEqual(PlaylistSelection.cyberpunk, app.selected_playlist);
     app.togglePlaylistSaved();
     try std.testing.expect(app.playlist_saved);
+}
+
+fn verifySpotifyLayout(surface: widget.Size, expect_center_priority: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    defer measure_cpu.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{
+        .tree = &tree,
+        .arena = arena.allocator(),
+        .surface = surface,
+    };
+
+    var app: SpotifyApp = .{};
+    try app.draw(&ctx);
+
+    flex.layoutWith(&tree, surface, measure_cpu.measure);
+    const report = try headless.verifyLayout(
+        std.testing.allocator,
+        &tree,
+        measure_cpu.measure,
+        surface,
+    );
+    defer std.testing.allocator.free(report);
+    try std.testing.expectEqualStrings("OK\n", report);
+
+    if (!expect_center_priority) return;
+
+    var workspace_row: ?*const widget.WidgetNode = null;
+    for (tree.nodes.items) |*node| {
+        switch (node.kind) {
+            .row => {
+                if (node.shared_columns != null and node.children.len == 3) {
+                    workspace_row = node;
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
+    const row = workspace_row orelse return error.WorkspaceRowNotFound;
+    const sidebar_node = tree.nodeConst(row.children.items[0]) orelse
+        return error.WorkspaceSidebarNotFound;
+    const center_node = tree.nodeConst(row.children.items[1]) orelse
+        return error.WorkspaceCenterNotFound;
+    const now_playing_node = tree.nodeConst(row.children.items[2]) orelse
+        return error.WorkspaceNowPlayingNotFound;
+    try std.testing.expect(center_node.rect.w > sidebar_node.rect.w);
+    try std.testing.expect(center_node.rect.w > now_playing_node.rect.w);
+}
+
+test "SpotifyApp desktop layout verifier at 1100x1160 prioritizes center" {
+    try verifySpotifyLayout(.{ .width = 1100, .height = 1160 }, true);
+}
+
+test "SpotifyApp medium layout verifier omits now-playing" {
+    try verifySpotifyLayout(.{ .width = 900, .height = 1160 }, false);
+}
+
+test "SpotifyApp compact layout verifier omits now-playing and labels" {
+    try verifySpotifyLayout(.{ .width = 640, .height = 1160 }, false);
+}
+
+test "SpotifyApp draw selects shell from surface" {
+    var desktop_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer desktop_arena.deinit();
+    var desktop_tree = WidgetTree.init(desktop_arena.allocator());
+    defer desktop_tree.nodes.deinit(desktop_arena.allocator());
+    var desktop_ctx: DrawCtx = .{
+        .tree = &desktop_tree,
+        .arena = desktop_arena.allocator(),
+    };
+    var desktop_app: SpotifyApp = .{};
+    try desktop_app.draw(&desktop_ctx);
+
+    var medium_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer medium_arena.deinit();
+    var medium_tree = WidgetTree.init(medium_arena.allocator());
+    defer medium_tree.nodes.deinit(medium_arena.allocator());
+    var medium_ctx: DrawCtx = .{
+        .tree = &medium_tree,
+        .arena = medium_arena.allocator(),
+        .surface = .{ .width = 800, .height = 600 },
+    };
+    var medium_app: SpotifyApp = .{};
+    try medium_app.draw(&medium_ctx);
+
+    try std.testing.expectEqual(spotify_layout.Mode.desktop, spotify_layout.forSurface(null).mode);
+    try std.testing.expectEqual(spotify_layout.Mode.medium, spotify_layout.forSurface(medium_ctx.surface).mode);
+    try std.testing.expect(medium_tree.nodes.items.len < desktop_tree.nodes.items.len);
+}
+
+test "SpotifyApp generated album label stays inside its button at 1100x1160" {
+    const surface: widget.Size = .{ .width = 1100, .height = 1160 };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    defer measure_cpu.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{
+        .tree = &tree,
+        .arena = arena.allocator(),
+        .surface = surface,
+    };
+
+    var app: SpotifyApp = .{};
+    try app.draw(&ctx);
+    flex.layoutWith(&tree, surface, measure_cpu.measure);
+
+    const expected_text = "Hurry Up, We're Dreaming";
+    var generated_label: ?*const widget.WidgetNode = null;
+    for (tree.nodes.items) |*node| {
+        switch (node.kind) {
+            .label => |label| {
+                if (!std.mem.eql(u8, label.text, expected_text)) continue;
+                const parent = tree.nodeConst(node.parent) orelse continue;
+                switch (parent.kind) {
+                    .button => |button| {
+                        if (std.mem.eql(u8, button.label, expected_text)) {
+                            generated_label = node;
+                            break;
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
+    const label_node = generated_label orelse return error.GeneratedAlbumLabelNotFound;
+    const button_node = tree.nodeConst(label_node.parent) orelse
+        return error.GeneratedAlbumButtonNotFound;
+
+    try std.testing.expectEqual(widget.TextOverflow.ellipsis, label_node.text_overflow);
+    const max_width = label_node.text_max_width orelse
+        return error.GeneratedAlbumLabelMaxWidthMissing;
+    try std.testing.expect(max_width > 0);
+
+    const label_rect = widget.absoluteRect(&tree, label_node.id);
+    const button_content_rect = widget.contentRect(&tree, button_node.id);
+    const epsilon: f32 = 0.001;
+    try std.testing.expect(label_rect.x >= button_content_rect.x - epsilon);
+    try std.testing.expect(label_rect.y >= button_content_rect.y - epsilon);
+    try std.testing.expect(
+        label_rect.x + label_rect.w <= button_content_rect.x + button_content_rect.w + epsilon,
+    );
+    try std.testing.expect(
+        label_rect.y + label_rect.h <= button_content_rect.y + button_content_rect.h + epsilon,
+    );
 }
