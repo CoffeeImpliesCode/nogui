@@ -23,6 +23,7 @@ pub const tracy_options: tracy.Options = .{
 };
 const Id = @import("v7/id.zig").Id;
 const ui = @import("ui.zig");
+const spotify_ui = @import("spotify.zig");
 const window_backend = @import("window.zig");
 const measure_cpu = @import("measure_cpu.zig");
 const headless = @import("v7/headless.zig");
@@ -46,13 +47,14 @@ pub fn main(init: std.process.Init) !void {
     var app = App.init(alloc);
     defer app.deinit();
     var todo: ui.TodoApp = .{};
-    _ = try app.register(ui.TodoApp, &todo);
+    var spotify: spotify_ui.SpotifyApp = .{};
     var tiger: ui.TigerApp = .{}; // registered at the --tiger dispatch (the App holds ONE root)
     var strokes: ui.TestStrokesApp = .{}; // --strokes: the stroke test scene
 
     var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, alloc);
     defer args_it.deinit();
     var window_mode = false;
+    var spotify_mode = false; // --spotify: the Spotify layout stress scene
     var tiger_mode = false; // --tiger: the dedicated tiger showcase window
     var strokes_mode = false; // --strokes: the stroke test scene
     var frames: ?u32 = null;
@@ -67,8 +69,11 @@ pub fn main(init: std.process.Init) !void {
     var bgr = false; // --bgr: BGR subpixel stripe order
     var damp = true; // --no-damp: disable the chroma damping
     var gpu_sort_verify = false; // --gpu-sort-verify: submit the bag in reverse paint order
+
     while (args_it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--tiger")) {
+        if (std.mem.eql(u8, arg, "--spotify")) {
+            spotify_mode = true;
+        } else if (std.mem.eql(u8, arg, "--tiger")) {
             // The dedicated showcase: the tiger LARGE (our sweep) next to
             // the librsvg reference render. Nothing else.
             tiger_mode = true;
@@ -125,6 +130,15 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    if (spotify_mode) {
+        _ = try app.register(spotify_ui.SpotifyApp, &spotify);
+    } else {
+        // Keep the default root registered for specialized modes until they
+        // replace it below. The simulator still dispatches TodoApp for those
+        // legacy modes.
+        _ = try app.register(ui.TodoApp, &todo);
+    }
+
     // Headless driver: read JSON-lines events from a script, feed them to
     // the core (time included — every .frame event carries the driver's
     // tick + clock), and print one JSON frame dump per frame event. Fully
@@ -152,7 +166,10 @@ pub fn main(init: std.process.Init) !void {
                 std.log.err("sim line {d}: {s}", .{ line_no, @errorName(err) });
                 std.process.exit(1);
             };
-            const out = app.handle(ui.TodoApp, &todo, ev) catch |err| {
+            const out = (if (spotify_mode)
+                app.handle(spotify_ui.SpotifyApp, &spotify, ev)
+            else
+                app.handle(ui.TodoApp, &todo, ev)) catch |err| {
                 std.log.err("sim line {d}: {s}", .{ line_no, @errorName(err) });
                 std.process.exit(1);
             };
@@ -280,6 +297,72 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (spotify_mode) {
+        if (window_mode) {
+            try window_backend.run(
+                spotify_ui.SpotifyApp,
+                &app,
+                &spotify,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+                null,
+            );
+            return;
+        }
+        if (frames) |n| {
+            window_backend.run(
+                spotify_ui.SpotifyApp,
+                &app,
+                &spotify,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+                n,
+            ) catch |e| {
+                std.log.err("run failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        if (shot_path) |p| {
+            window_backend.runShot(
+                spotify_ui.SpotifyApp,
+                &app,
+                &spotify,
+                p,
+                shot_hover,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+            ) catch |e| {
+                std.log.err("runShot failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        if (layout_path == null) {
+            try window_backend.run(
+                spotify_ui.SpotifyApp,
+                &app,
+                &spotify,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+                null,
+            );
+            return;
+        }
+    }
+
     if (window_mode) {
         try window_backend.run(ui.TodoApp, &app, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
         return;
@@ -320,8 +403,11 @@ pub fn main(init: std.process.Init) !void {
         app.serialize_json = true;
         defer measure_cpu.deinit();
         app.measure = measure_cpu.measure;
-        todo.frame_count = 1;
-        const out = try app.frame(ui.TodoApp, &todo, 1, .{ .width = 1100, .height = 1160 });
+        if (!spotify_mode) todo.frame_count = 1;
+        const out = if (spotify_mode)
+            try app.frame(spotify_ui.SpotifyApp, &spotify, 1, .{ .width = 1100, .height = 1160 })
+        else
+            try app.frame(ui.TodoApp, &todo, 1, .{ .width = 1100, .height = 1160 });
         defer if (out.json) |j| alloc.free(j);
 
         var io_impl = std.Io.Threaded.init(alloc, .{});

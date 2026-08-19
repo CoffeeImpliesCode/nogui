@@ -170,6 +170,22 @@ pub fn build(b: *std.Build) void {
     });
     v7_run_cmd.step.dependOn(&sort_spv_step.step);
 
+    // The Spotify scene reuses the v7 renderer and differs only in its root
+    // component. Keeping this as a separate run step makes the stress scene
+    // easy to launch without duplicating the GPU/window backend.
+    const spotify_run_cmd = b.addRunArtifact(v7_demo);
+    spotify_run_cmd.addArgs(&.{"--spotify"});
+    spotify_run_cmd.step.dependOn(b.getInstallStep());
+    spotify_run_cmd.step.dependOn(&quad_frag_spv_step.step);
+    spotify_run_cmd.step.dependOn(&quad_vert_spv_step.step);
+    spotify_run_cmd.step.dependOn(&blit_spv_step.step);
+    spotify_run_cmd.step.dependOn(&fullscreen_spv_step.step);
+    spotify_run_cmd.step.dependOn(&mandelbrot_spv_step.step);
+    spotify_run_cmd.step.dependOn(&sort_spv_step.step);
+    if (b.args) |args| spotify_run_cmd.addArgs(args);
+    const spotify_run_step = b.step("spotify", "Run the Spotify UI stress scene");
+    spotify_run_step.dependOn(&spotify_run_cmd.step);
+
     // ── Tests ────────────────────────────────
     const v7_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -239,6 +255,30 @@ pub fn build(b: *std.Build) void {
     }
     const run_v7_ui_tests = b.addRunArtifact(v7_ui_tests);
     test_step.dependOn(&run_v7_ui_tests.step);
+
+    const v7_spotify_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7_demo/spotify.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
+            },
+        }),
+    });
+    v7_spotify_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_spotify_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    if (coverage) {
+        v7_spotify_tests.use_llvm = true;
+        v7_spotify_tests.root_module.fuzz = true;
+        v7_spotify_tests.root_module.link_libc = true;
+        if (cov_rt) |p| v7_spotify_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
+    const run_v7_spotify_tests = b.addRunArtifact(v7_spotify_tests);
+    test_step.dependOn(&run_v7_spotify_tests.step);
 
     const v7_svg_tests = b.addTest(.{
         .root_module = b.createModule(.{
