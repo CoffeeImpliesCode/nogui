@@ -66,8 +66,19 @@ pub const FrameOutput = struct {
 /// Serialize the tree as a JSON array of node objects (see the file doc
 /// comment for the shape). The returned slice is allocator-owned; the
 /// caller frees it with `allocator`.
-pub fn treeToJson(allocator: std.mem.Allocator, tree: *const WidgetTree) ![]u8 {
-    const zone = tracy.Zone.begin(.{ .name = "treeToJson", .src = @src() });
+/// Optional geometry diagnostics for headless tree JSON.
+pub const TreeJsonOptions = struct {
+    include_absolute: bool = false,
+    include_visual: bool = false,
+};
+
+/// Serialize the tree with optional absolute and visual border rectangles.
+pub fn treeToJsonWith(
+    allocator: std.mem.Allocator,
+    tree: *const WidgetTree,
+    options: TreeJsonOptions,
+) ![]u8 {
+    const zone = tracy.Zone.begin(.{ .name = "treeToJsonWith", .src = @src() });
     defer zone.end();
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -76,10 +87,15 @@ pub fn treeToJson(allocator: std.mem.Allocator, tree: *const WidgetTree) ![]u8 {
     try w.writeByte('[');
     for (tree.nodes.items, 0..) |*node, i| {
         if (i != 0) try w.writeByte(',');
-        try writeNode(w, node);
+        try writeNode(w, tree, node, options);
     }
     try w.writeByte(']');
     return out.toOwnedSlice();
+}
+
+/// Serialize the tree as JSON without optional geometry diagnostics.
+pub fn treeToJson(allocator: std.mem.Allocator, tree: *const WidgetTree) ![]u8 {
+    return treeToJsonWith(allocator, tree, .{});
 }
 
 /// Parse one event from the headless driver's JSON-lines protocol
@@ -87,6 +103,7 @@ pub fn treeToJson(allocator: std.mem.Allocator, tree: *const WidgetTree) ![]u8 {
 ///   {"type":"frame","tick":1,"time_ms":0}
 ///   {"type":"resize","width":900,"height":700}
 ///   {"type":"mouse_move","x":12.5,"y":30.0}
+///   {"type":"mouse_wheel","x":12.5,"y":30.0,"delta_x":-1,"delta_y":2}
 ///   {"type":"mouse_leave"}
 ///   {"type":"mouse_down","button":"left","x":..,"y":..}
 ///   {"type":"mouse_up","button":"left","x":..,"y":..}
@@ -138,6 +155,14 @@ pub fn eventFromJson(allocator: std.mem.Allocator, line: []const u8) !Event {
         return .{ .mouse_move = .{
             .x = @as(f32, @floatCast(try objNumber(obj, "x"))),
             .y = @as(f32, @floatCast(try objNumber(obj, "y"))),
+        } };
+    }
+    if (std.mem.eql(u8, kind, "mouse_wheel")) {
+        return .{ .mouse_wheel = .{
+            .x = @as(f32, @floatCast(try objNumber(obj, "x"))),
+            .y = @as(f32, @floatCast(try objNumber(obj, "y"))),
+            .delta_x = @as(f32, @floatCast(try objNumber(obj, "delta_x"))),
+            .delta_y = @as(f32, @floatCast(try objNumber(obj, "delta_y"))),
         } };
     }
     if (std.mem.eql(u8, kind, "mouse_leave")) return .mouse_leave;
@@ -236,6 +261,8 @@ const NodeView = struct {
     kind: []const u8,
     parent: u32,
     rect: RectView,
+    abs_rect: ?RectView = null,
+    vis_rect: ?RectView = null,
     children: ?[]const u32 = null, // containers
     gap: ?f32 = null, // column/row
     label: ?[]const u8 = null, // label/button/slider
@@ -244,7 +271,12 @@ const NodeView = struct {
 
 const RectView = struct { x: f32, y: f32, w: f32, h: f32 };
 
-fn writeNode(w: *std.Io.Writer, node: *const WidgetNode) !void {
+fn writeNode(
+    w: *std.Io.Writer,
+    tree: *const WidgetTree,
+    node: *const WidgetNode,
+    options: TreeJsonOptions,
+) !void {
     // WidgetNode.children holds a fixed [32]Id slot array (widget.zig cap);
     // project it to a plain u32 slice for the view.
     var child_ids: [32]u32 = undefined;
@@ -258,12 +290,22 @@ fn writeNode(w: *std.Io.Writer, node: *const WidgetNode) !void {
         .column, .row => true,
         else => false,
     };
+    const abs_rect = if (options.include_absolute)
+        rectView(widget.absoluteRect(tree, node.id))
+    else
+        null;
+    const vis_rect = if (options.include_visual)
+        rectView(widget.visualBorderRect(tree, node.id))
+    else
+        null;
 
     const view: NodeView = .{
         .id = node.id.index(),
         .kind = @tagName(node.kind),
         .parent = node.parent.index(),
         .rect = .{ .x = node.rect.x, .y = node.rect.y, .w = node.rect.w, .h = node.rect.h },
+        .abs_rect = abs_rect,
+        .vis_rect = vis_rect,
         .children = if (is_container) child_ids[0..child_count] else null,
         .gap = switch (node.kind) {
             .column => |c| c.gap,
@@ -284,6 +326,10 @@ fn writeNode(w: *std.Io.Writer, node: *const WidgetNode) !void {
     try std.json.Stringify.value(view, .{ .emit_null_optional_fields = false }, w);
 }
 
+fn rectView(r: Rect) RectView {
+    return .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+}
+
 /// ── Offscreen layout verification (CPU only — no GPU, no display) ────────
 ///
 /// renderAscii paints the laid-out tree into a character map (2px per char,
@@ -299,17 +345,16 @@ const map_px = 2;
 
 /// Render the layout as an ASCII map, `hover` gets an '@' border. The
 /// returned slice is allocator-owned (caller frees). Bounds = the union of
-/// all node rects, so a 900x700 surface maps to 451x351 chars.
+/// all node visual border rects, so scroll offsets are reflected in the map.
 pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover: ?Id) ![]u8 {
-    // Bounds from the union of all ABSOLUTE rects (relative rects resolved
-    // through the parent chain — a nested node sits at its resolved
-    // position, not at its raw coordinates).
+    // Bounds from the union of all VISUAL border rects. Visual origins
+    // resolve relative boxes and subtract ancestor scroll offsets.
     var min_x: f32 = std.math.inf(f32);
     var min_y: f32 = std.math.inf(f32);
     var max_x: f32 = -std.math.inf(f32);
     var max_y: f32 = -std.math.inf(f32);
     for (tree.nodes.items) |*n| {
-        const r = widget.absoluteRect(tree, n.id);
+        const r = widget.visualBorderRect(tree, n.id);
         if (r.w <= 0 or r.h <= 0) continue;
         min_x = @min(min_x, r.x);
         min_y = @min(min_y, r.y);
@@ -340,7 +385,10 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
     while (i > 0) {
         i -= 1;
         const n = &tree.nodes.items[i];
-        const r = widget.absoluteRect(tree, n.id);
+        const visual = widget.visualBorderRect(tree, n.id);
+        var r = visual;
+        r.x -= min_x;
+        r.y -= min_y;
         if (r.w <= 0 or r.h <= 0) continue;
 
         switch (n.kind) {
@@ -376,7 +424,10 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
     if (hover) |hid| {
         for (tree.nodes.items) |*n| {
             if (n.id != hid) continue;
-            const r = widget.absoluteRect(tree, n.id);
+            const visual = widget.visualBorderRect(tree, n.id);
+            var r = visual;
+            r.x -= min_x;
+            r.y -= min_y;
             // A node smaller than one map cell (2px/char) cannot draw a
             // 4-edge border: the inner edge offsets (r.y + r.h - map_px,
             // r.x + r.w - map_px) would go negative and @intFromFloat
@@ -1161,6 +1212,72 @@ test "treeToJson: rect values round-trip exactly" {
     try std.testing.expectEqual(@as(f64, 200.75), try num(r.get("h").?));
 }
 
+test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    const parent: Id = @enumFromInt(1);
+    const child: Id = @enumFromInt(2);
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child,
+        .kind = .{ .label = .{ .text = "nested" } },
+        .parent = parent,
+        .rect = .{ .x = 7, .y = 11, .w = 30, .h = 12 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = parent,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
+        .box = .{
+            .border = .{ .left = 2, .top = 3 },
+            .padding = .{ .left = 4, .top = 5 },
+        },
+    });
+    tree.node(parent).?.children.items[0] = child;
+    tree.node(parent).?.children.len = 1;
+
+    const compact = try treeToJson(std.testing.allocator, &tree);
+    defer std.testing.allocator.free(compact);
+    var compact_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        compact,
+        .{},
+    );
+    defer compact_parsed.deinit();
+    const compact_child = compact_parsed.value.array.items[0].object;
+    try std.testing.expect(compact_child.get("abs_rect") == null);
+    try std.testing.expect(compact_child.get("vis_rect") == null);
+
+    const diagnostic = try treeToJsonWith(
+        std.testing.allocator,
+        &tree,
+        .{ .include_absolute = true, .include_visual = true },
+    );
+    defer std.testing.allocator.free(diagnostic);
+    var diagnostic_parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        diagnostic,
+        .{},
+    );
+    defer diagnostic_parsed.deinit();
+
+    const child_view = diagnostic_parsed.value.array.items[0].object;
+    const absolute = child_view.get("abs_rect").?.object;
+    try std.testing.expectEqual(@as(f64, 23), try num(absolute.get("x").?));
+    try std.testing.expectEqual(@as(f64, 39), try num(absolute.get("y").?));
+    try std.testing.expectEqual(@as(f64, 30), try num(absolute.get("w").?));
+    try std.testing.expectEqual(@as(f64, 12), try num(absolute.get("h").?));
+
+    const visual = child_view.get("vis_rect").?.object;
+    try std.testing.expectEqual(@as(f64, 23), try num(visual.get("x").?));
+    try std.testing.expectEqual(@as(f64, 39), try num(visual.get("y").?));
+    try std.testing.expectEqual(@as(f64, 30), try num(visual.get("w").?));
+    try std.testing.expectEqual(@as(f64, 12), try num(visual.get("h").?));
+}
+
 test "renderAscii: nested node renders at its absolute position" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.nodes.deinit(std.testing.allocator);
@@ -1279,6 +1396,21 @@ test "verifyLayout: negative box sides are reported" {
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "negative box side") != null);
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
+}
+
+test "eventFromJson: mouse wheel preserves position and signed deltas" {
+    const event = try eventFromJson(
+        std.testing.allocator,
+        "{\"type\":\"mouse_wheel\",\"x\":12.5,\"y\":30,\"delta_x\":-2,\"delta_y\":3.25}",
+    );
+    const wheel = switch (event) {
+        .mouse_wheel => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f32, 12.5), wheel.x);
+    try std.testing.expectEqual(@as(f32, 30), wheel.y);
+    try std.testing.expectEqual(@as(f32, -2), wheel.delta_x);
+    try std.testing.expectEqual(@as(f32, 3.25), wheel.delta_y);
 }
 
 test "eventFromJson: malformed lines return errors, never panic" {

@@ -2,14 +2,14 @@
 //! Per the prototype spec (notes/v7-prototype-spec.md §7).
 //!
 //! A click names a button node id. dispatchClick finds that node, reads the
-//! button's `owner` component id, and calls its type-erased `on_click` with
-//! the component pointer stored in the registry.
+//! button's `owner` component id, and calls its bound callback (or legacy
+//! `on_click`) with the component pointer stored in the registry.
 const std = @import("std");
 
 const Id = @import("id.zig").Id;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const WidgetNode = @import("widget.zig").WidgetNode;
-const absoluteRect = @import("widget.zig").absoluteRect;
+const visualBorderRect = @import("widget.zig").visualBorderRect;
 const callback = @import("callback.zig");
 const Component = @import("component.zig").Component;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
@@ -53,6 +53,7 @@ pub const Event = union(enum) {
     /// The surface size changed (the driver re-created its swapchain).
     resize: struct { width: f32, height: f32 },
     mouse_move: struct { x: f32, y: f32 },
+    mouse_wheel: struct { x: f32, y: f32, delta_x: f32, delta_y: f32 },
     /// The cursor left the window (hover clears).
     mouse_leave: void,
     mouse_down: struct { button: MouseButton, x: f32, y: f32 },
@@ -64,10 +65,11 @@ pub const Event = union(enum) {
     click: struct { button_id: Id },
 };
 
-/// Find the button node; look up its owner in `components`; call on_click.
+/// Find the button node; look up its owner in `components`; call a bound
+/// `user_callback` when present, otherwise call the legacy `on_click`.
 /// `components` is *std.AutoHashMapUnmanaged(Id, *Component).
 ///
-/// No-op (return) if: node missing, not a button, no on_click, owner not
+/// No-op (return) if: node missing, not a button, no callback, owner not
 /// registered.
 pub fn dispatchClick(
     tree: *const WidgetTree,
@@ -78,9 +80,13 @@ pub fn dispatchClick(
         .click => |click| {
             const node = findNode(tree, click.button_id) orelse return;
             if (node.kind != .button) return;
-            const on_click = node.kind.button.on_click orelse return;
             const comp = components.get(node.kind.button.owner) orelse return;
-            on_click(comp.ptr);
+            if (node.kind.button.user_callback) |user_callback| {
+                user_callback.invoke(comp.ptr);
+            } else {
+                const on_click = node.kind.button.on_click orelse return;
+                on_click(comp.ptr);
+            }
         },
         else => {}, // input events route through App.handle, not dispatchClick
     }
@@ -95,19 +101,20 @@ fn findNode(tree: *const WidgetTree, id: Id) ?*const WidgetNode {
     return null;
 }
 
-/// Set a slider's value from a pointer position (x in absolute layout
-/// pixels). The slider rect is RELATIVE (to its parent's content box), so
-/// it is resolved to absolute space via widget.absoluteRect first; the
-/// mapping is linear across that rect, clamped to [min, max]. Returns false
-/// (and changes nothing) when the node is missing or not a slider — the
-/// caller can use that to distinguish slider hits from other widgets.
+/// Set a slider's value from a pointer position (x in visual surface pixels).
+/// The slider rect is relative to its parent's content box, so it is resolved
+/// into visual space via widget.visualBorderRect first; ancestor scroll
+/// offsets therefore affect the mapping. The mapping is linear across that
+/// rect, clamped to [min, max]. Returns false (and changes nothing) when the
+/// node is missing or not a slider — the caller can use that to distinguish
+/// slider hits from other widgets.
 pub fn sliderSet(tree: *const WidgetTree, id: Id, x: f32) bool {
     const node = findNode(tree, id) orelse return false;
     const s = switch (node.kind) {
         .slider => |s| s,
         else => return false,
     };
-    const r = absoluteRect(tree, id);
+    const r = visualBorderRect(tree, id);
     if (r.w <= 0) return false;
     const t = std.math.clamp((x - r.x) / r.w, 0.0, 1.0);
     s.value.* = s.min + t * (s.max - s.min);
@@ -119,6 +126,7 @@ pub fn sliderSet(tree: *const WidgetTree, id: Id, x: f32) bool {
 const TestCounter = struct {
     const Self = TestCounter;
     clicks: u32 = 0,
+    data: usize = 0,
 
     pub fn draw(self: *Self, ctx: *DrawCtx) !void {
         _ = self;
@@ -127,6 +135,10 @@ const TestCounter = struct {
 
     pub fn onClick(self: *Self) void {
         self.clicks += 1;
+    }
+
+    pub fn onData(self: *Self, data: usize) void {
+        self.data = data;
     }
 };
 
@@ -199,6 +211,27 @@ test "dispatchClick: calls the wrapped handler on the registered owner" {
     dispatchClick(&h.tree, .{ .click = .{ .button_id = button_id } }, &h.components);
 
     try std.testing.expectEqual(@as(u32, 1), counter.clicks);
+}
+
+test "dispatchClick: invokes a button on_click_with_data callback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    var counter: TestCounter = .{};
+    var components: std.AutoHashMapUnmanaged(Id, Component) = .empty;
+    defer components.deinit(std.testing.allocator);
+    try components.put(std.testing.allocator, Id.root, Component.make(TestCounter, &counter));
+
+    const button = try ctx.button(.{
+        .label = "Data",
+        .on_click_with_data = callback.bind(TestCounter.onData, @as(usize, 42)),
+    });
+    dispatchClick(&tree, .{ .click = .{ .button_id = button } }, &components);
+
+    try std.testing.expectEqual(@as(usize, 42), counter.data);
+    try std.testing.expectEqual(@as(u32, 0), counter.clicks);
 }
 
 test "dispatchClick: missing button id is a no-op" {

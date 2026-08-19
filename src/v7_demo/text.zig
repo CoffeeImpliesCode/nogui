@@ -504,19 +504,8 @@ pub const TextEngine = struct {
     }
 
     /// Shape `text` (kerning/ligatures included), ensure the glyphs exist
-    /// (lazy), then append one SceneRect per glyph to `out` at (x,
-    /// baseline_y). `baseline_y` is the font baseline (the caller computes
-    /// it from the widget rect). `clip_id` is the node's clip rect index
-    /// (0xFFFFFFFF = no clip): glyphs inside a `.clip` container are
-    /// clipped to its rect like any other SceneRect. Advances and per-glyph
-    /// offsets come from the shaper (26.6 fixed-point, /64.0 → px; y
-    /// offsets are y-up, so the y-down framebuffer subtracts them). Glyph
-    /// id 0 (.notdef: chars missing from the font or invalid UTF-8) is
-    /// skipped WITHOUT advancing, matching the pre-shaping behavior.
-    /// Propagates error.TooManyGlyphs if the material slot budget is
-    /// exhausted.
-    /// `color` is the glyph color in Oklab (the pipeline space — the
-    /// caller converts the sRGB-authored widget color via srgbToOklab).
+    /// (lazy), then append one SceneRect per glyph to `out`. This preserves
+    /// the historical unbounded emission API for existing callers.
     pub fn emitText(
         self: *TextEngine,
         text: []const u8,
@@ -528,54 +517,143 @@ pub const TextEngine = struct {
         color: [4]f32,
         out: *std.ArrayList(SceneRect),
     ) !void {
+        return self.emitTextWithWidth(
+            text,
+            x,
+            baseline_y,
+            size,
+            font_id,
+            clip_id,
+            color,
+            null,
+            out,
+        );
+    }
+
+    /// Emit text into an optional single-line width. When the shaped run is
+    /// wider than `max_width`, retain complete shaped glyphs that fit before
+    /// a separately HarfBuzz-shaped ASCII `...` run. If the ellipsis itself
+    /// does not fit, emit no glyphs.
+    pub fn emitTextWithWidth(
+        self: *TextEngine,
+        text: []const u8,
+        x: f32,
+        baseline_y: f32,
+        size: u32,
+        font_id: u8,
+        clip_id: u32,
+        color: [4]f32,
+        max_width: ?f32,
+        out: *std.ArrayList(SceneRect),
+    ) !void {
         const zone = tracy.Zone.begin(.{ .name = "emitText", .src = @src() });
         defer zone.end();
         const font = try self.fontFor(font_id, size);
-        const run = try self.getOrShape(font, text);
-        const run_x = snapRunOrigin(x); // the LOGICAL origin snapped once
+        const ellipsis_key: ?RunKey = if (max_width != null)
+            (try self.getOrShape(font, "...")).key
+        else
+            null;
+        const run_key = (try self.getOrShape(font, text)).key;
+        // Re-fetch both keys after shaping. The second cache operation may
+        // rehash the map and invalidate the first returned pointer.
+        const run = self.run_cache.getPtr(run_key).?;
+        const ellipsis_run = if (ellipsis_key) |key| self.run_cache.getPtr(key) else null;
+        const run_x = snapRunOrigin(x);
         const run_baseline = @round(baseline_y);
-        var cursor: f32 = 0; // the exact internal pen (relative to run_x)
-        for (run.glyphs) |g| {
+
+        const truncate = if (max_width) |width| blk: {
+            if (std.math.isNan(width)) break :blk false;
+            break :blk run.width > @max(0, width);
+        } else false;
+        if (!truncate) {
+            _ = try self.emitRun(
+                font,
+                run,
+                run.glyphs.len,
+                run_x,
+                0,
+                run_baseline,
+                clip_id,
+                color,
+                out,
+            );
+            return;
+        }
+
+        const suffix = ellipsis_run.?;
+        const width = @max(0, max_width.?);
+        if (suffix.width > width) return;
+        const prefix_limit = width - suffix.width;
+        const prefix_count = fitGlyphCount(run, prefix_limit);
+        const cursor = try self.emitRun(
+            font,
+            run,
+            prefix_count,
+            run_x,
+            0,
+            run_baseline,
+            clip_id,
+            color,
+            out,
+        );
+        _ = try self.emitRun(
+            font,
+            suffix,
+            suffix.glyphs.len,
+            run_x,
+            cursor,
+            run_baseline,
+            clip_id,
+            color,
+            out,
+        );
+    }
+
+    fn fitGlyphCount(run: *const TextRun, width: f32) usize {
+        var cursor: f32 = 0;
+        for (run.glyphs, 0..) |g, i| {
+            const next = cursor + g.x_advance;
+            if (next > width) return i;
+            cursor = next;
+        }
+        return run.glyphs.len;
+    }
+
+    fn emitRun(
+        self: *TextEngine,
+        font: *FontState,
+        run: *const TextRun,
+        glyph_count: usize,
+        run_x: f32,
+        initial_cursor: f32,
+        run_baseline: f32,
+        clip_id: u32,
+        color: [4]f32,
+        out: *std.ArrayList(SceneRect),
+    ) !f32 {
+        var cursor = initial_cursor;
+        for (run.glyphs[0..glyph_count]) |g| {
             try self.ensureGlyph(font, g.gid);
-            const entry = self.entryFor(font.font_id, font.size, g.gid) orelse continue; // gid 0 → skip
-            // Canonical HarfBuzz placement at the exact positions: the
-            // glyph sits at run_x + cursor + x_offset + bearing_x, then
-            // the pen advances by x_advance (y offsets are y-up font
-            // units; the framebuffer is y-down, hence the minus). The
-            // run-level snap keeps the coverage static and the movement
-            // in 1px steps; the exact internal positions preserve the
-            // sub-pixel kerning (a per-glyph snap quantizes the advances
-            // and breaks pairs like "re set" / "w ater").
+            const entry = self.entryFor(font.font_id, font.size, g.gid) orelse continue;
             const ch_x = run_x + cursor + g.x_offset + entry.bearing_x;
             const ch_y = run_baseline - entry.bearing_y - g.y_offset;
             if (entry.glyph_w <= 0 or entry.glyph_h <= 0) {
-                cursor += g.x_advance; // zero-size glyph (e.g. space): advance only
+                cursor += g.x_advance;
                 continue;
             }
             try out.append(self.gpa, .{
-                // 2px surround on ALL sides: the ink's edges land within
-                // ceil(w)-w / ceil(h)-h of the boundary (fractional
-                // extents), and a bb that hits a pixel as a sliver must
-                // still resolve its AA fully inside the quad — the two
-                // outermost pixel rings stay clear of ink, so the fade
-                // never touches the quad's own edge (the original 1px was
-                // enough for integer extents but left the sliver's edge
-                // pixel adjacent to the quad boundary).
                 .dst = .{ ch_x - 2, ch_y - 2, @ceil(entry.glyph_w) + 4, @ceil(entry.glyph_h) + 4 },
                 .src = .{ 0, 0, 1, 1 },
                 .corners = .{ 0, 0, 0, 0 },
-                .color = color, // the node's text color in Oklab
+                .color = color,
                 .material_index = entry.slot,
                 .curve = .{ entry.curve_left, entry.curve_bottom, entry.curve_w, entry.curve_h },
-                // The PEN (the outline origin): the sweep windows must be
-                // anchored in the same space as the curves. x = the exact
-                // shaper pen, y = the baseline (y offsets are y-up: a
-                // raised glyph moves its baseline UP the framebuffer).
                 .clip_id = clip_id,
                 .origin = .{ run_x + cursor + g.x_offset, run_baseline - g.y_offset },
             });
             cursor += g.x_advance;
         }
+        return cursor;
     }
 
     /// Measure a text run's content size only: the SHAPED width (the sum of

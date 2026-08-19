@@ -2,9 +2,10 @@
 //! Pure geometry over the laid-out tree (widget.zig): no allocation, no side
 //! effects. Node rects are RELATIVE border boxes (relative to the parent's
 //! CONTENT box; root-level nodes relative to the surface), so each
-//! candidate's absolute rect is resolved via `widget.absoluteRect` (a parent
-//! walk through border+padding) before the containment test. Per the
-//! prototype spec (notes/v7-prototype-spec.md §7, click dispatch).
+//! candidate's visual rect is resolved via `widget.visualBorderRect` (a
+//! parent walk through border+padding+scroll offsets) and accepted only when
+//! `widget.pointInClipChain` contains the pointer. Per the prototype spec
+//! (notes/v7-prototype-spec.md §7, click dispatch).
 
 const std = @import("std");
 
@@ -18,7 +19,11 @@ const Rect = widget.Rect;
 /// first (a button inside a column hits the button, not the column).
 pub fn hitTest(tree: *const WidgetTree, pos: [2]f32) ?Id {
     for (tree.nodes.items) |n| {
-        if (contains(widget.absoluteRect(tree, n.id), pos)) return n.id;
+        if (widget.pointInClipChain(tree, n.id, pos) and
+            contains(widget.visualBorderRect(tree, n.id), pos))
+        {
+            return n.id;
+        }
     }
     return null;
 }
@@ -26,7 +31,12 @@ pub fn hitTest(tree: *const WidgetTree, pos: [2]f32) ?Id {
 /// hitTest restricted to .button nodes (for click dispatch).
 pub fn hitButton(tree: *const WidgetTree, pos: [2]f32) ?Id {
     for (tree.nodes.items) |n| {
-        if (n.kind == .button and contains(widget.absoluteRect(tree, n.id), pos)) return n.id;
+        if (n.kind == .button and
+            widget.pointInClipChain(tree, n.id, pos) and
+            contains(widget.visualBorderRect(tree, n.id), pos))
+        {
+            return n.id;
+        }
     }
     return null;
 }
@@ -244,4 +254,51 @@ test "hitTest: zero-size rect never hits" {
     // Even exactly on the degenerate rect's corner, nothing is hit.
     try std.testing.expectEqual(@as(?Id, null), hitTest(&tree, .{ 5, 5 }));
     try std.testing.expectEqual(@as(?Id, null), hitTest(&tree, .{ 6, 6 }));
+}
+test "hitTest: clipped child outside parent clip returns null" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    const parent_id: Id = @enumFromInt(1);
+    const child_id: Id = @enumFromInt(2);
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = parent_id,
+        .rect = .{ .x = 10, .y = 5, .w = 20, .h = 10 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = parent_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
+        .box = .{ .clip = true },
+    });
+
+    // The child's visual border box contains this point, but the parent's
+    // clip border box does not.
+    try std.testing.expectEqual(@as(?Id, null), hitTest(&tree, .{ 25, 10 }));
+}
+
+test "hitButton: clipped child outside parent clip returns null" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    const parent_id: Id = @enumFromInt(1);
+    const button_id: Id = @enumFromInt(2);
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = button_id,
+        .kind = .{ .button = .{ .label = "child" } },
+        .parent = parent_id,
+        .rect = .{ .x = 10, .y = 5, .w = 20, .h = 10 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = parent_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
+        .box = .{ .clip = true },
+    });
+
+    try std.testing.expectEqual(@as(?Id, null), hitButton(&tree, .{ 25, 10 }));
 }

@@ -3,24 +3,32 @@
 const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
 pub const srgbToOklab = @import("text.zig").srgbToOklab;
 const Id = @import("v7/id.zig").Id;
+const UserCallback = @import("v7/callback.zig").UserCallback;
 
-// Spotify Dark Theme Palette (sRGB authored, Oklab converted).
-pub const c_bg: [4]f32 = .{ 0.07, 0.07, 0.07, 1.0 }; // #121212 main canvas
-pub const c_sidebar_bg: [4]f32 = .{ 0.05, 0.05, 0.05, 1.0 }; // #0d0d0d deep black
-pub const c_card_bg: [4]f32 = .{ 0.10, 0.10, 0.10, 1.0 }; // #181818 card surface
-pub const c_card_hover: [4]f32 = .{ 0.16, 0.16, 0.16, 1.0 }; // #282828 elevated
-pub const c_active_row: [4]f32 = .{ 0.18, 0.18, 0.20, 1.0 }; // row selection highlight
-pub const c_player_bg: [4]f32 = .{ 0.09, 0.09, 0.09, 1.0 }; // bottom bar surface
-pub const c_accent: [4]f32 = .{ 0.11, 0.73, 0.33, 1.0 }; // #1DB954 Spotify green
-pub const c_accent_bright: [4]f32 = .{ 0.12, 0.84, 0.38, 1.0 }; // #1ED760 hover green
-pub const c_accent_dim: [4]f32 = .{ 0.08, 0.28, 0.14, 1.0 }; // accent surface
-pub const c_text: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 }; // pure white primary
-pub const c_text_sec: [4]f32 = .{ 0.70, 0.70, 0.70, 1.0 }; // #B3B3B3 secondary text
-pub const c_text_muted: [4]f32 = .{ 0.45, 0.45, 0.45, 1.0 }; // captions / track #
-pub const c_border: [4]f32 = .{ 0.22, 0.22, 0.22, 0.6 }; // card borders / dividers
-pub const c_hero_top: [4]f32 = .{ 0.24, 0.14, 0.42, 1.0 }; // purple/indigo hero gradient
-pub const c_hero_bot: [4]f32 = .{ 0.10, 0.10, 0.12, 1.0 }; // hero gradient bottom
-pub const c_like_active: [4]f32 = .{ 0.11, 0.73, 0.33, 1.0 }; // green heart
+// Spotify dark palette. Colors are authored in sRGB and converted at draw time.
+pub const c_bg: [4]f32 = .{ 0.07, 0.07, 0.07, 1.0 };
+pub const c_sidebar_bg: [4]f32 = .{ 0.02, 0.02, 0.02, 1.0 };
+pub const c_card_bg: [4]f32 = .{ 0.09, 0.09, 0.09, 1.0 };
+pub const c_card_elevated: [4]f32 = .{ 0.14, 0.14, 0.14, 1.0 };
+pub const c_hover: [4]f32 = .{ 0.16, 0.16, 0.16, 1.0 };
+pub const c_active_row: [4]f32 = .{ 0.165, 0.165, 0.165, 1.0 };
+pub const c_player_bg: [4]f32 = .{ 0.09, 0.09, 0.09, 1.0 };
+pub const c_accent: [4]f32 = .{ 0.11, 0.73, 0.33, 1.0 };
+pub const c_accent_hover: [4]f32 = .{ 0.12, 0.84, 0.38, 1.0 };
+pub const c_accent_dim: [4]f32 = .{ 0.08, 0.28, 0.14, 1.0 };
+pub const c_text: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 };
+pub const c_text_sec: [4]f32 = .{ 0.70, 0.70, 0.70, 1.0 };
+pub const c_text_muted: [4]f32 = .{ 0.42, 0.42, 0.42, 1.0 };
+pub const c_border: [4]f32 = .{ 0.20, 0.20, 0.20, 0.5 };
+pub const c_hero_grad_top: [4]f32 = .{ 0.28, 0.15, 0.48, 1.0 };
+pub const c_hero_grad_bot: [4]f32 = .{ 0.09, 0.09, 0.10, 1.0 };
+pub const c_like_active: [4]f32 = c_accent;
+
+// Existing names stay public for callers that predate the expanded palette.
+pub const c_card_hover: [4]f32 = c_hover;
+pub const c_accent_bright: [4]f32 = c_accent_hover;
+pub const c_hero_top: [4]f32 = c_hero_grad_top;
+pub const c_hero_bot: [4]f32 = c_hero_grad_bot;
 
 pub fn spotifyCard(ctx: *DrawCtx, grow: f32, fill: [4]f32, clip: bool) !Id {
     return ctx.column(.{
@@ -35,31 +43,74 @@ pub fn spotifyCard(ctx: *DrawCtx, grow: f32, fill: [4]f32, clip: bool) !Id {
     });
 }
 
-pub fn spotifyButton(ctx: *DrawCtx, text: []const u8, active: bool, on_click: anytype) !Id {
-    if (active) {
+const artwork_gradients = [_][2][4]f32{
+    .{ .{ 0.69, 0.12, 0.52, 1.0 }, .{ 0.25, 0.08, 0.48, 1.0 } },
+    .{ .{ 0.10, 0.64, 0.78, 1.0 }, .{ 0.04, 0.20, 0.52, 1.0 } },
+    .{ .{ 0.95, 0.42, 0.12, 1.0 }, .{ 0.54, 0.08, 0.18, 1.0 } },
+    .{ .{ 0.22, 0.76, 0.42, 1.0 }, .{ 0.02, 0.30, 0.32, 1.0 } },
+    .{ .{ 0.58, 0.34, 0.94, 1.0 }, .{ 0.14, 0.10, 0.52, 1.0 } },
+    .{ .{ 0.92, 0.24, 0.38, 1.0 }, .{ 0.38, 0.06, 0.36, 1.0 } },
+};
+
+const artwork_emblems = [_][]const u8{ "✦", "♪", "◉", "◆", "≈", "△" };
+
+pub fn drawArtworkTile(ctx: *DrawCtx, size: f32, seed: u8) !Id {
+    const index: usize = @as(usize, seed) % artwork_gradients.len;
+    const colors = artwork_gradients[index];
+    const tile = try ctx.column(.{
+        .basis = size,
+        .min_main = size,
+        .clip = true,
+        .fill = colors[0],
+        .gradient = srgbToOklab(colors[1]),
+        .radius = .{ .top = 6, .right = 6, .bottom = 6, .left = 6 },
+        .padding = .{
+            .top = size * 0.28,
+            .right = size * 0.18,
+            .bottom = size * 0.18,
+            .left = size * 0.18,
+        },
+        .shadow = 8,
+    });
+    defer ctx.pop();
+
+    _ = try ctx.label(.{
+        .text = artwork_emblems[index],
+        .color = .{ 1.0, 1.0, 1.0, 0.88 },
+        .font_size = size * 0.30,
+    });
+    _ = try ctx.spacer(.{ .size = size * 0.18 });
+    return tile;
+}
+
+pub fn spotifyButton(ctx: *DrawCtx, text: []const u8, active: bool, handler: anytype) !Id {
+    const color = if (active) c_accent else c_text_sec;
+    const fill = if (active) c_hover else c_card_bg;
+    const border_color = if (active) c_accent else c_border;
+    if (comptime @TypeOf(handler) == UserCallback) {
         return ctx.button(.{
             .label = text,
-            .on_click = on_click,
-            .color = c_accent,
+            .on_click_with_data = handler,
+            .color = color,
             .padding = .{ .left = 12, .right = 12, .top = 6, .bottom = 6 },
             .radius = .{ .top = 6, .right = 6, .bottom = 6, .left = 6 },
-            .fill = c_card_hover,
-            .gradient = srgbToOklab(c_card_hover),
+            .fill = fill,
+            .gradient = srgbToOklab(fill),
             .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-            .border_color = c_accent,
+            .border_color = border_color,
             .font_size = 13,
         });
     }
     return ctx.button(.{
         .label = text,
-        .on_click = on_click,
-        .color = c_text_sec,
+        .on_click = handler,
+        .color = color,
         .padding = .{ .left = 12, .right = 12, .top = 6, .bottom = 6 },
         .radius = .{ .top = 6, .right = 6, .bottom = 6, .left = 6 },
-        .fill = c_card_bg,
-        .gradient = srgbToOklab(c_card_bg),
+        .fill = fill,
+        .gradient = srgbToOklab(fill),
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = c_border,
+        .border_color = border_color,
         .font_size = 13,
     });
 }

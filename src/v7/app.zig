@@ -18,6 +18,7 @@ const Component = @import("component.zig").Component;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const Size = @import("widget.zig").Size;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
+const ScrollState = @import("widget.zig").ScrollState;
 const flex = @import("flex.zig");
 const Event = @import("event.zig").Event;
 const KeyEvent = @import("event.zig").KeyEvent;
@@ -141,6 +142,49 @@ pub const App = struct {
             .frame => |f| return try self.present(T, root, f.tick, f.time_ms),
             .resize => |r| {
                 self.surface = .{ .width = r.width, .height = r.height };
+                return null;
+            },
+            .mouse_wheel => |wheel| {
+                if (self.tree_ptr) |tree| {
+                    const hit = input.hitTest(tree, .{ wheel.x, wheel.y }) orelse return null;
+                    var current = hit;
+                    while (current != .root) {
+                        const node = tree.nodeConst(current) orelse break;
+                        if (node.scroll) |spec| {
+                            const state = spec.state;
+                            switch (spec.axis) {
+                                .horizontal => {
+                                    state.offset[0] = std.math.clamp(
+                                        state.offset[0] - wheel.delta_x * 20.0,
+                                        0.0,
+                                        state.max_offset[0],
+                                    );
+                                },
+                                .vertical => {
+                                    state.offset[1] = std.math.clamp(
+                                        state.offset[1] - wheel.delta_y * 20.0,
+                                        0.0,
+                                        state.max_offset[1],
+                                    );
+                                },
+                                .both => {
+                                    state.offset[0] = std.math.clamp(
+                                        state.offset[0] - wheel.delta_x * 20.0,
+                                        0.0,
+                                        state.max_offset[0],
+                                    );
+                                    state.offset[1] = std.math.clamp(
+                                        state.offset[1] - wheel.delta_y * 20.0,
+                                        0.0,
+                                        state.max_offset[1],
+                                    );
+                                },
+                            }
+                            break;
+                        }
+                        current = node.parent;
+                    }
+                }
                 return null;
             },
             .mouse_move => |m| {
@@ -745,6 +789,129 @@ test "App: driver — hover, click and slider drag through handle()" {
     // The drag ended: further moves do nothing.
     _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = 180, .y = 10 } });
     try std.testing.expectEqual(@as(f32, 0.3), widgets.volume);
+}
+test "App: mouse wheel scrolls the nearest ancestor and clamps offset" {
+    const ScrollWidgets = struct {
+        const Self = @This();
+
+        state: ScrollState = .{},
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            _ = try ctx.column(.{
+                .basis = 100,
+                .scroll_state = &self.state,
+                .scroll_axis = .vertical,
+            });
+            defer ctx.pop();
+            _ = try ctx.label(.{ .text = "scroll target" });
+        }
+    };
+
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+    var widgets: ScrollWidgets = .{};
+    widgets.state.max_offset = .{ 0, 60 };
+    widgets.state.offset = .{ 0, 10 };
+    _ = try app.register(ScrollWidgets, &widgets);
+
+    _ = try app.handle(ScrollWidgets, &widgets, .{
+        .resize = .{ .width = 200, .height = 100 },
+    });
+    const out = (try app.handle(ScrollWidgets, &widgets, .{
+        .frame = .{ .tick = 1, .time_ms = 0 },
+    })).?;
+    // Layout computes max_offset from content overflow. Set a bounded
+    // limit here so this test isolates wheel scaling and clamping.
+    widgets.state.max_offset = .{ 0, 60 };
+    defer if (out.json) |json| std.testing.allocator.free(json);
+
+    // Negative wheel delta moves content down, increasing the scroll offset.
+    _ = try app.handle(ScrollWidgets, &widgets, .{
+        .mouse_wheel = .{
+            .x = 1,
+            .y = 1,
+            .delta_x = 0,
+            .delta_y = -2,
+        },
+    });
+    try std.testing.expectEqual(@as(f32, 50), widgets.state.offset[1]);
+
+    // A second negative delta stops at max_offset rather than overshooting.
+    _ = try app.handle(ScrollWidgets, &widgets, .{
+        .mouse_wheel = .{
+            .x = 1,
+            .y = 1,
+            .delta_x = 0,
+            .delta_y = -2,
+        },
+    });
+    try std.testing.expectEqual(@as(f32, 60), widgets.state.offset[1]);
+
+    // A large positive delta stops at the zero floor.
+    _ = try app.handle(ScrollWidgets, &widgets, .{
+        .mouse_wheel = .{
+            .x = 1,
+            .y = 1,
+            .delta_x = 0,
+            .delta_y = 10,
+        },
+    });
+    try std.testing.expectEqual(@as(f32, 0), widgets.state.offset[1]);
+}
+
+test "App: mouse wheel stops at the nearest scroll ancestor" {
+    const Dummy = struct {};
+
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+    var dummy: Dummy = .{};
+
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+    var outer_state: ScrollState = .{
+        .max_offset = .{ 0, 100 },
+    };
+    var inner_state: ScrollState = .{
+        .max_offset = .{ 0, 100 },
+    };
+    const outer_id: Id = @enumFromInt(1);
+    const inner_id: Id = @enumFromInt(2);
+    const child_id: Id = @enumFromInt(3);
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = inner_id,
+        .rect = .{ .x = 10, .y = 10, .w = 20, .h = 20 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = inner_id,
+        .kind = .{ .column = .{} },
+        .parent = outer_id,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
+        .box = .{ .clip = true },
+        .scroll = .{ .state = &inner_state, .axis = .vertical },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = outer_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
+        .box = .{ .clip = true },
+        .scroll = .{ .state = &outer_state, .axis = .vertical },
+    });
+    app.tree_ptr = &tree;
+
+    _ = try app.handle(Dummy, &dummy, .{
+        .mouse_wheel = .{
+            .x = 15,
+            .y = 15,
+            .delta_x = 0,
+            .delta_y = -1,
+        },
+    });
+    try std.testing.expectEqual(@as(f32, 20), inner_state.offset[1]);
+    try std.testing.expectEqual(@as(f32, 0), outer_state.offset[1]);
 }
 
 test "App: keyboard — focus traversal, activate, slider arrows, escape" {

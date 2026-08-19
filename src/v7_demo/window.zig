@@ -37,7 +37,9 @@ const WidgetTree = @import("v7/widget.zig").WidgetTree;
 const Rect = @import("v7/widget.zig").Rect;
 const ClipRect = @import("v7/widget.zig").ClipRect;
 const absoluteRect = @import("v7/widget.zig").absoluteRect;
+const visualBorderRect = @import("v7/widget.zig").visualBorderRect;
 const contentRect = @import("v7/widget.zig").contentRect;
+const visualContentRect = @import("v7/widget.zig").visualContentRect;
 const collectDrawCmds = @import("v7/drawcmd.zig").collectDrawCmds;
 const MouseButton = @import("v7/event.zig").MouseButton;
 const Key = @import("v7/event.zig").Key;
@@ -709,7 +711,7 @@ fn buildSliceRects(
     for (tree.nodes.items) |*n| {
         if (n.kind != .slider) continue;
         const s = n.kind.slider;
-        const r = absoluteRect(tree, n.id);
+        const r = visualBorderRect(tree, n.id);
         if (r.w <= 0 or r.h <= 0) continue;
         // A max <= min slider has no valid range: 0/0 (or overflow) would
         // yield NaN/inf and poison the thumb rect. Center the thumb instead.
@@ -748,7 +750,7 @@ fn buildSliceRects(
     if (hover_id) |hid| {
         for (tree.nodes.items) |*n| {
             if (n.id != hid) continue;
-            const r = absoluteRect(tree, n.id);
+            const r = visualBorderRect(tree, n.id);
             if (r.w <= 0 or r.h <= 0) break;
             const ring_rx: f32 = @max(n.box.radius.left, n.box.radius.right);
             const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
@@ -784,7 +786,7 @@ fn buildSliceRects(
     if (focus_id) |fid| {
         for (tree.nodes.items) |*n| {
             if (n.id != fid) continue;
-            const r = absoluteRect(tree, n.id);
+            const r = visualBorderRect(tree, n.id);
             if (r.w <= 0 or r.h <= 0) break;
             const ring_rx: f32 = @max(n.box.radius.left, n.box.radius.right);
             const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
@@ -823,7 +825,7 @@ fn buildSliceRects(
         };
         const t = text orelse continue;
         if (t.len == 0) continue;
-        const content = contentRect(tree, n.id);
+        const content = visualContentRect(tree, n.id);
         if (content.w == 0 or content.h == 0) continue;
         const size: u32 = if (n.font_size > 0) @intFromFloat(@round(n.font_size)) else font_size_px;
         const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
@@ -837,8 +839,22 @@ fn buildSliceRects(
         // The node's layer key stamps the glyphs' z: a layered node's text
         // must ride its OWN layer (the layer-1 badge's caption would
         // otherwise sort below the badge's z=1 fill and vanish behind it).
+        const max_width: ?f32 = if (n.text_overflow == .ellipsis)
+            @min(content.w, n.text_max_width orelse content.w)
+        else
+            null;
         const before = out.items.len;
-        try text_engine.emitText(t, content.x, baseline_y, size, n.font_id, n.clip_id, srgbToOklab(text_color), out);
+        try text_engine.emitTextWithWidth(
+            t,
+            content.x,
+            baseline_y,
+            size,
+            n.font_id,
+            n.clip_id,
+            srgbToOklab(text_color),
+            max_width,
+            out,
+        );
         if (n.box.layer > 0) {
             for (out.items[before..]) |*r| r.z = n.box.layer;
         }
@@ -1208,12 +1224,15 @@ pub fn run(
                 },
                 .mouse_wheel => |mw| {
                     const pos = try toSurfacePoint(sdl_win, &gw, .{ mw.x, mw.y });
-                    _ = pos; // the wheel zooms at the cursor; the pan is mouse-driven
-                    // Zoom the mandelbrot (consumed — no core wheel event yet).
-                    // mw.scroll_y: positive away (up) = zoom in, negative
-                    // toward (down) = zoom out. The old code read mw.y (the
-                    // mouse Y position) as the delta — a large constant that
-                    // always exploded the scale to the zoom-in clamp.
+                    _ = try app.handle(T, root, .{ .mouse_wheel = .{
+                        .x = pos[0],
+                        .y = pos[1],
+                        .delta_x = mw.scroll_x,
+                        .delta_y = mw.scroll_y,
+                    } });
+                    // Keep the demo's Mandelbrot zoom in addition to the
+                    // core wheel event. SDL separates the cursor position
+                    // (x/y) from the horizontal and vertical deltas.
                     applyMandelbrot(null, .{ 0, 0 }, mw.scroll_y, mandel_rect, ui.mandelbrot_scale);
                     continue;
                 },

@@ -1,18 +1,10 @@
 //! Mock Spotify UI implementation using the nogui v7 immediate-mode framework.
-//!
-//! Tests real-world complex application layout:
-//! - Multi-pane flex hierarchy (Sidebar + Main Content + Bottom Player Bar)
-//! - Table alignment with multi-column headers and interactive track rows
-//! - Nested components with active playback state and navigation
-//! - Custom theme styling (Spotify dark palette, rounded badges, accent buttons)
-//! - Interactive controls: playback transport, seek scrubbing, volume, track selection, like toggles
-//!
-//! Follows Tiger Style: explicit allocators, safe bounds, arena-backed strings, no hidden memory.
 
 const std = @import("std");
 
 const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
-const WidgetTree = @import("v7/widget.zig").WidgetTree;
+const widget = @import("v7/widget.zig");
+const WidgetTree = widget.WidgetTree;
 const theme = @import("spotify_theme.zig");
 const data = @import("spotify_data.zig");
 const sidebar = @import("spotify_sidebar.zig");
@@ -22,16 +14,21 @@ const player = @import("spotify_player.zig");
 pub const c_bg = theme.c_bg;
 pub const c_sidebar_bg = theme.c_sidebar_bg;
 pub const c_card_bg = theme.c_card_bg;
+pub const c_card_elevated = theme.c_card_elevated;
+pub const c_hover = theme.c_hover;
 pub const c_card_hover = theme.c_card_hover;
 pub const c_active_row = theme.c_active_row;
 pub const c_player_bg = theme.c_player_bg;
 pub const c_accent = theme.c_accent;
+pub const c_accent_hover = theme.c_accent_hover;
 pub const c_accent_bright = theme.c_accent_bright;
 pub const c_accent_dim = theme.c_accent_dim;
 pub const c_text = theme.c_text;
 pub const c_text_sec = theme.c_text_sec;
 pub const c_text_muted = theme.c_text_muted;
 pub const c_border = theme.c_border;
+pub const c_hero_grad_top = theme.c_hero_grad_top;
+pub const c_hero_grad_bot = theme.c_hero_grad_bot;
 pub const c_hero_top = theme.c_hero_top;
 pub const c_hero_bot = theme.c_hero_bot;
 pub const c_like_active = theme.c_like_active;
@@ -41,9 +38,6 @@ pub const PlaylistInfo = data.PlaylistInfo;
 pub const NavTab = data.NavTab;
 pub const CategoryPill = data.CategoryPill;
 pub const PlaylistSelection = data.PlaylistSelection;
-
-// Spotify app.
-
 pub const SpotifyApp = struct {
     // Playback state
     is_playing: bool = true,
@@ -57,6 +51,9 @@ pub const SpotifyApp = struct {
     active_nav: NavTab = .home,
     active_category: CategoryPill = .all,
     selected_playlist: PlaylistSelection = .cyberpunk,
+
+    sidebar_scroll: widget.ScrollState = .{},
+    content_scroll: widget.ScrollState = .{},
     playlist_saved: bool = false,
 
     // Data set
@@ -96,6 +93,12 @@ pub const SpotifyApp = struct {
     pub fn toggleCurrentLike(self: *SpotifyApp) void {
         if (self.current_track_idx < self.tracks.len) {
             self.tracks[self.current_track_idx].is_liked = !self.tracks[self.current_track_idx].is_liked;
+        }
+    }
+
+    pub fn toggleTrackLike(self: *SpotifyApp, idx: usize) void {
+        if (idx < self.tracks.len) {
+            self.tracks[idx].is_liked = !self.tracks[idx].is_liked;
         }
     }
 
@@ -148,7 +151,7 @@ pub const SpotifyApp = struct {
         self.selectTrack(6);
     }
 
-    fn selectTrack(self: *SpotifyApp, idx: usize) void {
+    pub fn selectTrack(self: *SpotifyApp, idx: usize) void {
         if (idx < self.tracks.len) {
             self.current_track_idx = idx;
             self.progress_sec = 0;

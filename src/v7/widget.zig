@@ -4,6 +4,8 @@
 const std = @import("std");
 
 const Id = @import("id.zig").Id;
+const callback = @import("callback.zig");
+
 const FlexStyle = @import("flex.zig").FlexStyle;
 
 /// Axis-aligned rectangle in layout space.
@@ -101,13 +103,44 @@ pub const Box = struct {
 pub fn sidesSum(s: Sides) struct { w: f32, h: f32 } {
     return .{ .w = s.left + s.right, .h = s.top + s.bottom };
 }
-
 /// Per-child flexbox sizing parameters (main axis).
 pub const FlexChild = struct {
     grow: f32 = 0,
     shrink: f32 = 1,
     basis: f32 = 0,
+    min_main: ?f32 = null,
 };
+
+/// Sizing parameters for one shared column track.
+pub const ColumnTrack = struct {
+    grow: f32 = 0,
+    shrink: f32 = 1,
+    basis: f32 = 0,
+    min_main: ?f32 = null,
+};
+
+/// Column tracks shared by compatible row children.
+pub const SharedColumns = struct {
+    tracks: []const ColumnTrack,
+};
+
+/// Scrollable axes.
+pub const ScrollAxis = enum { vertical, horizontal, both };
+
+/// Mutable scroll offsets and their layout-derived limits.
+pub const ScrollState = struct {
+    offset: [2]f32 = .{ 0, 0 },
+    max_offset: [2]f32 = .{ 0, 0 },
+};
+
+/// Scroll behavior for a widget node.
+pub const ScrollSpec = struct {
+    state: *ScrollState,
+    axis: ScrollAxis = .vertical,
+};
+
+/// Text overflow behavior.
+pub const TextOverflow = enum { visible, clip, ellipsis };
 
 /// What a widget node is. Payload differs per kind; fields with defaults
 /// may be omitted at construction.
@@ -122,6 +155,7 @@ pub const WidgetKind = union(enum) {
         color: [4]f32 = .{ 1, 1, 1, 1 },
         on_click: ?*const fn (*anyopaque) void = null, // set via callback.wrap()
         owner: Id = .root, // component_id at creation time
+        user_callback: ?callback.UserCallback = null,
     },
     slider: struct {
         label: []const u8,
@@ -146,6 +180,10 @@ pub const WidgetNode = struct {
     /// CSS box model: margin/border/padding/radius. Set at creation from
     /// the DrawCtx opts; flex and the renderer read it.
     box: Box = .{},
+    scroll: ?ScrollSpec = null,
+    text_overflow: TextOverflow = .visible,
+    text_max_width: ?f32 = null,
+    shared_columns: ?*const SharedColumns = null,
     /// Font size in px for text-bearing nodes; 0 = the host's default.
     /// Set from opts.font_size; the measure hook and the text engine
     /// dispatch on it.
@@ -255,6 +293,64 @@ pub fn absoluteRect(tree: *const WidgetTree, id: Id) Rect {
     const origin = absoluteBorderOrigin(tree, id);
     const n = tree.nodeConst(id) orelse return .{ .x = origin[0], .y = origin[1] };
     return .{ .x = origin[0], .y = origin[1], .w = n.rect.w, .h = n.rect.h };
+}
+
+/// Resolve a node's visual border-box origin, accounting for ancestor scroll.
+/// The target node's own scroll offset does not move its border box.
+pub fn visualBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
+    var ox: f32 = 0;
+    var oy: f32 = 0;
+    var cur = id;
+    while (cur != .root) {
+        const n = tree.nodeConst(cur) orelse break;
+        ox += n.rect.x;
+        oy += n.rect.y;
+        const parent = tree.nodeConst(n.parent) orelse break;
+        ox += parent.box.border.left + parent.box.padding.left;
+        oy += parent.box.border.top + parent.box.padding.top;
+        if (parent.scroll) |scroll| {
+            ox -= scroll.state.offset[0];
+            oy -= scroll.state.offset[1];
+        }
+        cur = n.parent;
+    }
+    return .{ ox, oy };
+}
+
+/// Visual border box of a node, after ancestor scroll offsets are applied.
+pub fn visualBorderRect(tree: *const WidgetTree, id: Id) Rect {
+    const origin = visualBorderOrigin(tree, id);
+    const n = tree.nodeConst(id) orelse return .{ .x = origin[0], .y = origin[1] };
+    return .{ .x = origin[0], .y = origin[1], .w = n.rect.w, .h = n.rect.h };
+}
+
+/// Visual content box of a node, after ancestor scroll offsets are applied.
+pub fn visualContentRect(tree: *const WidgetTree, id: Id) Rect {
+    const r = visualBorderRect(tree, id);
+    const n = tree.nodeConst(id) orelse return r;
+    const b = n.box;
+    return .{
+        .x = r.x + b.border.left + b.padding.left,
+        .y = r.y + b.border.top + b.padding.top,
+        .w = @max(0, r.w - b.border.left - b.border.right - b.padding.left - b.padding.right),
+        .h = @max(0, r.h - b.border.top - b.border.bottom - b.padding.top - b.padding.bottom),
+    };
+}
+
+/// Return whether a point is inside every clipped ancestor of a node.
+pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
+    var cur = id;
+    while (cur != .root) {
+        const n = tree.nodeConst(cur) orelse break;
+        if (n.box.clip and !rectContainsPoint(visualBorderRect(tree, cur), pos)) return false;
+        cur = n.parent;
+    }
+    return true;
+}
+
+fn rectContainsPoint(rect: Rect, pos: [2]f32) bool {
+    return pos[0] >= rect.x and pos[0] < rect.x + rect.w and
+        pos[1] >= rect.y and pos[1] < rect.y + rect.h;
 }
 
 /// Absolute CONTENT box of a node: the absolute border box inset by the
@@ -414,4 +510,67 @@ test "WidgetNode: defaults are zero-valued" {
     try std.testing.expectEqual(@as(f32, 0), n.flex.grow);
     try std.testing.expectEqual(@as(f32, 1), n.flex.shrink);
     try std.testing.expectEqual(@as(f32, 0), n.flex.basis);
+}
+
+test "visualBorderRect: scroll offset applies only to descendants" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    const scroll_id: Id = @enumFromInt(1);
+    const child_id: Id = @enumFromInt(2);
+    var scroll_state: ScrollState = .{ .offset = .{ 4, 6 } };
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = scroll_id,
+        .rect = .{ .x = 5, .y = 7, .w = 20, .h = 10 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = scroll_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
+        .box = .{
+            .border = .{ .top = 3, .left = 2 },
+            .padding = .{ .top = 2, .left = 1 },
+        },
+        .scroll = .{ .state = &scroll_state },
+    });
+
+    try std.testing.expectEqual(
+        Rect{ .x = 10, .y = 20, .w = 100, .h = 80 },
+        visualBorderRect(&tree, scroll_id),
+    );
+    try std.testing.expectEqual(
+        Rect{ .x = 14, .y = 26, .w = 20, .h = 10 },
+        visualBorderRect(&tree, child_id),
+    );
+}
+
+test "pointInClipChain: rejects points outside a scrolled ancestor clip" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    const clip_id: Id = @enumFromInt(1);
+    const child_id: Id = @enumFromInt(2);
+    var scroll_state: ScrollState = .{ .offset = .{ 5, 0 } };
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = clip_id,
+        .rect = .{ .x = 25, .y = 5, .w = 20, .h = 10 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = clip_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 10, .y = 20, .w = 30, .h = 30 },
+        .box = .{ .clip = true },
+        .scroll = .{ .state = &scroll_state },
+    });
+
+    try std.testing.expect(pointInClipChain(&tree, child_id, .{ 35, 27 }));
+    try std.testing.expect(!pointInClipChain(&tree, child_id, .{ 45, 27 }));
 }

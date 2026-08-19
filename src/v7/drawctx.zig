@@ -31,6 +31,7 @@ const Align = @import("flex.zig").Align;
 const StateKey = @import("state.zig").Key;
 const stateHash = @import("state.zig").hashName;
 const StateDir = @import("state.zig").StateDir;
+const Component = @import("component.zig").Component;
 /// The App's persistent component registry (see DrawCtx.registry).
 pub const ComponentRegistry = struct {
     map: *std.AutoHashMapUnmanaged(Id, Component),
@@ -38,8 +39,12 @@ pub const ComponentRegistry = struct {
 };
 const WidgetKind = @import("widget.zig").WidgetKind;
 const WidgetTree = @import("widget.zig").WidgetTree;
+const ScrollAxis = @import("widget.zig").ScrollAxis;
+const ScrollState = @import("widget.zig").ScrollState;
+const TextOverflow = @import("widget.zig").TextOverflow;
+const SharedColumns = @import("widget.zig").SharedColumns;
+const ColumnTrack = @import("widget.zig").ColumnTrack;
 const callback = @import("callback.zig");
-const Component = @import("component.zig").Component;
 
 /// Assemble a CSS `Box` from a DrawCtx opts struct. Each box field is read
 /// only when present in the opts; absent fields keep the `Box` defaults.
@@ -53,6 +58,58 @@ fn applyFlexStyle(self: *DrawCtx, id: Id, opts: anytype) void {
     const T = @TypeOf(opts);
     if (@hasField(T, "justify")) self.tree.node(id).?.style.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) self.tree.node(id).?.style.@"align" = @as(Align, opts.@"align");
+}
+
+/// Apply explicit main-axis flex sizing from any widget's options.
+fn applyFlexSizing(self: *DrawCtx, id: Id, opts: anytype) void {
+    const node = self.tree.node(id).?;
+    const T = @TypeOf(opts);
+    if (@hasField(T, "grow")) node.flex.grow = opts.grow;
+    if (@hasField(T, "shrink")) node.flex.shrink = opts.shrink;
+    if (@hasField(T, "basis")) node.flex.basis = opts.basis;
+    if (@hasField(T, "min_main")) node.flex.min_main = opts.min_main;
+}
+
+/// Seed a direct row child from its parent's shared column track.
+fn applySharedColumnDefaults(self: *DrawCtx, id: Id) void {
+    const child = self.tree.node(id).?;
+    if (child.parent == .root) return;
+    const parent = self.tree.node(child.parent) orelse return;
+    if (parent.kind != .row) return;
+    const columns = parent.shared_columns orelse return;
+    if (parent.children.len == 0) return;
+    const child_index: usize = @intCast(parent.children.len - 1);
+    if (child_index >= columns.tracks.len) return;
+    const track = columns.tracks[child_index];
+    child.flex = .{
+        .grow = track.grow,
+        .shrink = track.shrink,
+        .basis = track.basis,
+        .min_main = track.min_main,
+    };
+}
+
+fn applyScrollOptions(self: *DrawCtx, id: Id, opts: anytype) void {
+    const T = @TypeOf(opts);
+    if (!@hasField(T, "scroll_state")) return;
+    const node = self.tree.node(id).?;
+    node.box.clip = true;
+    node.scroll = .{
+        .state = opts.scroll_state,
+        .axis = if (@hasField(T, "scroll_axis"))
+            @as(ScrollAxis, opts.scroll_axis)
+        else
+            .vertical,
+    };
+}
+
+fn applyTextOptions(self: *DrawCtx, id: Id, opts: anytype) void {
+    const node = self.tree.node(id).?;
+    const T = @TypeOf(opts);
+    if (@hasField(T, "text_overflow")) {
+        node.text_overflow = @as(TextOverflow, opts.text_overflow);
+    }
+    if (@hasField(T, "max_width")) node.text_max_width = opts.max_width;
 }
 
 fn asSides(x: anytype) Sides {
@@ -157,6 +214,7 @@ pub const DrawCtx = struct {
             if (p.children.len < p.children.items.len) {
                 p.children.items[p.children.len] = id;
                 p.children.len += 1;
+                applySharedColumnDefaults(self, id);
             }
         }
         return id;
@@ -176,18 +234,8 @@ pub const DrawCtx = struct {
             optsFontSize(opts),
             optsFontId(opts),
         );
-        var grow: f32 = 0;
-        if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
-        if (grow > 0) self.tree.node(id).?.flex.grow = grow;
-        var basis: f32 = 0;
-        if (@hasField(@TypeOf(opts), "basis")) basis = opts.basis;
-        if (basis > 0) self.tree.node(id).?.flex.basis = basis;
-        // shrink mirrors grow: a node may opt out of the overflow shrink
-        // pass (e.g. a basis-pinned overlay whose exact height is
-        // load-bearing). Default 1 = the flex default, untouched.
-        var shrink: f32 = 1;
-        if (@hasField(@TypeOf(opts), "shrink")) shrink = opts.shrink;
-        if (shrink != 1) self.tree.node(id).?.flex.shrink = shrink;
+        applyFlexSizing(self, id, opts);
+        applyScrollOptions(self, id, opts);
         applyFlexStyle(self, id, opts);
         self.descend(id);
         return id;
@@ -203,16 +251,11 @@ pub const DrawCtx = struct {
             optsFontSize(opts),
             optsFontId(opts),
         );
-        var grow: f32 = 0;
-        if (@hasField(@TypeOf(opts), "grow")) grow = opts.grow;
-        if (grow > 0) self.tree.node(id).?.flex.grow = grow;
-        var basis: f32 = 0;
-        if (@hasField(@TypeOf(opts), "basis")) basis = opts.basis;
-        if (basis > 0) self.tree.node(id).?.flex.basis = basis;
-        // shrink mirrors grow (see column()).
-        var shrink: f32 = 1;
-        if (@hasField(@TypeOf(opts), "shrink")) shrink = opts.shrink;
-        if (shrink != 1) self.tree.node(id).?.flex.shrink = shrink;
+        applyFlexSizing(self, id, opts);
+        if (@hasField(@TypeOf(opts), "columns")) {
+            self.tree.node(id).?.shared_columns = opts.columns;
+        }
+        applyScrollOptions(self, id, opts);
         applyFlexStyle(self, id, opts);
         self.descend(id);
         return id;
@@ -252,7 +295,10 @@ pub const DrawCtx = struct {
         const text = try self.arena.dupe(u8, opts.text);
         var kind: WidgetKind = .{ .label = .{ .text = text } };
         if (@hasField(@TypeOf(opts), "color")) kind.label.color = asColor(opts.color);
-        return self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        const id = try self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        applyFlexSizing(self, id, opts);
+        applyTextOptions(self, id, opts);
+        return id;
     }
 
     /// A clickable button. `owner` binds the click to the component that
@@ -267,27 +313,35 @@ pub const DrawCtx = struct {
     /// click-injection + hit-testing scan it).
     pub fn button(self: *DrawCtx, opts: anytype) !Id {
         var on_click: ?*const fn (*anyopaque) void = null;
-        if (@hasField(@TypeOf(opts), "on_click")) on_click = callback.wrap(opts.on_click);
+        var user_callback: ?callback.UserCallback = null;
+        const T = @TypeOf(opts);
+        if (@hasField(T, "on_click")) on_click = callback.wrap(opts.on_click);
+        if (@hasField(T, "on_click_with_data")) user_callback = opts.on_click_with_data;
+        if (@hasField(T, "user_callback")) user_callback = opts.user_callback;
         const label_copy = try self.arena.dupe(u8, opts.label);
         var kind: WidgetKind = .{ .button = .{
             .label = label_copy,
             .on_click = on_click,
             .owner = self.component_id,
+            .user_callback = user_callback,
         } };
-        if (@hasField(@TypeOf(opts), "color")) kind.button.color = asColor(opts.color);
+        if (@hasField(T, "color")) kind.button.color = asColor(opts.color);
         const font_size = optsFontSize(opts);
         const font_id = optsFontId(opts);
         const id = try self.create(kind, boxFromOpts(opts), font_size, font_id);
+        applyFlexSizing(self, id, opts);
+        applyTextOptions(self, id, opts);
         const node = self.tree.node(id).?;
         node.style.justify = .center;
         node.style.@"align" = .center;
         self.descend(id);
-        _ = try self.label(.{
+        const label_id = try self.label(.{
             .text = label_copy,
             .color = kind.button.color,
             .font_size = font_size,
             .font_id = font_id,
         });
+        applyTextOptions(self, label_id, opts);
         self.pop();
         return id;
     }
@@ -303,7 +357,9 @@ pub const DrawCtx = struct {
             .max = opts.max,
         } };
         if (@hasField(@TypeOf(opts), "color")) kind.slider.color = asColor(opts.color);
-        return self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        const id = try self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        applyFlexSizing(self, id, opts);
+        return id;
     }
 
     /// An empty spacer of the given size (`opts.size`, default 0). Box
@@ -311,7 +367,14 @@ pub const DrawCtx = struct {
     pub fn spacer(self: *DrawCtx, opts: anytype) !Id {
         var size: f32 = 0;
         if (@hasField(@TypeOf(opts), "size")) size = opts.size;
-        return self.create(.{ .spacer = .{ .size = size } }, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        const id = try self.create(
+            .{ .spacer = .{ .size = size } },
+            boxFromOpts(opts),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        applyFlexSizing(self, id, opts);
+        return id;
     }
 
     /// Push a clip rect onto the frame's clip-rect list, returning its
@@ -630,6 +693,104 @@ test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
     const cb = tree.node(wired).?.kind.button.on_click.?;
     cb(@ptrCast(&counter));
     try std.testing.expectEqual(@as(u32, 1), counter.n);
+}
+
+test "DrawCtx: shared columns inherit direct-child flex sizing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const tracks = [_]ColumnTrack{
+        .{ .grow = 2, .shrink = 0.5, .basis = 40, .min_main = 12 },
+        .{ .grow = 3, .shrink = 0.25, .basis = 60, .min_main = 20 },
+    };
+    const columns: SharedColumns = .{ .tracks = &tracks };
+    const row = try ctx.row(.{ .columns = &columns });
+    const first = try ctx.label(.{ .text = "first" });
+    const second = try ctx.label(.{
+        .text = "second",
+        .grow = 9,
+        .shrink = 0.75,
+        .basis = 90,
+        .min_main = 30,
+    });
+    const button = try ctx.button(.{ .label = "button" });
+    ctx.pop();
+
+    try std.testing.expectEqual(row, tree.node(first).?.parent);
+    try std.testing.expectEqual(row, tree.node(second).?.parent);
+    try std.testing.expectEqual(row, tree.node(button).?.parent);
+    try std.testing.expectEqual(@as(f32, 2), tree.node(first).?.flex.grow);
+    try std.testing.expectEqual(@as(f32, 0.5), tree.node(first).?.flex.shrink);
+    try std.testing.expectEqual(@as(f32, 40), tree.node(first).?.flex.basis);
+    try std.testing.expectEqual(@as(?f32, 12), tree.node(first).?.flex.min_main);
+    try std.testing.expectEqual(@as(f32, 9), tree.node(second).?.flex.grow);
+    try std.testing.expectEqual(@as(f32, 0.75), tree.node(second).?.flex.shrink);
+    try std.testing.expectEqual(@as(f32, 90), tree.node(second).?.flex.basis);
+    try std.testing.expectEqual(@as(?f32, 30), tree.node(second).?.flex.min_main);
+    // The button is the third child, so it is outside the two-track layout.
+    try std.testing.expectEqual(@as(f32, 0), tree.node(button).?.flex.grow);
+    try std.testing.expectEqual(@as(f32, 1), tree.node(button).?.flex.shrink);
+    try std.testing.expectEqual(@as(f32, 0), tree.node(button).?.flex.basis);
+    try std.testing.expectEqual(@as(?f32, null), tree.node(button).?.flex.min_main);
+}
+
+test "DrawCtx: button label does not consume shared column track" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const tracks = [_]ColumnTrack{
+        .{ .grow = 1, .basis = 25 },
+        .{ .grow = 4, .basis = 75 },
+    };
+    const columns: SharedColumns = .{ .tracks = &tracks };
+    const row = try ctx.row(.{ .columns = &columns });
+    const button = try ctx.button(.{ .label = "button" });
+    const sibling = try ctx.label(.{ .text = "sibling" });
+    ctx.pop();
+
+    const button_node = tree.node(button).?;
+    const button_label = tree.node(button_node.children.items[0]).?;
+    try std.testing.expectEqual(@as(f32, 1), button_node.flex.grow);
+    try std.testing.expectEqual(@as(f32, 25), button_node.flex.basis);
+    try std.testing.expectEqual(@as(f32, 0), button_label.flex.grow);
+    try std.testing.expectEqual(@as(f32, 0), button_label.flex.basis);
+    try std.testing.expectEqual(@as(f32, 4), tree.node(sibling).?.flex.grow);
+    try std.testing.expectEqual(@as(f32, 75), tree.node(sibling).?.flex.basis);
+    try std.testing.expectEqual(row, button_node.parent);
+}
+
+test "DrawCtx: scroll options wire state, axis, and clipping" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    var column_state: ScrollState = .{};
+    var row_state: ScrollState = .{};
+
+    const column = try ctx.column(.{
+        .scroll_state = &column_state,
+        .scroll_axis = .vertical,
+    });
+    ctx.pop();
+    const row = try ctx.row(.{
+        .scroll_state = &row_state,
+        .scroll_axis = .both,
+    });
+    ctx.pop();
+
+    try std.testing.expect(tree.node(column).?.box.clip);
+    try std.testing.expect(tree.node(row).?.box.clip);
+    try std.testing.expectEqual(&column_state, tree.node(column).?.scroll.?.state);
+    try std.testing.expectEqual(ScrollAxis.vertical, tree.node(column).?.scroll.?.axis);
+    try std.testing.expectEqual(&row_state, tree.node(row).?.scroll.?.state);
+    try std.testing.expectEqual(ScrollAxis.both, tree.node(row).?.scroll.?.axis);
 }
 
 test "DrawCtx: box fields from opts flow into the node's box" {
