@@ -24,6 +24,8 @@ pub const tracy_options: tracy.Options = .{
 const Id = @import("v7/id.zig").Id;
 const ui = @import("ui.zig");
 const spotify_ui = @import("spotify.zig");
+const local_library = @import("local_library.zig");
+const LocalTrack = @import("spotify_data.zig").LocalTrack;
 const window_backend = @import("window.zig");
 const measure_cpu = @import("measure_cpu.zig");
 const headless = @import("v7/headless.zig");
@@ -36,6 +38,11 @@ const App = @import("v7/app.zig").App;
 fn errMissingArg(flag: []const u8) error{MissingArg} {
     std.log.err("missing value for {s}", .{flag});
     return error.MissingArg;
+}
+const interactive_track_count_max: usize = 12;
+
+fn interactiveTracks(records: []const LocalTrack) []const LocalTrack {
+    return records[0..@min(records.len, interactive_track_count_max)];
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -64,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
     var layout_diff: ?[]const u8 = null;
     var layout_write_golden: ?[]const u8 = null;
     var sim_path: ?[]const u8 = null;
+    var library_path: ?[]const u8 = null;
     var subpixel = false; // subpixel AA OFF by default; --subpixel enables
     var quad_debug = false; // --quad-debug tints the glyph quads
     var bgr = false; // --bgr: BGR subpixel stripe order
@@ -116,6 +124,8 @@ pub fn main(init: std.process.Init) !void {
             layout_write_golden = args_it.next() orelse return errMissingArg("--write-golden");
         } else if (std.mem.eql(u8, arg, "--sim")) {
             sim_path = args_it.next() orelse return errMissingArg("--sim"); // JSON-lines event script
+        } else if (std.mem.eql(u8, arg, "--library")) {
+            library_path = args_it.next() orelse return errMissingArg("--library");
         } else if (std.mem.eql(u8, arg, "--hover")) {
             // "--hover x,y": render the hover outline at a fixed position
             // in the shot (headless mouse-position verification).
@@ -208,6 +218,7 @@ pub fn main(init: std.process.Init) !void {
                 damp,
                 gpu_sort_verify,
                 n,
+                null,
             ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
@@ -242,6 +253,7 @@ pub fn main(init: std.process.Init) !void {
             damp,
             gpu_sort_verify,
             null,
+            null,
         );
         return;
     }
@@ -259,6 +271,7 @@ pub fn main(init: std.process.Init) !void {
                 damp,
                 gpu_sort_verify,
                 n,
+                null,
             ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
@@ -293,12 +306,62 @@ pub fn main(init: std.process.Init) !void {
             damp,
             gpu_sort_verify,
             null,
+            null,
         );
         return;
     }
 
     if (spotify_mode) {
-        if (window_mode) {
+        if (frames == null and shot_path == null and layout_path == null) {
+            var io_impl = std.Io.Threaded.init(alloc, .{});
+            defer io_impl.deinit();
+            const io = io_impl.io();
+
+            var default_library_root: ?[]u8 = null;
+            defer if (default_library_root) |root_path| alloc.free(root_path);
+            if (library_path == null) {
+                if (init.environ_map.get("HOME")) |home| {
+                    default_library_root = std.fs.path.join(alloc, &.{ home, "songs", "Sunnify" }) catch |err| blk: {
+                        std.log.err("default Spotify library path failed: {s}", .{@errorName(err)});
+                        break :blk null;
+                    };
+                } else {
+                    std.log.err("HOME is unset; Spotify playback library is unavailable", .{});
+                }
+            }
+
+            const selected_library_root: ?[]const u8 = if (library_path) |path|
+                path
+            else if (default_library_root) |path|
+                path
+            else
+                null;
+            var library: ?local_library.LocalLibrary = null;
+            defer if (library) |*value| value.deinit();
+            if (selected_library_root) |path| {
+                library = local_library.LocalLibrary.scan(alloc, io, path, .{}) catch |err| blk: {
+                    std.log.err("Spotify library scan failed for {s}: {s}", .{ path, @errorName(err) });
+                    std.log.err("Spotify playback unavailable: local library scan failed", .{});
+                    _ = spotify.initLocalTracks(&.{});
+                    break :blk null;
+                };
+            } else {
+                std.log.err("Spotify playback unavailable: no local library configured", .{});
+                _ = spotify.initLocalTracks(&.{});
+            }
+
+            var audio_tracks: ?[]const LocalTrack = null;
+
+            if (library) |*value| {
+                const records = interactiveTracks(value.records());
+                const active_count = spotify.initLocalTracks(records);
+                if (active_count == 0) {
+                    std.log.err("Spotify playback unavailable: no supported local audio tracks found", .{});
+                } else {
+                    audio_tracks = records[0..active_count];
+                }
+            }
+
             try window_backend.run(
                 spotify_ui.SpotifyApp,
                 &app,
@@ -309,6 +372,7 @@ pub fn main(init: std.process.Init) !void {
                 damp,
                 gpu_sort_verify,
                 null,
+                audio_tracks,
             );
             return;
         }
@@ -323,6 +387,7 @@ pub fn main(init: std.process.Init) !void {
                 damp,
                 gpu_sort_verify,
                 n,
+                null,
             ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
@@ -347,29 +412,26 @@ pub fn main(init: std.process.Init) !void {
             };
             return;
         }
-        if (layout_path == null) {
-            try window_backend.run(
-                spotify_ui.SpotifyApp,
-                &app,
-                &spotify,
-                subpixel,
-                quad_debug,
-                bgr,
-                damp,
-                gpu_sort_verify,
-                null,
-            );
-            return;
-        }
     }
 
     if (window_mode) {
-        try window_backend.run(ui.TodoApp, &app, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null);
+        try window_backend.run(ui.TodoApp, &app, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null, null);
         return;
     }
 
     if (frames) |n| {
-        window_backend.run(ui.TodoApp, &app, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, n) catch |e| {
+        window_backend.run(
+            ui.TodoApp,
+            &app,
+            &todo,
+            subpixel,
+            quad_debug,
+            bgr,
+            damp,
+            gpu_sort_verify,
+            n,
+            null,
+        ) catch |e| {
             std.log.err("run failed: {s}", .{@errorName(e)});
             return e;
         };

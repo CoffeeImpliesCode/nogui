@@ -660,7 +660,7 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
                 Size{ .width = 84, .height = 20 };
             const content_w = @max(0, capTextWidth(node, ms.width));
             node.rect.w = @max(100, content_w + border.w + padding.w);
-            node.rect.h = ms.height + border.h + padding.h;
+            node.rect.h = @max(widget.slider_rail_height, ms.height) + border.h + padding.h;
         },
         .spacer => |s| {
             node.rect.w = s.size + border.w + padding.w;

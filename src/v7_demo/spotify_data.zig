@@ -1,5 +1,20 @@
 //! Spotify demo models and immutable seed data.
+const std = @import("std");
 
+/// Owned embedded artwork copied from an audio container.
+pub const Artwork = struct {
+    bytes: []u8,
+    width: u32,
+    height: u32,
+    codec_id: c_int,
+
+    pub fn deinit(self: *Artwork, gpa: std.mem.Allocator) void {
+        gpa.free(self.bytes);
+        self.* = undefined;
+    }
+};
+/// Maximum number of local tracks retained by the scanner and playback queue.
+pub const local_queue_capacity: usize = 4096;
 pub const Track = struct {
     id: u32,
     title: []const u8,
@@ -9,7 +24,19 @@ pub const Track = struct {
     duration_sec: u24,
     date_added: []const u8,
     artwork_seed: u8 = 0,
+    artwork_texture_index: ?u32 = null,
     is_liked: bool = false,
+};
+/// Borrowed local-library metadata. The owning library keeps these slices and
+/// the optional artwork bytes alive.
+pub const LocalTrack = struct {
+    path: []const u8,
+    title: []const u8,
+    artist: []const u8,
+    album: []const u8,
+    duration_str: []const u8,
+    duration_sec: u32,
+    artwork: ?Artwork = null,
 };
 
 pub const PlaylistInfo = struct {

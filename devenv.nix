@@ -28,6 +28,7 @@ rec {
     # tracy_0_11
     mangohud
     zig-zlint
+    ffmpeg
   ];
 
   env = {

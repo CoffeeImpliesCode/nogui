@@ -1,6 +1,7 @@
 //! Sidebar view for the Spotify demo.
 
 const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
+const flex = @import("v7/flex.zig");
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
 
@@ -29,9 +30,18 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     });
     defer ctx.pop();
 
-    try navButton(ctx, "⌂", "⌂  Home", expanded, app.active_nav == .home, App.selectNavHome);
-    try navButton(ctx, "⌕", "⌕  Search", expanded, app.active_nav == .search, App.selectNavSearch);
-    try navButton(ctx, "▥", "▥  Your Library", expanded, app.active_nav == .library, App.selectNavLibrary);
+    {
+        _ = try ctx.column(.{
+            .gap = theme.sidebar_nav_gap,
+            .shrink = 0,
+            .clip = true,
+        });
+        defer ctx.pop();
+
+        try navButton(ctx, "⌂", "⌂  Home", expanded, app.active_nav == .home, App.selectNavHome);
+        try navButton(ctx, "⌕", "⌕  Search", expanded, app.active_nav == .search, App.selectNavSearch);
+        try navButton(ctx, "▥", "▥  Your Library", expanded, app.active_nav == .library, App.selectNavLibrary);
+    }
 
     if (expanded) {
         try libraryHeader(ctx);
@@ -54,7 +64,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         "Liked Songs",
         "You",
         4,
-        true,
         app.selected_playlist == .liked_songs,
         expanded,
         App.selectPlaylistLiked,
@@ -64,7 +73,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         pl[0].name,
         pl[0].author,
         pl[0].artwork_seed,
-        pl[0].is_pinned,
         app.selected_playlist == .cyberpunk,
         expanded,
         App.selectPlaylist0,
@@ -74,7 +82,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         pl[1].name,
         pl[1].author,
         pl[1].artwork_seed,
-        pl[1].is_pinned,
         app.selected_playlist == .discover_weekly,
         expanded,
         App.selectPlaylist1,
@@ -84,7 +91,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         pl[2].name,
         pl[2].author,
         pl[2].artwork_seed,
-        pl[2].is_pinned,
         app.selected_playlist == .release_radar,
         expanded,
         App.selectPlaylist2,
@@ -94,7 +100,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         pl[3].name,
         pl[3].author,
         pl[3].artwork_seed,
-        pl[3].is_pinned,
         app.selected_playlist == .daily_mix,
         expanded,
         App.selectPlaylist3,
@@ -104,7 +109,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         pl[4].name,
         pl[4].author,
         pl[4].artwork_seed,
-        pl[4].is_pinned,
         app.selected_playlist == .deep_focus,
         expanded,
         App.selectPlaylist4,
@@ -114,7 +118,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         pl[5].name,
         pl[5].author,
         pl[5].artwork_seed,
-        pl[5].is_pinned,
         app.selected_playlist == .chill_lofi,
         expanded,
         App.selectPlaylist5,
@@ -130,18 +133,47 @@ fn navButton(
     comptime on_click: anytype,
 ) !void {
     const fill = if (active) theme.c_active_row else theme.c_sidebar_bg;
-    const label = if (expanded) expanded_label else compact_label;
+
+    if (!expanded) {
+        _ = try ctx.row(.{
+            .basis = theme.sidebar_nav_row_height,
+            .min_main = theme.sidebar_nav_row_height,
+            .shrink = 0,
+            .justify = .center,
+            .@"align" = .center,
+            .clip = true,
+        });
+        defer ctx.pop();
+
+        _ = try ctx.button(.{
+            .label = expanded_label,
+            .visual_label = compact_label,
+            .accessible_label = expanded_label,
+            .on_click = on_click,
+            .basis = theme.sidebar_compact_target_size,
+            .min_main = theme.sidebar_compact_target_size,
+            .grow = 0,
+            .shrink = 0,
+            .color = if (active) theme.c_text else theme.c_text_sec,
+            .font_size = 16,
+            .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+            .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
+            .fill = fill,
+            .gradient = theme.srgbToOklab(fill),
+        });
+        return;
+    }
 
     _ = try ctx.button(.{
-        .label = label,
+        .label = expanded_label,
         .on_click = on_click,
         .basis = theme.sidebar_nav_row_height,
         .min_main = theme.sidebar_nav_row_height,
         .shrink = 0,
         .justify = .start,
         .color = if (active) theme.c_text else theme.c_text_sec,
-        .font_size = if (expanded) @as(f32, 13) else 16,
-        .padding = .{ .left = if (expanded) @as(f32, 10) else @as(f32, 0), .right = 8, .top = 0, .bottom = 0 },
+        .font_size = 13,
+        .padding = .{ .left = 10, .right = 8, .top = 0, .bottom = 0 },
         .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
         .fill = fill,
         .gradient = theme.srgbToOklab(fill),
@@ -174,45 +206,68 @@ fn playlistRow(
     name: []const u8,
     author: []const u8,
     artwork_seed: u8,
-    pinned: bool,
     active: bool,
     expanded: bool,
     comptime on_click: anytype,
 ) !void {
-    const fill = if (active) theme.c_active_row else theme.c_sidebar_bg;
-
-    _ = try ctx.row(.{
-        .basis = theme.sidebar_row_height,
-        .min_main = theme.sidebar_row_height,
-        .shrink = 0,
-        .@"align" = .center,
-        .gap = if (expanded) theme.sidebar_section_gap else 0,
-        .padding = .{ .left = if (expanded) @as(f32, 6) else @as(f32, 0), .right = 6, .top = 4, .bottom = 4 },
-        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
-        .fill = fill,
-        .gradient = theme.srgbToOklab(fill),
-        .clip = true,
-    });
+    if (active) {
+        _ = try ctx.row(.{
+            .basis = theme.sidebar_row_height,
+            .min_main = theme.sidebar_row_height,
+            .shrink = 0,
+            .@"align" = .center,
+            .justify = @as(flex.Justify, if (expanded) .start else .center),
+            .gap = if (expanded) theme.sidebar_section_gap else 0,
+            .padding = .{
+                .left = if (expanded) @as(f32, 6) else @as(f32, 0),
+                .right = if (expanded) @as(f32, 6) else @as(f32, 0),
+                .top = 4,
+                .bottom = 4,
+            },
+            .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
+            .fill = theme.c_active_row,
+            .gradient = theme.srgbToOklab(theme.c_active_row),
+            .clip = true,
+        });
+    } else {
+        _ = try ctx.row(.{
+            .basis = theme.sidebar_row_height,
+            .min_main = theme.sidebar_row_height,
+            .shrink = 0,
+            .@"align" = .center,
+            .justify = @as(flex.Justify, if (expanded) .start else .center),
+            .gap = if (expanded) theme.sidebar_section_gap else 0,
+            .padding = .{
+                .left = if (expanded) @as(f32, 6) else @as(f32, 0),
+                .right = if (expanded) @as(f32, 6) else @as(f32, 0),
+                .top = 4,
+                .bottom = 4,
+            },
+            .clip = true,
+        });
+    }
     defer ctx.pop();
 
     if (!expanded) {
         _ = try ctx.button(.{
-            .label = if (active) "▶" else if (pinned) "◆" else "•",
+            .label = name,
+            .visual_label = theme.compactArtworkMark(artwork_seed),
+            .accessible_label = name,
             .on_click = on_click,
-            .grow = 1,
-            .min_main = 0,
-            .justify = .start,
-            .color = if (active) theme.c_accent else theme.c_text_muted,
+            .basis = theme.sidebar_compact_target_size,
+            .min_main = theme.sidebar_compact_target_size,
+            .grow = 0,
+            .shrink = 0,
+            .color = if (active) theme.c_text else theme.c_text_sec,
             .font_size = 13,
-            .padding = .{ .left = 12, .right = 0, .top = 0, .bottom = 0 },
-            .fill = fill,
-            .gradient = theme.srgbToOklab(fill),
+            .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+            .transparent = true,
         });
         return;
     }
 
-    _ = try theme.drawArtworkTile(ctx, theme.playlist_artwork_size, artwork_seed);
-    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 0, .gap = 0 });
+    _ = try theme.drawArtworkTile(ctx, theme.playlist_artwork_size, artwork_seed, null);
+    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 0, .gap = theme.sidebar_playlist_copy_gap });
     defer ctx.pop();
 
     _ = try ctx.button(.{
@@ -223,16 +278,15 @@ fn playlistRow(
         .min_main = 0,
         .justify = .start,
         .color = if (active) theme.c_text else theme.c_text_sec,
-        .font_size = 13,
+        .transparent = true,
+        .font_size = theme.sidebar_playlist_title_size,
         .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-        .fill = fill,
-        .gradient = theme.srgbToOklab(fill),
         .text_overflow = .ellipsis,
     });
     _ = try ctx.label(.{
         .text = author,
         .color = theme.c_text_muted,
-        .font_size = 10,
+        .font_size = theme.sidebar_playlist_metadata_size,
         .text_overflow = .ellipsis,
     });
 }

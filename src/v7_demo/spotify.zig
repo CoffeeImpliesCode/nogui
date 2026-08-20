@@ -43,6 +43,17 @@ pub const PlaylistInfo = data.PlaylistInfo;
 pub const NavTab = data.NavTab;
 pub const CategoryPill = data.CategoryPill;
 pub const PlaylistSelection = data.PlaylistSelection;
+pub const track_capacity: usize = data.local_queue_capacity;
+pub const default_track_count: usize = data.default_tracks.len;
+
+fn defaultTrackStorage() [track_capacity]Track {
+    var tracks: [track_capacity]Track = undefined;
+    for (data.default_tracks, 0..) |track, index| {
+        tracks[index] = track;
+    }
+    return tracks;
+}
+
 pub const SpotifyApp = struct {
     // Playback state
     is_playing: bool = true,
@@ -61,28 +72,104 @@ pub const SpotifyApp = struct {
     content_scroll: widget.ScrollState = .{},
     playlist_saved: bool = false,
 
-    // Data set
-    tracks: [data.default_tracks.len]Track = data.default_tracks,
+    // Data set. The fixed array keeps the UI storage allocation-free.
+    // Interactive startup replaces fixture tracks with this local queue.
+    local_audio_queue_initialized: bool = false,
+    active_track_count: usize = default_track_count,
+    tracks: [track_capacity]Track = defaultTrackStorage(),
     playlists: [6]PlaylistInfo = data.default_playlists,
 
     // Interaction callbacks.
 
+    pub fn activeTrackCount(self: *const SpotifyApp) usize {
+        return @min(self.active_track_count, self.tracks.len);
+    }
+
+    pub fn activeTracks(self: *const SpotifyApp) []const Track {
+        return self.tracks[0..self.activeTrackCount()];
+    }
+
+    pub fn currentTrackIndex(self: *const SpotifyApp) ?usize {
+        const count = self.activeTrackCount();
+        if (count == 0) return null;
+        return if (self.current_track_idx < count) self.current_track_idx else 0;
+    }
+
+    pub fn currentTrack(self: *const SpotifyApp) ?*const Track {
+        const index = self.currentTrackIndex() orelse return null;
+        return &self.tracks[index];
+    }
+
+    /// Copy the bounded local queue into the fixed UI track storage.
+    ///
+    /// LocalLibrary owns the metadata slices. The UI only borrows those
+    /// immutable slices for the lifetime of the interactive window.
+    pub fn initLocalTracks(self: *SpotifyApp, local_tracks: []const data.LocalTrack) usize {
+        const count = @min(local_tracks.len, track_capacity);
+        self.local_audio_queue_initialized = true;
+        self.active_track_count = count;
+        self.current_track_idx = 0;
+        self.progress_sec = 0;
+        self.is_playing = false;
+        if (count == 0) return 0;
+
+        for (local_tracks[0..count], 0..) |local_track, index| {
+            self.tracks[index] = .{
+                .id = @intCast(index + 1),
+                .title = local_track.title,
+                .artist = local_track.artist,
+                .album = local_track.album,
+                .duration_str = local_track.duration_str,
+                .duration_sec = @intCast(@min(
+                    local_track.duration_sec,
+                    @as(u32, std.math.maxInt(u24)),
+                )),
+                .date_added = "Local library",
+                .artwork_seed = @intCast(index % (@as(usize, std.math.maxInt(u8)) + 1)),
+            };
+        }
+
+        return count;
+    }
+
+    /// Bind a persistent window-owned texture index to one local track.
+    pub fn setArtworkTextureIndex(self: *SpotifyApp, index: usize, texture_index: ?u32) void {
+        if (index < self.activeTrackCount()) {
+            self.tracks[index].artwork_texture_index = texture_index;
+        }
+    }
+
     pub fn togglePlay(self: *SpotifyApp) void {
+        if (self.currentTrackIndex() == null) {
+            self.is_playing = false;
+            return;
+        }
         self.is_playing = !self.is_playing;
     }
 
     pub fn nextTrack(self: *SpotifyApp) void {
-        self.current_track_idx = (self.current_track_idx + 1) % self.tracks.len;
+        const count = self.activeTrackCount();
+        if (count == 0) return;
+
+        const current_index = self.currentTrackIndex().?;
+        self.current_track_idx = (current_index + 1) % count;
         self.progress_sec = 0;
         self.is_playing = true;
     }
 
+    /// Advance after decoder EOF without changing the play/pause state.
+    pub fn advancePlaybackAtEnd(self: *SpotifyApp) void {
+        const was_playing = self.is_playing;
+        self.nextTrack();
+        self.is_playing = was_playing;
+    }
+
     pub fn prevTrack(self: *SpotifyApp) void {
-        if (self.current_track_idx > 0) {
-            self.current_track_idx -= 1;
-        } else {
-            self.current_track_idx = self.tracks.len - 1;
-        }
+        const count = self.activeTrackCount();
+        if (count == 0) return;
+
+        const current_index = self.currentTrackIndex().?;
+        self.current_track_idx = if (current_index > 0) current_index - 1 else count - 1;
         self.progress_sec = 0;
         self.is_playing = true;
     }
@@ -96,13 +183,13 @@ pub const SpotifyApp = struct {
     }
 
     pub fn toggleCurrentLike(self: *SpotifyApp) void {
-        if (self.current_track_idx < self.tracks.len) {
-            self.tracks[self.current_track_idx].is_liked = !self.tracks[self.current_track_idx].is_liked;
+        if (self.currentTrackIndex()) |index| {
+            self.tracks[index].is_liked = !self.tracks[index].is_liked;
         }
     }
 
     pub fn toggleTrackLike(self: *SpotifyApp, idx: usize) void {
-        if (idx < self.tracks.len) {
+        if (idx < self.activeTrackCount()) {
             self.tracks[idx].is_liked = !self.tracks[idx].is_liked;
         }
     }
@@ -157,7 +244,7 @@ pub const SpotifyApp = struct {
     }
 
     pub fn selectTrack(self: *SpotifyApp, idx: usize) void {
-        if (idx < self.tracks.len) {
+        if (idx < self.activeTrackCount()) {
             self.current_track_idx = idx;
             self.progress_sec = 0;
             self.is_playing = true;
@@ -265,6 +352,7 @@ test "SpotifyApp draws without error in DrawCtx" {
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     var app: SpotifyApp = .{};
+    try std.testing.expectEqual(default_track_count, app.activeTrackCount());
     try app.draw(&ctx);
 
     // Verify node tree has been populated with essential hierarchy
@@ -443,4 +531,106 @@ test "SpotifyApp generated album label stays inside its button at 1100x1160" {
     try std.testing.expect(
         label_rect.y + label_rect.h <= button_content_rect.y + button_content_rect.h + epsilon,
     );
+}
+
+test "SpotifyApp retains a full local queue at the shared capacity" {
+    var local_tracks: [track_capacity]data.LocalTrack = undefined;
+    for (&local_tracks, 0..) |*local_track, index| {
+        local_track.* = .{
+            .path = "local.flac",
+            .title = if (index == track_capacity - 1) "last" else "local",
+            .artist = "Artist",
+            .album = "Album",
+            .duration_str = "1:00",
+            .duration_sec = 60,
+        };
+    }
+
+    var app: SpotifyApp = .{};
+    const active_count = app.initLocalTracks(&local_tracks);
+
+    try std.testing.expectEqual(track_capacity, active_count);
+    try std.testing.expectEqual(track_capacity, app.activeTrackCount());
+    try std.testing.expectEqualStrings("last", app.activeTracks()[track_capacity - 1].title);
+}
+test "SpotifyApp local queue starts paused until explicit play" {
+    const local_tracks = [_]data.LocalTrack{.{
+        .path = "local.flac",
+        .title = "Local",
+        .artist = "Artist",
+        .album = "Album",
+        .duration_str = "1:00",
+        .duration_sec = 60,
+    }};
+
+    var app: SpotifyApp = .{};
+    try std.testing.expect(app.is_playing);
+    try std.testing.expectEqual(@as(usize, 1), app.initLocalTracks(&local_tracks));
+    try std.testing.expect(!app.is_playing);
+
+    app.togglePlay();
+    try std.testing.expect(app.is_playing);
+}
+
+test "SpotifyApp local tracks share rendered order and report unavailable playback when empty" {
+    const local_tracks = [_]data.LocalTrack{
+        .{
+            .path = "first.flac",
+            .title = "Local First",
+            .artist = "Local Artist",
+            .album = "Local Album",
+            .duration_str = "1:01",
+            .duration_sec = 61,
+        },
+        .{
+            .path = "second.flac",
+            .title = "Local Second",
+            .artist = "Second Artist",
+            .album = "Second Album",
+            .duration_str = "2:02",
+            .duration_sec = 122,
+        },
+    };
+
+    var app: SpotifyApp = .{};
+    try std.testing.expectEqual(@as(usize, 2), app.initLocalTracks(&local_tracks));
+    try std.testing.expectEqualStrings("Local First", app.activeTracks()[0].title);
+    app.selectTrack(1);
+    try std.testing.expectEqualStrings("Local Second", app.currentTrack().?.title);
+
+    var empty_app: SpotifyApp = .{};
+    const empty_tracks: [0]data.LocalTrack = .{};
+    try std.testing.expectEqual(@as(usize, 0), empty_app.initLocalTracks(&empty_tracks));
+    try std.testing.expectEqual(@as(usize, 0), empty_app.activeTrackCount());
+    try std.testing.expect(!empty_app.is_playing);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    try empty_app.draw(&ctx);
+
+    var unavailable_tracks_label_found = false;
+    var unavailable_player_label_found = false;
+    var fallback_track_label_found = false;
+    for (tree.nodes.items) |*node| {
+        switch (node.kind) {
+            .label => |label| {
+                if (std.mem.eql(u8, label.text, "No local tracks available")) {
+                    unavailable_tracks_label_found = true;
+                }
+                if (std.mem.eql(u8, label.text, "Playback unavailable")) {
+                    unavailable_player_label_found = true;
+                }
+                if (std.mem.eql(u8, label.text, "Resonance")) {
+                    fallback_track_label_found = true;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(unavailable_tracks_label_found);
+    try std.testing.expect(unavailable_player_label_found);
+    try std.testing.expect(!fallback_track_label_found);
 }

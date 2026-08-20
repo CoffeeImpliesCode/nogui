@@ -125,6 +125,11 @@ pub fn build(b: *std.Build) void {
     // its headers so the consumer's @cImport can find them.
     v7_demo.root_module.linkLibrary(libxml2_dep.artifact("xml2"));
     v7_demo.root_module.addIncludePath(libxml2_dep.artifact("xml2").getEmittedIncludeTree());
+    v7_demo.root_module.linkSystemLibrary("avformat", .{});
+    v7_demo.root_module.linkSystemLibrary("avcodec", .{});
+    v7_demo.root_module.linkSystemLibrary("avutil", .{});
+    v7_demo.root_module.linkSystemLibrary("swresample", .{});
+    v7_demo.root_module.linkSystemLibrary("swscale", .{});
     b.installArtifact(v7_demo);
 
     const v7_run_cmd = b.addRunArtifact(v7_demo);
@@ -326,6 +331,11 @@ pub fn build(b: *std.Build) void {
     });
     exe_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     exe_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    exe_tests.root_module.linkSystemLibrary("avformat", .{});
+    exe_tests.root_module.linkSystemLibrary("avcodec", .{});
+    exe_tests.root_module.linkSystemLibrary("avutil", .{});
+    exe_tests.root_module.linkSystemLibrary("swresample", .{});
+    exe_tests.root_module.linkSystemLibrary("swscale", .{});
     if (coverage) {
         exe_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
         exe_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1

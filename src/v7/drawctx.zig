@@ -30,6 +30,7 @@ const BoxSizing = @import("widget.zig").BoxSizing;
 const Justify = @import("flex.zig").Justify;
 const Align = @import("flex.zig").Align;
 const layout = @import("flex.zig").layout;
+const hitButton = @import("input.zig").hitButton;
 const StateKey = @import("state.zig").Key;
 const stateHash = @import("state.zig").hashName;
 const StateDir = @import("state.zig").StateDir;
@@ -148,6 +149,7 @@ fn boxFromOpts(opts: anytype) Box {
     if (@hasField(T, "box_sizing")) box.box_sizing = @as(BoxSizing, opts.box_sizing);
     // Paint-only fields (absent keeps the Box defaults).
     if (@hasField(T, "shadow")) box.shadow = opts.shadow;
+    if (@hasField(T, "transparent")) box.transparent = opts.transparent;
     if (@hasField(T, "clip")) box.clip = opts.clip;
     // layer is a u32 — copy it directly (absent keeps the Box default 0).
     if (@hasField(T, "layer")) box.layer = opts.layer;
@@ -345,17 +347,23 @@ pub const DrawCtx = struct {
         if (@hasField(T, "user_callback")) user_callback = opts.user_callback;
 
         const label_copy = try self.arena.dupe(u8, opts.label);
+        var visual_label: ?[]const u8 = null;
+        if (@hasField(T, "visual_label")) {
+            visual_label = try self.dupeOptionalText(opts.visual_label);
+        }
         var accessible_label: ?[]const u8 = null;
         if (@hasField(T, "accessible_label")) {
             accessible_label = try self.dupeOptionalText(opts.accessible_label);
         }
         var kind: WidgetKind = .{ .button = .{
             .label = label_copy,
+            .visual_label = visual_label,
             .accessible_label = accessible_label,
             .on_click = on_click,
             .owner = self.component_id,
             .user_callback = user_callback,
         } };
+        if (@hasField(T, "icon")) kind.button.icon = opts.icon;
         if (@hasField(T, "color")) kind.button.color = asColor(opts.color);
 
         const font_size = optsFontSize(opts);
@@ -371,28 +379,31 @@ pub const DrawCtx = struct {
         node.style.@"align" = .center;
         applyFlexStyle(self, id, opts);
 
-        self.descend(id);
-        const label_id = try self.label(.{
-            .text = label_copy,
-            .color = kind.button.color,
-            .font_size = font_size,
-            .font_id = font_id,
-        });
-        applyButtonLabelSizing(self, label_id, opts);
-        applyTextOptions(self, label_id, opts);
-        if (@hasField(T, "text_overflow")) {
-            const overflow: TextOverflow = opts.text_overflow;
-            if (overflow == .ellipsis or overflow == .clip) {
-                if (@hasField(T, "max_width")) {
-                    if (opts.max_width > 0) {
-                        // A bounded button label may shrink to its parent's
-                        // final content box instead of its natural width.
-                        self.tree.node(label_id).?.flex.min_main = 0;
+        const visible_label = widget.buttonVisualLabel(kind);
+        if (visible_label.len != 0) {
+            self.descend(id);
+            const label_id = try self.label(.{
+                .text = visible_label,
+                .color = kind.button.color,
+                .font_size = font_size,
+                .font_id = font_id,
+            });
+            applyButtonLabelSizing(self, label_id, opts);
+            applyTextOptions(self, label_id, opts);
+            if (@hasField(T, "text_overflow")) {
+                const overflow: TextOverflow = opts.text_overflow;
+                if (overflow == .ellipsis or overflow == .clip) {
+                    if (@hasField(T, "max_width")) {
+                        if (opts.max_width > 0) {
+                            // A bounded button label may shrink to its parent's
+                            // final content box instead of its natural width.
+                            self.tree.node(label_id).?.flex.min_main = 0;
+                        }
                     }
                 }
             }
+            self.pop();
         }
-        self.pop();
         return id;
     }
 
@@ -762,6 +773,47 @@ test "DrawCtx: semantic and visual labels are copied, empty override stays expli
     try std.testing.expectEqualStrings("Slider", slider_kind.label);
     try std.testing.expectEqualStrings("Vis", slider_kind.visual_label.?);
     try std.testing.expectEqualStrings("", tree.node(hidden).?.kind.slider.visual_label.?);
+}
+
+test "DrawCtx: icon-only button stays interactive without a label child" {
+    // Layout an icon-only button, then verify that its semantic and renderer
+    // metadata stay on the hit-testable button instead of a generated leaf.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Counter = struct {
+        const Self = @This();
+
+        fn click(self: *Self) void {
+            _ = self;
+        }
+    };
+    const button = try ctx.button(.{
+        .label = "Play",
+        .accessible_label = "Play",
+        .icon = @as(widget.IconId, .play),
+        .on_click = Counter.click,
+        .basis = 24,
+        .min_main = 24,
+        .shrink = 0,
+    });
+
+    layout(&tree, .{ .width = 80, .height = 40 });
+    const button_node = tree.node(button).?;
+    const button_kind = button_node.kind.button;
+    try std.testing.expectEqual(@as(u8, 0), button_node.children.len);
+    try std.testing.expectEqualStrings("Play", button_kind.accessible_label.?);
+    try std.testing.expectEqual(widget.IconId.play, button_kind.icon.?);
+    try std.testing.expect(button_kind.on_click != null);
+    try std.testing.expect(button_node.rect.w > 0);
+    try std.testing.expect(button_node.rect.h > 0);
+
+    const bounds = widget.visualBorderRect(&tree, button);
+    const hit = hitButton(&tree, .{ bounds.x + bounds.w / 2, bounds.y + bounds.h / 2 });
+    try std.testing.expectEqual(button, hit.?);
 }
 
 test "DrawCtx: container gap comes from opts, defaults to 0" {

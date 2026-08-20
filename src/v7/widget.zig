@@ -75,6 +75,8 @@ pub const Box = struct {
     /// set it to the same color as the gradient for a flat fill. Excluded
     /// from the layout fingerprint.
     color: [4]f32 = .{ 0, 0, 0, 0 },
+    /// When true, the node participates in layout and interaction but emits no fill.
+    transparent: bool = false,
     /// Paint-only: this container clips its own + descendants' content to
     /// its border box (collectDrawCmds stamps a clip id on the subtree's
     /// draw commands; the fragment shader discards outside the rect).
@@ -142,6 +144,42 @@ pub const ScrollSpec = struct {
 /// Text overflow behavior.
 pub const TextOverflow = enum { visible, clip, ellipsis };
 
+/// A window-rendered SVG icon. This stays value-only so the widget tree
+/// remains independent of the GPU cache that owns its path materials.
+pub const IconId = enum {
+    heart,
+    heart_filled,
+    shuffle,
+    previous,
+    play,
+    pause,
+    next,
+    repeat,
+    queue,
+    devices,
+    volume,
+};
+/// Visible rail height for sliders whose visual label is intentionally hidden.
+/// Layout owns this shared intrinsic so such controls remain paintable and
+/// interactive without caller-specific vertical padding.
+pub const slider_rail_height: f32 = 4;
+
+/// Paint-only thumb geometry. The fixed width keeps the marker visible over
+/// both the filled progress and the unfilled rail; this does not increase the
+/// slider's intrinsic or pointer-hit height.
+pub const slider_thumb_width: f32 = 10;
+
+pub fn sliderThumbRect(rail: Rect, fraction: f32) Rect {
+    const width = @min(slider_thumb_width, rail.w);
+    const x = rail.x + std.math.clamp(fraction, 0, 1) * @max(0, rail.w - width);
+    return .{
+        .x = x,
+        .y = rail.y,
+        .w = width,
+        .h = rail.h,
+    };
+}
+
 /// What a widget node is. Payload differs per kind; fields with defaults
 /// may be omitted at construction.
 pub const WidgetKind = union(enum) {
@@ -151,9 +189,15 @@ pub const WidgetKind = union(enum) {
     /// renderer, like every widget color); default = white.
     label: struct { text: []const u8, color: [4]f32 = .{ 1, 1, 1, 1 } },
     button: struct {
+        /// Semantic name retained for input dispatch and accessibility.
         label: []const u8,
+        /// Optional visible text. Null uses `label` for text buttons; icons
+        /// default to no text. An empty slice explicitly suppresses text.
+        visual_label: ?[]const u8 = null,
+        /// Optional window-owned SVG cache key; no GPU state belongs here.
+        icon: ?IconId = null,
         /// Optional semantic name for assistive technologies; `label` remains
-        /// the visual glyph/text emitted by the button's child label.
+        /// the semantic fallback when this is absent.
         accessible_label: ?[]const u8 = null,
         color: [4]f32 = .{ 1, 1, 1, 1 },
         on_click: ?*const fn (*anyopaque) void = null, // set via callback.wrap()
@@ -173,6 +217,16 @@ pub const WidgetKind = union(enum) {
     },
     spacer: struct { size: f32 = 0 },
 };
+
+/// Return a button's visible text while keeping its semantic label intact.
+/// Icon buttons intentionally default to no text; an explicit visual label
+/// can still opt into a mixed icon-and-text button.
+pub fn buttonVisualLabel(kind: WidgetKind) []const u8 {
+    return switch (kind) {
+        .button => |b| b.visual_label orelse if (b.icon != null) "" else b.label,
+        else => unreachable,
+    };
+}
 
 /// Return the text a slider should display while preserving its semantic label
 /// in the slider payload. A null visual label falls back to that label; an

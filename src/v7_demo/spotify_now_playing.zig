@@ -9,8 +9,7 @@ const now_playing_artwork_size: f32 = 160;
 pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     if (!spec.show_now_playing) return;
 
-    const track_index = if (app.current_track_idx < app.tracks.len) app.current_track_idx else 0;
-    const track = app.tracks[track_index];
+    const current_track = app.currentTrack();
     const content_width = spec.now_playing_width - now_playing_rail_padding_x * 2;
 
     _ = try ctx.column(.{
@@ -52,28 +51,49 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         });
     }
 
-    const artwork_tile = try theme.drawArtworkTile(ctx, now_playing_artwork_size, track.artwork_seed);
-    ctx.tree.node(artwork_tile).?.box.padding.bottom = 0;
-    _ = try ctx.label(.{
-        .text = track.title,
-        .shrink = 1,
-        .min_main = 0,
-        .text_overflow = .ellipsis,
-        .max_width = content_width,
-        .color = theme.c_text,
-        .font_size = 16,
-    });
-    _ = try ctx.label(.{
-        .text = track.artist,
-        .shrink = 1,
-        .min_main = 0,
-        .text_overflow = .ellipsis,
-        .max_width = content_width,
-        .color = theme.c_text_sec,
-        .font_size = 12,
-    });
+    if (current_track) |track| {
+        {
+            _ = try ctx.row(.{ .justify = .center, .clip = true });
+            defer ctx.pop();
+            const artwork_tile = try theme.drawArtworkTile(
+                ctx,
+                now_playing_artwork_size,
+                track.artwork_seed,
+                track.artwork_texture_index,
+            );
+            ctx.tree.node(artwork_tile).?.box.padding.bottom = 0;
+        }
+        _ = try ctx.label(.{
+            .text = track.title,
+            .shrink = 1,
+            .min_main = 0,
+            .text_overflow = .ellipsis,
+            .max_width = content_width,
+            .color = theme.c_text,
+            .font_size = 16,
+        });
+        _ = try ctx.label(.{
+            .text = track.artist,
+            .shrink = 1,
+            .min_main = 0,
+            .text_overflow = .ellipsis,
+            .max_width = content_width,
+            .color = theme.c_text_sec,
+            .font_size = 12,
+        });
 
-    try drawMetadata(ctx, content_width, track.album, track.date_added);
+        try drawMetadata(ctx, content_width, track.album, track.date_added);
+    } else {
+        _ = try ctx.label(.{
+            .text = "Playback unavailable",
+            .shrink = 1,
+            .min_main = 0,
+            .text_overflow = .ellipsis,
+            .max_width = content_width,
+            .color = theme.c_text_sec,
+            .font_size = 13,
+        });
+    }
 }
 
 fn drawMetadata(ctx: *DrawCtx, content_width: f32, album: []const u8, date_added: []const u8) !void {

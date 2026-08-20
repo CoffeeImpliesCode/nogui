@@ -166,9 +166,8 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
         const b = node.box;
         const base_color: ?[4]f32 = switch (node.kind) {
             .column, .row => palette.container,
-            // The button's fill: the box's flat fill when set (alpha > 0),
-            // else the palette fallback.
-            .button => if (b.color[3] > 0) b.color else palette.button,
+            // Transparent buttons retain their hit target without a painted slab.
+            .button => if (b.transparent) null else if (b.color[3] > 0) b.color else palette.button,
             .slider => palette.slider,
             .label => null, // no fill — the glyph strokes carry the label
             .spacer => null, // spacer paints nothing

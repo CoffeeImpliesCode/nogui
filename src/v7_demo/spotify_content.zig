@@ -72,8 +72,10 @@ fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec
         });
         if (spec.mode != .compact) {
             try drawFilterPill(ctx, "All", app.active_category == .all, App.selectCategoryAll);
-            try drawFilterPill(ctx, "Music", app.active_category == .music, App.selectCategoryMusic);
-            try drawFilterPill(ctx, "Podcasts", app.active_category == .podcasts, App.selectCategoryPodcasts);
+            if (spec.mode == .desktop) {
+                try drawFilterPill(ctx, "Music", app.active_category == .music, App.selectCategoryMusic);
+                try drawFilterPill(ctx, "Podcasts", app.active_category == .podcasts, App.selectCategoryPodcasts);
+            }
         }
     }
 
@@ -166,7 +168,12 @@ fn drawHero(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     defer ctx.pop();
 
     if (spec.mode == .desktop) {
-        _ = try theme.drawArtworkTile(ctx, theme.hero_artwork_size, app.playlists[0].artwork_seed);
+        _ = try theme.drawArtworkTile(
+            ctx,
+            theme.hero_artwork_size,
+            app.playlists[0].artwork_seed,
+            null,
+        );
     }
 
     _ = try ctx.column(.{

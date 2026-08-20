@@ -38,9 +38,11 @@ const Rect = @import("v7/widget.zig").Rect;
 const ClipRect = @import("v7/widget.zig").ClipRect;
 const absoluteRect = @import("v7/widget.zig").absoluteRect;
 const visualBorderRect = @import("v7/widget.zig").visualBorderRect;
+const sliderThumbRect = @import("v7/widget.zig").sliderThumbRect;
 const sliderVisualLabel = @import("v7/widget.zig").sliderVisualLabel;
 const contentRect = @import("v7/widget.zig").contentRect;
 const visualContentRect = @import("v7/widget.zig").visualContentRect;
+const IconId = @import("v7/widget.zig").IconId;
 const collectDrawCmds = @import("v7/drawcmd.zig").collectDrawCmds;
 const MouseButton = @import("v7/event.zig").MouseButton;
 const Key = @import("v7/event.zig").Key;
@@ -70,6 +72,10 @@ const font_size_px = @import("text.zig").font_size_px;
 const proto = @import("proto/sweeper.zig");
 const srgbToOklab = @import("text.zig").srgbToOklab;
 const ui = @import("ui.zig"); // for the demo texture index (texture_idx)
+const AudioPlayer = @import("audio_player.zig").AudioPlayer;
+const ffmpeg_decoder = @import("ffmpeg_decoder.zig");
+const LocalTrack = @import("spotify_data.zig").LocalTrack;
+const spotify_ui = @import("spotify.zig");
 
 /// SDL3 extension list copy. Gpu.init's loader callback can't be a closure,
 /// so the dupe lives here for the duration of run()/runShot().
@@ -154,6 +160,125 @@ fn initStrokeView(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEng
     const v = try SvgView.init(gpa, gpu, &doc, text_engine.materials, text_engine.materialBda(), svg_material_base);
     return v;
 }
+
+const icon_count = @typeInfo(IconId).@"enum".fields.len;
+const icon_material_base: u32 = svg_material_base + 384;
+
+/// Compact 16px SVG paths, indexed in exact `IconId` declaration order.
+/// Every path stays within the view box so cached bounds center consistently.
+const icon_svg = [_][]const u8{
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M8 14.25 L2.2 8.55 C0.45 6.82 1.04 3.5 3.75 3.5
+    \\       C5.48 3.5 6.89 4.45 8 5.74 C9.11 4.45 10.52 3.5 12.25 3.5 C14.96 3.5 15.55 6.82 13.8 8.55 Z"
+    \\    fill="none" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M8 14.25 L2.2 8.55 C0.45 6.82 1.04 3.5 3.75 3.5
+    \\       C5.48 3.5 6.89 4.45 8 5.74 C9.11 4.45 10.52 3.5 12.25 3.5 C14.96 3.5 15.55 6.82 13.8 8.55 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M1 3 L5 3 L5 1 L9 5 L5 9 L5 7 L3 7 L3 9 L1 9 L1 5 L1 5 Z
+    \\       M15 7 L11 7 L11 9 L7 5 L11 1 L11 3 L13 3 L13 1 L15 1 L15 5 L15 5 Z
+    \\       M1 11 L5 11 L5 9 L9 13 L5 15 L5 15 L1 15 L1 11 Z
+    \\       M15 11 L15 15 L11 15 L11 15 L7 13 L11 9 L11 11 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M2 2 L4 2 L4 6 L13 1 L13 15 L4 10 L4 14 L2 14 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M3 1 L14 8 L3 15 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M3 2 L6 2 L6 14 L3 14 Z M10 2 L13 2 L13 14 L10 14 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M3 1 L12 6 L12 2 L14 2 L14 14 L12 14 L12 10 L3 15 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M3 2 L12 2 L12 1 L15 3.5 L12 6 L12 4 L5 4 L5 7 L3 7 Z
+    \\       M13 9 L13 14 L4 14 L4 15 L1 12.5 L4 10 L4 12 L11 12 L11 9 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M2 2 L14 2 L14 5 L2 5 Z M2 7 L14 7 L14 10 L2 10 Z M2 12 L10 12 L10 15 L2 15 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M2 3 L14 3 L14 12 L2 12 Z M4 5 L12 5 L12 10 L4 10 Z M6 13 L10 13 L10 15 L6 15 Z"
+    \\  />
+    \\</svg>
+    ,
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    \\  <path
+    \\    d="M1 6 L4 6 L8 3 L8 13 L4 10 L1 10 Z M10 5 C13 7 13 9 10 11 L11 13 C16 10 16 6 11 3 Z"
+    \\  />
+    \\</svg>
+    ,
+};
+comptime {
+    std.debug.assert(icon_svg.len == icon_count);
+}
+
+const IconCache = struct {
+    views: [icon_count]SvgView,
+
+    fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEngine) !IconCache {
+        comptime std.debug.assert(icon_material_base + icon_count * 2 <= max_materials);
+        var views: [icon_count]SvgView = undefined;
+        var initialized: usize = 0;
+        errdefer for (views[0..initialized]) |*view| view.deinit(gpu);
+        for (icon_svg, 0..) |xml, i| {
+            var doc = try svg_xml.parseSvg(gpa, xml);
+            defer doc.deinit();
+            views[i] = try SvgView.init(
+                gpa,
+                gpu,
+                &doc,
+                text_engine.materials,
+                text_engine.materialBda(),
+                icon_material_base + @as(u32, @intCast(i * 2)),
+            );
+            views[i].setScale(1);
+            initialized += 1;
+        }
+        return .{ .views = views };
+    }
+
+    fn deinit(self: *IconCache, gpu: *noapi.Gpu) void {
+        for (&self.views) |*view| view.deinit(gpu);
+        self.* = undefined;
+    }
+
+    fn get(self: *const IconCache, icon: IconId) *const SvgView {
+        return &self.views[@intFromEnum(icon)];
+    }
+};
 
 /// In-flight pan (drag) state: the mouse position + the center at the grab.
 const MandelDrag = struct {
@@ -505,6 +630,87 @@ fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Texture
     return registry.register(gpa, tex);
 }
 
+/// Decode and upload one local track's artwork during window setup. The
+/// registry owns the sampled texture after registration; no frame allocates.
+fn uploadArtworkTexture(
+    gpa: std.mem.Allocator,
+    gpu: *noapi.Gpu,
+    registry: *TextureRegistry,
+    artwork: ffmpeg_decoder.Artwork,
+) !u32 {
+    var decoded = try ffmpeg_decoder.decodeArtwork(gpa, artwork);
+    defer decoded.deinit(gpa);
+
+    const pixel_count = try std.math.mul(
+        usize,
+        @as(usize, decoded.width),
+        @as(usize, decoded.height),
+    );
+    const float_count = try std.math.mul(usize, pixel_count, 4);
+    const staging_bytes: u64 = @intCast(float_count * @sizeOf(f32));
+
+    const texture = try gpu.textureCreate(.{
+        .dimensions = .{ decoded.width, decoded.height, 1 },
+        .format = .rgba32_float,
+        .usage = .{ .sampled = true },
+    });
+    errdefer gpu.textureDestroy(texture);
+
+    const staging = try gpu.gpuMalloc(staging_bytes, 64, .default);
+    defer gpu.gpuFree(staging);
+    const destination: [*]f32 = @ptrCast(@alignCast(staging.cpu));
+    for (0..pixel_count) |pixel_index| {
+        const source_offset = pixel_index * 4;
+        const color = srgbToOklab(.{
+            @as(f32, @floatFromInt(decoded.pixels[source_offset])) / 255.0,
+            @as(f32, @floatFromInt(decoded.pixels[source_offset + 1])) / 255.0,
+            @as(f32, @floatFromInt(decoded.pixels[source_offset + 2])) / 255.0,
+            @as(f32, @floatFromInt(decoded.pixels[source_offset + 3])) / 255.0,
+        });
+        const destination_offset = pixel_index * 4;
+        destination[destination_offset + 0] = color[0];
+        destination[destination_offset + 1] = color[1];
+        destination[destination_offset + 2] = color[2];
+        destination[destination_offset + 3] = color[3];
+    }
+
+    var command = try gpu.commandsBegin();
+    command.copyToTexture(.{
+        .gpu = gpu,
+        .handle = texture,
+        .dimensions = .{ decoded.width, decoded.height, 1 },
+        .format = .rgba32_float,
+    }, staging, .{ .size = .{ decoded.width, decoded.height, 1 } });
+    try gpu.queueSubmit(&.{command});
+    gpu.commandsEnd(command);
+    try gpu.waitIdle();
+
+    return registry.register(gpa, texture);
+}
+
+fn uploadLocalArtwork(
+    comptime T: type,
+    gpa: std.mem.Allocator,
+    root: *T,
+    gpu: *noapi.Gpu,
+    registry: *TextureRegistry,
+    tracks: []const LocalTrack,
+) void {
+    if (comptime T != spotify_ui.SpotifyApp) return;
+
+    for (tracks, 0..) |track, index| {
+        const artwork = track.artwork orelse continue;
+        const texture_index = uploadArtworkTexture(gpa, gpu, registry, artwork) catch |err| {
+            std.log.warn(
+                "embedded artwork upload failed for track {d}: {s}",
+                .{ index, @errorName(err) },
+            );
+            continue;
+        };
+        root.setArtworkTextureIndex(index, texture_index);
+    }
+}
+
 /// The tiger demo's reference render: the rsvg-rendered tiger (a raw
 /// RGBA8 blob, 512×512, generated at build time from tiger.svg) uploaded
 /// as an rgba32_float texture and registered (ui.tiger_ref_idx) for the
@@ -566,14 +772,15 @@ fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Te
 ///    occludes the slider's own label).
 /// 3. Hover + focus outlines paint after the fills (before the glyphs, so
 ///    they never overdraw text at the box edges).
-/// 4. Every label-bearing node (label/button/slider) emits one glyph
-///    SceneRect per character at the node's ABSOLUTE content box
-///    (x = content.x, baseline = the font-derived baseline), appended
-///    LAST so text paints on top of every widget decoration.
+/// 4. Every text-bearing node (labels and visible slider labels) emits one
+///    glyph SceneRect per character at its ABSOLUTE content box. SVG icon
+///    buttons append their cached path rects after glyph emission, with no
+///    text fallback.
 fn buildSliceRects(
     gpa: std.mem.Allocator,
     text_engine: *TextEngine,
     svg_view: ?*SvgView,
+    icon_cache: ?*const IconCache,
     cmds: []const DrawCmd,
     tree: *const WidgetTree,
     hover_id: ?Id,
@@ -707,20 +914,47 @@ fn buildSliceRects(
         });
     }
 
-    // Slider thumbs: a rounded bar at the value fraction, painted BEFORE
-    // the glyphs so the thumb never covers the slider's own label.
+    // Slider progress and thumbs paint before glyphs so a thumb never covers
+    // the slider's own visible label.
     for (tree.nodes.items) |*n| {
         if (n.kind != .slider) continue;
         const s = n.kind.slider;
         const r = visualBorderRect(tree, n.id);
         if (r.w <= 0 or r.h <= 0) continue;
         // A max <= min slider has no valid range: 0/0 (or overflow) would
-        // yield NaN/inf and poison the thumb rect. Center the thumb instead.
+        // yield NaN/inf and poison the progress or thumb rect. Center both.
         const range = s.max - s.min;
         const frac = std.math.clamp(if (range <= 0) 0.5 else (s.value.* - s.min) / range, 0, 1);
-        const thumb_w: f32 = 10;
-        const thumb_x = r.x + frac * @max(0, r.w - thumb_w);
-        const thumb_radius: f32 = 3;
+        const progress_w = frac * r.w;
+        if (progress_w > 0) {
+            const progress_radius: f32 = @min(2, r.h / 2);
+            std.debug.assert(material_slot > glyph_slots);
+            material_slot -= 1;
+            proto.GlyphSweeper.writeRoundedRectMaterial(
+                text_engine.materials,
+                material_slot,
+                progress_radius,
+                progress_radius,
+                0,
+                progress_w,
+                r.h,
+                .{ 0, 0, 0, 0 },
+            );
+            try out.append(gpa, .{
+                .dst = .{ r.x, r.y, progress_w, r.h },
+                .src = .{ 0, 0, 1, 1 },
+                .corners = .{ progress_radius, progress_radius, progress_radius, progress_radius },
+                .color = srgbToOklab(s.color),
+                .curve = .{ 0, 0, 0, 0 },
+                .material_index = material_slot,
+                .clip_id = n.clip_id,
+                .origin = .{ r.x, r.y },
+            });
+        }
+
+        const thumb = sliderThumbRect(r, frac);
+        if (thumb.w <= 0 or thumb.h <= 0) continue;
+        const thumb_radius: f32 = @min(3, @min(thumb.w, thumb.h) / 2);
         std.debug.assert(material_slot > glyph_slots);
         material_slot -= 1;
         proto.GlyphSweeper.writeRoundedRectMaterial(
@@ -729,19 +963,19 @@ fn buildSliceRects(
             thumb_radius,
             thumb_radius,
             0,
-            thumb_w,
-            r.h,
+            thumb.w,
+            thumb.h,
             .{ 0, 0, 0, 0 },
         );
         try out.append(gpa, .{
-            .dst = .{ thumb_x, r.y, thumb_w, r.h },
+            .dst = .{ thumb.x, thumb.y, thumb.w, thumb.h },
             .src = .{ 0, 0, 1, 1 },
             .corners = .{ thumb_radius, thumb_radius, thumb_radius, thumb_radius },
             .color = srgbToOklab(.{ 0.82, 0.82, 0.85, 1 }),
             .curve = .{ 0, 0, 0, 0 },
             .material_index = material_slot,
             .clip_id = n.clip_id,
-            .origin = .{ thumb_x, r.y },
+            .origin = .{ thumb.x, thumb.y },
         });
     }
 
@@ -858,6 +1092,40 @@ fn buildSliceRects(
         );
         if (n.box.layer > 0) {
             for (out.items[before..]) |*r| r.z = n.box.layer;
+        }
+    }
+
+    // SVG icon buttons use the cache initialized by both `run` and
+    // `runShot`. The fixed 16px sweep space means this frame loop only
+    // copies cached SceneRects.
+    if (icon_cache) |cache| {
+        for (tree.nodes.items) |*n| {
+            const button = switch (n.kind) {
+                .button => |b| b,
+                else => continue,
+            };
+            const icon = button.icon orelse continue;
+            const content = visualContentRect(tree, n.id);
+            if (content.w <= 0 or content.h <= 0) continue;
+            const view = cache.get(icon);
+            const bounds = view.boundsRect();
+            if (bounds.w <= 0 or bounds.h <= 0) continue;
+            const ox = content.x + (content.w - bounds.w) / 2 - bounds.x;
+            const oy = content.y + (content.h - bounds.h) / 2 - bounds.y;
+            for (view.rects()) |r| {
+                try out.append(gpa, .{
+                    .dst = .{ ox + r.dst[0], oy + r.dst[1], r.dst[2], r.dst[3] },
+                    .src = r.src,
+                    .corners = r.corners,
+                    .color = srgbToOklab(button.color),
+                    .curve = r.curve,
+                    .material_index = r.material_index,
+                    .clip_id = n.clip_id,
+                    .origin = .{ ox + r.origin[0], oy + r.origin[1] },
+                    .tex_idx = r.tex_idx,
+                    .z = n.box.layer,
+                });
+            }
         }
     }
 
@@ -986,6 +1254,7 @@ pub fn run(
     damp: bool,
     gpu_sort_verify: bool,
     max_frames: ?u32,
+    audio_tracks: ?[]const LocalTrack,
 ) !void {
     const gpa = app.gpa;
 
@@ -999,6 +1268,41 @@ pub fn run(
     try sdl3.init(.{ .video = true, .events = true });
     defer sdl3.quit(.{ .video = true, .events = true });
 
+    // Io backs shader reads and the dedicated audio worker.
+    var io_impl = std.Io.Threaded.init(gpa, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var audio_initialized = false;
+    if (audio_tracks) |tracks| {
+        if (comptime T != spotify_ui.SpotifyApp) return error.AudioRequiresSpotify;
+        if (tracks.len > 0) {
+            if (sdl3.init(.{ .audio = true })) |_| {
+                audio_initialized = true;
+            } else |err| {
+                std.log.err("SDL audio initialization failed: {s}", .{@errorName(err)});
+            }
+        }
+    }
+    defer if (audio_initialized) sdl3.quit(.{ .audio = true });
+
+    var audio_player: ?AudioPlayer = null;
+    if (audio_tracks) |tracks| {
+        if (audio_initialized) {
+            audio_player = AudioPlayer.init(gpa, io, tracks) catch |err| blk: {
+                std.log.err("audio stream initialization failed: {s}", .{@errorName(err)});
+                break :blk null;
+            };
+        }
+    }
+    defer if (audio_player) |*player| player.deinit();
+
+    const AudioSeek = struct {
+        selected_index: usize,
+        position_sec: f32,
+    };
+    var audio_seek_sent: ?AudioSeek = null;
+
     const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 1100, 1160, .{ .resizable = true });
     defer sdl_win.deinit();
     try sdl_win.show();
@@ -1009,11 +1313,6 @@ pub fn run(
     const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
     exts_copy_global = try gpa.dupe([*:0]const u8, sdl_exts);
     defer gpa.free(exts_copy_global);
-
-    // Io for shader file reads (no process.Init here — own a Threaded).
-    var io_impl = std.Io.Threaded.init(gpa, .{});
-    defer io_impl.deinit();
-    const io = io_impl.io();
 
     // Load SPIR-V: quad_vert/quad_frag for the 9-slice batch, the CS1
     // sort compute (V1b), plus the fullscreen blit pass (Oklab → sRGB).
@@ -1074,6 +1373,9 @@ pub fn run(
     defer tex_registry.deinit(gpa);
     ui.texture_idx = try uploadDemoTexture(gpa, &gpu, &tex_registry);
     try uploadReferenceTexture(gpa, &gpu, &tex_registry);
+    if (audio_tracks) |tracks| {
+        uploadLocalArtwork(T, gpa, root, &gpu, &tex_registry, tracks);
+    }
 
     // Mandelbrot compute pass: render target + compute shader + params
     // buffer, registered into the GUI heap (set 0 sampled + set 1 storage).
@@ -1089,6 +1391,11 @@ pub fn run(
     else
         try initSvgView(gpa, &gpu, &text_engine);
     defer svg_view.deinit(&gpu);
+    // Transport icons share TextEngine's material buffer but are initialized
+    // only in the interactive window. No parsing or GPU allocation occurs
+    // in the frame loop.
+    var icon_cache = try IconCache.init(gpa, &gpu, &text_engine);
+    defer icon_cache.deinit(&gpu);
 
     // Blit pass: fullscreen triangle + Oklab→sRGB fragment shader, with a
     // descriptor heap holding the render-target texture + nearest sampler.
@@ -1320,6 +1627,55 @@ pub fn run(
         // hover comes from the core's cursor state.
         const time_ms: u64 = sdl3.timer.getMillisecondsSinceInit();
         const out = (try app.handle(T, root, .{ .frame = .{ .tick = tick, .time_ms = time_ms } })).?;
+        if (audio_player) |*player| {
+            if (comptime T == spotify_ui.SpotifyApp) {
+                const sync_result = player.sync(
+                    root.current_track_idx,
+                    root.is_playing,
+                    root.repeat,
+                    root.volume,
+                ) catch |err| blk: {
+                    std.log.err("audio playback disabled: {s}", .{@errorName(err)});
+                    player.deinit();
+                    audio_player = null;
+                    break :blk .unchanged;
+                };
+
+                if (audio_player != null and sync_result == .request_next_track) {
+                    root.advancePlaybackAtEnd();
+                    if (root.currentTrackIndex()) |next_index| {
+                        player.openTrack(next_index, root.is_playing) catch |err| {
+                            std.log.err("audio playback disabled: {s}", .{@errorName(err)});
+                            player.deinit();
+                            audio_player = null;
+                        };
+                    }
+                }
+
+                if (audio_player != null) {
+                    const seek_state: AudioSeek = .{
+                        .selected_index = root.current_track_idx,
+                        .position_sec = root.progress_sec,
+                    };
+                    const seek_changed = if (audio_seek_sent) |last_seek|
+                        last_seek.selected_index != seek_state.selected_index or
+                            last_seek.position_sec != seek_state.position_sec
+                    else
+                        true;
+                    if (seek_changed) {
+                        player.seek(
+                            seek_state.selected_index,
+                            seek_state.position_sec,
+                        ) catch |err| {
+                            std.log.err("audio playback disabled: {s}", .{@errorName(err)});
+                            player.deinit();
+                            audio_player = null;
+                        };
+                        if (audio_player != null) audio_seek_sent = seek_state;
+                    }
+                }
+            }
+        }
         defer if (out.json) |j| gpa.free(j);
         mandel_rect = mandelbrotRect(out.tree, ui.mandelbrot_idx);
 
@@ -1336,6 +1692,7 @@ pub fn run(
             gpa,
             &text_engine,
             &svg_view,
+            &icon_cache,
             base_cmds,
             out.tree,
             out.hover,
@@ -1589,6 +1946,10 @@ pub fn runShot(
     else
         try initSvgView(gpa, &gpu, &text_engine);
     defer svg_view.deinit(&gpu);
+    // Transport icons share TextEngine's material buffer but are initialized
+    // for the one-shot frame so icon-only controls render their cached paths.
+    var icon_cache = try IconCache.init(gpa, &gpu, &text_engine);
+    defer icon_cache.deinit(&gpu);
 
     const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
     defer gpu.shaderDestroy(blit_vert);
@@ -1638,6 +1999,7 @@ pub fn runShot(
         gpa,
         &text_engine,
         &svg_view,
+        &icon_cache,
         base_cmds,
         out.tree,
         hover_id,
