@@ -57,26 +57,184 @@ const SharedColumns = @import("widget.zig").SharedColumns;
 const ColumnTrack = @import("widget.zig").ColumnTrack;
 const callback = @import("callback.zig");
 
+fn asDimensionSize(x: anytype) style.DimensionSize {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") {
+        return .{ .width = .auto, .height = .auto };
+    }
+    return .{
+        .width = if (@hasField(T, "width")) style.dimensionFrom(x.width) else .auto,
+        .height = if (@hasField(T, "height")) style.dimensionFrom(x.height) else .auto,
+    };
+}
+
+fn asLengthPercentageAutoSize(x: anytype) style.DimensionSize {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") {
+        return .{ .width = .auto, .height = .auto };
+    }
+    return .{
+        .width = if (@hasField(T, "width")) style.dimensionFrom(x.width) else .auto,
+        .height = if (@hasField(T, "height")) style.dimensionFrom(x.height) else .auto,
+    };
+}
+
+fn asInsets(x: anytype) style.Insets {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") return .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    return .{
+        .top = if (@hasField(T, "top")) style.lengthPercentageAutoFrom(x.top) else .auto,
+        .right = if (@hasField(T, "right")) style.lengthPercentageAutoFrom(x.right) else .auto,
+        .bottom = if (@hasField(T, "bottom")) style.lengthPercentageAutoFrom(x.bottom) else .auto,
+        .left = if (@hasField(T, "left")) style.lengthPercentageAutoFrom(x.left) else .auto,
+    };
+}
+
+fn asLengthPercentageRect(x: anytype) style.LengthPercentageRect {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") return .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 0 },
+    };
+    return .{
+        .top = if (@hasField(T, "top")) style.lengthPercentageFrom(x.top) else .{ .length = 0 },
+        .right = if (@hasField(T, "right")) style.lengthPercentageFrom(x.right) else .{ .length = 0 },
+        .bottom = if (@hasField(T, "bottom")) style.lengthPercentageFrom(x.bottom) else .{ .length = 0 },
+        .left = if (@hasField(T, "left")) style.lengthPercentageFrom(x.left) else .{ .length = 0 },
+    };
+}
+
+fn asOverflowAxes(x: anytype) style.OverflowAxes {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") return .{ .width = .visible, .height = .visible };
+    return .{
+        .width = if (@hasField(T, "width")) @as(style.Overflow, x.width) else .visible,
+        .height = if (@hasField(T, "height")) @as(style.Overflow, x.height) else .visible,
+    };
+}
+
+fn asLegacySide(value: anytype) f32 {
+    const resolved = style.lengthPercentageAutoFrom(value);
+    return switch (resolved) {
+        .auto => 0,
+        .length => |length| length,
+        .percent => 0,
+    };
+}
+fn asFixedLength(value: anytype) ?f32 {
+    return switch (style.lengthPercentageAutoFrom(value)) {
+        .auto, .percent => null,
+        .length => |length| length,
+    };
+}
+fn asOptionalF32(value: anytype) ?f32 {
+    const T = @TypeOf(value);
+    if (T == style.Dimension) {
+        return switch (value) {
+            .length => |length| length,
+            .auto, .percent, .min_content, .max_content => null,
+        };
+    }
+    if (T == style.LengthPercentage) {
+        return switch (value) {
+            .length => |length| length,
+            .percent => null,
+        };
+    }
+    if (T == style.LengthPercentageAuto) {
+        return switch (value) {
+            .length => |length| length,
+            .auto, .percent => null,
+        };
+    }
+    if (T == std.meta.Tag(style.Dimension)) {
+        return asOptionalF32(style.dimensionFrom(value));
+    }
+    if (T == style.DimensionOverride) return asOptionalF32(style.dimensionFrom(value));
+    if (T == style.LengthPercentageAutoOverride) {
+        return asOptionalF32(style.lengthPercentageAutoFrom(value));
+    }
+    return switch (@typeInfo(T)) {
+        .optional => if (value) |inner| asOptionalF32(inner) else null,
+        .int, .comptime_int => @floatFromInt(value),
+        .float, .comptime_float => @floatCast(value),
+        .enum_literal => asOptionalF32(style.dimensionFrom(value)),
+        .@"struct" => asOptionalF32(style.dimensionFrom(value)),
+        else => @compileError("expected a numeric or fixed dimension value"),
+    };
+}
+
 /// Resolve typed layout and paint values from an anonymous widget options
 /// value. Missing fields stay unspecified and therefore retain defaults.
 fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
     var local: StyleOverride = .{};
     const T = @TypeOf(opts);
-    if (@hasField(T, "display")) local.display = @as(style.Display, opts.display);
     if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
-    if (@hasField(T, "flex_direction")) {
-        local.flex_direction = @as(style.FlexDirection, opts.flex_direction);
-    }
     if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
     if (@hasField(T, "gap")) local.gap = opts.gap;
     if (@hasField(T, "grow")) local.grow = opts.grow;
     if (@hasField(T, "shrink")) local.shrink = opts.shrink;
     if (@hasField(T, "basis")) local.basis = opts.basis;
-    if (@hasField(T, "min_main")) local.min_main = .{ .value = opts.min_main };
-    if (@hasField(T, "margin")) local.margin = asSides(opts.margin);
-    if (@hasField(T, "border")) local.border = asSides(opts.border);
-    if (@hasField(T, "padding")) local.padding = asSides(opts.padding);
+    if (@hasField(T, "min_main")) {
+        local.min_main = .{ .value = asOptionalF32(opts.min_main) };
+    }
+    if (@hasField(T, "flex_basis")) local.flex_basis = .{ .value = style.dimensionFrom(opts.flex_basis) };
+    if (@hasField(T, "size")) local.size = .{ .value = asDimensionSize(opts.size) };
+    if (@hasField(T, "min_size")) {
+        local.min_size = .{ .value = asLengthPercentageAutoSize(opts.min_size) };
+    }
+    if (@hasField(T, "max_size")) {
+        local.max_size = .{ .value = asLengthPercentageAutoSize(opts.max_size) };
+    }
+    if (@hasField(T, "width")) {
+        local.width = .{ .value = style.dimensionFrom(opts.width) };
+    }
+    if (@hasField(T, "height")) {
+        local.height = .{ .value = style.dimensionFrom(opts.height) };
+    }
+    if (@hasField(T, "min_width")) {
+        local.min_width = .{ .value = style.dimensionFrom(opts.min_width) };
+    }
+    if (@hasField(T, "min_height")) {
+        local.min_height = .{ .value = style.dimensionFrom(opts.min_height) };
+    }
+    if (@hasField(T, "max_width")) {
+        local.max_width = .{ .value = style.dimensionFrom(opts.max_width) };
+    }
+    if (@hasField(T, "max_height")) {
+        local.max_height = .{ .value = style.dimensionFrom(opts.max_height) };
+    }
+    if (@hasField(T, "width_override")) local.width_override = opts.width_override;
+    if (@hasField(T, "height_override")) local.height_override = opts.height_override;
+    if (@hasField(T, "min_width_override")) local.min_width_override = opts.min_width_override;
+    if (@hasField(T, "min_height_override")) local.min_height_override = opts.min_height_override;
+    if (@hasField(T, "max_width_override")) local.max_width_override = opts.max_width_override;
+    if (@hasField(T, "inset")) local.inset = .{ .value = asInsets(opts.inset) };
+    if (@hasField(T, "aspect_ratio")) local.aspect_ratio = .{ .value = opts.aspect_ratio };
+    if (@hasField(T, "overflow")) local.overflow = .{ .value = asOverflowAxes(opts.overflow) };
+    if (@hasField(T, "margin")) {
+        local.margin = asSides(opts.margin);
+        local.margin_inset = asInsets(opts.margin);
+    }
+    if (@hasField(T, "border")) {
+        local.border = asSides(opts.border);
+        local.border_inset = asLengthPercentageRect(opts.border);
+    }
+    if (@hasField(T, "padding")) {
+        local.padding = asSides(opts.padding);
+        local.padding_inset = asLengthPercentageRect(opts.padding);
+    }
+    if (@hasField(T, "margin_inset")) local.margin_inset = asInsets(opts.margin_inset);
+    if (@hasField(T, "border_inset")) local.border_inset = asLengthPercentageRect(opts.border_inset);
+    if (@hasField(T, "padding_inset")) local.padding_inset = asLengthPercentageRect(opts.padding_inset);
     if (@hasField(T, "box_sizing")) local.box_sizing = @as(BoxSizing, opts.box_sizing);
     return Style.resolve(.{ .direction = direction }, local);
 }
@@ -103,14 +261,21 @@ fn applyFlexStyle(self: *DrawCtx, id: Id, opts: anytype) void {
     if (@hasField(T, "align")) node.style.@"align" = @as(Align, opts.@"align");
 }
 
-/// Apply explicit main-axis flex sizing from any widget's options.
+/// Apply explicit flex sizing; the parent chooses its main-axis direction.
 fn applyFlexSizing(self: *DrawCtx, id: Id, opts: anytype) void {
     const node = self.tree.node(id).?;
     const T = @TypeOf(opts);
     if (@hasField(T, "grow")) node.style.grow = opts.grow;
     if (@hasField(T, "shrink")) node.style.shrink = opts.shrink;
-    if (@hasField(T, "basis")) node.style.basis = opts.basis;
-    if (@hasField(T, "min_main")) node.style.min_main = opts.min_main;
+    if (@hasField(T, "basis")) {
+        node.style.basis = opts.basis;
+        node.style.flex_basis = .{ .length = opts.basis };
+    }
+    if (@hasField(T, "flex_basis")) node.style.flex_basis = style.dimensionFrom(opts.flex_basis);
+    if (@hasField(T, "min_main")) {
+        const min_value = asOptionalF32(opts.min_main);
+        node.style.min_main = min_value;
+    }
     node.flex = .{
         .grow = node.style.grow,
         .shrink = node.style.shrink,
@@ -124,7 +289,7 @@ fn applyButtonLabelSizing(self: *DrawCtx, id: Id, opts: anytype) void {
     const node = self.tree.node(id).?;
     const T = @TypeOf(opts);
     if (@hasField(T, "shrink")) node.style.shrink = opts.shrink;
-    if (@hasField(T, "min_main")) node.style.min_main = opts.min_main;
+    if (@hasField(T, "min_main")) node.style.min_main = asOptionalF32(opts.min_main);
     node.flex.shrink = node.style.shrink;
     node.flex.min_main = node.style.min_main;
 }
@@ -144,6 +309,10 @@ fn applySharedColumnDefaults(self: *DrawCtx, id: Id) void {
     child.style.shrink = track.shrink;
     child.style.basis = track.basis;
     child.style.min_main = track.min_main;
+    child.style.flex_basis = if (track.basis > 0) .{ .length = track.basis } else .auto;
+    // Shared columns are row-main constraints, so this typed width mirror is
+    // axis-stable even when the child itself is a column widget.
+    child.style.min_size.width = if (track.min_main) |value| .{ .length = value } else .auto;
     child.flex = .{
         .grow = child.style.grow,
         .shrink = child.style.shrink,
@@ -173,17 +342,19 @@ fn applyTextOptions(self: *DrawCtx, id: Id, opts: anytype) void {
     if (@hasField(T, "text_overflow")) {
         node.text_overflow = @as(TextOverflow, opts.text_overflow);
     }
-    if (@hasField(T, "max_width")) node.text_max_width = opts.max_width;
+    if (@hasField(T, "max_width")) {
+        if (asFixedLength(opts.max_width)) |max_width| node.text_max_width = max_width;
+    }
 }
 
 fn asSides(x: anytype) Sides {
     const T = @TypeOf(x);
     // Partial Sides literals are allowed: absent sides stay 0.
     return .{
-        .top = if (@hasField(T, "top")) x.top else 0,
-        .right = if (@hasField(T, "right")) x.right else 0,
-        .bottom = if (@hasField(T, "bottom")) x.bottom else 0,
-        .left = if (@hasField(T, "left")) x.left else 0,
+        .top = if (@hasField(T, "top")) asLegacySide(x.top) else 0,
+        .right = if (@hasField(T, "right")) asLegacySide(x.right) else 0,
+        .bottom = if (@hasField(T, "bottom")) asLegacySide(x.bottom) else 0,
+        .left = if (@hasField(T, "left")) asLegacySide(x.left) else 0,
     };
 }
 
@@ -448,11 +619,13 @@ pub const DrawCtx = struct {
                 const overflow: TextOverflow = opts.text_overflow;
                 if (overflow == .ellipsis or overflow == .clip) {
                     if (@hasField(T, "max_width")) {
-                        if (opts.max_width > 0) {
-                            // A bounded button label may shrink to its parent's
-                            // final content box instead of its natural width.
-                            self.tree.node(label_id).?.style.min_main = 0;
-                            self.tree.node(label_id).?.flex.min_main = 0;
+                        if (asFixedLength(opts.max_width)) |max_width| {
+                            if (max_width > 0) {
+                                // A bounded button label may shrink to its parent's
+                                // final content box instead of its natural width.
+                                self.tree.node(label_id).?.style.min_main = 0;
+                                self.tree.node(label_id).?.flex.min_main = 0;
+                            }
                         }
                     }
                 }
@@ -1157,4 +1330,63 @@ test "DrawCtx: the .clip opt lands on the container box; pushClip appends to the
     try std.testing.expectEqual(@as(u32, 2), tree.clip_count);
     try std.testing.expectEqual(@as(f32, 30), tree.clip_rects[0].w);
     try std.testing.expectEqual(@as(f32, 80), tree.clip_rects[1].h);
+}
+test "DrawCtx: legacy basis and min_main stay in the parent-axis flex model" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    const id = try ctx.label(.{ .text = "typed", .basis = 30, .min_main = 12 });
+    const node = tree.node(id).?;
+    switch (node.style.flex_basis) {
+        .length => |value| try std.testing.expectEqual(@as(f32, 30), value),
+        else => try std.testing.expect(false),
+    }
+    try std.testing.expectEqual(@as(f32, 30), node.style.basis);
+    try std.testing.expectEqual(@as(?f32, 12), node.style.min_main);
+    try std.testing.expect(std.meta.eql(@as(style.Dimension, .auto), node.style.min_size.height));
+}
+
+test "DrawCtx: min_main conversion accepts optionals and fixed dimensions" {
+    const optional_number: ?u16 = 9;
+    const optional_fixed: ?style.Dimension = style.Dimension.fixed(18);
+
+    try std.testing.expectEqual(@as(?f32, 9), asOptionalF32(optional_number));
+    try std.testing.expectEqual(@as(?f32, 18), asOptionalF32(optional_fixed));
+    try std.testing.expectEqual(
+        @as(?f32, null),
+        asOptionalF32(style.Dimension.percentage(0.5)),
+    );
+    try std.testing.expectEqual(
+        @as(?f32, null),
+        asOptionalF32(@as(style.Dimension, .min_content)),
+    );
+}
+
+test "DrawCtx: fixed and percentage min_main retain legacy axis semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const fixed_id = try ctx.label(.{
+        .text = "fixed",
+        .min_main = style.Dimension.fixed(18),
+    });
+    const fixed = tree.node(fixed_id).?;
+    try std.testing.expectEqual(@as(?f32, 18), fixed.style.min_main);
+    try std.testing.expect(std.meta.eql(@as(style.Dimension, .auto), fixed.style.min_size.height));
+
+    const percent_id = try ctx.label(.{
+        .text = "percent",
+        .min_main = style.Dimension.percentage(0.5),
+    });
+    const percent = tree.node(percent_id).?;
+    try std.testing.expectEqual(@as(?f32, null), percent.style.min_main);
+    try std.testing.expect(std.meta.eql(
+        @as(style.Dimension, .auto),
+        percent.style.min_size.height,
+    ));
 }

@@ -17,6 +17,24 @@ pub const Justify = style.Justify;
 pub const Align = style.Align;
 pub const BoxSizing = style.BoxSizing;
 pub const Sides = style.Sides;
+pub const Dimension = style.Dimension;
+pub const LengthPercentage = style.LengthPercentage;
+pub const LengthPercentageAuto = style.LengthPercentageAuto;
+pub const TypedSize = style.Size;
+pub const TypedRect = style.Rect;
+pub const Insets = style.Insets;
+pub const Overflow = style.Overflow;
+pub const OverflowAxes = style.OverflowAxes;
+pub const ResolvedStyle = style.ResolvedStyle;
+pub const ResolvedDimensions = style.ResolvedDimensions;
+pub const ResolvedConstraints = style.ResolvedConstraints;
+pub const ResolvedInsets = style.ResolvedInsets;
+pub const DimensionSize = style.DimensionSize;
+pub const LengthPercentageSize = style.LengthPercentageSize;
+pub const LengthPercentageAutoSize = style.LengthPercentageAutoSize;
+pub const LengthPercentageRect = style.LengthPercentageRect;
+pub const DimensionOverride = style.DimensionOverride;
+pub const ExplicitOverride = style.ExplicitOverride;
 /// Axis-aligned rectangle in layout space.
 ///
 /// RELATIVE semantics: a node's rect is its BORDER box, positioned relative
@@ -244,6 +262,18 @@ pub const WidgetNode = struct {
     /// Legacy box mirror retained for draw command and caller compatibility.
     box: Box = .{},
     /// Resolved typed layout values. This is the canonical flex/style view.
+    resolved_style: ResolvedStyle = .{},
+    resolved_dimensions: ResolvedDimensions = .{},
+    resolved_insets: ResolvedInsets = .{
+        .top = null,
+        .right = null,
+        .bottom = null,
+        .left = null,
+    },
+    resolved_constraints: ResolvedConstraints = .{},
+    resolved_aspect_ratio: ?f32 = null,
+    resolved_overflow: OverflowAxes = .{ .width = .visible, .height = .visible },
+    /// Resolved typed layout values. This is the canonical flex/style view.
     style: Style = .{},
     /// Resolved typed paint values. This is the canonical paint view.
     paint: PaintStyle = .{},
@@ -275,6 +305,28 @@ pub const WidgetNode = struct {
     paint_snapshot: PaintStyle = .{},
     flex_snapshot: FlexChild = .{},
 
+    /// Resolve typed dimensions, constraints, insets, and overflow for the
+    /// containing block known by the current layout pass.
+    pub fn resolveTypedStyle(
+        self: *WidgetNode,
+        containing: ?Size,
+        intrinsic: Size,
+    ) void {
+        const resolved = self.style.resolveTotal(
+            if (containing) |value|
+                style.Size(f32){ .width = value.width, .height = value.height }
+            else
+                null,
+            style.Size(f32){ .width = intrinsic.width, .height = intrinsic.height },
+        );
+        self.resolved_style = resolved;
+        self.resolved_dimensions = resolved.dimensions;
+        self.resolved_insets = resolved.insets;
+        self.resolved_constraints = resolved.constraints;
+        self.resolved_aspect_ratio = resolved.aspect_ratio;
+        self.resolved_overflow = resolved.overflow;
+    }
+
     /// Reconcile legacy public mirrors before layout. This keeps old direct
     /// box/flex writes working while flex consumes the resolved values.
     pub fn syncResolvedStyle(self: *WidgetNode) void {
@@ -298,6 +350,24 @@ pub const WidgetNode = struct {
             self.style.border = self.box.border;
             self.style.padding = self.box.padding;
             self.style.box_sizing = self.box.box_sizing;
+            self.style.margin_inset = .{
+                .top = .{ .length = self.box.margin.top },
+                .right = .{ .length = self.box.margin.right },
+                .bottom = .{ .length = self.box.margin.bottom },
+                .left = .{ .length = self.box.margin.left },
+            };
+            self.style.border_inset = .{
+                .top = .{ .length = self.box.border.top },
+                .right = .{ .length = self.box.border.right },
+                .bottom = .{ .length = self.box.border.bottom },
+                .left = .{ .length = self.box.border.left },
+            };
+            self.style.padding_inset = .{
+                .top = .{ .length = self.box.padding.top },
+                .right = .{ .length = self.box.padding.right },
+                .bottom = .{ .length = self.box.padding.bottom },
+                .left = .{ .length = self.box.padding.left },
+            };
         } else if (typed_box_changed) {
             self.box.margin = self.style.margin;
             self.box.border = self.style.border;
@@ -329,11 +399,16 @@ pub const WidgetNode = struct {
         const typed_flex_changed = self.style.grow != self.style_snapshot.grow or
             self.style.shrink != self.style_snapshot.shrink or
             self.style.basis != self.style_snapshot.basis or
+            !std.meta.eql(self.style.flex_basis, self.style_snapshot.flex_basis) or
             self.style.min_main != self.style_snapshot.min_main;
         if (legacy_flex_changed and !typed_flex_changed) {
             self.style.grow = self.flex.grow;
             self.style.shrink = self.flex.shrink;
             self.style.basis = self.flex.basis;
+            self.style.flex_basis = if (self.flex.basis > 0)
+                .{ .length = self.flex.basis }
+            else
+                .auto;
             self.style.min_main = self.flex.min_main;
         } else if (typed_flex_changed) {
             self.flex = .{
@@ -374,6 +449,7 @@ pub const WidgetNode = struct {
             .basis = resolved_style.basis,
             .min_main = resolved_style.min_main,
         };
+        self.resolveTypedStyle(null, .{ .width = 0, .height = 0 });
         self.box_snapshot = self.box;
         self.style_snapshot = self.style;
         self.paint_snapshot = self.paint;
@@ -689,6 +765,27 @@ test "WidgetNode: defaults are zero-valued" {
     try std.testing.expectEqual(@as(f32, 1), n.flex.shrink);
     try std.testing.expectEqual(@as(f32, 0), n.flex.basis);
 }
+test "WidgetNode: typed dimensions and constraints are stored after resolution" {
+    var node: WidgetNode = .{
+        .id = .root,
+        .kind = .{ .label = .{ .text = "typed" } },
+        .parent = .root,
+        .style = .{
+            .size = .{ .width = .{ .percent = 0.5 }, .height = .auto },
+            .min_size = .{ .width = .{ .length = 40 }, .height = .auto },
+            .inset = .{
+                .top = .auto,
+                .right = .{ .length = 8 },
+                .bottom = .auto,
+                .left = .auto,
+            },
+        },
+    };
+    node.resolveTypedStyle(.{ .width = 200, .height = 100 }, .{ .width = 30, .height = 20 });
+    try std.testing.expectEqual(@as(?f32, 100), node.resolved_dimensions.width);
+    try std.testing.expectEqual(@as(?f32, 40), node.resolved_constraints.min_width);
+    try std.testing.expectEqual(@as(?f32, 8), node.resolved_insets.right);
+}
 
 test "sliderVisualLabel: null falls back, empty suppresses visible text" {
     var value: f32 = 0.5;
@@ -779,4 +876,26 @@ test "pointInClipChain: rejects points outside a scrolled ancestor clip" {
 
     try std.testing.expect(pointInClipChain(&tree, child_id, .{ 35, 27 }));
     try std.testing.expect(!pointInClipChain(&tree, child_id, .{ 45, 27 }));
+}
+
+test "WidgetNode: typed flex sync compares dimension payloads" {
+    var node: WidgetNode = .{
+        .id = .root,
+        .kind = .{ .label = .{ .text = "typed" } },
+        .parent = .root,
+    };
+
+    node.style.flex_basis = .{ .length = 24 };
+    node.syncResolvedStyle();
+    try std.testing.expect(std.meta.eql(
+        @as(Dimension, .{ .length = 24 }),
+        node.style_snapshot.flex_basis,
+    ));
+
+    node.style.flex_basis = .{ .length = 36 };
+    node.syncResolvedStyle();
+    try std.testing.expect(std.meta.eql(
+        @as(Dimension, .{ .length = 36 }),
+        node.style_snapshot.flex_basis,
+    ));
 }

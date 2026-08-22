@@ -446,6 +446,41 @@ test "SpotifyApp compact layout verifier omits now-playing and labels" {
     try verifySpotifyLayout(.{ .width = 640, .height = 1160 }, false);
 }
 
+test "Spotify seek slider keeps legacy minimum on its parent axis" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{
+        .tree = &tree,
+        .arena = arena.allocator(),
+        .surface = .{ .width = 1100, .height = 1160 },
+    };
+
+    var app: SpotifyApp = .{};
+    try app.draw(&ctx);
+    flex.layout(&tree, .{ .width = 1100, .height = 1160 });
+
+    var seek: ?*const widget.WidgetNode = null;
+    for (tree.nodes.items) |*node| {
+        switch (node.kind) {
+            .slider => |slider| {
+                if (std.mem.eql(u8, slider.label, "seek")) {
+                    seek = node;
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
+    const seek_node = seek orelse return error.SeekSliderNotFound;
+    try std.testing.expectEqual(@as(f32, 100), seek_node.style.basis);
+    try std.testing.expectEqual(@as(?f32, 100), seek_node.style.min_main);
+    try std.testing.expectEqual(@as(?f32, null), seek_node.resolved_constraints.min_height);
+    try std.testing.expect(seek_node.rect.h < 100);
+    try std.testing.expect(seek_node.rect.w >= 100);
+}
+
 test "SpotifyApp draw selects shell from surface" {
     var desktop_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer desktop_arena.deinit();
