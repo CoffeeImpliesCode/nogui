@@ -24,6 +24,8 @@ const std = @import("std");
 const widget = @import("widget.zig");
 
 const Id = @import("id.zig").Id;
+const ComponentKey = @import("key.zig").ComponentKey;
+const ComponentId = @import("key.zig").ComponentId;
 const Box = @import("widget.zig").Box;
 const Sides = @import("widget.zig").Sides;
 const BoxSizing = @import("widget.zig").BoxSizing;
@@ -35,7 +37,7 @@ const StateKey = @import("state.zig").Key;
 const stateHash = @import("state.zig").hashName;
 const StateDir = @import("state.zig").StateDir;
 const Component = @import("component.zig").Component;
-/// The App's persistent component registry (see DrawCtx.registry).
+const IdentityRegistry = @import("component.zig").ComponentRegistry;
 pub const ComponentRegistry = struct {
     map: *std.AutoHashMapUnmanaged(Id, Component),
     gpa: std.mem.Allocator,
@@ -187,6 +189,13 @@ pub const DrawCtx = struct {
     state_cur: ?*StateDir = null,
     parent_stack: [64]Id = .{.root} ** 64,
     depth: u32 = 0,
+    /// Stable identity used for component-local state and registry lookup.
+    component_identity: ComponentId = .root,
+    /// Generation of the frame currently being drawn.
+    frame_generation: u64 = 0,
+    /// App-owned stable component metadata map.
+    identity_map: ?*IdentityRegistry = null,
+    /// Frame-local widget owner retained for event dispatch compatibility.
     component_id: Id = .root,
     /// Nesting depth of pushClip()/popClip() calls. The clip rects
     /// themselves live in the tree's per-frame list (WidgetTree.
@@ -466,38 +475,53 @@ pub const DrawCtx = struct {
         self.clip_depth -= 1;
     }
 
-    /// Nest a sub-component: its draw() runs with `component_id` set to a
-    /// fresh id reserved from the tree's id space, so its buttons bind to
-    /// it; the parent's `component_id` is restored afterwards. The child
-    /// draws into the current cursor like any widget. The child is also
-    /// REGISTERED in the App's component map (gpa-backed, persistent) —
-    /// without that, dispatchClick cannot resolve its owner and its buttons
-    /// would silently do nothing.
-    pub fn component(self: *DrawCtx, comptime T: type, ptr: *T) !void {
-        const saved = self.component_id;
-        defer self.component_id = saved;
+    /// Nest a sub-component with a stable key. The key is combined with the
+    /// current component identity, so sibling identities are deterministic
+    /// across frames while equal sibling keys are rejected in one frame.
+    /// The widget event owner remains a frame-local Id for compatibility.
+    pub fn component(
+        self: *DrawCtx,
+        comptime T: type,
+        options: struct { key: ComponentKey },
+        ptr: *T,
+    ) !void {
+        const child_identity = ComponentId.child(self.component_identity, options.key);
+        const child_component = Component.make(T, ptr);
+        if (self.identity_map) |identity_map| {
+            const entry = try identity_map.map.getOrPut(identity_map.gpa, child_identity);
+            if (entry.found_existing and entry.value_ptr.last_seen_frame == self.frame_generation) {
+                return error.DuplicateComponentIdentity;
+            }
+            entry.value_ptr.* = .{
+                .component = child_component,
+                .last_seen_frame = self.frame_generation,
+            };
+        }
+
+        const saved_identity = self.component_identity;
+        const saved_owner = self.component_id;
+        defer {
+            self.component_identity = saved_identity;
+            self.component_id = saved_owner;
+        }
+        self.component_identity = child_identity;
         self.component_id = @enumFromInt(self.tree.next_id);
         self.tree.next_id += 1;
         if (self.registry) |reg| {
-            try reg.map.put(reg.gpa, self.component_id, Component.make(T, ptr));
+            try reg.map.put(reg.gpa, self.component_id, child_component);
         }
-        try Component.make(T, ptr).vtable.draw(ptr, self);
+        try child_component.vtable.draw(ptr, self);
     }
 
-    /// useState-like inter-frame transient state, node-local: `name` is
-    /// scoped to the node about to be created (the current id), so two
-    /// nodes may use the same name without colliding. Returns a pointer to
-    /// a FRESH T in the frame arena, valid until the arena resets:
-    ///   - the node was live last frame -> seeded from its previous value;
-    ///   - otherwise -> `init` (new node, or unmounted since — hidden
-    ///     nodes drop their state automatically, no pruning needed);
-    ///   - called twice for the same node+name in one frame -> the SAME
-    ///     copy (the first call's mutations survive).
-    /// The returned T lives in the frame arena: no gpa allocations, no
-    /// flush — the double-buffered arenas ARE the store. A frame-arena OOM
-    /// propagates as error.OutOfMemory.
+    /// useState-like inter-frame transient state, component-local: `name`
+    /// is scoped to the current stable component identity, so sibling
+    /// insertion and widget-node renumbering do not move the stored value.
+    /// Returns a pointer to a FRESH T in the frame arena, valid until reset.
     pub fn state(self: *DrawCtx, comptime T: type, name: []const u8, init: T) !*T {
-        const key: StateKey = .{ .node = @enumFromInt(self.tree.next_id), .name_hash = stateHash(name) };
+        const key: StateKey = .{
+            .component = self.component_identity,
+            .name_hash = stateHash(name),
+        };
         const cur = self.state_cur orelse {
             // No state mode (single-frame tests): a plain init copy.
             const p = try self.arena.create(T);
@@ -629,7 +653,7 @@ test "DrawCtx: button owner binds to component_id, incl. inside component()" {
         }
     };
     var child: Child = .{};
-    try ctx.component(Child, &child);
+    try ctx.component(Child, .{ .key = .{ .static = "child" } }, &child);
 
     // The component took the next id (3 — 2 was the root button's child
     // label); the inner button (id 4) is owned by the child component,
@@ -664,7 +688,7 @@ test "DrawCtx: component() draws into the current cursor" {
 
     // Drawn at root level: the child's node is root-level.
     // component() reserves id 1 for the child component, so its label is 2.
-    try ctx.component(Child, &child);
+    try ctx.component(Child, .{ .key = .{ .static = "child" } }, &child);
     const root_label: Id = @enumFromInt(2);
     try std.testing.expectEqual(Id.root, tree.node(root_label).?.parent);
 
@@ -676,7 +700,7 @@ test "DrawCtx: component() draws into the current cursor" {
     var ctx2: DrawCtx = .{ .tree = &tree2, .arena = arena2.allocator() };
 
     const col = try ctx2.column(.{});
-    try ctx2.component(Child, &child);
+    try ctx2.component(Child, .{ .key = .{ .static = "child" } }, &child);
     ctx2.pop();
 
     // ids: column = 1, component = 2, child label = 3.

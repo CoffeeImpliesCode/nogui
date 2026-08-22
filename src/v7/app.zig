@@ -14,7 +14,9 @@ const std = @import("std");
 const tracy = @import("tracy");
 
 const Id = @import("id.zig").Id;
+const ComponentId = @import("key.zig").ComponentId;
 const Component = @import("component.zig").Component;
+const ComponentRegistry = @import("component.zig").ComponentRegistry;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const Size = @import("widget.zig").Size;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
@@ -38,6 +40,11 @@ pub const App = struct {
     /// (--sim, --layout, the demo frames) turn it on.
     serialize_json: bool = false,
     components: std.AutoHashMapUnmanaged(Id, Component) = .empty,
+    /// Stable component identity metadata; widget event ownership remains
+    /// in `components`, keyed by the frame-local `Id`.
+    identity_registry: ComponentRegistry,
+    /// Monotonic generation identifying the frame currently being drawn.
+    frame_generation: u64 = 0,
     /// Double-buffered frame arenas. Frame N builds into arenas[1-current]
     /// (resetting the tree from two frames ago) while arenas[current] keeps
     /// the PREVIOUS frame's tree alive for the whole of frame N — callers
@@ -87,14 +94,13 @@ pub const App = struct {
     /// ring re-fades as the cursor travels between widgets.
     last_hover_id: ?Id = null,
     /// The @typeName of the registered root component, recorded by
-    /// register(). present() refuses to draw with a caller type that
-    /// differs — the component vtable is type-erased, so a mismatch would
-    /// run the registered type's draw on the caller's memory.
+    /// register(). present() rejects a mismatched caller type.
     root_type_name: []const u8 = "",
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
             .gpa = gpa,
+            .identity_registry = ComponentRegistry.init(gpa),
             .arenas = .{
                 std.heap.ArenaAllocator.init(gpa),
                 std.heap.ArenaAllocator.init(gpa),
@@ -104,18 +110,23 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.components.deinit(self.gpa);
+        self.identity_registry.deinit();
         self.arenas[0].deinit();
         self.arenas[1].deinit();
         self.* = undefined;
     }
 
-    /// Register the root component. Its id is 1. The map stores the
-    /// Component BY VALUE (16 bytes); the returned pointer refers to the
-    /// map's stored value and stays valid until the map is mutated/freed.
+    /// Register the root component. Its widget event owner is id 1; its
+    /// stable component identity is ComponentId.root.
     pub fn register(self: *App, comptime T: type, ptr: *T) !*Component {
         self.root_type_name = @typeName(T);
         const id: Id = @enumFromInt(1);
-        try self.components.put(self.gpa, id, Component.make(T, ptr));
+        const component = Component.make(T, ptr);
+        try self.components.put(self.gpa, id, component);
+        try self.identity_registry.map.put(self.gpa, ComponentId.root, .{
+            .component = component,
+            .last_seen_frame = self.frame_generation,
+        });
         return self.components.getPtr(id).?;
     }
 
@@ -396,6 +407,7 @@ pub const App = struct {
         if (!std.mem.eql(u8, self.root_type_name, @typeName(T))) {
             @panic("App: frame()/handle() called with a root type different from the one register() stored");
         }
+        self.frame_generation +%= 1;
         const build_idx: u32 = 1 - self.current;
         // Reset the arena holding the tree from two frames ago. The other
         // arena keeps the previous frame's tree alive during this build.
@@ -419,21 +431,29 @@ pub const App = struct {
         // frame's directory (state_prev) points into the other arena, still
         // alive — that is the store state() seeds from.
         const state_dir = try arena_alloc.create(StateDir);
+        const root_component = self.components.get(@enumFromInt(1)).?;
+        const root_entry = try self.identity_registry.map.getOrPut(self.gpa, ComponentId.root);
+        root_entry.value_ptr.* = .{
+            .component = root_component,
+            .last_seen_frame = self.frame_generation,
+        };
         state_dir.* = .empty;
         var ctx: DrawCtx = .{
             .tree = tree,
             .arena = arena_alloc,
             .surface = surface,
-            .component_id = @enumFromInt(1), // buttons drawn by the root bind here
+            .component_id = @enumFromInt(1), // legacy widget event owner
+            .component_identity = ComponentId.root,
+            .frame_generation = self.frame_generation,
             .state_prev = self.state_prev,
             .state_cur = state_dir,
             .registry = .{ .map = &self.components, .gpa = self.gpa },
+            .identity_map = &self.identity_registry,
         };
 
         // Draw the registered root through its vtable. `root` is the same
         // pointer register() stored, so click dispatch targets it too.
-        const root_comp = self.components.get(@enumFromInt(1)).?;
-        try root_comp.vtable.draw(root, &ctx);
+        try root_component.vtable.draw(root, &ctx);
 
         flex.layoutWith(tree, surface, self.measure);
 
@@ -1421,4 +1441,105 @@ test "present: press_alpha ramps over time and decays" {
     try std.testing.expect(out7.hover_alpha > 0.3 and out7.hover_alpha < 0.55);
     try std.testing.expect(out6.press_alpha >= 0 and out6.press_alpha <= 1);
     try std.testing.expect(out6.hover_alpha >= 0 and out6.hover_alpha <= 1);
+}
+
+test "App: same-key component identity is stable across frames" {
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+
+    const Child = struct {
+        const Self = @This();
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            _ = self;
+            _ = ctx;
+        }
+    };
+    const Root = struct {
+        const Self = @This();
+        child: Child = .{},
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            try ctx.component(Child, .{ .key = .{ .static = "child" } }, &self.child);
+        }
+    };
+
+    var root: Root = .{};
+    _ = try app.register(Root, &root);
+    _ = try app.frame(Root, &root, 1, .{ .width = 100, .height = 100 });
+    const child_identity = ComponentId.child(.root, .{ .static = "child" });
+    try std.testing.expectEqual(@as(u64, 1), app.identity_registry.map.get(child_identity).?.last_seen_frame);
+
+    _ = try app.frame(Root, &root, 2, .{ .width = 100, .height = 100 });
+    const entry = app.identity_registry.map.get(child_identity).?;
+    try std.testing.expectEqual(child_identity, ComponentId.child(.root, .{ .static = "child" }));
+    try std.testing.expectEqual(@as(u64, 2), entry.last_seen_frame);
+}
+
+test "App: duplicate same-key sibling components are rejected" {
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+
+    const Child = struct {
+        const Self = @This();
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            _ = self;
+            _ = ctx;
+        }
+    };
+    const Root = struct {
+        const Self = @This();
+        first: Child = .{},
+        second: Child = .{},
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            try ctx.component(Child, .{ .key = .{ .static = "duplicate" } }, &self.first);
+            try ctx.component(Child, .{ .key = .{ .static = "duplicate" } }, &self.second);
+        }
+    };
+
+    var root: Root = .{};
+    _ = try app.register(Root, &root);
+    try std.testing.expectError(
+        error.DuplicateComponentIdentity,
+        app.frame(Root, &root, 1, .{ .width = 100, .height = 100 }),
+    );
+}
+
+test "App: component-scoped state survives a preceding sibling insertion" {
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+
+    const Child = struct {
+        const Self = @This();
+        observed: u32 = 0,
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            const value = try ctx.state(u32, "value", 0);
+            self.observed = value.*;
+            value.* += 1;
+        }
+    };
+    const Root = struct {
+        const Self = @This();
+        child: Child = .{},
+        insert_sibling: bool = false,
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            if (self.insert_sibling) {
+                _ = try ctx.label(.{ .text = "inserted" });
+            }
+            try ctx.component(Child, .{ .key = .{ .static = "stateful-child" } }, &self.child);
+        }
+    };
+
+    var root: Root = .{};
+    _ = try app.register(Root, &root);
+    _ = try app.frame(Root, &root, 1, .{ .width = 100, .height = 100 });
+    try std.testing.expectEqual(@as(u32, 0), root.child.observed);
+
+    root.insert_sibling = true;
+    _ = try app.frame(Root, &root, 2, .{ .width = 100, .height = 100 });
+    try std.testing.expectEqual(@as(u32, 1), root.child.observed);
 }

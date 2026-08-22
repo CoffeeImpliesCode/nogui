@@ -9,6 +9,7 @@ const std = @import("std");
 const DrawCtx = @import("drawctx.zig").DrawCtx;
 const Event = @import("event.zig").Event;
 const WidgetTree = @import("widget.zig").WidgetTree;
+const ComponentId = @import("key.zig").ComponentId;
 
 /// Type-erased operations for a component of any concrete type T.
 /// `deinit` takes the allocator first, then the opaque receiver: it frees
@@ -60,7 +61,29 @@ pub const Component = struct {
             .on_event = if (@hasDecl(T, "onEvent")) Impl.onEvent else null,
             .deinit = if (@hasDecl(T, "deinit")) Impl.deinit else null,
         };
+
         return .{ .ptr = ptr, .vtable = &vtable };
+    }
+};
+
+/// Persistent metadata for one stable component identity.
+pub const ComponentEntry = struct {
+    component: Component,
+    last_seen_frame: u64,
+};
+
+/// App-owned stable component identity registry.
+pub const ComponentRegistry = struct {
+    map: std.AutoHashMapUnmanaged(ComponentId, ComponentEntry) = .empty,
+    gpa: std.mem.Allocator,
+
+    pub fn init(gpa: std.mem.Allocator) ComponentRegistry {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *ComponentRegistry) void {
+        self.map.deinit(self.gpa);
+        self.* = undefined;
     }
 };
 

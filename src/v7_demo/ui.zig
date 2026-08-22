@@ -472,7 +472,7 @@ pub const TodoApp = struct {
         // Box-model showcase FIRST, at ROOT level: a root-level row spans
         // the full window width, so justify = space_between has main-axis
         // free space to distribute (a nested row would hug its content).
-        try ctx.component(Showcase, &self.showcase);
+        try ctx.component(Showcase, .{ .key = .{ .static = "showcase" } }, &self.showcase);
 
         // Root column: every block stacked with a 16px gap; the root's own
         // padding insets the whole UI from the window edges.
@@ -591,7 +591,7 @@ pub const TodoApp = struct {
 
         // Volume block: nested sub-component (its own card + slider), beside
         // the counter in the same row.
-        try ctx.component(VolumeSlider, &self.volume);
+        try ctx.component(VolumeSlider, .{ .key = .{ .static = "volume" } }, &self.volume);
         ctx.pop(); // the horizontal row — explicit, NOT deferred
 
         // Spacer: reserves 8px of empty main-axis space (paints nothing).
