@@ -10,13 +10,13 @@ const style = @import("style.zig");
 pub const Style = style.Style;
 pub const PaintStyle = style.PaintStyle;
 pub const StyleOverride = style.StyleOverride;
-pub const PaintStyleOverride = style.PaintStyleOverride;
 pub const Display = style.Display;
+pub const Position = style.Position;
 pub const FlexDirection = style.FlexDirection;
 pub const Justify = style.Justify;
 pub const Align = style.Align;
-pub const BoxSizing = style.BoxSizing;
 pub const Sides = style.Sides;
+pub const BoxSizing = style.BoxSizing;
 pub const Dimension = style.Dimension;
 pub const LengthPercentage = style.LengthPercentage;
 pub const LengthPercentageAuto = style.LengthPercentageAuto;
@@ -257,7 +257,7 @@ pub const WidgetNode = struct {
     // SAFETY: items is filled by flex before any read; len tracks the filled count.
     children: struct { items: [32]Id = undefined, len: u8 = 0 } = .{}, // fixed cap, prototype
     /// BORDER box, positioned relative to the parent's CONTENT box (see
-    /// Rect's doc). Filled by flex.layout().
+    /// Rect's doc). Filled by the layout dispatcher.
     rect: Rect = .{},
     /// Legacy box mirror retained for draw command and caller compatibility.
     box: Box = .{},
@@ -312,11 +312,21 @@ pub const WidgetNode = struct {
         containing: ?Size,
         intrinsic: Size,
     ) void {
-        const resolved = self.style.resolveTotal(
-            if (containing) |value|
-                style.Size(f32){ .width = value.width, .height = value.height }
-            else
-                null,
+        const width_containing = if (containing) |value| value.width else null;
+        const height_containing = if (containing) |value| value.height else null;
+        self.resolveTypedStyleAxes(width_containing, height_containing, intrinsic);
+    }
+
+    /// Resolve typed values with independent width and height definiteness.
+    pub fn resolveTypedStyleAxes(
+        self: *WidgetNode,
+        width_containing: ?f32,
+        height_containing: ?f32,
+        intrinsic: Size,
+    ) void {
+        const resolved = self.style.resolveTotalAxes(
+            width_containing,
+            height_containing,
             style.Size(f32){ .width = intrinsic.width, .height = intrinsic.height },
         );
         self.resolved_style = resolved;

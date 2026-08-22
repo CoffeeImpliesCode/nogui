@@ -176,6 +176,8 @@ fn asOptionalF32(value: anytype) ?f32 {
 fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
     var local: StyleOverride = .{};
     const T = @TypeOf(opts);
+    if (@hasField(T, "display")) local.display = @as(style.Display, opts.display);
+    if (@hasField(T, "position")) local.position = @as(style.Position, opts.position);
     if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
     if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
@@ -398,11 +400,10 @@ pub const DrawCtx = struct {
     /// themselves live in the tree's per-frame list (WidgetTree.
     /// clip_rects); this only balances the stack.
     clip_depth: u32 = 0,
-
     /// Create a node under the cursor. Container kinds do NOT descend here.
     /// The node's `.box` (CSS box model: margin/border/padding/radius) is
     /// set from the opts at creation; its `.rect` is the RELATIVE border
-    /// box, filled later by flex.layout().
+    /// box, filled later by the layout dispatcher.
     /// Font size from a widget's opts (0 = the host default).
     fn optsFontSize(opts: anytype) f32 {
         if (@hasField(@TypeOf(opts), "font_size")) return opts.font_size;
@@ -1389,4 +1390,18 @@ test "DrawCtx: fixed and percentage min_main retain legacy axis semantics" {
         @as(style.Dimension, .auto),
         percent.style.min_size.height,
     ));
+}
+
+test "DrawCtx: constructor translates display and position into Style" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const id = try ctx.column(.{ .display = .block, .position = .absolute });
+    ctx.pop();
+
+    try std.testing.expectEqual(style.Display.block, tree.node(id).?.style.display);
+    try std.testing.expectEqual(style.Position.absolute, tree.node(id).?.style.position);
 }

@@ -5,8 +5,11 @@ pub const Color = [4]f32;
 pub const TextureId = u32;
 pub const Layer = u32;
 
-/// The first layout slice supports the existing flex path only.
-pub const Display = enum { flex };
+/// Layout modes supported by the v7 dispatcher.
+pub const Display = enum { block, flex };
+
+/// Whether a node participates in normal flow or is removed from it.
+pub const Position = enum { relative, absolute };
 
 pub const FlexDirection = enum { column, row };
 pub const Justify = enum { start, center, end, space_between };
@@ -260,6 +263,14 @@ fn defaultLengthPercentageRect() LengthPercentageRect {
     };
 }
 
+fn numericF32(value: anytype) f32 {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .int, .comptime_int => @floatFromInt(value),
+        .float, .comptime_float => @floatCast(value),
+        else => @compileError("dimension payload must be numeric"),
+    };
+}
+
 pub fn dimensionFrom(value: anytype) Dimension {
     const T = @TypeOf(value);
     if (T == Dimension) return value;
@@ -290,7 +301,7 @@ pub fn dimensionFrom(value: anytype) Dimension {
     }
     return switch (@typeInfo(T)) {
         .optional => if (value) |inner| dimensionFrom(inner) else .auto,
-        .int, .float, .comptime_int, .comptime_float => .{ .length = @floatCast(value) },
+        .int, .float, .comptime_int, .comptime_float => .{ .length = numericF32(value) },
         .enum_literal => switch (value) {
             .auto => .auto,
             .min_content => .min_content,
@@ -298,8 +309,8 @@ pub fn dimensionFrom(value: anytype) Dimension {
             else => .auto,
         },
         .@"struct" => blk: {
-            if (@hasField(T, "length")) break :blk .{ .length = @floatCast(value.length) };
-            if (@hasField(T, "percent")) break :blk .{ .percent = @floatCast(value.percent) };
+            if (@hasField(T, "length")) break :blk .{ .length = numericF32(value.length) };
+            if (@hasField(T, "percent")) break :blk .{ .percent = numericF32(value.percent) };
             if (@hasField(T, "auto")) break :blk .auto;
             if (@hasField(T, "min_content")) break :blk .min_content;
             if (@hasField(T, "max_content")) break :blk .max_content;
@@ -335,11 +346,11 @@ pub fn lengthPercentageFrom(value: anytype) LengthPercentage {
     }
     return switch (@typeInfo(T)) {
         .optional => if (value) |inner| lengthPercentageFrom(inner) else .{ .length = 0 },
-        .int, .float, .comptime_int, .comptime_float => .{ .length = @floatCast(value) },
+        .int, .float, .comptime_int, .comptime_float => .{ .length = numericF32(value) },
         .enum_literal => .{ .length = 0 },
         .@"struct" => blk: {
-            if (@hasField(T, "length")) break :blk .{ .length = @floatCast(value.length) };
-            if (@hasField(T, "percent")) break :blk .{ .percent = @floatCast(value.percent) };
+            if (@hasField(T, "length")) break :blk .{ .length = numericF32(value.length) };
+            if (@hasField(T, "percent")) break :blk .{ .percent = numericF32(value.percent) };
             @compileError("length-percentage value must contain length or percent");
         },
         else => @compileError("unsupported length-percentage value"),
@@ -373,14 +384,14 @@ pub fn lengthPercentageAutoFrom(value: anytype) LengthPercentageAuto {
     }
     return switch (@typeInfo(T)) {
         .optional => if (value) |inner| lengthPercentageAutoFrom(inner) else .auto,
-        .int, .float, .comptime_int, .comptime_float => .{ .length = @floatCast(value) },
+        .int, .float, .comptime_int, .comptime_float => .{ .length = numericF32(value) },
         .enum_literal => switch (value) {
             .auto => .auto,
             else => .auto,
         },
         .@"struct" => blk: {
-            if (@hasField(T, "length")) break :blk .{ .length = @floatCast(value.length) };
-            if (@hasField(T, "percent")) break :blk .{ .percent = @floatCast(value.percent) };
+            if (@hasField(T, "length")) break :blk .{ .length = numericF32(value.length) };
+            if (@hasField(T, "percent")) break :blk .{ .percent = numericF32(value.percent) };
             if (@hasField(T, "auto")) break :blk .auto;
             @compileError("length-percentage-auto value must contain length, percent, or auto");
         },
@@ -403,6 +414,7 @@ pub const TextureOverride = union(enum) {
 /// Typed layout input plus legacy compatibility mirrors.
 pub const Style = struct {
     display: Display = .flex,
+    position: Position = .relative,
     direction: FlexDirection = .column,
     justify: Justify = .start,
     @"align": Align = .stretch,
@@ -437,6 +449,7 @@ pub const Style = struct {
     pub fn resolve(defaults: Style, local: StyleOverride) Style {
         var result = defaults;
         if (local.display) |value| result.display = value;
+        if (local.position) |value| result.position = value;
         if (local.direction) |value| result.direction = value;
         if (local.justify) |value| result.justify = value;
         if (local.@"align") |value| result.@"align" = value;
@@ -548,6 +561,17 @@ pub const Style = struct {
     ) ResolvedStyle {
         const width_containing = if (containing) |value| value.width else null;
         const height_containing = if (containing) |value| value.height else null;
+        return self.resolveTotalAxes(width_containing, height_containing, intrinsic);
+    }
+
+    /// Resolve typed fields when the two containing-block axes have
+    /// independent definiteness.
+    pub fn resolveTotalAxes(
+        self: Style,
+        width_containing: ?f32,
+        height_containing: ?f32,
+        intrinsic: Size(f32),
+    ) ResolvedStyle {
         const flex_basis = self.flex_basis.resolve(
             if (self.direction == .column) height_containing else width_containing,
             if (self.direction == .column) intrinsic.height else intrinsic.width,
@@ -586,6 +610,7 @@ pub const Style = struct {
 /// Local layout overrides. Unspecified fields retain component defaults.
 pub const StyleOverride = struct {
     display: ?Display = null,
+    position: ?Position = null,
     direction: ?FlexDirection = null,
     /// Compatibility spelling accepted by option translators.
     justify: ?Justify = null,
@@ -823,4 +848,24 @@ test "dimension converters accept anonymous literals typed unions and optionals"
         dimensionFrom(optional_fixed),
     ));
     try std.testing.expect(std.meta.eql(@as(Dimension, .auto), dimensionFrom(optional_absent)));
+}
+
+test "display and position resolve through typed style overrides" {
+    const resolved = Style.resolve(
+        .{},
+        .{ .display = .block, .position = .absolute },
+    );
+    try std.testing.expectEqual(Display.block, resolved.display);
+    try std.testing.expectEqual(Position.absolute, resolved.position);
+}
+
+test "typed axes resolve width while height remains indefinite" {
+    const resolved = (Style{
+        .size = .{
+            .width = .{ .percent = 0.5 },
+            .height = .{ .percent = 0.5 },
+        },
+    }).resolveTotalAxes(200, null, .{ .width = 20, .height = 10 });
+    try std.testing.expectEqual(@as(?f32, 100), resolved.dimensions.width);
+    try std.testing.expectEqual(@as(?f32, null), resolved.dimensions.height);
 }
