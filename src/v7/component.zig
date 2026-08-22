@@ -2,14 +2,17 @@
 //! Per the prototype spec (notes/v7-prototype-spec.md §5).
 //!
 //! Every element of a UI — including the root — is a `Component(T)`
-//! created with `Component.make(T, ptr)`. `draw` is mandatory; `onEvent`
-//! and `deinit` are optional and detected via `@hasDecl`.
+//! created with `Component.make(T, ptr)`. `draw` is mandatory; `onEvent`,
+//! `deinit`, and the GPU lifecycle hooks are optional and detected via
+//! `@hasDecl`.
 const std = @import("std");
 
 const DrawCtx = @import("drawctx.zig").DrawCtx;
 const Event = @import("event.zig").Event;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const ComponentId = @import("key.zig").ComponentId;
+const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
+const GpuFrame = @import("runtime.zig").GpuFrame;
 
 /// Type-erased operations for a component of any concrete type T.
 /// `deinit` takes the allocator first, then the opaque receiver: it frees
@@ -19,6 +22,9 @@ pub const ComponentVTable = struct {
     draw: *const fn (*anyopaque, *DrawCtx) anyerror!void,
     on_event: ?*const fn (*anyopaque, *const Event) void,
     deinit: ?*const fn (std.mem.Allocator, *anyopaque) void,
+    init_gpu: ?*const fn (*anyopaque, *GpuEndpoint) anyerror!void,
+    frame_gpu: ?*const fn (*anyopaque, *GpuFrame) anyerror!void,
+    deinit_gpu: ?*const fn (*anyopaque, *GpuEndpoint) void,
 };
 
 /// A type-erased component: an opaque pointer plus its vtable.
@@ -49,6 +55,18 @@ pub const Component = struct {
                 @call(.auto, T.deinit, .{ t, allocator });
                 t.* = undefined; // poison last; the allocation is still live
             }
+            fn initGpu(p: *anyopaque, endpoint: *GpuEndpoint) anyerror!void {
+                const t: *T = @ptrCast(@alignCast(p));
+                return @call(.auto, T.initGpu, .{ t, endpoint });
+            }
+            fn frameGpu(p: *anyopaque, frame: *GpuFrame) anyerror!void {
+                const t: *T = @ptrCast(@alignCast(p));
+                return @call(.auto, T.frameGpu, .{ t, frame });
+            }
+            fn deinitGpu(p: *anyopaque, endpoint: *GpuEndpoint) void {
+                const t: *T = @ptrCast(@alignCast(p));
+                @call(.auto, T.deinitGpu, .{ t, endpoint });
+            }
         };
 
         // All fields are comptime-known (fn pointers + @hasDecl), so the
@@ -60,6 +78,9 @@ pub const Component = struct {
             .draw = Impl.draw,
             .on_event = if (@hasDecl(T, "onEvent")) Impl.onEvent else null,
             .deinit = if (@hasDecl(T, "deinit")) Impl.deinit else null,
+            .init_gpu = if (@hasDecl(T, "initGpu")) Impl.initGpu else null,
+            .frame_gpu = if (@hasDecl(T, "frameGpu")) Impl.frameGpu else null,
+            .deinit_gpu = if (@hasDecl(T, "deinitGpu")) Impl.deinitGpu else null,
         };
 
         return .{ .ptr = ptr, .vtable = &vtable };
@@ -70,6 +91,7 @@ pub const Component = struct {
 pub const ComponentEntry = struct {
     component: Component,
     last_seen_frame: u64,
+    gpu_initialized: bool = false,
 };
 
 /// App-owned stable component identity registry.
@@ -137,6 +159,18 @@ test "make: on_event and deinit are null when the type omits them" {
     try std.testing.expectEqual(
         @as(?*const fn (std.mem.Allocator, *anyopaque) void, null),
         c.vtable.deinit,
+    );
+    try std.testing.expectEqual(
+        @as(?*const fn (*anyopaque, *GpuEndpoint) anyerror!void, null),
+        c.vtable.init_gpu,
+    );
+    try std.testing.expectEqual(
+        @as(?*const fn (*anyopaque, *GpuFrame) anyerror!void, null),
+        c.vtable.frame_gpu,
+    );
+    try std.testing.expectEqual(
+        @as(?*const fn (*anyopaque, *GpuEndpoint) void, null),
+        c.vtable.deinit_gpu,
     );
 }
 

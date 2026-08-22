@@ -38,6 +38,7 @@ const stateHash = @import("state.zig").hashName;
 const StateDir = @import("state.zig").StateDir;
 const Component = @import("component.zig").Component;
 const IdentityRegistry = @import("component.zig").ComponentRegistry;
+const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
 pub const ComponentRegistry = struct {
     map: *std.AutoHashMapUnmanaged(Id, Component),
     gpa: std.mem.Allocator,
@@ -183,9 +184,7 @@ pub const DrawCtx = struct {
     /// Last frame's state directory (pointers into the OTHER arena, still
     /// alive while this frame builds) — the "stored version" for state().
     state_prev: ?*const StateDir = null,
-    /// This frame's state directory (arena-allocated by App); state()
-    /// appends every live value here. Null = no state (single-frame tests):
-    /// state() then returns a plain init copy.
+    /// This frame's state directory (arena-allocated by App).
     state_cur: ?*StateDir = null,
     parent_stack: [64]Id = .{.root} ** 64,
     depth: u32 = 0,
@@ -195,6 +194,8 @@ pub const DrawCtx = struct {
     frame_generation: u64 = 0,
     /// App-owned stable component metadata map.
     identity_map: ?*IdentityRegistry = null,
+    /// Attached GPU endpoint used to mount newly discovered components.
+    gpu_endpoint: ?*GpuEndpoint = null,
     /// Frame-local widget owner retained for event dispatch compatibility.
     component_id: Id = .root,
     /// Nesting depth of pushClip()/popClip() calls. The clip rects
@@ -477,8 +478,6 @@ pub const DrawCtx = struct {
 
     /// Nest a sub-component with a stable key. The key is combined with the
     /// current component identity, so sibling identities are deterministic
-    /// across frames while equal sibling keys are rejected in one frame.
-    /// The widget event owner remains a frame-local Id for compatibility.
     pub fn component(
         self: *DrawCtx,
         comptime T: type,
@@ -492,10 +491,19 @@ pub const DrawCtx = struct {
             if (entry.found_existing and entry.value_ptr.last_seen_frame == self.frame_generation) {
                 return error.DuplicateComponentIdentity;
             }
-            entry.value_ptr.* = .{
-                .component = child_component,
-                .last_seen_frame = self.frame_generation,
-            };
+            entry.value_ptr.component = child_component;
+            entry.value_ptr.last_seen_frame = self.frame_generation;
+            if (!entry.found_existing) {
+                entry.value_ptr.gpu_initialized = false;
+            }
+            if (self.gpu_endpoint) |endpoint| {
+                if (!entry.value_ptr.gpu_initialized) {
+                    if (child_component.vtable.init_gpu) |init_gpu| {
+                        try init_gpu(child_component.ptr, endpoint);
+                    }
+                    entry.value_ptr.gpu_initialized = true;
+                }
+            }
         }
 
         const saved_identity = self.component_identity;

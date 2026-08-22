@@ -204,6 +204,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "noapi", .module = noapi_mod },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
             },

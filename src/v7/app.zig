@@ -16,7 +16,10 @@ const tracy = @import("tracy");
 const Id = @import("id.zig").Id;
 const ComponentId = @import("key.zig").ComponentId;
 const Component = @import("component.zig").Component;
+const ComponentEntry = @import("component.zig").ComponentEntry;
 const ComponentRegistry = @import("component.zig").ComponentRegistry;
+const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
+const GpuFrame = @import("runtime.zig").GpuFrame;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const Size = @import("widget.zig").Size;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
@@ -96,6 +99,9 @@ pub const App = struct {
     /// The @typeName of the registered root component, recorded by
     /// register(). present() rejects a mismatched caller type.
     root_type_name: []const u8 = "",
+    /// The optional renderer endpoint. The endpoint remains owned by the
+    /// window driver; App only borrows it while dispatching hooks.
+    gpu_endpoint: ?*GpuEndpoint = null,
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
@@ -108,7 +114,56 @@ pub const App = struct {
         };
     }
 
+    fn initGpuEntry(self: *App, entry: *ComponentEntry) !void {
+        const endpoint = self.gpu_endpoint orelse return;
+        if (entry.gpu_initialized) return;
+        if (entry.component.vtable.init_gpu) |init_gpu| {
+            try init_gpu(entry.component.ptr, endpoint);
+        }
+        entry.gpu_initialized = true;
+    }
+
+    fn deinitGpuEntry(self: *App, entry: *ComponentEntry) void {
+        if (!entry.gpu_initialized) return;
+        if (self.gpu_endpoint) |endpoint| {
+            if (entry.component.vtable.deinit_gpu) |deinit_gpu| {
+                deinit_gpu(entry.component.ptr, endpoint);
+            }
+        }
+        entry.gpu_initialized = false;
+    }
+
+    /// Attach a persistent renderer endpoint. Entries mounted in the current
+    /// frame are initialized before this call returns.
+    pub fn attachGpu(self: *App, endpoint: *GpuEndpoint) !void {
+        if (self.gpu_endpoint) |current| {
+            if (current != endpoint) {
+                self.detachGpu();
+            }
+        }
+        self.gpu_endpoint = endpoint;
+        errdefer self.detachGpu();
+
+        var iterator = self.identity_registry.map.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.last_seen_frame == self.frame_generation) {
+                try self.initGpuEntry(entry.value_ptr);
+            }
+        }
+    }
+
+    /// Detach the renderer endpoint after deinitializing every mounted entry.
+    pub fn detachGpu(self: *App) void {
+        if (self.gpu_endpoint == null) return;
+        var iterator = self.identity_registry.map.iterator();
+        while (iterator.next()) |entry| {
+            self.deinitGpuEntry(entry.value_ptr);
+        }
+        self.gpu_endpoint = null;
+    }
+
     pub fn deinit(self: *App) void {
+        self.detachGpu();
         self.components.deinit(self.gpa);
         self.identity_registry.deinit();
         self.arenas[0].deinit();
@@ -122,11 +177,19 @@ pub const App = struct {
         self.root_type_name = @typeName(T);
         const id: Id = @enumFromInt(1);
         const component = Component.make(T, ptr);
+        if (self.identity_registry.map.getPtr(ComponentId.root)) |entry| {
+            self.deinitGpuEntry(entry);
+        }
         try self.components.put(self.gpa, id, component);
-        try self.identity_registry.map.put(self.gpa, ComponentId.root, .{
+        const entry = try self.identity_registry.map.getOrPut(self.gpa, ComponentId.root);
+        entry.value_ptr.* = .{
             .component = component,
             .last_seen_frame = self.frame_generation,
-        });
+            .gpu_initialized = false,
+        };
+        if (self.gpu_endpoint != null) {
+            try self.initGpuEntry(entry.value_ptr);
+        }
         return self.components.getPtr(id).?;
     }
 
@@ -150,7 +213,7 @@ pub const App = struct {
     /// Returns null for non-frame events.
     pub fn handle(self: *App, comptime T: type, root: *T, ev: Event) !?FrameOutput {
         switch (ev) {
-            .frame => |f| return try self.present(T, root, f.tick, f.time_ms),
+            .frame => |f| return try self.present(T, root, f.tick, f.time_ms, null),
             .resize => |r| {
                 self.surface = .{ .width = r.width, .height = r.height };
                 return null;
@@ -385,7 +448,23 @@ pub const App = struct {
     /// entry is handle(.frame), which uses the driver's surface + clock.
     pub fn frame(self: *App, comptime T: type, root: *T, frame_number: u32, surface: Size) !FrameOutput {
         self.surface = surface;
-        return self.present(T, root, frame_number, 0);
+        return self.present(T, root, frame_number, 0, null);
+    }
+
+    /// Present one frame with a borrowed noapi command buffer. The endpoint
+    /// must already be attached and must be the frame's endpoint.
+    pub fn frameWithGpu(
+        self: *App,
+        comptime T: type,
+        root: *T,
+        frame_number: u32,
+        surface: Size,
+        gpu_frame: *GpuFrame,
+    ) !FrameOutput {
+        const endpoint = self.gpu_endpoint orelse return error.GpuEndpointNotAttached;
+        if (gpu_frame.endpoint != endpoint) return error.GpuFrameEndpointMismatch;
+        self.surface = surface;
+        return self.present(T, root, frame_number, 0, gpu_frame);
     }
 
     fn findNode(tree: *const WidgetTree, id: Id) ?*const WidgetNode {
@@ -395,7 +474,37 @@ pub const App = struct {
         return null;
     }
 
-    fn present(self: *App, comptime T: type, root: *T, frame_number: u32, time_ms: u64) !FrameOutput {
+    fn dispatchGpuFrame(self: *App, gpu_frame: *GpuFrame) !void {
+        const endpoint = self.gpu_endpoint orelse return error.GpuEndpointNotAttached;
+        if (gpu_frame.endpoint != endpoint) return error.GpuFrameEndpointMismatch;
+        var iterator = self.identity_registry.map.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.last_seen_frame != self.frame_generation) continue;
+            if (!entry.value_ptr.gpu_initialized) continue;
+            if (entry.value_ptr.component.vtable.frame_gpu) |frame_gpu| {
+                try frame_gpu(entry.value_ptr.component.ptr, gpu_frame);
+            }
+        }
+    }
+
+    fn unmountStaleGpuComponents(self: *App) void {
+        var iterator = self.identity_registry.map.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.last_seen_frame == self.frame_generation) continue;
+            const identity = entry.key_ptr.*;
+            self.deinitGpuEntry(entry.value_ptr);
+            _ = self.identity_registry.map.remove(identity);
+        }
+    }
+
+    fn present(
+        self: *App,
+        comptime T: type,
+        root: *T,
+        frame_number: u32,
+        time_ms: u64,
+        gpu_frame: ?*GpuFrame,
+    ) !FrameOutput {
         // Type-confusion guard: register() recorded @typeName(T), and the
         // vtable's draw is type-erased — presenting with a DIFFERENT type
         // would dispatch the registered type's draw on the caller's memory
@@ -433,10 +542,14 @@ pub const App = struct {
         const state_dir = try arena_alloc.create(StateDir);
         const root_component = self.components.get(@enumFromInt(1)).?;
         const root_entry = try self.identity_registry.map.getOrPut(self.gpa, ComponentId.root);
-        root_entry.value_ptr.* = .{
-            .component = root_component,
-            .last_seen_frame = self.frame_generation,
-        };
+        root_entry.value_ptr.component = root_component;
+        root_entry.value_ptr.last_seen_frame = self.frame_generation;
+        if (!root_entry.found_existing) {
+            root_entry.value_ptr.gpu_initialized = false;
+        }
+        if (self.gpu_endpoint != null) {
+            try self.initGpuEntry(root_entry.value_ptr);
+        }
         state_dir.* = .empty;
         var ctx: DrawCtx = .{
             .tree = tree,
@@ -449,6 +562,7 @@ pub const App = struct {
             .state_cur = state_dir,
             .registry = .{ .map = &self.components, .gpa = self.gpa },
             .identity_map = &self.identity_registry,
+            .gpu_endpoint = self.gpu_endpoint,
         };
 
         // Draw the registered root through its vtable. `root` is the same
@@ -456,6 +570,10 @@ pub const App = struct {
         try root_component.vtable.draw(root, &ctx);
 
         flex.layoutWith(tree, surface, self.measure);
+        defer self.unmountStaleGpuComponents();
+        if (gpu_frame) |active_gpu_frame| {
+            try self.dispatchGpuFrame(active_gpu_frame);
+        }
 
         // Revalidate ids carried over from the previous frame's tree.
         // Draw order can change between frames (a conditional node inserted
