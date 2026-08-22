@@ -26,7 +26,7 @@
 //! rings ×2 — the beginFrame fence only gates CPU recording, not the
 //! previous frame's GPU execution.
 //!
-//! PROTOTYPE — throwaway design exploration.
+//! Active v7 renderer primitive.
 
 const std = @import("std");
 const noapi = @import("noapi");

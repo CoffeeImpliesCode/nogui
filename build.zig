@@ -19,6 +19,14 @@ pub fn build(b: *std.Build) void {
 
     // ── noapi module (borrowed from dependency) ────────────
     const noapi_mod = noapi_dep.module("noapi");
+    // ── v7 renderer module ──────────────────────────
+    const v7_render_mod = b.addModule("v7_render", .{
+        .root_source_file = b.path("src/v7_render/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "noapi", .module = noapi_mod },
+        },
+    });
 
     // ── nogui module ──────────────────────────────
     const mod = b.addModule("nogui", .{
@@ -64,6 +72,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "noapi", .module = noapi_mod },
+            .{ .name = "v7_render", .module = v7_render_mod },
             .{ .name = "sdl3", .module = sdl3.module("sdl3") },
         },
     });
@@ -77,6 +86,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "proto", .module = proto_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
                 .{ .name = "noapi", .module = noapi_mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
@@ -109,6 +119,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
                 .{ .name = "nogui", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
@@ -227,6 +238,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
                 .{ .name = "nogui", .module = mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
@@ -252,6 +264,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
                 .{ .name = "nogui", .module = mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
@@ -277,6 +290,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
                 .{ .name = "nogui", .module = mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
@@ -329,6 +343,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
                 .{ .name = "nogui", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },

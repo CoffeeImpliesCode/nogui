@@ -58,14 +58,14 @@ const std = @import("std");
 const noapi = @import("noapi");
 const svg = @import("svg.zig");
 const svg_xml = @import("svg_xml.zig");
-const proto = @import("proto/sweeper.zig");
-const SceneRect = @import("proto/render_9slice.zig").SceneRect;
+const renderer = @import("v7_render");
+const SceneRect = renderer.SceneRect;
 const nogui = @import("nogui");
 pub const Rect = nogui.widget.Rect;
 const srgbToOklab = @import("text.zig").srgbToOklab;
 
-const Curve = proto.Curve;
-const GlyphSweeper = proto.GlyphSweeper;
+const Curve = renderer.Curve;
+const GlyphSweeper = renderer.GlyphSweeper;
 
 /// A point in user space.
 const Point = struct { x: f32 = 0, y: f32 = 0 };
@@ -301,8 +301,8 @@ fn rebaseToBbox(curves: []const Curve, bbox: Rect, out: []Curve) void {
 /// One edge of the stroke's offset-outline polygon: a straight segment
 /// (x0,y0) -> (x1,y1) in the sweep space. Cairo's reference rasterizes
 /// these edges exactly (the trapezoid coverage), never sampling a field.
-/// (The extern layout lives with the band builder in proto/sweeper.zig.)
-const StrokeEdge = proto.StrokeEdge;
+/// (The extern layout lives with the band builder in v7_render.)
+const StrokeEdge = renderer.StrokeEdge;
 
 /// The left perpendicular of the chord a0→a1, normalized; null when the
 /// chord is degenerate (zero length).
@@ -899,13 +899,13 @@ pub const SvgView = struct {
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
         for (0..self.stroke_widths.len) |j| {
             const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
-            const offset = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "win_w");
+            const offset = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "win_w");
             @as(*f32, @ptrCast(@alignCast(dst + offset))).* = @floatFromInt(algo);
             @as(*f32, @ptrCast(@alignCast(dst + offset + @sizeOf(f32)))).* = oversize;
             // Mode 2 reads the EDGE buffer (the offset outline) through the
             // material's curve_bda slot; modes 0/1 read the curves. Point
             // the BDA at the right buffer.
-            const bda_off = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "curve_bda");
+            const bda_off = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "curve_bda");
             const bda = if (algo == 2) self.stroke_edge_bdas[j] else self.stroke_curve_bdas[j];
             @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
         }
@@ -918,7 +918,7 @@ pub const SvgView = struct {
         // materials' bearing_y fields (offset 4 = after the type u32).
         for (self.stroke_widths, 0..) |w, j| {
             const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
-            const offset = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "bearing_y");
+            const offset = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "bearing_y");
             const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
             @as(*f32, @ptrCast(@alignCast(dst + offset))).* = w * scale;
         }
@@ -1004,7 +1004,7 @@ pub const SvgView = struct {
     /// freed and the material's band_bda is ALWAYS rewritten (a stale
     /// pointer would render the wrong scale's rows).
     fn buildBands(self: *SvgView, i: usize, scaled: []const Curve) void {
-        const bands = proto.buildFillBands(self.gpa, scaled) catch {
+        const bands = renderer.buildFillBands(self.gpa, scaled) catch {
             // OOM: drop any stale band, fall back to the full loop.
             if (self.band_bufs[i]) |old| self.gpu.gpuFree(old);
             self.band_bufs[i] = null;
@@ -1055,7 +1055,7 @@ pub const SvgView = struct {
     fn writeBandBda(self: *SvgView, i: usize, bda: u64) void {
         const slot = self.base_slot + @as(u32, @intCast(i));
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
-        const bda_off = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "band_bda");
+        const bda_off = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "band_bda");
         @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
     }
 
@@ -1068,7 +1068,7 @@ pub const SvgView = struct {
     /// freed and the material's band_bda is ALWAYS rewritten (a stale
     /// pointer would render the wrong scale's rows).
     fn buildStrokeBands(self: *SvgView, j: usize, scaled: []const StrokeEdge) void {
-        const bands = proto.buildStrokeBands(self.gpa, scaled, 1.0) catch {
+        const bands = renderer.buildStrokeBands(self.gpa, scaled, 1.0) catch {
             // OOM: drop any stale band, fall back to the full loop.
             if (self.stroke_band_bufs[j]) |old| self.gpu.gpuFree(old);
             self.stroke_band_bufs[j] = null;
@@ -1120,7 +1120,7 @@ pub const SvgView = struct {
     fn writeStrokeBandBda(self: *SvgView, j: usize, bda: u64) void {
         const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
-        const bda_off = slot * proto.material_size + @offsetOf(proto.GlyphMaterial, "band_bda");
+        const bda_off = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "band_bda");
         @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
     }
 

@@ -38,7 +38,7 @@
 //! PROTOTYPE — but the enum contract is final.
 
 const std = @import("std");
-const SceneRect = @import("render_9slice.zig").SceneRect;
+const SceneRect = @import("v7_render").SceneRect;
 const Widget = @import("widget.zig").Widget;
 const Rect = @import("widget.zig").Rect;
 

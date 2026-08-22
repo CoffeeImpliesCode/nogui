@@ -21,8 +21,6 @@ pub const SizingAxis = @import("proto/widget.zig").SizingAxis;
 pub const Size = @import("proto/widget.zig").Size;
 pub const Rect = @import("proto/widget.zig").Rect;
 pub const Direction = @import("proto/widget.zig").Direction;
-pub const GlyphSweeper = @import("proto/sweeper.zig").GlyphSweeper;
-pub const Curve = @import("proto/sweeper.zig").Curve;
 
 // ─── Event system ───────────────────────────────
 pub const Event = @import("proto/event.zig").Event;
@@ -40,7 +38,6 @@ pub const wasClicked = @import("proto/event.zig").wasClicked;
 
 test {
     _ = @import("proto/widget.zig");
-    _ = @import("proto/sweeper.zig");
     std.testing.refAllDecls(@This());
 }
 

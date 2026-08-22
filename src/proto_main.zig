@@ -10,6 +10,7 @@ const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
 const proto = @import("proto");
+const renderer = @import("v7_render");
 const c = @cImport({
     @cDefine("FT2_BUILD_LIBRARY", "1");
     @cInclude("freetype/freetype.h");
@@ -24,13 +25,13 @@ fn getExts() []const [*:0]const u8 {
 }
 
 /// Extract glyph curves for a specific character using FreeType.
-fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]proto.Curve {
+fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]renderer.Curve {
     const idx = c.FT_Get_Char_Index(face, @intCast(ch));
     if (idx == 0) return error.GlyphNotFound;
     if (c.FT_Load_Glyph(face, idx, c.FT_LOAD_NO_BITMAP) != 0) return error.GlyphLoadFailed;
     const outline = &face.*.glyph.*.outline;
 
-    var buf: [4096]proto.Curve = undefined;
+    var buf: [4096]renderer.Curve = undefined;
     var count: u32 = 0;
     var first_x: f32 = 0;
     var first_y: f32 = 0;
@@ -38,7 +39,7 @@ fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]prot
     var last_y: f32 = 0;
 
     const Ctx = struct {
-        curves: *[4096]proto.Curve,
+        curves: *[4096]renderer.Curve,
         count: *u32,
         first_x: *f32,
         first_y: *f32,
@@ -168,7 +169,7 @@ fn extractCharCurves(alloc: std.mem.Allocator, face: c.FT_Face, ch: u21) ![]prot
     };
     if (c.FT_Outline_Decompose(outline, &funcs, &ctx) != 0) return error.OutlineDecomposeFailed;
 
-    const result = try alloc.dupe(proto.Curve, buf[0..count]);
+    const result = try alloc.dupe(renderer.Curve, buf[0..count]);
     return result; // caller prints glyph info
 }
 
@@ -328,7 +329,7 @@ pub fn main(init: std.process.Init) !void {
     defer win.deinit();
 
     // Create 'A' sweeper (background glyph)
-    var a_sweeper = try proto.GlyphSweeper.init(&ctx.gpu, a_curves);
+    var a_sweeper = try renderer.GlyphSweeper.init(&ctx.gpu, a_curves);
     defer a_sweeper.deinit();
     win.sweeper = &a_sweeper;
 
@@ -349,7 +350,7 @@ pub fn main(init: std.process.Init) !void {
     }
     @memset(&seen, false);
 
-    const sweeper_arr = try gpa.alloc(proto.GlyphSweeper, unique_count);
+    const sweeper_arr = try gpa.alloc(renderer.GlyphSweeper, unique_count);
     var si: usize = 0;
     defer {
         for (sweeper_arr[0..si]) |*s| s.deinit();
@@ -360,7 +361,7 @@ pub fn main(init: std.process.Init) !void {
         seen[ch] = true;
         const curves = try extractCharCurves(gpa, face, ch);
         defer gpa.free(curves);
-        sweeper_arr[si] = try proto.GlyphSweeper.init(&ctx.gpu, curves);
+        sweeper_arr[si] = try renderer.GlyphSweeper.init(&ctx.gpu, curves);
 
         _ = c.FT_Load_Glyph(face, c.FT_Get_Char_Index(face, ch), c.FT_LOAD_NO_BITMAP);
         const m = face.*.glyph.*.metrics;

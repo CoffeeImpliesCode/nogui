@@ -13,8 +13,8 @@
 const std = @import("std");
 const tracy = @import("tracy");
 const noapi = @import("noapi");
-const proto = @import("proto/sweeper.zig");
-const SceneRect = @import("proto/render_9slice.zig").SceneRect;
+const renderer = @import("v7_render");
+const SceneRect = renderer.SceneRect;
 const nogui = @import("nogui");
 pub const WidgetSize = nogui.widget.Size;
 
@@ -141,7 +141,7 @@ pub const TextEngine = struct {
     fonts: [max_font_sizes]?FontState = .{null} ** max_font_sizes,
     // Parallel arrays, one element per rasterized glyph:
     // sweepers[i] owns the GPU curve buffer backing entries[i].
-    sweepers: std.ArrayList(proto.GlyphSweeper) = .empty, // per glyph
+    sweepers: std.ArrayList(renderer.GlyphSweeper) = .empty, // per glyph
     entries: std.ArrayList(GlyphEntry) = .empty, // per glyph
     materials: noapi.GpuPtr, // max_materials * material_size, .default
     next_slot: u32 = 1,
@@ -205,7 +205,7 @@ pub const TextEngine = struct {
         var font_ext: c.hb_font_extents_t = undefined;
         _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
 
-        const materials = try gpu.gpuMalloc(max_materials * proto.material_size, 64, .default);
+        const materials = try gpu.gpuMalloc(max_materials * renderer.material_size, 64, .default);
 
         var self: TextEngine = .{
             .gpu = gpu,
@@ -435,7 +435,7 @@ pub const TextEngine = struct {
         const curves = extractGlyphCurves(self.gpa, font.hb_font, gid) catch return;
         defer self.gpa.free(curves);
 
-        var sweeper = try proto.GlyphSweeper.init(self.gpu, curves);
+        var sweeper = try renderer.GlyphSweeper.init(self.gpu, curves);
 
         // Metrics from HarfBuzz (the same 26.6 fixed-point scale as the
         // shaped positions; /64.0 → pixels). No FreeType in our code.
@@ -464,7 +464,7 @@ pub const TextEngine = struct {
         // (analytic AA — no intermediate bitmap), so the material only
         // needs the curve buffer; the window fields are unused (1.0).
         const slot = self.next_slot;
-        proto.GlyphSweeper.writeMaterial(
+        renderer.GlyphSweeper.writeMaterial(
             sweeper.curve_buf_bda,
             self.materials,
             slot,
@@ -691,10 +691,10 @@ pub const TextEngine = struct {
 /// our code: the face exists only as the hb-ft backend. Callbacks fill a
 /// 4096-curve stack buffer (cubic segments split into two conics at
 /// t=0.5), then the caller-owned slice is dupe'd via `alloc`.
-fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]proto.Curve {
+fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]renderer.Curve {
     if (gid == 0) return error.GlyphNotFound;
 
-    var buf: [4096]proto.Curve = undefined;
+    var buf: [4096]renderer.Curve = undefined;
     var count: u32 = 0;
     var first_x: f32 = 0;
     var first_y: f32 = 0;
@@ -702,7 +702,7 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
     var last_y: f32 = 0;
 
     const Ctx = struct {
-        curves: *[4096]proto.Curve,
+        curves: *[4096]renderer.Curve,
         count: *u32,
         first_x: *f32,
         first_y: *f32,
@@ -866,7 +866,7 @@ fn extractGlyphCurves(alloc: std.mem.Allocator, font: hb.Font, gid: u32) ![]prot
     c.hb_draw_funcs_set_cubic_to_func(funcs, cubic_cb, &ctx, null);
     c.hb_font_draw_glyph(font.handle, gid, funcs, &ctx);
 
-    return alloc.dupe(proto.Curve, buf[0..count]);
+    return alloc.dupe(renderer.Curve, buf[0..count]);
 }
 
 // ── sweep validation (port of quad_frag scanlineSweep) ─────────────
@@ -960,7 +960,7 @@ fn sweepSegment(size: [2]f32, offset: [2]f32, p0: [2]f32, p1: [2]f32, p2: [2]f32
 
 /// Rasterize real glyph curves at a pixel; returns coverage.
 fn glyphCoverage(
-    curves: []const proto.Curve,
+    curves: []const renderer.Curve,
     curve_left: f32,
     curve_bottom: f32,
     curve_w: f32,
@@ -1142,7 +1142,7 @@ test "quad policy: hb extents bound the ink, the 2px surround keeps the outer pi
             // The ink's true extent: the control hull of the EXTRACTED
             // curves (the cubic-split conics shrink the hull, never grow
             // it, so it must sit inside the hb bb).
-            const hull = proto.glyphExtent(curves);
+            const hull = renderer.glyphExtent(curves);
             var ext: c.hb_glyph_extents_t = undefined;
             try std.testing.expectEqual(@as(c_int, 1), c.hb_font_get_glyph_extents(h, gid, &ext));
             const bbx: f32 = @floatCast(@as(f64, @floatFromInt(ext.x_bearing)) / 64.0);

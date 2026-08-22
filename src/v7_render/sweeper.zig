@@ -2,7 +2,7 @@
 //! GlyphMaterial is written to a GPU buffer and referenced by
 //! the quad fragment shader via material_idx + BDA push constant.
 //!
-//! PROTOTYPE — throwaway design exploration.
+//! Active v7 renderer primitive.
 
 const std = @import("std");
 const noapi = @import("noapi");

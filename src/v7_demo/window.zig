@@ -49,7 +49,8 @@ const collectDrawCmds = nogui.drawcmd.collectDrawCmds;
 const MouseButton = nogui.event.MouseButton;
 const Key = nogui.event.Key;
 const hitTest = nogui.hitTest; // runShot's forced --hover
-const Batch9Slice = @import("proto/render_9slice.zig").Batch9Slice;
+const renderer = @import("v7_render");
+const Batch9Slice = renderer.Batch9Slice;
 
 /// The offscreen Oklab render target format (the GUI pass's workspace).
 /// RGBA16F halves the blend ROP traffic vs RGBA32F: the Oklab values
@@ -63,15 +64,14 @@ const Batch9Slice = @import("proto/render_9slice.zig").Batch9Slice;
 // the half4 SPIR-V output needs shaderFloat16/storageInputOutput16, which
 // this GTX 1660 Ti driver does not expose (FeatureNotPresent). 32F stays.
 const render_target_format: noapi.Texture.TextureFormat = .rgba32_float;
-const SceneRect = @import("proto/render_9slice.zig").SceneRect;
-const BatchClipRect = @import("proto/render_9slice.zig").ClipRect;
+const SceneRect = renderer.SceneRect;
+const BatchClipRect = renderer.ClipRect;
 const TextEngine = @import("text.zig").TextEngine;
 const text_mod = @import("text.zig");
 const svg_xml = @import("svg_xml.zig");
 const SvgView = @import("svg_view.zig").SvgView;
 const max_materials = @import("text.zig").max_materials;
 const font_size_px = @import("text.zig").font_size_px;
-const proto = @import("proto/sweeper.zig");
 const srgbToOklab = @import("text.zig").srgbToOklab;
 const ui = @import("ui.zig"); // for the demo texture index (texture_idx)
 const AudioPlayer = @import("audio_player.zig").AudioPlayer;
@@ -846,7 +846,7 @@ fn buildSliceRects(
             const feather = cmd.paint.shadow;
             std.debug.assert(material_slot > glyph_slots); // never reach the live glyph slots
             material_slot -= 1;
-            proto.GlyphSweeper.writeShadowMaterial(
+            renderer.GlyphSweeper.writeShadowMaterial(
                 text_engine.materials,
                 material_slot,
                 shadow_rx,
@@ -880,7 +880,7 @@ fn buildSliceRects(
             // Ring materials always carry the ring's gradient (the demo sets
             // none); fills carry one only when the gradient flag is set.
             const gradient: [4]f32 = if (cmd.ring or cmd.paint.gradient[3] > 0) cmd.paint.gradient else .{ 0, 0, 0, 0 };
-            proto.GlyphSweeper.writeRoundedRectMaterial(
+            renderer.GlyphSweeper.writeRoundedRectMaterial(
                 text_engine.materials,
                 material_slot,
                 rx,
@@ -928,7 +928,7 @@ fn buildSliceRects(
             const progress_radius: f32 = @min(2, r.h / 2);
             std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
-            proto.GlyphSweeper.writeRoundedRectMaterial(
+            renderer.GlyphSweeper.writeRoundedRectMaterial(
                 text_engine.materials,
                 material_slot,
                 progress_radius,
@@ -955,7 +955,7 @@ fn buildSliceRects(
         const thumb_radius: f32 = @min(3, @min(thumb.w, thumb.h) / 2);
         std.debug.assert(material_slot > glyph_slots);
         material_slot -= 1;
-        proto.GlyphSweeper.writeRoundedRectMaterial(
+        renderer.GlyphSweeper.writeRoundedRectMaterial(
             text_engine.materials,
             material_slot,
             thumb_radius,
@@ -989,7 +989,7 @@ fn buildSliceRects(
             const ring_ry: f32 = @max(n.paint.radius.top, n.paint.radius.bottom);
             std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
-            proto.GlyphSweeper.writeRoundedRectMaterial(
+            renderer.GlyphSweeper.writeRoundedRectMaterial(
                 text_engine.materials,
                 material_slot,
                 ring_rx,
@@ -1030,7 +1030,7 @@ fn buildSliceRects(
             const ring_ry: f32 = @max(n.paint.radius.top, n.paint.radius.bottom);
             std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
-            proto.GlyphSweeper.writeRoundedRectMaterial(
+            renderer.GlyphSweeper.writeRoundedRectMaterial(
                 text_engine.materials,
                 material_slot,
                 ring_rx,
@@ -1216,8 +1216,8 @@ fn renderPass1(
     // dispatch the stable radix sort, barrier compute → graphics. Compute
     // cannot run inside dynamic rendering, so the batch's sort/draw split
     // mirrors the pass structure.
-    const proto_rects: []const BatchClipRect = @ptrCast(clip_rects);
-    try batch.sort(cmd, slice_rects, proto_rects);
+    const renderer_clip_rects: []const BatchClipRect = @ptrCast(clip_rects);
+    try batch.sort(cmd, slice_rects, renderer_clip_rects);
 
     cmd.beginRendering(.{ .color_attachments = &.{
         .{ .texture = render_target, .load_op = .clear, .store_op = .store, .clear_color = oklab_gray },

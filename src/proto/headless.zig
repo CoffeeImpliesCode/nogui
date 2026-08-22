@@ -15,16 +15,17 @@
 //! PROTOTYPE — throwaway design exploration.
 
 const std = @import("std");
+const v7_render = @import("v7_render");
 const Widget = @import("widget.zig").Widget;
 const Id = @import("widget.zig").Id;
 const Rect = @import("widget.zig").Rect;
 const Sizing = @import("widget.zig").Sizing;
 const SizingAxis = @import("widget.zig").SizingAxis;
-const SceneRect = @import("render_9slice.zig").SceneRect;
+const SceneRect = v7_render.SceneRect;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
-const GlyphSweeper = @import("sweeper.zig").GlyphSweeper;
-const Curve = @import("sweeper.zig").Curve;
-const GlyphMaterial = @import("sweeper.zig").GlyphMaterial;
+const GlyphSweeper = v7_render.GlyphSweeper;
+const Curve = v7_render.Curve;
+const GlyphMaterial = v7_render.GlyphMaterial;
 const drawctx = @import("drawctx.zig");
 const RenderCommand = @import("render_command.zig").RenderCommand;
 const RenderCommandList = @import("render_command.zig").RenderCommandList;
