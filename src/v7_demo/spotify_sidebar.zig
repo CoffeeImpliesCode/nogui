@@ -9,6 +9,16 @@ const theme = @import("spotify_theme.zig");
 /// Compatibility alias for callers that use the full desktop sidebar width.
 pub const width: f32 = theme.sidebar_width_full;
 
+const NavButton = struct {
+    pub const default_style: nogui.Style = .{
+        .direction = .row,
+        .shrink = 0,
+    };
+    pub const default_paint: nogui.PaintStyle = .{
+        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
+    };
+};
+
 pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     const App = @TypeOf(app.*);
     const expanded = spec.show_sidebar_labels;
@@ -134,12 +144,15 @@ fn navButton(
     comptime on_click: anytype,
 ) !void {
     const fill = if (active) theme.c_active_row else theme.c_sidebar_bg;
+    const style = NavButton.default_style;
+    const paint = NavButton.default_paint;
 
     if (!expanded) {
         _ = try ctx.row(.{
+            .direction = style.direction,
             .basis = theme.sidebar_nav_row_height,
             .min_main = theme.sidebar_nav_row_height,
-            .shrink = 0,
+            .shrink = style.shrink,
             .justify = .center,
             .@"align" = .center,
             .clip = true,
@@ -147,6 +160,7 @@ fn navButton(
         defer ctx.pop();
 
         _ = try ctx.button(.{
+            .direction = style.direction,
             .label = expanded_label,
             .visual_label = compact_label,
             .accessible_label = expanded_label,
@@ -154,11 +168,11 @@ fn navButton(
             .basis = theme.sidebar_compact_target_size,
             .min_main = theme.sidebar_compact_target_size,
             .grow = 0,
-            .shrink = 0,
+            .shrink = style.shrink,
             .color = if (active) theme.c_text else theme.c_text_sec,
             .font_size = 16,
             .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-            .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
+            .radius = paint.radius,
             .fill = fill,
             .gradient = theme.srgbToOklab(fill),
         });
@@ -166,16 +180,17 @@ fn navButton(
     }
 
     _ = try ctx.button(.{
+        .direction = style.direction,
         .label = expanded_label,
         .on_click = on_click,
         .basis = theme.sidebar_nav_row_height,
         .min_main = theme.sidebar_nav_row_height,
-        .shrink = 0,
+        .shrink = style.shrink,
         .justify = .start,
         .color = if (active) theme.c_text else theme.c_text_sec,
         .font_size = 13,
         .padding = .{ .left = 10, .right = 8, .top = 0, .bottom = 0 },
-        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
+        .radius = paint.radius,
         .fill = fill,
         .gradient = theme.srgbToOklab(fill),
         .text_overflow = .ellipsis,

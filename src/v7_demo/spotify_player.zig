@@ -17,6 +17,30 @@ const player_tracks = [_]widget.ColumnTrack{
 };
 const player_columns: widget.SharedColumns = .{ .tracks = &player_tracks };
 
+const UtilityButton = struct {
+    pub const default_style: nogui.Style = .{
+        .direction = .row,
+        .shrink = 1,
+        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
+    };
+    pub const default_paint: nogui.PaintStyle = .{
+        .fill = theme.c_player_control_bg,
+        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
+    };
+};
+
+const TransportButton = struct {
+    pub const default_style: nogui.Style = .{
+        .direction = .row,
+        .shrink = 1,
+        .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
+    };
+    pub const default_paint: nogui.PaintStyle = .{
+        .fill = theme.c_player_control_bg,
+        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
+    };
+};
+
 pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     _ = spec;
     const App = @TypeOf(app.*);
@@ -44,6 +68,52 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         try drawUnavailable(ctx);
     }
     try drawVolume(app, ctx);
+}
+
+fn drawUtilityButton(
+    ctx: *DrawCtx,
+    label: []const u8,
+    icon: widget.IconId,
+    basis: f32,
+    min_main: f32,
+    color: [4]f32,
+    options: anytype,
+) !void {
+    const style = UtilityButton.default_style;
+    const paint = UtilityButton.default_paint;
+    const has_on_click = @hasField(@TypeOf(options), "on_click");
+    if (has_on_click) {
+        _ = try ctx.button(.{
+            .direction = style.direction,
+            .label = label,
+            .accessible_label = label,
+            .visual_label = "",
+            .icon = icon,
+            .on_click = options.on_click,
+            .basis = basis,
+            .shrink = style.shrink,
+            .min_main = min_main,
+            .color = color,
+            .padding = style.padding,
+            .fill = paint.fill,
+            .gradient = paint.gradient,
+        });
+        return;
+    }
+    _ = try ctx.button(.{
+        .direction = style.direction,
+        .label = label,
+        .accessible_label = label,
+        .visual_label = "",
+        .icon = icon,
+        .basis = basis,
+        .shrink = style.shrink,
+        .min_main = min_main,
+        .color = color,
+        .padding = style.padding,
+        .fill = paint.fill,
+        .gradient = paint.gradient,
+    });
 }
 
 fn drawUnavailable(ctx: *DrawCtx) !void {
@@ -96,20 +166,15 @@ fn drawNowPlaying(comptime App: type, track: anytype, ctx: *DrawCtx) !void {
         });
     }
 
-    _ = try ctx.button(.{
-        .label = "Like track",
-        .accessible_label = "Like track",
-        .visual_label = "",
-        .icon = @as(widget.IconId, if (track.is_liked) .heart_filled else .heart),
-        .on_click = App.toggleCurrentLike,
-        .basis = 22,
-        .shrink = 1,
-        .min_main = 18,
-        .color = if (track.is_liked) theme.c_player_progress else theme.c_player_utility,
-        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
-        .fill = theme.c_player_control_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
-    });
+    try drawUtilityButton(
+        ctx,
+        "Like track",
+        @as(widget.IconId, if (track.is_liked) .heart_filled else .heart),
+        22,
+        18,
+        if (track.is_liked) theme.c_player_progress else theme.c_player_utility,
+        .{ .on_click = App.toggleCurrentLike },
+    );
 }
 
 fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx) !void {
@@ -188,19 +253,22 @@ fn drawTransportButton(
     active: bool,
     basis: f32,
 ) !void {
+    const style = TransportButton.default_style;
+    const paint = TransportButton.default_paint;
     _ = try ctx.button(.{
+        .direction = style.direction,
         .label = label,
         .accessible_label = label,
         .visual_label = "",
         .icon = icon,
         .on_click = handler,
         .basis = basis,
-        .shrink = 1,
+        .shrink = style.shrink,
         .min_main = basis,
         .color = if (active) theme.c_player_progress else theme.c_player_utility,
-        .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
-        .fill = theme.c_player_control_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
+        .padding = style.padding,
+        .fill = paint.fill,
+        .gradient = paint.gradient,
     });
 }
 
@@ -208,32 +276,16 @@ fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
     _ = try ctx.row(.{ .gap = 6, .shrink = 1, .min_main = 0, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
-    _ = try ctx.button(.{
-        .label = "Queue",
-        .accessible_label = "Queue",
-        .visual_label = "",
-        .icon = .queue,
-        .basis = 22,
-        .shrink = 1,
-        .min_main = 18,
-        .color = theme.c_player_utility,
-        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
-        .fill = theme.c_player_control_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
-    });
-    _ = try ctx.button(.{
-        .label = "Connect to a device",
-        .accessible_label = "Connect to a device",
-        .visual_label = "",
-        .icon = .devices,
-        .basis = 22,
-        .shrink = 1,
-        .min_main = 18,
-        .color = theme.c_player_utility,
-        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
-        .fill = theme.c_player_control_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
-    });
+    try drawUtilityButton(ctx, "Queue", .queue, 22, 18, theme.c_player_utility, .{});
+    try drawUtilityButton(
+        ctx,
+        "Connect to a device",
+        .devices,
+        22,
+        18,
+        theme.c_player_utility,
+        .{},
+    );
     _ = try ctx.button(.{
         .label = "Volume",
         .accessible_label = "Volume",

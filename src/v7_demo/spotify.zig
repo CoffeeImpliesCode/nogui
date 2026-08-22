@@ -78,6 +78,7 @@ pub const SpotifyApp = struct {
     local_audio_queue_initialized: bool = false,
     active_track_count: usize = default_track_count,
     tracks: [track_capacity]Track = defaultTrackStorage(),
+
     playlists: [6]PlaylistInfo = data.default_playlists,
 
     // Interaction callbacks.

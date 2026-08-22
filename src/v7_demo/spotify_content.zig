@@ -14,6 +14,17 @@ const header_tracks = [_]widget.ColumnTrack{
 const header_columns: widget.SharedColumns = .{ .tracks = &header_tracks };
 const hero_content_max_width: f32 = 360;
 
+const CircleButton = struct {
+    pub const default_style: nogui.Style = .{
+        .direction = .row,
+        .shrink = 0,
+        .box_sizing = .border_box,
+    };
+    pub const default_paint: nogui.PaintStyle = .{
+        .border_color = theme.c_border,
+    };
+};
+
 pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     const App = @TypeOf(app.*);
 
@@ -24,6 +35,53 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     try drawHero(app, ctx, spec);
     try drawActions(App, app, ctx, spec);
     try tracks.draw(app, ctx, spec);
+}
+
+fn drawCircleButton(
+    ctx: *DrawCtx,
+    label: []const u8,
+    color: [4]f32,
+    font_size: f32,
+    options: anytype,
+) !void {
+    const style = CircleButton.default_style;
+    const paint = CircleButton.default_paint;
+    const bordered: bool = if (@hasField(@TypeOf(options), "bordered")) options.bordered else false;
+    const has_on_click = @hasField(@TypeOf(options), "on_click");
+    const half: f32 = options.basis * 0.5;
+    const border: f32 = if (bordered) 1 else 0;
+    if (has_on_click) {
+        _ = try ctx.button(.{
+            .direction = style.direction,
+            .label = label,
+            .on_click = options.on_click,
+            .basis = options.basis,
+            .shrink = style.shrink,
+            .box_sizing = style.box_sizing,
+            .color = color,
+            .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
+            .radius = .{ .top = half, .right = half, .bottom = half, .left = half },
+            .fill = options.fill,
+            .border = .{ .top = border, .right = border, .bottom = border, .left = border },
+            .border_color = paint.border_color,
+            .font_size = font_size,
+        });
+        return;
+    }
+    _ = try ctx.button(.{
+        .direction = style.direction,
+        .label = label,
+        .basis = options.basis,
+        .shrink = style.shrink,
+        .box_sizing = style.box_sizing,
+        .color = color,
+        .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
+        .radius = .{ .top = half, .right = half, .bottom = half, .left = half },
+        .fill = options.fill,
+        .border = .{ .top = border, .right = border, .bottom = border, .left = border },
+        .border_color = paint.border_color,
+        .font_size = font_size,
+    });
 }
 
 fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
@@ -75,7 +133,12 @@ fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec
             try drawFilterPill(ctx, "All", app.active_category == .all, App.selectCategoryAll);
             if (spec.mode == .desktop) {
                 try drawFilterPill(ctx, "Music", app.active_category == .music, App.selectCategoryMusic);
-                try drawFilterPill(ctx, "Podcasts", app.active_category == .podcasts, App.selectCategoryPodcasts);
+                try drawFilterPill(
+                    ctx,
+                    "Podcasts",
+                    app.active_category == .podcasts,
+                    App.selectCategoryPodcasts,
+                );
             }
         }
     }
@@ -95,49 +158,6 @@ fn drawFilterPill(ctx: *DrawCtx, text: []const u8, active: bool, on_click: anyty
     });
 }
 
-fn drawCircleButton(
-    ctx: *DrawCtx,
-    label: []const u8,
-    color: [4]f32,
-    font_size: f32,
-    options: anytype,
-) !void {
-    const bordered: bool = if (@hasField(@TypeOf(options), "bordered")) options.bordered else false;
-    const has_on_click = @hasField(@TypeOf(options), "on_click");
-    const half: f32 = options.basis * 0.5;
-    const border: f32 = if (bordered) 1 else 0;
-    if (has_on_click) {
-        _ = try ctx.button(.{
-            .label = label,
-            .on_click = options.on_click,
-            .basis = options.basis,
-            .shrink = 0,
-            .box_sizing = .border_box,
-            .color = color,
-            .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
-            .radius = .{ .top = half, .right = half, .bottom = half, .left = half },
-            .fill = options.fill,
-            .border = .{ .top = border, .right = border, .bottom = border, .left = border },
-            .border_color = theme.c_border,
-            .font_size = font_size,
-        });
-        return;
-    }
-    _ = try ctx.button(.{
-        .label = label,
-        .basis = options.basis,
-        .shrink = 0,
-        .box_sizing = .border_box,
-        .color = color,
-        .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
-        .radius = .{ .top = half, .right = half, .bottom = half, .left = half },
-        .fill = options.fill,
-        .border = .{ .top = border, .right = border, .bottom = border, .left = border },
-        .border_color = theme.c_border,
-        .font_size = font_size,
-    });
-}
-
 fn drawProfilePill(ctx: *DrawCtx, name: []const u8) !void {
     _ = try ctx.row(.{
         .gap = 6,
@@ -148,11 +168,16 @@ fn drawProfilePill(ctx: *DrawCtx, name: []const u8) !void {
     });
     defer ctx.pop();
 
-    _ = try drawCircleButton(ctx, "J", theme.c_bg, 12, .{
+    try drawCircleButton(ctx, "J", theme.c_bg, 12, .{
         .basis = 20,
         .fill = theme.c_accent,
     });
-    _ = try ctx.label(.{ .text = name, .text_overflow = .ellipsis, .color = theme.c_text, .font_size = 12 });
+    _ = try ctx.label(.{
+        .text = name,
+        .text_overflow = .ellipsis,
+        .color = theme.c_text,
+        .font_size = 12,
+    });
 }
 
 fn drawHero(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {

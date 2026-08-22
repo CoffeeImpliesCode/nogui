@@ -7,6 +7,15 @@ const theme = @import("spotify_theme.zig");
 
 const now_playing_rail_padding_x: f32 = 14;
 const now_playing_artwork_size: f32 = 160;
+
+const MetadataRow = struct {
+    pub const default_style: nogui.Style = .{
+        .direction = .row,
+        .gap = 8,
+        .@"align" = .center,
+    };
+};
+
 pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     if (!spec.show_now_playing) return;
 
@@ -97,7 +106,12 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     }
 }
 
-fn drawMetadata(ctx: *DrawCtx, content_width: f32, album: []const u8, date_added: []const u8) !void {
+fn drawMetadata(
+    ctx: *DrawCtx,
+    content_width: f32,
+    album: []const u8,
+    date_added: []const u8,
+) !void {
     _ = try ctx.column(.{
         .shrink = 1,
         .min_main = 0,
@@ -115,8 +129,19 @@ fn drawMetadata(ctx: *DrawCtx, content_width: f32, album: []const u8, date_added
     try drawMetadataRow(ctx, content_width - 24, "Added", date_added);
 }
 
-fn drawMetadataRow(ctx: *DrawCtx, content_width: f32, heading: []const u8, value: []const u8) !void {
-    _ = try ctx.row(.{ .gap = 8, .clip = true, .@"align" = .center });
+fn drawMetadataRow(
+    ctx: *DrawCtx,
+    content_width: f32,
+    heading: []const u8,
+    value: []const u8,
+) !void {
+    const style = MetadataRow.default_style;
+    _ = try ctx.row(.{
+        .direction = style.direction,
+        .gap = style.gap,
+        .clip = true,
+        .@"align" = style.@"align",
+    });
     defer ctx.pop();
     _ = try ctx.label(.{
         .text = heading,
