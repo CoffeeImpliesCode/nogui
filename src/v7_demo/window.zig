@@ -378,16 +378,61 @@ fn ensureRenderTarget(
 /// writes each registration's image-view descriptor at its index.
 /// descHeapCreate's requested counts are capacity hints — the backend
 /// forces the pool to max_textures/max_samplers either way.
+const ExternalTextureSlots = struct {
+    const Self = ExternalTextureSlots;
+
+    /// Indices freed by external component textures are reusable by any
+    /// subsequent registration, including ordinary map-owned textures.
+    next_idx: u32 = 0,
+    reusable_indices: std.ArrayListUnmanaged(u32) = .empty,
+    live_indices: std.AutoHashMapUnmanaged(u32, void) = .empty,
+
+    fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+        self.reusable_indices.deinit(gpa);
+        self.live_indices.deinit(gpa);
+        self.* = undefined;
+    }
+
+    fn take(self: *Self) u32 {
+        if (self.reusable_indices.pop()) |idx| return idx;
+        const idx = self.next_idx;
+        self.next_idx += 1;
+        return idx;
+    }
+
+    fn restore(self: *Self, gpa: std.mem.Allocator, idx: u32) void {
+        self.reusable_indices.append(gpa, idx) catch
+            @panic("external texture slot free-list allocation failed");
+    }
+
+    fn register(self: *Self, gpa: std.mem.Allocator) !u32 {
+        const idx = self.take();
+        errdefer self.restore(gpa, idx);
+        try self.live_indices.put(gpa, idx, {});
+        return idx;
+    }
+
+    fn unregister(self: *Self, gpa: std.mem.Allocator, idx: u32) bool {
+        if (self.live_indices.fetchRemove(idx) == null) return false;
+        self.reusable_indices.append(gpa, idx) catch
+            @panic("external texture slot free-list allocation failed");
+        return true;
+    }
+};
+
 const TextureRegistry = struct {
     const Self = TextureRegistry;
 
     gpu: *noapi.Gpu,
     gpa: std.mem.Allocator,
     heap: noapi.DescriptorHeap,
-    /// Next free heap slot (the registry is append-only this pass).
-    next_idx: u32 = 0,
+    /// Global descriptor slot allocation. External ownership is tracked
+    /// separately by `external_slots`; map entries remain registry-owned.
+    external_slots: ExternalTextureSlots = .{},
     /// The app's texture handle → heap index.
     map: std.AutoHashMapUnmanaged(noapi.TextureHandle, u32) = .empty,
+    /// The storage-image table has one active slot for the Mandelbrot shader.
+    storage_owner: ?u32 = null,
 
     fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu) !Self {
         const heap = try gpu.descHeapCreate(16, 0, 1);
@@ -407,11 +452,11 @@ const TextureRegistry = struct {
     fn deinit(self: *Self, gpa: std.mem.Allocator) void {
         // Ordinary window-owned textures remain registry-owned. Component
         // textures use registerExternalWithStorage() and free themselves
-        // during deinitGpu; their descriptor slots stay inert until heap
-        // teardown because the runtime API has no unregister operation.
+        // during deinitGpu; only their descriptor slots are cleared here.
         var it = self.map.keyIterator();
         while (it.next()) |h| self.gpu.textureDestroy(h.*);
         self.map.deinit(gpa);
+        self.external_slots.deinit(gpa);
         self.gpu.descHeapDestroy(self.heap);
         self.* = undefined;
     }
@@ -421,8 +466,8 @@ const TextureRegistry = struct {
     /// Idempotent: a handle already registered returns its index.
     fn register(self: *Self, gpa: std.mem.Allocator, tex: noapi.TextureHandle) !u32 {
         if (self.map.get(tex)) |idx| return idx;
-        const idx = self.next_idx;
-        self.next_idx += 1;
+        const idx = self.external_slots.take();
+        errdefer self.external_slots.restore(gpa, idx);
         const desc = self.gpu.textureViewDescriptor(tex, .{ .format = .default });
         self.gpu.descHeapSetTextures(self.heap, idx, &.{desc});
         try self.map.put(gpa, tex, idx);
@@ -430,22 +475,71 @@ const TextureRegistry = struct {
     }
 
     /// Register a component-owned storage texture without putting its handle
-    /// in the registry's destruction map. The descriptor/index remains inert
-    /// until heap teardown because the runtime API has no unregister operation.
+    /// in the registry's destruction map. Its sampled and storage descriptors
+    /// are cleared by unregisterExternalWithStorage().
     fn registerExternalWithStorage(self: *Self, tex: noapi.TextureHandle) !u32 {
-        const idx = self.next_idx;
-        self.next_idx += 1;
+        const idx = try self.external_slots.register(self.gpa);
         const desc = self.gpu.textureViewDescriptor(tex, .{ .format = .default });
         self.gpu.descHeapSetTextures(self.heap, idx, &.{desc});
         const rw_desc = self.gpu.textureRwViewDescriptor(tex, .{ .format = .default });
+        self.gpu.descHeapSetTexturesRw(self.heap, idx, &.{rw_desc});
         self.gpu.descHeapSetTexturesRw(self.heap, 0, &.{rw_desc});
+        self.storage_owner = idx;
         return idx;
+    }
+
+    /// Unregister a component-owned texture. The live-index set makes this
+    /// callback idempotent, so a repeated deinit cannot reuse a slot twice.
+    fn unregisterExternalWithStorage(self: *Self, idx: u32) void {
+        if (!self.external_slots.unregister(self.gpa, idx)) return;
+        const null_desc: u64 = 0;
+        self.gpu.descHeapSetTextures(self.heap, idx, &.{null_desc});
+        self.gpu.descHeapSetTexturesRw(self.heap, idx, &.{null_desc});
+        if (self.storage_owner) |owner| {
+            if (owner == idx) {
+                self.gpu.descHeapSetTexturesRw(self.heap, 0, &.{null_desc});
+                self.storage_owner = null;
+            }
+        }
     }
 };
 
 fn registerRuntimeTexture(ptr: *anyopaque, texture: noapi.TextureHandle) anyerror!u32 {
     const registry: *TextureRegistry = @ptrCast(@alignCast(ptr));
     return registry.registerExternalWithStorage(texture);
+}
+
+fn unregisterRuntimeTexture(ptr: *anyopaque, index: u32) void {
+    const registry: *TextureRegistry = @ptrCast(@alignCast(ptr));
+    registry.unregisterExternalWithStorage(index);
+}
+
+test "TextureRegistry: external slots reuse released indices" {
+    var slots: ExternalTextureSlots = .{};
+    defer slots.deinit(std.testing.allocator);
+
+    const first = try slots.register(std.testing.allocator);
+    const second = try slots.register(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), first);
+    try std.testing.expectEqual(@as(u32, 1), second);
+    try std.testing.expect(slots.unregister(std.testing.allocator, first));
+
+    const reused = try slots.register(std.testing.allocator);
+    try std.testing.expectEqual(first, reused);
+}
+
+test "TextureRegistry: double external unregister is idempotent" {
+    var slots: ExternalTextureSlots = .{};
+    defer slots.deinit(std.testing.allocator);
+
+    const index = try slots.register(std.testing.allocator);
+    try std.testing.expect(slots.unregister(std.testing.allocator, index));
+    try std.testing.expect(!slots.unregister(std.testing.allocator, index));
+
+    const reused = try slots.register(std.testing.allocator);
+    try std.testing.expectEqual(index, reused);
+    const next = try slots.register(std.testing.allocator);
+    try std.testing.expectEqual(index + 1, next);
 }
 
 /// Demo texture pixels: a 64x64 procedural Oklab stripe pattern — eight
@@ -1308,6 +1402,7 @@ pub fn run(
     var gpu_texture_runtime: nogui.TextureRegistry = .{
         .ptr = &tex_registry,
         .register = registerRuntimeTexture,
+        .unregister = unregisterRuntimeTexture,
     };
     var gpu_endpoint: nogui.GpuEndpoint = .{
         .gpu = &gpu,
@@ -1757,7 +1852,6 @@ pub fn runShot(
     try sdl3.hints.setWithPriority(.render_driver, "vulkan", .override);
     try sdl3.init(.{ .video = true, .events = true });
     defer sdl3.quit(.{ .video = true, .events = true });
-
     const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 1100, 1160, .{ .resizable = true });
     defer sdl_win.deinit();
     try sdl_win.show();
@@ -1855,6 +1949,7 @@ pub fn runShot(
     var gpu_texture_runtime: nogui.TextureRegistry = .{
         .ptr = &tex_registry,
         .register = registerRuntimeTexture,
+        .unregister = unregisterRuntimeTexture,
     };
     var gpu_endpoint: nogui.GpuEndpoint = .{
         .gpu = &gpu,

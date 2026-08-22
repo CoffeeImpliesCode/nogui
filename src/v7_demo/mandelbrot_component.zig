@@ -125,7 +125,7 @@ pub const MandelbrotComponent = struct {
     }
 
     pub fn deinitGpu(self: *MandelbrotComponent, endpoint: *GpuEndpoint) void {
-        if (!self.gpu_ready) return;
+        self.releaseBindlessTexture(endpoint);
         const gpu = endpoint.gpu;
         if (self.params_buf) |params_buf| gpu.gpuFree(params_buf);
         if (self.shader) |shader| gpu.shaderDestroy(shader);
@@ -134,8 +134,13 @@ pub const MandelbrotComponent = struct {
         self.params_buf = null;
         self.shader = null;
         self.params_bda = 0;
-        self.bindless_index = null;
         self.gpu_ready = false;
+    }
+
+    fn releaseBindlessTexture(self: *MandelbrotComponent, endpoint: *GpuEndpoint) void {
+        const index = self.bindless_index orelse return;
+        self.bindless_index = null;
+        endpoint.unregisterTexture(index);
     }
 
     pub fn onEvent(self: *MandelbrotComponent, event: *const Event) void {
@@ -229,3 +234,36 @@ pub const MandelbrotComponent = struct {
         self.center[1] = drag.center[1] - @as(f64, point[1] - drag.mouse[1]) / scale_y;
     }
 };
+
+const DeinitProbe = struct {
+    component: *MandelbrotComponent,
+    observed_index: ?u32 = null,
+    observed_cleared: bool = false,
+};
+
+fn fakeRegisterTexture(_: *anyopaque, _: noapi.TextureHandle) anyerror!u32 {
+    return 0;
+}
+
+fn recordUnregisterTexture(ptr: *anyopaque, index: u32) void {
+    const probe: *DeinitProbe = @ptrCast(@alignCast(ptr));
+    probe.observed_index = index;
+    probe.observed_cleared = probe.component.bindless_index == null;
+}
+
+test "MandelbrotComponent: deinitGpu unregisters before texture teardown" {
+    var component: MandelbrotComponent = .{ .bindless_index = 23 };
+    var probe: DeinitProbe = .{ .component = &component };
+    var registry: nogui.TextureRegistry = .{
+        .ptr = &probe,
+        .register = fakeRegisterTexture,
+        .unregister = recordUnregisterTexture,
+    };
+    var endpoint: GpuEndpoint = .{ .gpu = undefined, .textures = &registry };
+
+    component.deinitGpu(&endpoint);
+
+    try std.testing.expectEqual(@as(?u32, null), component.bindless_index);
+    try std.testing.expectEqual(@as(?u32, 23), probe.observed_index);
+    try std.testing.expect(probe.observed_cleared);
+}

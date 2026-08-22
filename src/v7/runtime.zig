@@ -13,6 +13,8 @@ const noapi = @import("noapi");
 pub const TextureRegistry = struct {
     ptr: *anyopaque,
     register: *const fn (*anyopaque, noapi.TextureHandle) anyerror!u32,
+    /// Unregisters a component-owned slot. Map-owned textures never call it.
+    unregister: *const fn (*anyopaque, u32) void,
 };
 
 /// Persistent renderer services available to GPU lifecycle hooks.
@@ -26,6 +28,11 @@ pub const GpuEndpoint = struct {
     pub fn registerTexture(self: *GpuEndpoint, texture: noapi.TextureHandle) !u32 {
         const textures = self.textures orelse return error.TextureRegistryUnavailable;
         return textures.register(textures.ptr, texture);
+    }
+
+    pub fn unregisterTexture(self: *GpuEndpoint, index: u32) void {
+        const textures = self.textures orelse return;
+        textures.unregister(textures.ptr, index);
     }
 };
 
