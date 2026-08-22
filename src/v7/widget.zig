@@ -7,10 +7,13 @@ const Id = @import("id.zig").Id;
 const callback = @import("callback.zig");
 const style = @import("style.zig");
 
+pub const PaintStyleOverride = style.PaintStyleOverride;
+pub const ComponentDefaults = style.ComponentDefaults;
 pub const Style = style.Style;
 pub const PaintStyle = style.PaintStyle;
 pub const StyleOverride = style.StyleOverride;
 pub const Display = style.Display;
+pub const Position = style.Position;
 pub const FlexDirection = style.FlexDirection;
 pub const FlexWrap = style.FlexWrap;
 pub const Justify = style.Justify;

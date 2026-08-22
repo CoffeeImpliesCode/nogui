@@ -3,8 +3,8 @@
 //!
 //! Every element of a UI — including the root — is a `Component(T)`
 //! created with `Component.make(T, ptr)`. `draw` is mandatory; `onEvent`,
-//! `deinit`, and the GPU lifecycle hooks are optional and detected via
-//! `@hasDecl`.
+//! `deinit`, GPU lifecycle hooks, and typed `default_style` /
+//! `default_paint` declarations are optional and detected at comptime.
 const std = @import("std");
 
 const DrawCtx = @import("drawctx.zig").DrawCtx;
@@ -13,6 +13,10 @@ const WidgetTree = @import("widget.zig").WidgetTree;
 const ComponentId = @import("key.zig").ComponentId;
 const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
 const GpuFrame = @import("runtime.zig").GpuFrame;
+const style = @import("style.zig");
+const Style = style.Style;
+const PaintStyle = style.PaintStyle;
+pub const ComponentDefaults = style.ComponentDefaults;
 
 /// Type-erased operations for a component of any concrete type T.
 /// `deinit` takes the allocator first, then the opaque receiver: it frees
@@ -20,6 +24,8 @@ const GpuFrame = @import("runtime.zig").GpuFrame;
 /// concrete allocation calls `allocator.destroy` after it returns.
 pub const ComponentVTable = struct {
     draw: *const fn (*anyopaque, *DrawCtx) anyerror!void,
+    default_style: ?*const fn () Style,
+    default_paint: ?*const fn () PaintStyle,
     on_event: ?*const fn (*anyopaque, *const Event) void,
     deinit: ?*const fn (std.mem.Allocator, *anyopaque) void,
     init_gpu: ?*const fn (*anyopaque, *GpuEndpoint) anyerror!void,
@@ -31,11 +37,20 @@ pub const ComponentVTable = struct {
 pub const Component = struct {
     ptr: *anyopaque,
     vtable: *const ComponentVTable,
+    /// Return the concrete component's typed defaults. Types without a
+    /// declaration contribute an empty value for that half of the scope.
+    pub fn defaults(self: Component) ComponentDefaults {
+        return .{
+            .style = if (self.vtable.default_style) |default_style| default_style() else null,
+            .paint = if (self.vtable.default_paint) |default_paint| default_paint() else null,
+        };
+    }
 
     /// Build a Component from a concrete type. T must declare
-    /// `draw(self: *T, ctx: *DrawCtx) !void` (checked at comptime);
-    /// `onEvent` and `deinit` are optional. The adapters cast the
-    /// `*anyopaque` receiver back to `*T` and dispatch with `.auto`.
+    /// `draw(self: *T, ctx: *DrawCtx) !void` (checked at comptime).
+    /// Lifecycle hooks and typed `default_style` / `default_paint`
+    /// declarations are optional. Adapters cast the opaque receiver back to
+    /// `*T` and dispatch with `.auto`.
     pub fn make(comptime T: type, ptr: *T) Component {
         if (!@hasDecl(T, "draw")) {
             @compileError("Component type " ++ @typeName(T) ++ " must declare draw(self: *T, ctx: *DrawCtx) !void");
@@ -44,7 +59,24 @@ pub const Component = struct {
         const Impl = struct {
             fn draw(p: *anyopaque, ctx: *DrawCtx) anyerror!void {
                 const t: *T = @ptrCast(@alignCast(p));
+                if (std.meta.eql(ctx.component_identity, ComponentId.root)) {
+                    const saved_defaults = ctx.component_defaults;
+                    defer ctx.component_defaults = saved_defaults;
+                    ctx.component_defaults = componentDefaults();
+                }
                 return @call(.auto, T.draw, .{ t, ctx });
+            }
+            fn componentDefaults() ComponentDefaults {
+                return .{
+                    .style = if (@hasDecl(T, "default_style")) T.default_style else null,
+                    .paint = if (@hasDecl(T, "default_paint")) T.default_paint else null,
+                };
+            }
+            fn defaultStyle() Style {
+                return @field(T, "default_style");
+            }
+            fn defaultPaint() PaintStyle {
+                return @field(T, "default_paint");
             }
             fn onEvent(p: *anyopaque, ev: *const Event) void {
                 const t: *T = @ptrCast(@alignCast(p));
@@ -76,6 +108,8 @@ pub const Component = struct {
         // across frames).
         const vtable: ComponentVTable = comptime .{
             .draw = Impl.draw,
+            .default_style = if (@hasDecl(T, "default_style")) Impl.defaultStyle else null,
+            .default_paint = if (@hasDecl(T, "default_paint")) Impl.defaultPaint else null,
             .on_event = if (@hasDecl(T, "onEvent")) Impl.onEvent else null,
             .deinit = if (@hasDecl(T, "deinit")) Impl.deinit else null,
             .init_gpu = if (@hasDecl(T, "initGpu")) Impl.initGpu else null,
@@ -172,6 +206,47 @@ test "make: on_event and deinit are null when the type omits them" {
         @as(?*const fn (*anyopaque, *GpuEndpoint) void, null),
         c.vtable.deinit_gpu,
     );
+}
+
+test "make: typed default adapters are present only for declared values" {
+    const WithDefaults = struct {
+        const Self = @This();
+        pub const default_style: Style = .{ .direction = .row, .gap = 11 };
+        pub const default_paint: PaintStyle = .{ .layer = 4 };
+
+        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+            _ = self;
+            _ = ctx;
+        }
+    };
+    const WithoutDefaults = struct {
+        const Self = @This();
+
+        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+            _ = self;
+            _ = ctx;
+        }
+    };
+
+    var with_defaults: WithDefaults = .{};
+    const with_component = Component.make(WithDefaults, &with_defaults);
+    try std.testing.expect(with_component.vtable.default_style != null);
+    try std.testing.expect(with_component.vtable.default_paint != null);
+    try std.testing.expectEqual(
+        @as(?Style, WithDefaults.default_style),
+        with_component.defaults().style,
+    );
+    try std.testing.expectEqual(
+        @as(?PaintStyle, WithDefaults.default_paint),
+        with_component.defaults().paint,
+    );
+
+    var without_defaults: WithoutDefaults = .{};
+    const without_component = Component.make(WithoutDefaults, &without_defaults);
+    try std.testing.expect(without_component.vtable.default_style == null);
+    try std.testing.expect(without_component.vtable.default_paint == null);
+    try std.testing.expectEqual(@as(?Style, null), without_component.defaults().style);
+    try std.testing.expectEqual(@as(?PaintStyle, null), without_component.defaults().paint);
 }
 
 test "make: on_event dispatches through the vtable when declared" {

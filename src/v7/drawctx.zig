@@ -31,12 +31,14 @@ const Style = style.Style;
 const StyleOverride = style.StyleOverride;
 const PaintStyle = style.PaintStyle;
 const PaintStyleOverride = style.PaintStyleOverride;
+const ComponentDefaults = style.ComponentDefaults;
 const Sides = style.Sides;
 const BoxSizing = style.BoxSizing;
 const Justify = style.Justify;
 const Align = style.Align;
 const FlexWrap = style.FlexWrap;
 const AlignContent = style.AlignContent;
+const FlexDirection = style.FlexDirection;
 const AlignSelf = style.AlignSelf;
 const layout = @import("flex.zig").layout;
 const hitButton = @import("input.zig").hitButton;
@@ -205,12 +207,15 @@ fn asOptionalF32(value: anytype) ?f32 {
 
 /// Resolve typed layout and paint values from an anonymous widget options
 /// value. Missing fields stay unspecified and therefore retain defaults.
-fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
+fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection) Style {
     var local: StyleOverride = .{};
     const T = @TypeOf(opts);
     if (@hasField(T, "display")) local.display = @as(style.Display, opts.display);
     if (@hasField(T, "position")) local.position = @as(style.Position, opts.position);
     if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
+    if (@hasField(T, "flex_direction")) {
+        local.flex_direction = @as(style.FlexDirection, opts.flex_direction);
+    }
     if (@hasField(T, "wrap")) local.wrap = @as(FlexWrap, opts.wrap);
     if (@hasField(T, "flex_wrap")) local.flex_wrap = @as(FlexWrap, opts.flex_wrap);
     if (@hasField(T, "align_content")) {
@@ -316,10 +321,10 @@ fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
     if (@hasField(T, "border_inset")) local.border_inset = asLengthPercentageRect(opts.border_inset);
     if (@hasField(T, "padding_inset")) local.padding_inset = asLengthPercentageRect(opts.padding_inset);
     if (@hasField(T, "box_sizing")) local.box_sizing = @as(BoxSizing, opts.box_sizing);
-    return Style.resolve(.{ .direction = direction }, local);
+    return Style.resolve(defaults orelse .{ .direction = direction }, local);
 }
 
-fn paintStyleFromOpts(opts: anytype) PaintStyle {
+fn paintStyleFromOpts(opts: anytype, defaults: ?PaintStyle) PaintStyle {
     var local: PaintStyleOverride = .{};
     const T = @TypeOf(opts);
     if (@hasField(T, "border_color")) local.border_color = asColor(opts.border_color);
@@ -331,7 +336,7 @@ fn paintStyleFromOpts(opts: anytype) PaintStyle {
     if (@hasField(T, "texture")) local.texture = .{ .value = opts.texture };
     if (@hasField(T, "gradient")) local.gradient = asColor(opts.gradient);
     if (@hasField(T, "fill")) local.fill = asColor(opts.fill);
-    return PaintStyle.resolve(.{}, local);
+    return PaintStyle.resolve(defaults orelse .{}, local);
 }
 
 /// Set the generated button label's typed flex bounds.
@@ -430,6 +435,9 @@ pub const DrawCtx = struct {
     state_cur: ?*StateDir = null,
     parent_stack: [64]Id = .{.root} ** 64,
     depth: u32 = 0,
+    /// Defaults contributed by the component currently being drawn. A child
+    /// scope replaces this value for its entire draw and is restored on return.
+    component_defaults: ComponentDefaults = .{},
     /// Stable identity used for component-local state and registry lookup.
     component_identity: ComponentId = .root,
     /// Generation of the frame currently being drawn.
@@ -511,11 +519,11 @@ pub const DrawCtx = struct {
     /// `align` set the Style distribution/alignment (start / stretch). The
     /// typed Style's padding/border define where flex places children.
     pub fn column(self: *DrawCtx, opts: anytype) !Id {
-        const resolved_style = styleFromOpts(opts, .column);
+        const resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
         const id = try self.create(
             .{ .column = .{ .gap = resolved_style.gap } },
             resolved_style,
-            paintStyleFromOpts(opts),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -525,11 +533,11 @@ pub const DrawCtx = struct {
     }
     /// Container: create + descend (row variant). See `column`.
     pub fn row(self: *DrawCtx, opts: anytype) !Id {
-        const resolved_style = styleFromOpts(opts, .row);
+        const resolved_style = styleFromOpts(opts, self.component_defaults.style, .row);
         const id = try self.create(
             .{ .row = .{ .gap = resolved_style.gap } },
             resolved_style,
-            paintStyleFromOpts(opts),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -543,7 +551,7 @@ pub const DrawCtx = struct {
     /// Grid container: it uses the same tree container kind as column, but
     /// dispatches to the bounded grid algorithm through Style.display.
     pub fn grid(self: *DrawCtx, opts: anytype) !Id {
-        var resolved_style = styleFromOpts(opts, .column);
+        var resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
         resolved_style.display = .grid;
         const T = @TypeOf(opts);
         if (!@hasField(T, "grid_justify_content") and @hasField(T, "justify"))
@@ -557,7 +565,7 @@ pub const DrawCtx = struct {
         const id = try self.create(
             .{ .column = .{ .gap = resolved_style.gap } },
             resolved_style,
-            paintStyleFromOpts(opts),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -602,8 +610,8 @@ pub const DrawCtx = struct {
         if (@hasField(@TypeOf(opts), "color")) kind.label.color = asColor(opts.color);
         const id = try self.create(
             kind,
-            styleFromOpts(opts, .column),
-            paintStyleFromOpts(opts),
+            styleFromOpts(opts, self.component_defaults.style, .column),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -653,8 +661,8 @@ pub const DrawCtx = struct {
         const font_id = optsFontId(opts);
         const id = try self.create(
             kind,
-            styleFromOpts(opts, .row),
-            paintStyleFromOpts(opts),
+            styleFromOpts(opts, self.component_defaults.style, .row),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
             font_size,
             font_id,
         );
@@ -663,8 +671,10 @@ pub const DrawCtx = struct {
         // Buttons center generated labels unless the caller overrides either
         // flex axis independently.
         const node = self.tree.node(id).?;
-        node.style.justify = .center;
-        node.style.@"align" = .center;
+        if (self.component_defaults.style == null) {
+            node.style.justify = .center;
+            node.style.@"align" = .center;
+        }
         if (@hasField(T, "justify")) node.style.justify = @as(Justify, opts.justify);
         if (@hasField(T, "align")) node.style.@"align" = @as(Align, opts.@"align");
 
@@ -717,8 +727,8 @@ pub const DrawCtx = struct {
         if (@hasField(T, "color")) kind.slider.color = asColor(opts.color);
         const id = try self.create(
             kind,
-            styleFromOpts(opts, .column),
-            paintStyleFromOpts(opts),
+            styleFromOpts(opts, self.component_defaults.style, .column),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -731,8 +741,8 @@ pub const DrawCtx = struct {
         if (@hasField(@TypeOf(opts), "size")) size = opts.size;
         const id = try self.create(
             .{ .spacer = .{ .size = size } },
-            styleFromOpts(opts, .column),
-            paintStyleFromOpts(opts),
+            styleFromOpts(opts, self.component_defaults.style, .column),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -793,9 +803,11 @@ pub const DrawCtx = struct {
 
         const saved_identity = self.component_identity;
         const saved_owner = self.component_id;
+        const saved_defaults = self.component_defaults;
         defer {
             self.component_identity = saved_identity;
             self.component_id = saved_owner;
+            self.component_defaults = saved_defaults;
         }
         self.component_identity = child_identity;
         self.component_id = @enumFromInt(self.tree.next_id);
@@ -803,6 +815,7 @@ pub const DrawCtx = struct {
         if (self.registry) |reg| {
             try reg.map.put(reg.gpa, self.component_id, child_component);
         }
+        self.component_defaults = child_component.defaults();
         try child_component.vtable.draw(ptr, self);
     }
 
@@ -1002,6 +1015,154 @@ test "DrawCtx: component() draws into the current cursor" {
     const col_node = tree2.node(col).?;
     try std.testing.expectEqual(@as(u8, 1), col_node.children.len);
     try std.testing.expectEqual(nested, col_node.children.items[0]);
+}
+
+test "DrawCtx: component defaults apply before local overrides and restore" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Styled = struct {
+        const Self = @This();
+        pub const default_style: Style = .{
+            .direction = .row,
+            .gap = 12,
+        };
+        pub const default_paint: PaintStyle = .{
+            .fill = .{ 1, 0, 0, 1 },
+            .layer = 7,
+        };
+        first: Id = .root,
+        second: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.first = try c.label(.{ .text = "default" });
+            self.second = try c.label(.{
+                .text = "local",
+                .gap = 3,
+                .fill = .{ 0, 1, 0, 1 },
+            });
+        }
+    };
+
+    var styled: Styled = .{};
+    try ctx.component(Styled, .{ .key = .{ .static = "styled" } }, &styled);
+    const first = tree.node(styled.first).?;
+    const second = tree.node(styled.second).?;
+    try std.testing.expectEqual(FlexDirection.row, first.style.direction);
+    try std.testing.expectEqual(@as(f32, 12), first.style.gap);
+    try std.testing.expectEqual([4]f32{ 1, 0, 0, 1 }, first.paint.fill);
+    try std.testing.expectEqual(@as(f32, 3), second.style.gap);
+    try std.testing.expectEqual([4]f32{ 0, 1, 0, 1 }, second.paint.fill);
+
+    const after = try ctx.label(.{ .text = "after" });
+    try std.testing.expectEqual(FlexDirection.column, tree.node(after).?.style.direction);
+    try std.testing.expectEqual(@as(f32, 0), tree.node(after).?.style.gap);
+    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, tree.node(after).?.paint.fill);
+    try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
+    try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);
+}
+
+test "DrawCtx: component default scope restores after draw error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Failing = struct {
+        const Self = @This();
+        pub const default_style: Style = .{ .gap = 8 };
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            _ = self;
+            _ = c;
+            return error.TestComponentFailure;
+        }
+    };
+
+    var failing: Failing = .{};
+    try std.testing.expectError(
+        error.TestComponentFailure,
+        ctx.component(Failing, .{ .key = .{ .static = "failing" } }, &failing),
+    );
+    try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
+    const after = try ctx.label(.{ .text = "after-error" });
+    try std.testing.expectEqual(@as(f32, 0), tree.node(after).?.style.gap);
+}
+
+test "DrawCtx: nested component defaults replace and isolate parent scope" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Bare = struct {
+        const Self = @This();
+        label_id: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.label_id = try c.label(.{ .text = "bare" });
+        }
+    };
+    const Child = struct {
+        const Self = @This();
+        pub const default_style: Style = .{
+            .direction = .column,
+            .gap = 5,
+        };
+        pub const default_paint: PaintStyle = .{ .fill = .{ 0, 0, 1, 1 } };
+        bare: *Bare,
+        label_id: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.label_id = try c.label(.{ .text = "child" });
+            try c.component(Bare, .{ .key = .{ .static = "bare" } }, self.bare);
+        }
+    };
+    const Parent = struct {
+        const Self = @This();
+        pub const default_style: Style = .{
+            .direction = .row,
+            .gap = 20,
+        };
+        pub const default_paint: PaintStyle = .{ .fill = .{ 1, 0, 0, 1 } };
+        child: *Child,
+        before_id: Id = .root,
+        after_id: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.before_id = try c.label(.{ .text = "before" });
+            try c.component(Child, .{ .key = .{ .static = "child" } }, self.child);
+            self.after_id = try c.label(.{ .text = "after" });
+        }
+    };
+
+    var bare: Bare = .{};
+    var child: Child = .{ .bare = &bare };
+    var parent: Parent = .{ .child = &child };
+    try ctx.component(Parent, .{ .key = .{ .static = "parent" } }, &parent);
+
+    const before = tree.node(parent.before_id).?;
+    const child_label = tree.node(child.label_id).?;
+    const bare_label = tree.node(bare.label_id).?;
+    const after = tree.node(parent.after_id).?;
+    try std.testing.expectEqual(FlexDirection.row, before.style.direction);
+    try std.testing.expectEqual(@as(f32, 20), before.style.gap);
+    try std.testing.expectEqual(FlexDirection.column, child_label.style.direction);
+    try std.testing.expectEqual(@as(f32, 5), child_label.style.gap);
+    try std.testing.expectEqual([4]f32{ 0, 0, 1, 1 }, child_label.paint.fill);
+    try std.testing.expectEqual(FlexDirection.column, bare_label.style.direction);
+    try std.testing.expectEqual(@as(f32, 0), bare_label.style.gap);
+    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, bare_label.paint.fill);
+    try std.testing.expectEqual(FlexDirection.row, after.style.direction);
+    try std.testing.expectEqual(@as(f32, 20), after.style.gap);
+    try std.testing.expectEqual([4]f32{ 1, 0, 0, 1 }, after.paint.fill);
+    try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
+    try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);
 }
 
 test "DrawCtx: justify and align flow into the node's Style" {

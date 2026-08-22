@@ -544,6 +544,7 @@ pub const Style = struct {
         if (local.display) |value| result.display = value;
         if (local.position) |value| result.position = value;
         if (local.direction) |value| result.direction = value;
+        if (local.flex_direction) |value| result.direction = value;
         if (local.wrap) |value| {
             result.wrap = value;
             result.flex_wrap = value;
@@ -742,6 +743,8 @@ pub const StyleOverride = struct {
     display: ?Display = null,
     position: ?Position = null,
     direction: ?FlexDirection = null,
+    /// Compatibility spelling accepted by option translators.
+    flex_direction: ?FlexDirection = null,
     wrap: ?FlexWrap = null,
     flex_wrap: ?FlexWrap = null,
     /// Compatibility spelling accepted by option translators.
@@ -851,6 +854,25 @@ pub const PaintStyleOverride = struct {
     texture: TextureOverride = .unspecified,
     layer: ?Layer = null,
 };
+
+/// Typed defaults scoped to one component draw. A missing half is empty and
+/// never inherits layout values from the enclosing component.
+pub const ComponentDefaults = struct {
+    style: ?Style = null,
+    paint: ?PaintStyle = null,
+};
+
+test "ComponentDefaults keeps layout and paint scopes independently optional" {
+    const defaults: ComponentDefaults = .{
+        .style = .{ .gap = 16 },
+        .paint = .{ .layer = 3 },
+    };
+    try std.testing.expectEqual(@as(?f32, 16), defaults.style.?.gap);
+    try std.testing.expectEqual(@as(?Layer, 3), defaults.paint.?.layer);
+    const empty: ComponentDefaults = .{};
+    try std.testing.expectEqual(@as(?Style, null), empty.style);
+    try std.testing.expectEqual(@as(?PaintStyle, null), empty.paint);
+}
 
 test "Style resolution retains component defaults" {
     const defaults: Style = .{

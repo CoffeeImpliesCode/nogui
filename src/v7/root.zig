@@ -31,21 +31,63 @@ pub const ComponentRegistry = @import("component.zig").ComponentRegistry;
 pub const TextureRegistry = @import("runtime.zig").TextureRegistry;
 pub const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
 pub const GpuFrame = @import("runtime.zig").GpuFrame;
-pub const Justify = @import("style.zig").Justify;
-pub const Align = @import("style.zig").Align;
-pub const Style = @import("style.zig").Style;
-pub const StyleOverride = @import("style.zig").StyleOverride;
-pub const PaintStyle = @import("style.zig").PaintStyle;
-pub const PaintStyleOverride = @import("style.zig").PaintStyleOverride;
-pub const Display = @import("style.zig").Display;
-pub const FlexDirection = @import("style.zig").FlexDirection;
-pub const BoxSizing = @import("style.zig").BoxSizing;
-pub const Sides = @import("style.zig").Sides;
-pub const Color = @import("style.zig").Color;
-pub const TextureId = @import("style.zig").TextureId;
-pub const Layer = @import("style.zig").Layer;
-pub const OptionalFloatOverride = @import("style.zig").OptionalFloatOverride;
-pub const TextureOverride = @import("style.zig").TextureOverride;
+pub const style = @import("style.zig");
+pub const Display = style.Display;
+pub const Position = style.Position;
+pub const FlexDirection = style.FlexDirection;
+pub const Direction = style.FlexDirection;
+pub const FlexWrap = style.FlexWrap;
+pub const Justify = style.Justify;
+pub const Align = style.Align;
+pub const AlignContent = style.AlignContent;
+pub const AlignSelf = style.AlignSelf;
+pub const BoxSizing = style.BoxSizing;
+pub const Sides = style.Sides;
+pub const Color = style.Color;
+pub const TextureId = style.TextureId;
+pub const Layer = style.Layer;
+pub const Style = style.Style;
+pub const StyleOverride = style.StyleOverride;
+pub const PaintStyle = style.PaintStyle;
+pub const PaintStyleOverride = style.PaintStyleOverride;
+pub const ComponentDefaults = style.ComponentDefaults;
+pub const OptionalFloatOverride = style.OptionalFloatOverride;
+pub const TextureOverride = style.TextureOverride;
+pub const GridTrackBreadth = style.GridTrackBreadth;
+pub const GridMinMax = style.GridMinMax;
+pub const GridTrack = style.GridTrack;
+pub const GridPlacement = style.GridPlacement;
+pub const GridLine = style.GridLine;
+pub const GridAutoFlow = style.GridAutoFlow;
+pub const Dimension = style.Dimension;
+pub const LengthPercentage = style.LengthPercentage;
+pub const LengthPercentageAuto = style.LengthPercentageAuto;
+pub const StyleSize = style.Size;
+pub const StyleRect = style.Rect;
+pub const DimensionSize = style.DimensionSize;
+pub const LengthPercentageSize = style.LengthPercentageSize;
+pub const LengthPercentageAutoSize = style.LengthPercentageAutoSize;
+pub const Insets = style.Insets;
+pub const LengthPercentageRect = style.LengthPercentageRect;
+pub const ResolvedSize = style.ResolvedSize;
+pub const ResolvedInsets = style.ResolvedInsets;
+pub const Overflow = style.Overflow;
+pub const OverflowAxes = style.OverflowAxes;
+pub const ExplicitOverride = style.ExplicitOverride;
+pub const Override = style.Override;
+pub const DimensionOverride = style.DimensionOverride;
+pub const LengthPercentageAutoOverride = style.LengthPercentageAutoOverride;
+pub const DimensionSizeOverride = style.DimensionSizeOverride;
+pub const InsetsOverride = style.InsetsOverride;
+pub const OverflowAxesOverride = style.OverflowAxesOverride;
+pub const ResolvedDimensions = style.ResolvedDimensions;
+pub const ResolvedConstraints = style.ResolvedConstraints;
+pub const ResolvedStyle = style.ResolvedStyle;
+pub const directionIsColumn = style.directionIsColumn;
+pub const directionIsReverse = style.directionIsReverse;
+pub const dimensionFrom = style.dimensionFrom;
+pub const lengthPercentageFrom = style.lengthPercentageFrom;
+pub const lengthPercentageAutoFrom = style.lengthPercentageAutoFrom;
 pub const Event = @import("event.zig").Event;
 pub const dispatchClick = @import("event.zig").dispatchClick;
 pub const FrameOutput = @import("headless.zig").FrameOutput;
@@ -71,6 +113,37 @@ test {
 test "canonical module exports App and DrawCtx" {
     _ = App;
     _ = DrawCtx;
+}
+
+test "root component defaults scope only the root draw" {
+    const Root = struct {
+        const Self = @This();
+        pub const default_style: Style = .{ .direction = .row, .gap = 9 };
+        pub const default_paint: PaintStyle = .{ .fill = .{ 0.25, 0.5, 0.75, 1 } };
+        label_id: Id = .root,
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+            self.label_id = try ctx.label(.{ .text = "root" });
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    var root_component: Root = .{};
+    const erased = Component.make(Root, &root_component);
+    ctx.component_defaults = erased.defaults();
+    try erased.vtable.draw(erased.ptr, &ctx);
+    ctx.component_defaults = .{};
+
+    const node = tree.node(root_component.label_id).?;
+    try std.testing.expectEqual(FlexDirection.row, node.style.direction);
+    try std.testing.expectEqual(@as(f32, 9), node.style.gap);
+    try std.testing.expectEqual([4]f32{ 0.25, 0.5, 0.75, 1 }, node.paint.fill);
+    try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
+    try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);
 }
 
 const GpuLifecycleEvent = enum { init, frame, deinit };
