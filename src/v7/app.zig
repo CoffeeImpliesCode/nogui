@@ -452,7 +452,8 @@ pub const App = struct {
     }
 
     /// Present one frame with a borrowed noapi command buffer. The endpoint
-    /// must already be attached and must be the frame's endpoint.
+    /// must already be attached and must be the frame's endpoint. This
+    /// compatibility entry uses the one-shot frame clock (time 0).
     pub fn frameWithGpu(
         self: *App,
         comptime T: type,
@@ -461,10 +462,25 @@ pub const App = struct {
         surface: Size,
         gpu_frame: *GpuFrame,
     ) !FrameOutput {
+        return self.frameWithGpuAtTime(T, root, frame_number, 0, surface, gpu_frame);
+    }
+
+    /// Present a driver-timed graphical frame after its Surface frame began.
+    /// The caller owns Surface begin/end; App builds and lays out before
+    /// dispatching component GPU hooks against `gpu_frame`.
+    pub fn frameWithGpuAtTime(
+        self: *App,
+        comptime T: type,
+        root: *T,
+        frame_number: u32,
+        time_ms: u64,
+        surface: Size,
+        gpu_frame: *GpuFrame,
+    ) !FrameOutput {
         const endpoint = self.gpu_endpoint orelse return error.GpuEndpointNotAttached;
         if (gpu_frame.endpoint != endpoint) return error.GpuFrameEndpointMismatch;
         self.surface = surface;
-        return self.present(T, root, frame_number, 0, gpu_frame);
+        return self.present(T, root, frame_number, time_ms, gpu_frame);
     }
 
     fn findNode(tree: *const WidgetTree, id: Id) ?*const WidgetNode {

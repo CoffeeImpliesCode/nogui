@@ -7,17 +7,18 @@
 //! `v7` symlink in this directory — same convention as ui.zig, so this file
 //! stays standalone-compilable). The v7 module itself never sees sdl3/noapi.
 //!
-//! Flow per frame: app.frame builds + lays out the tree and serializes it to
-//! JSON (freed here); collectDrawCmds flattens the tree into paint-ordered
-//! DrawCmds; buildSliceRects turns each cmd into a SceneRect — solid cmds
-//! use material slot 0, radius-bearing fills and border rings use per-cmd
-//! rounded-rect materials (type 2) written into the engine's material
+//! Flow per frame: the window begins the Surface frame and obtains its
+//! command buffer; app.frameWithGpuAtTime builds + lays out the tree and
+//! dispatches component GPU hooks; collectDrawCmds flattens the tree into
+//! paint-ordered DrawCmds; buildSliceRects turns each cmd into a SceneRect —
+//! solid cmds use material slot 0, radius-bearing fills and border rings use
+//! per-cmd rounded-rect materials (type 2) written into the engine's material
 //! buffer; label-bearing nodes additionally emit one glyph SceneRect per
 //! character via TextEngine (FreeType); Batch9Slice expands the rects into
 //! one indexed draw into the offscreen Oklab target; a barrier transitions
-//! the target to shader-read; the blit pass samples it and writes sRGB to
-//! the swapchain. Mouse clicks hit-test the same frame's tree and dispatch
-//! back into the app (mutations apply on the next frame).
+//! the target to shader-read; the blit pass samples it and writes sRGB to the
+//! swapchain. Mouse clicks hit-test the same frame's tree and dispatch back
+//! into the app (mutations apply on the next frame).
 //!
 //! `runShot` renders a single frame into the offscreen target, copies it back
 //! to a readback buffer and writes a P6 PPM — the text-renders proof.
@@ -402,6 +403,7 @@ const TextureRegistry = struct {
     const Self = TextureRegistry;
 
     gpu: *noapi.Gpu,
+    gpa: std.mem.Allocator,
     heap: noapi.DescriptorHeap,
     /// Next free heap slot (the registry is append-only this pass).
     next_idx: u32 = 0,
@@ -409,7 +411,6 @@ const TextureRegistry = struct {
     map: std.AutoHashMapUnmanaged(noapi.TextureHandle, u32) = .empty,
 
     fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu) !Self {
-        _ = gpa; // the unmanaged map allocates lazily at register time
         const heap = try gpu.descHeapCreate(16, 0, 1);
         errdefer gpu.descHeapDestroy(heap);
         const sampler = gpu.samplerDescriptor(.{
@@ -421,7 +422,7 @@ const TextureRegistry = struct {
             .address_mode_w = .clamp_to_edge,
         });
         gpu.descHeapSetSamplers(heap, 0, &.{sampler});
-        return .{ .gpu = gpu, .heap = heap };
+        return .{ .gpu = gpu, .gpa = gpa, .heap = heap };
     }
 
     fn deinit(self: *Self, gpa: std.mem.Allocator) void {
@@ -464,6 +465,11 @@ const TextureRegistry = struct {
         return idx;
     }
 };
+
+fn registerRuntimeTexture(ptr: *anyopaque, texture: noapi.TextureHandle) anyerror!u32 {
+    const registry: *TextureRegistry = @ptrCast(@alignCast(ptr));
+    return registry.register(registry.gpa, texture);
+}
 
 /// Mandelbrot compute pass (Part A): a 512x384 rgba32_float render target
 /// written by mandelbrot.comp.slang (storage view) and sampled by the GUI
@@ -1419,6 +1425,20 @@ pub fn run(
     var rt_h: u32 = 0;
     defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
 
+    // The endpoint borrows the window-owned GPU and texture registry for the
+    // graphical lifetime. Components initialize here, before the first
+    // begun Surface frame, and detach while those resources are still alive.
+    var gpu_texture_runtime: nogui.TextureRegistry = .{
+        .ptr = &tex_registry,
+        .register = registerRuntimeTexture,
+    };
+    var gpu_endpoint: nogui.GpuEndpoint = .{
+        .gpu = &gpu,
+        .textures = &gpu_texture_runtime,
+    };
+    try app.attachGpu(&gpu_endpoint);
+    defer app.detachGpu();
+
     // Frame pacer (Phase 2 — tier-2 frame pacing). The FIFO swapchain is
     // vsync-paced and blocks the CPU on the GPU once the image queue is
     // full; `Surface.slopNs()` reports that per-frame block. The pacer
@@ -1439,6 +1459,9 @@ pub fn run(
     // (the core never polls input or reads a clock itself), then emit one
     // .frame event per iteration with the driver's tick + clock.
     var tick: u32 = 1;
+    // The single window's Surface frame slot advances only after a successful
+    // present, matching noapi's command-buffer rotation.
+    var frame_index: u32 = 0;
     var last_frame_ms: u64 = 0;
     var should_close = false;
     var mandel_rect: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
@@ -1624,10 +1647,37 @@ pub fn run(
             .quad_debug = batch.quad_debug,
         };
 
-        // Frame event: the core draws + lays out + presents; the output's
-        // hover comes from the core's cursor state.
+        // Frame event: the driver clock is sampled before the Surface frame;
+        // the begun frame is then borrowed by App for GPU lifecycle hooks.
         const time_ms: u64 = sdl3.timer.getMillisecondsSinceInit();
-        const out = (try app.handle(T, root, .{ .frame = .{ .tick = tick, .time_ms = time_ms } })).?;
+        const schedule = gw.beginFrame() catch |e| {
+            if (e == error.OutOfDateKHR) {
+                try Io.sleep(io, Io.Duration.fromMilliseconds(16), .real);
+                continue;
+            }
+            @panic("beginFrame");
+        };
+        _ = schedule;
+        const size = gw.surfaceSize();
+        try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, size.width, size.height, blit_heap);
+        var cmd = gw.commandsBegin();
+        var gpu_frame: nogui.GpuFrame = .{
+            .endpoint = &gpu_endpoint,
+            .command_buffer = &cmd,
+            .extent = size,
+            .frame_index = frame_index,
+        };
+        const out = try app.frameWithGpuAtTime(
+            T,
+            root,
+            tick,
+            time_ms,
+            .{
+                .width = @floatFromInt(size.width),
+                .height = @floatFromInt(size.height),
+            },
+            &gpu_frame,
+        );
         if (audio_player) |*player| {
             if (comptime T == spotify_ui.SpotifyApp) {
                 const sync_result = player.sync(
@@ -1706,27 +1756,9 @@ pub fn run(
         // so the frame renders byte-identical to the ordered submission.
         if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
 
-        // Acquire the swapchain image (recreates the swapchain on resize).
-        // OutOfDateKHR consumed the frame event: sleep ~16ms before the
-        // retry so a resize storm doesn't spin the loop at 100% CPU.
-        const schedule = gw.beginFrame() catch |e| {
-            if (e == error.OutOfDateKHR) {
-                try Io.sleep(io, Io.Duration.fromMilliseconds(16), .real);
-                continue;
-            }
-            @panic("beginFrame");
-        };
-        _ = schedule;
-        const size = gw.surfaceSize();
-        try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, size.width, size.height, blit_heap);
-
-        var cmd = gw.commandsBegin();
-
-        // Mandelbrot compute: dispatch only when this frame actually draws
-        // the fractal texture (the TodoApp's showcase box — the tiger and
-        // stroke scenes never sample it). It is window-level demo plumbing,
-        // not a v7 component; the per-frame texture check is the dynamic
-        // gate (a compute dispatch costs ~0.16ms even when unused).
+        // App GPU hooks have already run after layout and before this
+        // driver-owned Mandelbrot compute, which remains before the GUI pass.
+        // The component callbacks do not own this compute or Surface frame.
         const draws_mandelbrot = blk: {
             if (ui.mandelbrot_idx) |mi| {
                 for (slice_rects.items) |r| if (r.tex_idx == mi) break :blk true;
@@ -1772,6 +1804,7 @@ pub fn run(
 
         const frame_result = try gw.endFrame(.{ .blit_to_swapchain = true });
         _ = frame_result;
+        frame_index = (frame_index + 1) % @as(u32, gpu.frames_in_flight);
 
         // Rolling FPS (an EMA over the frame deltas) for the demo header.
         // The unconditional 16ms sleep is GONE — it doubled the vsync pacing
