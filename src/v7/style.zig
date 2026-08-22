@@ -11,10 +11,21 @@ pub const Display = enum { block, flex };
 /// Whether a node participates in normal flow or is removed from it.
 pub const Position = enum { relative, absolute };
 
-pub const FlexDirection = enum { column, row };
+pub const FlexDirection = enum { column, row, column_reverse, row_reverse };
+pub const FlexWrap = enum { nowrap, wrap, wrap_reverse };
 pub const Justify = enum { start, center, end, space_between };
 pub const Align = enum { stretch, start, center, end };
+pub const AlignContent = enum { stretch, start, center, end, space_between, space_around };
+pub const AlignSelf = enum { auto, stretch, start, center, end };
 pub const BoxSizing = enum { content_box, border_box };
+
+pub fn directionIsColumn(direction: FlexDirection) bool {
+    return direction == .column or direction == .column_reverse;
+}
+
+pub fn directionIsReverse(direction: FlexDirection) bool {
+    return direction == .column_reverse or direction == .row_reverse;
+}
 
 /// Per-side box extents in top, right, bottom, left order.
 pub const Sides = struct {
@@ -242,6 +253,7 @@ pub const ResolvedStyle = struct {
         return self.constraints.clampHeight(value);
     }
 };
+
 fn defaultDimensionSize() DimensionSize {
     return .{ .width = .auto, .height = .auto };
 }
@@ -252,6 +264,15 @@ fn defaultLengthPercentageAutoSize() LengthPercentageAutoSize {
 
 fn defaultInsets() Insets {
     return .{ .top = .auto, .right = .auto, .bottom = .auto, .left = .auto };
+}
+
+fn defaultMarginInsets() Insets {
+    return .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 0 },
+    };
 }
 
 fn defaultLengthPercentageRect() LengthPercentageRect {
@@ -399,12 +420,6 @@ pub fn lengthPercentageAutoFrom(value: anytype) LengthPercentageAuto {
     };
 }
 
-/// Distinguishes an unspecified override from an explicit nullable value.
-pub const OptionalFloatOverride = union(enum) {
-    unspecified,
-    value: ?f32,
-};
-
 /// Distinguishes an unspecified override from an explicit texture removal.
 pub const TextureOverride = union(enum) {
     unspecified,
@@ -416,8 +431,13 @@ pub const Style = struct {
     display: Display = .flex,
     position: Position = .relative,
     direction: FlexDirection = .column,
+    wrap: FlexWrap = .nowrap,
+    /// Compatibility spelling for callers that use the CSS property name.
+    flex_wrap: FlexWrap = .nowrap,
     justify: Justify = .start,
     @"align": Align = .stretch,
+    align_content: AlignContent = .stretch,
+    align_self: AlignSelf = .auto,
     gap: f32 = 0,
 
     /// Legacy flex values are consumed by the parent; their axis is not the
@@ -442,7 +462,7 @@ pub const Style = struct {
     box_sizing: BoxSizing = .content_box,
     /// Typed mirrors of the legacy box fields. Fixed legacy values populate
     /// both representations; percentage values stay available to resolution.
-    margin_inset: Insets = defaultInsets(),
+    margin_inset: Insets = defaultMarginInsets(),
     border_inset: LengthPercentageRect = defaultLengthPercentageRect(),
     padding_inset: LengthPercentageRect = defaultLengthPercentageRect(),
 
@@ -451,8 +471,18 @@ pub const Style = struct {
         if (local.display) |value| result.display = value;
         if (local.position) |value| result.position = value;
         if (local.direction) |value| result.direction = value;
+        if (local.wrap) |value| {
+            result.wrap = value;
+            result.flex_wrap = value;
+        }
+        if (local.flex_wrap) |value| {
+            result.wrap = value;
+            result.flex_wrap = value;
+        }
         if (local.justify) |value| result.justify = value;
         if (local.@"align") |value| result.@"align" = value;
+        if (local.align_content) |value| result.align_content = value;
+        if (local.align_self) |value| result.align_self = value;
         if (local.gap) |value| result.gap = value;
         if (local.grow) |value| result.grow = value;
         if (local.shrink) |value| result.shrink = value;
@@ -573,8 +603,8 @@ pub const Style = struct {
         intrinsic: Size(f32),
     ) ResolvedStyle {
         const flex_basis = self.flex_basis.resolve(
-            if (self.direction == .column) height_containing else width_containing,
-            if (self.direction == .column) intrinsic.height else intrinsic.width,
+            if (directionIsColumn(self.direction)) height_containing else width_containing,
+            if (directionIsColumn(self.direction)) intrinsic.height else intrinsic.width,
         ) orelse if (self.basis > 0) self.basis else null;
         // Keep legacy `min_main` out of typed constraints: the parent flex
         // direction is the only axis that can resolve that legacy field.
@@ -607,14 +637,24 @@ pub const Style = struct {
     }
 };
 
+/// Distinguishes an unspecified legacy main-axis override from an explicit clear.
+pub const OptionalFloatOverride = union(enum) {
+    unspecified,
+    value: ?f32,
+};
+
 /// Local layout overrides. Unspecified fields retain component defaults.
 pub const StyleOverride = struct {
     display: ?Display = null,
     position: ?Position = null,
     direction: ?FlexDirection = null,
+    wrap: ?FlexWrap = null,
+    flex_wrap: ?FlexWrap = null,
     /// Compatibility spelling accepted by option translators.
     justify: ?Justify = null,
     @"align": ?Align = null,
+    align_content: ?AlignContent = null,
+    align_self: ?AlignSelf = null,
     gap: ?f32 = null,
 
     grow: ?f32 = null,
@@ -868,4 +908,28 @@ test "typed axes resolve width while height remains indefinite" {
     }).resolveTotalAxes(200, null, .{ .width = 20, .height = 10 });
     try std.testing.expectEqual(@as(?f32, 100), resolved.dimensions.width);
     try std.testing.expectEqual(@as(?f32, null), resolved.dimensions.height);
+}
+
+test "typed wrapped flex options resolve fieldwise" {
+    const resolved = Style.resolve(.{}, .{
+        .direction = .row_reverse,
+        .wrap = .wrap_reverse,
+        .align_content = .space_around,
+        .align_self = .end,
+        .margin_inset = .{
+            .top = .auto,
+            .right = .{ .percent = 0.1 },
+            .bottom = .{ .length = 4 },
+            .left = .{ .length = 2 },
+        },
+    });
+    try std.testing.expectEqual(FlexDirection.row_reverse, resolved.direction);
+    try std.testing.expectEqual(FlexWrap.wrap_reverse, resolved.wrap);
+    try std.testing.expectEqual(FlexWrap.wrap_reverse, resolved.flex_wrap);
+    try std.testing.expectEqual(AlignContent.space_around, resolved.align_content);
+    try std.testing.expectEqual(AlignSelf.end, resolved.align_self);
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentageAuto, .auto),
+        resolved.margin_inset.top,
+    ));
 }

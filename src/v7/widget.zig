@@ -11,10 +11,12 @@ pub const Style = style.Style;
 pub const PaintStyle = style.PaintStyle;
 pub const StyleOverride = style.StyleOverride;
 pub const Display = style.Display;
-pub const Position = style.Position;
 pub const FlexDirection = style.FlexDirection;
+pub const FlexWrap = style.FlexWrap;
 pub const Justify = style.Justify;
 pub const Align = style.Align;
+pub const AlignContent = style.AlignContent;
+pub const AlignSelf = style.AlignSelf;
 pub const Sides = style.Sides;
 pub const BoxSizing = style.BoxSizing;
 pub const Dimension = style.Dimension;
@@ -341,6 +343,10 @@ pub const WidgetNode = struct {
     /// box/flex writes working while flex consumes the resolved values.
     pub fn syncResolvedStyle(self: *WidgetNode) void {
         const legacy_box_changed = !std.meta.eql(self.box, self.box_snapshot);
+        const typed_margin_changed = !std.meta.eql(
+            self.style.margin_inset,
+            self.style_snapshot.margin_inset,
+        );
         const typed_box_changed = !std.meta.eql(self.style.margin, self.style_snapshot.margin) or
             !std.meta.eql(self.style.border, self.style_snapshot.border) or
             !std.meta.eql(self.style.padding, self.style_snapshot.padding) or
@@ -379,6 +385,14 @@ pub const WidgetNode = struct {
                 .left = .{ .length = self.box.padding.left },
             };
         } else if (typed_box_changed) {
+            if (!typed_margin_changed) {
+                self.style.margin_inset = .{
+                    .top = .{ .length = self.style.margin.top },
+                    .right = .{ .length = self.style.margin.right },
+                    .bottom = .{ .length = self.style.margin.bottom },
+                    .left = .{ .length = self.style.margin.left },
+                };
+            }
             self.box.margin = self.style.margin;
             self.box.border = self.style.border;
             self.box.padding = self.style.padding;

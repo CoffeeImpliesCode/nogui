@@ -36,6 +36,9 @@ const Sides = style.Sides;
 const BoxSizing = style.BoxSizing;
 const Justify = style.Justify;
 const Align = style.Align;
+const FlexWrap = style.FlexWrap;
+const AlignContent = style.AlignContent;
+const AlignSelf = style.AlignSelf;
 const layout = @import("flex.zig").layout;
 const hitButton = @import("input.zig").hitButton;
 const StateKey = @import("state.zig").Key;
@@ -92,6 +95,22 @@ fn asInsets(x: anytype) style.Insets {
         .right = if (@hasField(T, "right")) style.lengthPercentageAutoFrom(x.right) else .auto,
         .bottom = if (@hasField(T, "bottom")) style.lengthPercentageAutoFrom(x.bottom) else .auto,
         .left = if (@hasField(T, "left")) style.lengthPercentageAutoFrom(x.left) else .auto,
+    };
+}
+
+fn asMarginInsets(x: anytype) style.Insets {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") return .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 0 },
+    };
+    return .{
+        .top = if (@hasField(T, "top")) style.lengthPercentageAutoFrom(x.top) else .{ .length = 0 },
+        .right = if (@hasField(T, "right")) style.lengthPercentageAutoFrom(x.right) else .{ .length = 0 },
+        .bottom = if (@hasField(T, "bottom")) style.lengthPercentageAutoFrom(x.bottom) else .{ .length = 0 },
+        .left = if (@hasField(T, "left")) style.lengthPercentageAutoFrom(x.left) else .{ .length = 0 },
     };
 }
 
@@ -179,6 +198,12 @@ fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
     if (@hasField(T, "display")) local.display = @as(style.Display, opts.display);
     if (@hasField(T, "position")) local.position = @as(style.Position, opts.position);
     if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
+    if (@hasField(T, "wrap")) local.wrap = @as(FlexWrap, opts.wrap);
+    if (@hasField(T, "flex_wrap")) local.flex_wrap = @as(FlexWrap, opts.flex_wrap);
+    if (@hasField(T, "align_content")) {
+        local.align_content = @as(AlignContent, opts.align_content);
+    }
+    if (@hasField(T, "align_self")) local.align_self = @as(AlignSelf, opts.align_self);
     if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
     if (@hasField(T, "gap")) local.gap = opts.gap;
@@ -219,12 +244,13 @@ fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
     if (@hasField(T, "min_width_override")) local.min_width_override = opts.min_width_override;
     if (@hasField(T, "min_height_override")) local.min_height_override = opts.min_height_override;
     if (@hasField(T, "max_width_override")) local.max_width_override = opts.max_width_override;
+    if (@hasField(T, "max_height_override")) local.max_height_override = opts.max_height_override;
     if (@hasField(T, "inset")) local.inset = .{ .value = asInsets(opts.inset) };
     if (@hasField(T, "aspect_ratio")) local.aspect_ratio = .{ .value = opts.aspect_ratio };
     if (@hasField(T, "overflow")) local.overflow = .{ .value = asOverflowAxes(opts.overflow) };
     if (@hasField(T, "margin")) {
         local.margin = asSides(opts.margin);
-        local.margin_inset = asInsets(opts.margin);
+        local.margin_inset = asMarginInsets(opts.margin);
     }
     if (@hasField(T, "border")) {
         local.border = asSides(opts.border);
@@ -259,8 +285,14 @@ fn paintStyleFromOpts(opts: anytype) PaintStyle {
 fn applyFlexStyle(self: *DrawCtx, id: Id, opts: anytype) void {
     const T = @TypeOf(opts);
     const node = self.tree.node(id).?;
+    if (@hasField(T, "wrap")) node.style.wrap = @as(FlexWrap, opts.wrap);
+    if (@hasField(T, "flex_wrap")) node.style.flex_wrap = @as(FlexWrap, opts.flex_wrap);
     if (@hasField(T, "justify")) node.style.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) node.style.@"align" = @as(Align, opts.@"align");
+    if (@hasField(T, "align_content")) {
+        node.style.align_content = @as(AlignContent, opts.align_content);
+    }
+    if (@hasField(T, "align_self")) node.style.align_self = @as(AlignSelf, opts.align_self);
 }
 
 /// Apply explicit flex sizing; the parent chooses its main-axis direction.
@@ -1404,4 +1436,33 @@ test "DrawCtx: constructor translates display and position into Style" {
 
     try std.testing.expectEqual(style.Display.block, tree.node(id).?.style.display);
     try std.testing.expectEqual(style.Position.absolute, tree.node(id).?.style.position);
+}
+
+test "DrawCtx: wrapped flex options translate into typed Style" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const id = try ctx.row(.{
+        .direction = .row_reverse,
+        .wrap = .wrap_reverse,
+        .align_content = .space_around,
+        .align_self = .end,
+        .margin_inset = .{
+            .top = .auto,
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+    });
+    ctx.pop();
+
+    const resolved = tree.node(id).?.style;
+    try std.testing.expectEqual(style.FlexDirection.row_reverse, resolved.direction);
+    try std.testing.expectEqual(style.FlexWrap.wrap_reverse, resolved.wrap);
+    try std.testing.expectEqual(style.AlignContent.space_around, resolved.align_content);
+    try std.testing.expectEqual(style.AlignSelf.end, resolved.align_self);
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentageAuto, .auto), resolved.margin_inset.top));
 }
