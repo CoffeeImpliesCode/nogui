@@ -1,7 +1,8 @@
 //! Main playlist header and action view for the Spotify demo.
 
-const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
-const widget = @import("v7/widget.zig");
+const nogui = @import("nogui");
+const DrawCtx = nogui.DrawCtx;
+const widget = nogui.widget;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
 const tracks = @import("spotify_tracks.zig");

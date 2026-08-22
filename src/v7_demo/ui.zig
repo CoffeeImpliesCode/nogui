@@ -15,13 +15,14 @@
 
 const std = @import("std");
 
-const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
+const nogui = @import("nogui");
+const DrawCtx = nogui.DrawCtx;
 const srgbToOklab = @import("text.zig").srgbToOklab;
 const text_mod = @import("text.zig");
-const WidgetTree = @import("v7/widget.zig").WidgetTree;
-const WidgetNode = @import("v7/widget.zig").WidgetNode;
-const App = @import("v7/app.zig").App;
-const Id = @import("v7/id.zig").Id;
+const WidgetTree = nogui.WidgetTree;
+const WidgetNode = nogui.WidgetNode;
+const App = nogui.App;
+const Id = nogui.Id;
 
 /// The demo texture's bindless heap index, set by the window backend after
 /// it creates + registers the procedural texture (the demo UI cannot touch
@@ -845,9 +846,9 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
     // 1100px surface) chip at y=0; its -44 bottom margin cancels the
     // advance exactly, so the Showcase row starts at y=0 and the root
     // column follows it directly — no badge-induced offset anywhere.
-    const flex = @import("v7/flex.zig");
-    const Rect = @import("v7/widget.zig").Rect;
-    const Size = @import("v7/widget.zig").Size;
+    const flex = nogui.flex;
+    const Rect = nogui.Rect;
+    const Size = nogui.Size;
     const fakeMeasure = struct {
         fn f(_: []const u8, _: f32, _: u8) Size {
             return .{ .width = 40, .height = 24 };

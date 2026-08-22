@@ -1,9 +1,10 @@
 //! Shared Spotify palette and stateless widgets.
 
-const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
+const nogui = @import("nogui");
+const DrawCtx = nogui.DrawCtx;
 pub const srgbToOklab = @import("text.zig").srgbToOklab;
-const Id = @import("v7/id.zig").Id;
-const UserCallback = @import("v7/callback.zig").UserCallback;
+pub const Id = nogui.Id;
+const UserCallback = nogui.UserCallback;
 
 /// Outer breathing room between the application surface and its chrome.
 pub const app_inset: f32 = 8;

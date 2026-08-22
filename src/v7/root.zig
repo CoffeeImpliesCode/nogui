@@ -36,7 +36,21 @@ pub const treeToJson = @import("headless.zig").treeToJson;
 pub const TreeJsonOptions = @import("headless.zig").TreeJsonOptions;
 pub const treeToJsonWith = @import("headless.zig").treeToJsonWith;
 pub const App = @import("app.zig").App;
+pub const headless = @import("headless.zig");
+pub const hitTest = @import("input.zig").hitTest;
+pub const app = @import("app.zig");
+pub const callback = @import("callback.zig");
+pub const drawcmd = @import("drawcmd.zig");
+pub const event = @import("event.zig");
+pub const flex = @import("flex.zig");
+pub const input = @import("input.zig");
+pub const widget = @import("widget.zig");
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "canonical module exports App and DrawCtx" {
+    _ = App;
+    _ = DrawCtx;
 }

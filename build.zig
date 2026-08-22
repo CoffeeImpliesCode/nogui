@@ -22,10 +22,11 @@ pub fn build(b: *std.Build) void {
 
     // ── nogui module ──────────────────────────────
     const mod = b.addModule("nogui", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/v7/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "noapi", .module = noapi_mod },
+            .{ .name = "tracy", .module = tracy.module("tracy") },
         },
     });
 
@@ -108,6 +109,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "nogui", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
@@ -224,6 +226,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "nogui", .module = mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
@@ -248,6 +251,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "nogui", .module = mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
@@ -272,6 +276,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "nogui", .module = mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
@@ -296,6 +301,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "nogui", .module = mod },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
                 .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
@@ -322,6 +328,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "nogui", .module = mod },
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },

@@ -30,7 +30,8 @@
 
 const std = @import("std");
 const svg = @import("svg.zig");
-const Rect = @import("v7/widget.zig").Rect;
+const nogui = @import("nogui");
+const Rect = nogui.widget.Rect;
 const Command = svg.Command;
 
 // One C import, owned by the libxml2 binding: parser.h pulls in tree.h and

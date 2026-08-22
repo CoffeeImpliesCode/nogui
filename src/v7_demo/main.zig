@@ -21,16 +21,17 @@ pub const tracy_options: tracy.Options = .{
     .broadcast_port = null,
     .default_callstack_depth = 8,
 };
-const Id = @import("v7/id.zig").Id;
+const nogui = @import("nogui");
+const Id = nogui.Id;
 const ui = @import("ui.zig");
 const spotify_ui = @import("spotify.zig");
 const local_library = @import("local_library.zig");
 const LocalTrack = @import("spotify_data.zig").LocalTrack;
 const window_backend = @import("window.zig");
 const measure_cpu = @import("measure_cpu.zig");
-const headless = @import("v7/headless.zig");
-const hitTest = @import("v7/input.zig").hitTest;
-const App = @import("v7/app.zig").App;
+const headless = nogui.headless;
+const hitTest = nogui.hitTest;
+const App = nogui.App;
 
 /// A value-taking flag with no value after it: print which flag is missing
 /// its argument and fail. The runtime reports the returned error and exits

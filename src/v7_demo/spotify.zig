@@ -2,11 +2,12 @@
 
 const std = @import("std");
 
-const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
-const widget = @import("v7/widget.zig");
+const nogui = @import("nogui");
+const DrawCtx = nogui.DrawCtx;
+const widget = nogui.widget;
 const WidgetTree = widget.WidgetTree;
-const flex = @import("v7/flex.zig");
-const headless = @import("v7/headless.zig");
+const flex = nogui.flex;
+const headless = nogui.headless;
 const measure_cpu = @import("measure_cpu.zig");
 const theme = @import("spotify_theme.zig");
 const data = @import("spotify_data.zig");

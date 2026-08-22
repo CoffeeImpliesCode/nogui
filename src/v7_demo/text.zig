@@ -15,7 +15,8 @@ const tracy = @import("tracy");
 const noapi = @import("noapi");
 const proto = @import("proto/sweeper.zig");
 const SceneRect = @import("proto/render_9slice.zig").SceneRect;
-const WidgetSize = @import("v7/widget.zig").Size;
+const nogui = @import("nogui");
+pub const WidgetSize = nogui.widget.Size;
 
 // One C import, owned by the HarfBuzz binding: hb.h + hb-ft.h pull in
 // freetype.h, so this exposes the full FreeType API we still need for

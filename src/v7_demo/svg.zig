@@ -28,7 +28,8 @@
 //! Demo-side only: like text.zig, this file MAY import the v7 core.
 
 const std = @import("std");
-const Rect = @import("v7/widget.zig").Rect;
+const nogui = @import("nogui");
+const Rect = nogui.widget.Rect;
 
 /// A point in user space.
 const Point = struct { x: f32 = 0, y: f32 = 0 };

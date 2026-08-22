@@ -7,7 +7,8 @@
 //! the same per-size structure the window uses for its engines. A shared
 //! face that gets re-sized per call does NOT work: hb-ft's extents cache
 //! the first size and ignore later FT_Set_Pixel_Sizes.
-const WidgetSize = @import("v7/widget.zig").Size;
+const nogui = @import("nogui");
+pub const WidgetSize = nogui.widget.Size;
 
 // Same single C import as text.zig (the HarfBuzz binding owns it).
 const hb = @import("harfbuzz");

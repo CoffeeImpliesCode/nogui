@@ -4,7 +4,8 @@
 //! the resulting specification but do not need to repeat breakpoint logic.
 const std = @import("std");
 
-const widget = @import("v7/widget.zig");
+const nogui = @import("nogui");
+const widget = nogui.widget;
 const theme = @import("spotify_theme.zig");
 
 pub const Mode = enum {

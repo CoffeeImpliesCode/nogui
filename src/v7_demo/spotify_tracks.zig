@@ -1,12 +1,13 @@
 //! Track table view for the Spotify demo.
 
 const std = @import("std");
-const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
-const callback = @import("v7/callback.zig");
+const nogui = @import("nogui");
+const DrawCtx = nogui.DrawCtx;
+const callback = nogui.callback;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
-const widget = @import("v7/widget.zig");
-const Id = @import("v7/id.zig").Id;
+const widget = nogui.widget;
+const Id = nogui.Id;
 
 const track_row_height = theme.track_row_height;
 const track_text_gap = theme.track_text_gap;

@@ -182,7 +182,7 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
         if (painted and b.shadow > 0) {
             try list.append(allocator, .{
                 .rect = Rect{ .x = abs.x + 2, .y = abs.y + 3, .w = abs.w, .h = abs.h },
-                .color = .{ 0, 0, 0, 0.45 },
+                .color = .{ 0, 0, 0, 0.28 },
                 .kind = .solid,
                 .box = b,
                 .ring = false,

@@ -1,6 +1,7 @@
 //! Now-playing rail view for the Spotify demo.
 
-const DrawCtx = @import("v7/drawctx.zig").DrawCtx;
+const nogui = @import("nogui");
+const DrawCtx = nogui.DrawCtx;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
 

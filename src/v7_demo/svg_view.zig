@@ -60,7 +60,8 @@ const svg = @import("svg.zig");
 const svg_xml = @import("svg_xml.zig");
 const proto = @import("proto/sweeper.zig");
 const SceneRect = @import("proto/render_9slice.zig").SceneRect;
-const Rect = @import("v7/widget.zig").Rect;
+const nogui = @import("nogui");
+pub const Rect = nogui.widget.Rect;
 const srgbToOklab = @import("text.zig").srgbToOklab;
 
 const Curve = proto.Curve;
