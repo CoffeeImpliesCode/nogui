@@ -3,6 +3,8 @@
 const std = @import("std");
 
 pub const Id = @import("id.zig").Id;
+pub const ComponentKey = @import("key.zig").ComponentKey;
+pub const ComponentId = @import("key.zig").ComponentId;
 pub const Rect = @import("widget.zig").Rect;
 pub const Size = @import("widget.zig").Size;
 pub const FlexChild = @import("widget.zig").FlexChild;
