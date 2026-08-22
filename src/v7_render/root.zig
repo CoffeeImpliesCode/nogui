@@ -1,15 +1,15 @@
 //! Canonical v7 renderer module.
 
-pub const render_9slice = @import("render_9slice.zig");
 pub const sweeper = @import("sweeper.zig");
+const facade = @import("renderer.zig");
 
-pub const ClipRect = render_9slice.ClipRect;
-pub const max_clip_rects = render_9slice.max_clip_rects;
-pub const SceneRect = render_9slice.SceneRect;
-pub const SortParams = render_9slice.SortParams;
-pub const sort_passes = render_9slice.sort_passes;
-pub const sort_dispatches = render_9slice.sort_dispatches;
-pub const Batch9Slice = render_9slice.Batch9Slice;
+pub const Renderer = facade.Renderer;
+pub const Scene = facade.Scene;
+pub const Options = facade.Options;
+
+pub const ClipRect = facade.ClipRect;
+pub const max_clip_rects = facade.max_clip_rects;
+pub const SceneRect = facade.SceneRect;
 
 pub const Curve = sweeper.Curve;
 pub const StrokeEdge = sweeper.StrokeEdge;

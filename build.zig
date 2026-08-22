@@ -66,44 +66,6 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
 
-    // ── Prototype module ─────────────────────────────
-    const proto_mod = b.addModule("proto", .{
-        .root_source_file = b.path("src/proto.zig"),
-        .target = target,
-        .imports = &.{
-            .{ .name = "noapi", .module = noapi_mod },
-            .{ .name = "v7_render", .module = v7_render_mod },
-            .{ .name = "sdl3", .module = sdl3.module("sdl3") },
-        },
-    });
-
-    // ── Prototype executable ───────────────────────────
-    const proto_exe = b.addExecutable(.{
-        .name = "nogui-proto",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/proto_main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "proto", .module = proto_mod },
-                .{ .name = "v7_render", .module = v7_render_mod },
-                .{ .name = "noapi", .module = noapi_mod },
-                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
-                .{ .name = "tracy", .module = tracy.module("tracy") },
-            },
-        }),
-    });
-    proto_exe.root_module.linkLibrary(lib);
-    proto_exe.root_module.linkLibrary(freetype_dep.artifact("freetype"));
-
-    b.installArtifact(proto_exe);
-
-    const proto_run_step = b.step("proto", "Run the prototype");
-    const proto_run_cmd = b.addRunArtifact(proto_exe);
-    proto_run_step.dependOn(&proto_run_cmd.step);
-    proto_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| proto_run_cmd.addArgs(args);
-
     // ── Storage-image isolation probe ───────────────────────
     // TEMP: standalone compute → storage-image write probe (probe_main.zig
     // + shaders/storage_probe.comp.slang). Prints three readback pixels:

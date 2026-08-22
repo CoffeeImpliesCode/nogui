@@ -1,7 +1,7 @@
 //! v7 demo window backend — SDL3 + noapi Vulkan rendering for the v7 tree,
-//! through v4's text/glyph pipeline: Batch9Slice + FreeType glyph materials,
-//! rendered into an offscreen Oklab float target, then blitted to the
-//! swapchain with the Oklab→sRGB conversion shader.
+//! through v4's text/glyph pipeline: the Renderer scene facade + FreeType
+//! glyph materials, rendered into an offscreen Oklab float target, then
+//! blitted to the swapchain with the Oklab→sRGB conversion shader.
 //!
 //! Demo-side code (imports std, sdl3, noapi AND the pure v7 module via the
 //! `v7` symlink in this directory — same convention as ui.zig, so this file
@@ -14,11 +14,11 @@
 //! solid cmds use material slot 0, radius-bearing fills and border rings use
 //! per-cmd rounded-rect materials (type 2) written into the engine's material
 //! buffer; label-bearing nodes additionally emit one glyph SceneRect per
-//! character via TextEngine (FreeType); Batch9Slice expands the rects into
-//! one indexed draw into the offscreen Oklab target; a barrier transitions
-//! the target to shader-read; the blit pass samples it and writes sRGB to the
-//! swapchain. Mouse clicks hit-test the same frame's tree and dispatch back
-//! into the app (mutations apply on the next frame).
+//! character via TextEngine (FreeType); Renderer prepares the stable GPU sort
+//! and records one indexed draw into the offscreen Oklab target; a barrier
+//! transitions the target to shader-read; the blit pass samples it and writes
+//! sRGB to the swapchain. Mouse clicks hit-test the same frame's tree and
+//! dispatch back into the app (mutations apply on the next frame).
 //!
 //! `runShot` renders a single frame into the offscreen target, copies it back
 //! to a readback buffer and writes a P6 PPM — the text-renders proof.
@@ -50,7 +50,9 @@ const MouseButton = nogui.event.MouseButton;
 const Key = nogui.event.Key;
 const hitTest = nogui.hitTest; // runShot's forced --hover
 const renderer = @import("v7_render");
-const Batch9Slice = renderer.Batch9Slice;
+const Renderer = renderer.Renderer;
+const RenderScene = renderer.Scene;
+const RenderOptions = renderer.Options;
 
 /// The offscreen Oklab render target format (the GUI pass's workspace).
 /// RGBA16F halves the blend ROP traffic vs RGBA32F: the Oklab values
@@ -65,7 +67,6 @@ const Batch9Slice = renderer.Batch9Slice;
 // this GTX 1660 Ti driver does not expose (FeatureNotPresent). 32F stays.
 const render_target_format: noapi.Texture.TextureFormat = .rgba32_float;
 const SceneRect = renderer.SceneRect;
-const BatchClipRect = renderer.ClipRect;
 const TextEngine = @import("text.zig").TextEngine;
 const text_mod = @import("text.zig");
 const svg_xml = @import("svg_xml.zig");
@@ -144,8 +145,8 @@ fn svgCardRect(tree: *const WidgetTree) SvgCard {
 
 /// Parse the embedded tiger + convert it into the renderer's SvgView
 /// (per-path conics + glyph materials + scene rects). The materials are
-/// written into the shared text-engine buffer at the SVG region — the
-/// batch draws everything with that one material BDA.
+/// written into the shared text-engine buffer at the SVG region — Renderer
+/// draws everything with that one material BDA.
 fn initSvgView(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEngine) !SvgView {
     const tiger_xml = @embedFile("tiger.svg");
     var doc = try svg_xml.parseSvg(gpa, tiger_xml);
@@ -371,7 +372,7 @@ fn ensureRenderTarget(
 /// a persistent descriptor heap created once (set 0 = the app-registered
 /// textures, set 2 = one shared linear/clamp sampler at index 0) plus a
 /// map from the app's texture handle to its stable heap index. The frame
-/// binds the heap with ONE cmd.bindDescriptorSets before batch.draw —
+/// binds the heap with ONE cmd.bindDescriptorSets before renderer.draw —
 /// bindings are not draws, so the one-draw invariant holds. The fragment
 /// shader samples textures[NonUniformResourceIndex(tex_idx)] (set 0
 /// binding 0) with samplers[0] (set 2 binding 0); descHeapSetTextures
@@ -1196,10 +1197,10 @@ fn buildSliceRects(
 /// Render the current app frame into the offscreen Oklab target. Shared by
 /// run() (presented via the blit pass) and runShot() (read back).
 /// `texture_heap` is the GUI texture heap (the bindless textures the
-/// fragment shader samples) — bound ONCE per frame before the batch draw;
+/// fragment shader samples) — bound ONCE per frame before the renderer draw;
 /// the blit pass binds its own heap later.
 fn renderPass1(
-    batch: *Batch9Slice,
+    gui_renderer: *Renderer,
     cmd: *noapi.CommandBuffer,
     slice_rects: []const SceneRect,
     clip_rects: []const ClipRect,
@@ -1212,12 +1213,16 @@ fn renderPass1(
     const sw: f32 = @floatFromInt(surface_size.width);
     const sh: f32 = @floatFromInt(surface_size.height);
 
-    // CS1 (V1b) FIRST, outside the render pass: upload the drawable bag,
-    // dispatch the stable radix sort, barrier compute → graphics. Compute
-    // cannot run inside dynamic rendering, so the batch's sort/draw split
-    // mirrors the pass structure.
-    const renderer_clip_rects: []const BatchClipRect = @ptrCast(clip_rects);
-    try batch.sort(cmd, slice_rects, renderer_clip_rects);
+    // CS1 (V1b) FIRST, outside the render pass: Renderer.prepare uploads
+    // the borrowed scene, dispatches the stable radix sort, and records
+    // the compute → graphics barriers. Compute cannot run inside dynamic
+    // rendering, so the prepare/draw split mirrors the pass structure.
+    const render_clip_rects: []const renderer.ClipRect = @ptrCast(clip_rects);
+    const scene: RenderScene = .{
+        .rects = slice_rects,
+        .clips = render_clip_rects,
+    };
+    try gui_renderer.prepare(cmd, scene);
 
     cmd.beginRendering(.{ .color_attachments = &.{
         .{ .texture = render_target, .load_op = .clear, .store_op = .store, .clear_color = oklab_gray },
@@ -1243,9 +1248,8 @@ fn renderPass1(
     // samplers) — ONE call; bindings are not draws, so the one-draw
     // invariant holds. The blit pass re-binds its own heap afterwards.
     cmd.bindDescriptorSets(texture_heap);
-    // The tree's ClipRect and the batch's are layout-identical (4 f32);
-    // the batch defines its own to avoid the module-identity split.
-    batch.draw(cmd, sw, sh);
+    // Renderer.draw records the one indirect GUI draw inside the pass.
+    gui_renderer.draw(cmd, sw, sh);
     cmd.setBlendEnable(false);
     cmd.endRendering();
 }
@@ -1322,7 +1326,7 @@ pub fn run(
     exts_copy_global = try gpa.dupe([*:0]const u8, sdl_exts);
     defer gpa.free(exts_copy_global);
 
-    // Load SPIR-V: quad_vert/quad_frag for the 9-slice batch, the CS1
+    // Load SPIR-V: quad_vert/quad_frag for Renderer, the CS1 sort
     // sort compute (V1b), plus the fullscreen blit pass (Oklab → sRGB).
     var quad_vert_f = try ShaderFile.load(gpa, io, "shaders/quad_vert.spv");
     defer quad_vert_f.deinit(gpa);
@@ -1356,26 +1360,26 @@ pub fn run(
     defer gw.deinit();
     const win_id = try sdl_win.getId();
 
-    // Text engine (owns FreeType + the glyph material buffer) and the
-    // 9-slice batch renderer (owns the quad shaders + vertex/index buffers).
-    // Text engine (owns FreeType + the per-size font states + the glyph
-    // material buffer) and the 9-slice batch renderer (owns the quad
-    // shaders + vertex/index buffers). One engine serves every font size.
+    // Text engine owns FreeType, per-size font states, and the glyph
+    // material buffer. Renderer owns the quad shaders and draw buffers.
     var text_engine = try TextEngine.init(gpa, &gpu);
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
     app.measure = TextEngine.measureForFlex;
-    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
-    defer batch.deinit();
-    batch.material_buf_bda = text_engine.materialBda();
-    batch.subpixel = subpixel;
-    batch.quad_debug = quad_debug;
-    batch.bgr_order = bgr;
-    batch.damp_chroma = damp;
+    var gui_renderer = try Renderer.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
+    defer gui_renderer.deinit();
+    var render_options: RenderOptions = .{
+        .material_bda = text_engine.materialBda(),
+        .subpixel = subpixel,
+        .quad_debug = quad_debug,
+        .bgr_order = bgr,
+        .damp_chroma = damp,
+    };
+    gui_renderer.configure(render_options);
 
     // GUI texture heap + registry: persistent bindless heap (set 0 =
     // registered textures, set 2 = the shared linear/clamp sampler), bound
-    // once per frame before the batch draw. The demo registers one
+    // once per frame before the renderer draw. The demo registers one
     // procedural texture and the UI draws it via `.texture = idx`.
     var tex_registry = try TextureRegistry.init(gpa, &gpu);
     defer tex_registry.deinit(gpa);
@@ -1567,13 +1571,15 @@ pub fn run(
                 .key_down => |kd| {
                     if (kd.key) |kc| {
                         if (kc == .s) {
-                            batch.subpixel = !batch.subpixel;
-                            std.log.info("subpixel AA: {s}", .{if (batch.subpixel) "on" else "off"});
+                            render_options.subpixel = !render_options.subpixel;
+                            gui_renderer.configure(render_options);
+                            std.log.info("subpixel AA: {s}", .{if (render_options.subpixel) "on" else "off"});
                             continue;
                         }
                         if (kc == .d) {
-                            batch.quad_debug = !batch.quad_debug;
-                            std.log.info("quad debug: {s}", .{if (batch.quad_debug) "on" else "off"});
+                            render_options.quad_debug = !render_options.quad_debug;
+                            gui_renderer.configure(render_options);
+                            std.log.info("quad debug: {s}", .{if (render_options.quad_debug) "on" else "off"});
                             continue;
                         }
                         if (kc == .a) {
@@ -1592,13 +1598,15 @@ pub fn run(
                             continue;
                         }
                         if (kc == .o) {
-                            batch.bgr_order = !batch.bgr_order;
-                            std.log.info("subpixel order: {s}", .{if (batch.bgr_order) "BGR" else "RGB"});
+                            render_options.bgr_order = !render_options.bgr_order;
+                            gui_renderer.configure(render_options);
+                            std.log.info("subpixel order: {s}", .{if (render_options.bgr_order) "BGR" else "RGB"});
                             continue;
                         }
                         if (kc == .c) {
-                            batch.damp_chroma = !batch.damp_chroma;
-                            std.log.info("chroma damping: {s}", .{if (batch.damp_chroma) "on" else "off"});
+                            render_options.damp_chroma = !render_options.damp_chroma;
+                            gui_renderer.configure(render_options);
+                            std.log.info("chroma damping: {s}", .{if (render_options.damp_chroma) "on" else "off"});
                             continue;
                         }
                         if (kc == .p and dispatchRootPrecisionKey(T, root)) continue;
@@ -1615,25 +1623,26 @@ pub fn run(
         if (should_close) break;
 
         // Apply the header pill clicks (the UI sets a request; the window
-        // owns the batch). The keys flip the batch directly above; the
-        // request path flips it the same way so both routes agree.
+        // owns the options). Keys and requests use the same configuration
+        // path so both routes agree.
         if (ui.toggle_request) |req| {
             switch (req) {
-                .subpixel => batch.subpixel = !batch.subpixel,
-                .bgr => batch.bgr_order = !batch.bgr_order,
-                .damp => batch.damp_chroma = !batch.damp_chroma,
-                .debug => batch.quad_debug = !batch.quad_debug,
+                .subpixel => render_options.subpixel = !render_options.subpixel,
+                .bgr => render_options.bgr_order = !render_options.bgr_order,
+                .damp => render_options.damp_chroma = !render_options.damp_chroma,
+                .debug => render_options.quad_debug = !render_options.quad_debug,
             }
+            gui_renderer.configure(render_options);
             ui.toggle_request = null;
         }
 
         // Sync the toggle state for the UI's header line (the UI cannot
         // import the window; the debug_state lives in text.zig).
         text_mod.debug_state = .{
-            .subpixel = batch.subpixel,
-            .bgr = batch.bgr_order,
-            .damp = batch.damp_chroma,
-            .quad_debug = batch.quad_debug,
+            .subpixel = render_options.subpixel,
+            .bgr = render_options.bgr_order,
+            .damp = render_options.damp_chroma,
+            .quad_debug = render_options.quad_debug,
         };
 
         // Frame event: the driver clock is sampled before the Surface frame;
@@ -1748,7 +1757,7 @@ pub fn run(
         // Pass 1: GUI into the offscreen Oklab target.
         cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
         try renderPass1(
-            &batch,
+            &gui_renderer,
             &cmd,
             slice_rects.items,
             out.tree.clip_rects[0..out.tree.clip_count],
@@ -1920,20 +1929,22 @@ pub fn runShot(
     var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
     defer gw.deinit();
 
-    // Text engine (owns FreeType + the per-size font states + the glyph
-    // material buffer) and the 9-slice batch renderer (owns the quad
-    // shaders + vertex/index buffers). One engine serves every font size.
+    // Text engine owns FreeType, per-size font states, and the glyph
+    // material buffer. Renderer owns the quad shaders and draw buffers.
     var text_engine = try TextEngine.init(gpa, &gpu);
     defer text_engine.deinit();
     TextEngine.measure_engine = &text_engine;
     app.measure = TextEngine.measureForFlex;
-    var batch = try Batch9Slice.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
-    defer batch.deinit();
-    batch.material_buf_bda = text_engine.materialBda();
-    batch.subpixel = subpixel;
-    batch.quad_debug = quad_debug;
-    batch.bgr_order = bgr;
-    batch.damp_chroma = damp;
+    var gui_renderer = try Renderer.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
+    defer gui_renderer.deinit();
+    const render_options: RenderOptions = .{
+        .material_bda = text_engine.materialBda(),
+        .subpixel = subpixel,
+        .quad_debug = quad_debug,
+        .bgr_order = bgr,
+        .damp_chroma = damp,
+    };
+    gui_renderer.configure(render_options);
 
     // GUI texture heap + registry + the demo's procedural texture — the
     // shot renders it like run() (the texture card is part of the frame).
@@ -1988,10 +1999,10 @@ pub fn runShot(
     // header status line reads debug_state, so a late sync would stamp the
     // PREVIOUS frame's toggles onto this shot. Same order as run()'s loop.
     text_mod.debug_state = .{
-        .subpixel = batch.subpixel,
-        .bgr = batch.bgr_order,
-        .damp = batch.damp_chroma,
-        .quad_debug = batch.quad_debug,
+        .subpixel = render_options.subpixel,
+        .bgr = render_options.bgr_order,
+        .damp = render_options.damp_chroma,
+        .quad_debug = render_options.quad_debug,
     };
 
     // One frame: fresh tree + layout at the fixed window size.
@@ -2048,7 +2059,7 @@ pub fn runShot(
     defer gpu.gpuFree(readback);
 
     try renderPass1(
-        &batch,
+        &gui_renderer,
         &cmd,
         slice_rects.items,
         out.tree.clip_rects[0..out.tree.clip_count],
@@ -2081,7 +2092,7 @@ pub fn runShot(
         const perm_rb = try gpu.gpuMalloc(@as(u64, n) * @sizeOf(u32), 64, .readback);
         defer gpu.gpuFree(perm_rb);
         var cmd2 = try gpu.commandsBegin();
-        cmd2.memCopy(perm_rb, batch.perm_a[batch.cur_slot], @as(u64, n) * @sizeOf(u32));
+        cmd2.memCopy(perm_rb, gui_renderer.permutationBuffer(), @as(u64, n) * @sizeOf(u32));
         try gpu.queueSubmit(&.{cmd2});
         gpu.commandsEnd(cmd2);
         try gpu.waitIdle();
