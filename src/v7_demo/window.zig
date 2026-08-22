@@ -31,6 +31,7 @@ const Io = std.Io;
 
 const nogui = @import("nogui");
 const App = nogui.App;
+const Event = nogui.Event;
 const tracy = @import("tracy");
 const FramePacer = @import("FramePacer.zig").FramePacer;
 const Id = nogui.Id;
@@ -38,7 +39,6 @@ const DrawCmd = nogui.drawcmd.DrawCmd;
 const WidgetTree = nogui.WidgetTree;
 const Rect = nogui.Rect;
 const ClipRect = nogui.widget.ClipRect;
-const absoluteRect = nogui.widget.absoluteRect;
 const visualBorderRect = nogui.visualBorderRect;
 const sliderThumbRect = nogui.widget.sliderThumbRect;
 const sliderVisualLabel = nogui.widget.sliderVisualLabel;
@@ -104,13 +104,24 @@ fn mapSdlKey(kc: sdl3.keycode.Keycode) ?Key {
     };
 }
 
-/// The mandelbrot box's absolute border rect (the node whose fill carries the
-/// mandelbrot texture). The driver hit-tests it for the pan/zoom interaction.
-fn mandelbrotRect(tree: *const WidgetTree, idx: ?u32) Rect {
-    for (tree.nodes.items) |n| {
-        if (idx != null and n.box.texture == idx) return absoluteRect(tree, n.id);
+fn dispatchRootEvent(comptime T: type, root: *T, event: Event) void {
+    if (comptime @hasDecl(T, "onEvent")) root.onEvent(&event);
+}
+
+fn dispatchRootFrame(comptime T: type, root: *T, time_ms: u64) void {
+    if (comptime @hasDecl(T, "onFrame")) root.onFrame(time_ms);
+}
+
+fn configureGpuComponents(comptime T: type, root: *T, heap: noapi.DescriptorHeap) void {
+    if (comptime @hasDecl(T, "setGpuDescriptorHeap")) root.setGpuDescriptorHeap(heap);
+}
+
+fn dispatchRootPrecisionKey(comptime T: type, root: *T) bool {
+    if (comptime @hasDecl(T, "onPrecisionKey")) {
+        root.onPrecisionKey();
+        return true;
     }
-    return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    return false;
 }
 
 /// The SVG showcase's reserved box (the node the ui stores in
@@ -282,38 +293,6 @@ const IconCache = struct {
     }
 };
 
-/// In-flight pan (drag) state: the mouse position + the center at the grab.
-const MandelDrag = struct {
-    mouse: [2]f32,
-    center: [2]f64,
-};
-
-/// Pan/zoom the mandelbrot by a mouse drag + wheel. The pan divides by the
-/// DISPLAYED pixels-per-unit (the texture_scale scaled by the box/texture
-/// ratio — the 512px texture is drawn in a narrower box, so the texture's
-/// own scale would make the content lag the mouse); the wheel zooms the
-/// texture_scale exponentially (no maximum — the user can zoom arbitrarily
-/// deep), clamped only at a small minimum so the view can't invert.
-fn applyMandelbrot(drag: ?*MandelDrag, pos: [2]f32, wheel_y: f32, rect: Rect, scale: f64) void {
-    if (drag) |d| {
-        // Grab the content 1:1 in SCREEN space: the complex-plane delta
-        // per pixel differs per axis because the mandelbrot texture is
-        // 4:3 (512x384) but its box may be a different aspect — a single
-        // width-derived scale makes the y pan wrong. Each axis divides
-        // by ITS OWN display scale (px-per-unit: rect.{w,h} shows
-        // MANDEL_{W,H}/scale units).
-        const st = d.*;
-        const s_x = scale * @as(f64, rect.w / @as(f32, mandel_w));
-        const s_y = scale * @as(f64, rect.h / @as(f32, mandel_h));
-        ui.mandelbrot_center[0] = st.center[0] - @as(f64, pos[0] - st.mouse[0]) / s_x;
-        ui.mandelbrot_center[1] = st.center[1] - @as(f64, pos[1] - st.mouse[1]) / s_y;
-    }
-    if (wheel_y != 0) {
-        const k: f64 = 0.05;
-        ui.mandelbrot_scale = @max(ui.mandelbrot_scale * @exp(@as(f64, wheel_y) * k), 10);
-    }
-}
-
 /// Convert window-logical mouse coordinates (SDL event space) to surface
 /// pixels (the layout space): scale by the surface/window size ratio.
 /// Identity when the window is not scaled; correct on HiDPI displays.
@@ -426,8 +405,10 @@ const TextureRegistry = struct {
     }
 
     fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-        // The registry owns the registered textures (created by the demo
-        // setup, alive for the whole run).
+        // Ordinary window-owned textures remain registry-owned. Component
+        // textures use registerExternalWithStorage() and free themselves
+        // during deinitGpu; their descriptor slots stay inert until heap
+        // teardown because the runtime API has no unregister operation.
         var it = self.map.keyIterator();
         while (it.next()) |h| self.gpu.textureDestroy(h.*);
         self.map.deinit(gpa);
@@ -448,18 +429,14 @@ const TextureRegistry = struct {
         return idx;
     }
 
-    /// Register a STORAGE-capable texture for both bindless paths: the
-    /// sampled view (set 0, for the GUI fragment shader) via register(),
-    /// plus the storage view (set 1, for the compute shader) via
-    /// descHeapSetTexturesRw. Returns the SAMPLED index (the one the GUI
-    /// draws with). The storage descriptor goes at FIXED set-1 index 0:
-    /// mandelbrot.comp.slang declares a non-arrayed RWTexture2D at set 1
-    /// binding 0 (the same convention as the sweep compute demo), so it
-    /// sees element 0 only — set-1 indices are independent of the set-0
-    /// indices. Plain register() textures (the demo stripe) are NOT
-    /// storage-capable and never write a set-1 descriptor.
-    fn registerWithStorage(self: *Self, gpa: std.mem.Allocator, tex: noapi.TextureHandle) !u32 {
-        const idx = try self.register(gpa, tex);
+    /// Register a component-owned storage texture without putting its handle
+    /// in the registry's destruction map. The descriptor/index remains inert
+    /// until heap teardown because the runtime API has no unregister operation.
+    fn registerExternalWithStorage(self: *Self, tex: noapi.TextureHandle) !u32 {
+        const idx = self.next_idx;
+        self.next_idx += 1;
+        const desc = self.gpu.textureViewDescriptor(tex, .{ .format = .default });
+        self.gpu.descHeapSetTextures(self.heap, idx, &.{desc});
         const rw_desc = self.gpu.textureRwViewDescriptor(tex, .{ .format = .default });
         self.gpu.descHeapSetTexturesRw(self.heap, 0, &.{rw_desc});
         return idx;
@@ -468,103 +445,7 @@ const TextureRegistry = struct {
 
 fn registerRuntimeTexture(ptr: *anyopaque, texture: noapi.TextureHandle) anyerror!u32 {
     const registry: *TextureRegistry = @ptrCast(@alignCast(ptr));
-    return registry.register(registry.gpa, texture);
-}
-
-/// Mandelbrot compute pass (Part A): a 512x384 rgba32_float render target
-/// written by mandelbrot.comp.slang (storage view) and sampled by the GUI
-/// (sampled view). Created once per run()/runShot(); the texture is
-/// registered in the GUI heap for BOTH bindless paths and is then OWNED by
-/// the registry (destroyed with it). The params buffer is host-visible
-/// (.default = host_coherent, like the material buffers) and rewritten
-/// every frame before the dispatch — same pattern as the per-frame
-/// material writes, so no flush is needed.
-const mandel_w: u32 = 512;
-const mandel_h: u32 = 384;
-const mandel_max_iter: u32 = 256;
-
-/// The compute params, written verbatim into the host-visible buffer.
-/// Layout MUST match MandelParams in shaders/mandelbrot.comp.slang
-/// (std430 — vk::BufferPointer target): float2 center @0, scale @8,
-/// time @12, max_iter @16, then uint2 size at @24 (std430 aligns vec2 to
-/// 8 bytes, so there is a 4-byte pad after max_iter — mirrored here as an
-/// explicit field). 32 bytes total.
-const MandelParams = extern struct {
-    size: [2]u32, // @0 — the uint2 first so it is 8-aligned (the std430 block layout)
-    center: [2]f64, // @8 — f64 for the deep-zoom precision + the runtime switch
-    scale: f64, // @24
-    time: f32, // @32
-    max_iter: u32, // @36
-    precision: u32, // @40 — 0 f32, 1 f64, 2 adaptive
-};
-
-const MandelbrotPass = struct {
-    shader: noapi.Shader,
-    params_buf: noapi.GpuPtr,
-    params_bda: u64,
-
-    fn init(gpa: std.mem.Allocator, io: Io, gpu: *noapi.Gpu, registry: *TextureRegistry) !MandelbrotPass {
-        // Storage + sampled usage: the compute writes it (set 1 storage
-        // view), the GUI samples it (set 0 sampled view). textureCreate
-        // forces transfer_dst and transitions to GENERAL — the layout both
-        // descriptor types use.
-        const tex = try gpu.textureCreate(.{
-            .dimensions = .{ mandel_w, mandel_h, 1 },
-            .format = .rgba32_float,
-            .usage = .{ .sampled = true, .storage = true },
-        });
-        errdefer gpu.textureDestroy(tex);
-
-        var shader_f = try ShaderFile.load(gpa, io, "shaders/mandelbrot_comp.spv");
-        defer shader_f.deinit(gpa);
-        const shader = try gpu.shaderCreate(shader_f.spv, .compute, "main", "mandelbrot_comp");
-        errdefer gpu.shaderDestroy(shader);
-
-        const params_buf = try gpu.gpuMalloc(@sizeOf(MandelParams), 64, .default);
-        errdefer gpu.gpuFree(params_buf);
-
-        // Register LAST: after this the registry owns the texture (its
-        // deinit destroys it), so no errdefer may fire past this point.
-        ui.mandelbrot_idx = try registry.registerWithStorage(gpa, tex);
-        return .{ .shader = shader, .params_buf = params_buf, .params_bda = params_buf.gpu };
-    }
-
-    fn deinit(self: *MandelbrotPass, gpu: *noapi.Gpu) void {
-        gpu.gpuFree(self.params_buf);
-        gpu.shaderDestroy(self.shader);
-        self.* = undefined;
-    }
-};
-
-/// Record the mandelbrot compute pass into `cmd`, BEFORE the GUI pass:
-/// rewrite the params (center/scale from the demo globals — the
-/// pan/zoom/animation knobs — plus the frame time for the hue shift),
-/// bind the GUI texture heap (set 1 = the storage image at fixed index 0),
-/// dispatch mandel_w/8 x mandel_h/8 groups, then a compute→fragment
-/// barrier so the GUI pass's sampled read sees the fresh fractal. The
-/// image stays in GENERAL layout throughout (textureCreate + the heap
-/// descriptors), so the barrier is access-only — no layout transition.
-fn recordMandelbrot(
-    cmd: *noapi.CommandBuffer,
-    pass: *const MandelbrotPass,
-    heap: noapi.DescriptorHeap,
-    time_ms: u64,
-) void {
-    const zone = tracy.Zone.begin(.{ .name = "mandelbrot", .src = @src() });
-    defer zone.end();
-    const params: *MandelParams = @ptrCast(@alignCast(pass.params_buf.cpu));
-    params.* = .{
-        .size = .{ mandel_w, mandel_h },
-        .center = ui.mandelbrot_center,
-        .scale = ui.mandelbrot_scale,
-        .time = @as(f32, @floatCast(@as(f64, @floatFromInt(time_ms)) / 1000.0)),
-        .max_iter = mandel_max_iter,
-        .precision = ui.mandelbrot_precision,
-    };
-    cmd.setComputeShader(pass.shader);
-    cmd.bindDescriptorSets(heap);
-    cmd.dispatch(pass.params_bda, mandel_w / 8, mandel_h / 8, 1);
-    cmd.barrier(.{ .compute = true }, .{ .fragment = true }, .{});
+    return registry.registerExternalWithStorage(texture);
 }
 
 /// Demo texture pixels: a 64x64 procedural Oklab stripe pattern — eight
@@ -1384,11 +1265,6 @@ pub fn run(
         uploadLocalArtwork(T, gpa, root, &gpu, &tex_registry, tracks);
     }
 
-    // Mandelbrot compute pass: render target + compute shader + params
-    // buffer, registered into the GUI heap (set 0 sampled + set 1 storage).
-    var mandelbrot = try MandelbrotPass.init(gpa, io, &gpu, &tex_registry);
-    defer mandelbrot.deinit(&gpu);
-
     // SVG showcase: the tiger, parsed + converted once (the paths →
     // conics → glyph materials + cached scene rects).
     // The stroke test scene (the TestStrokesApp root) loads the curved
@@ -1424,6 +1300,7 @@ pub fn run(
     var rt_w: u32 = 0;
     var rt_h: u32 = 0;
     defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
+    configureGpuComponents(T, root, tex_registry.heap);
 
     // The endpoint borrows the window-owned GPU and texture registry for the
     // graphical lifetime. Components initialize here, before the first
@@ -1464,8 +1341,6 @@ pub fn run(
     var frame_index: u32 = 0;
     var last_frame_ms: u64 = 0;
     var should_close = false;
-    var mandel_rect: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
-    var mandel_drag: ?MandelDrag = null;
     while (!should_close) {
         // Frame pacer: sleep the recommended delay BEFORE polling input so
         // the frame lands just before the vblank instead of blocking after
@@ -1492,34 +1367,38 @@ pub fn run(
                     if (we.id == win_id) {
                         const pix = try sdl_win.getSizeInPixels();
                         gw.notifyResize(.{ .width = @intCast(pix[0]), .height = @intCast(pix[1]) });
-                        _ = try app.handle(T, root, .{ .resize = .{
+                        const event: Event = .{ .resize = .{
                             .width = @floatFromInt(pix[0]),
                             .height = @floatFromInt(pix[1]),
-                        } });
+                        } };
+                        dispatchRootEvent(T, root, event);
+                        _ = try app.handle(T, root, event);
                     }
                 },
                 .window_resized => |we| {
                     if (we.id == win_id) {
                         const pix = try sdl_win.getSizeInPixels();
                         gw.notifyResize(.{ .width = @intCast(pix[0]), .height = @intCast(pix[1]) });
-                        _ = try app.handle(T, root, .{ .resize = .{
+                        const event: Event = .{ .resize = .{
                             .width = @floatFromInt(pix[0]),
                             .height = @floatFromInt(pix[1]),
-                        } });
+                        } };
+                        dispatchRootEvent(T, root, event);
+                        _ = try app.handle(T, root, event);
                     }
                 },
                 .mouse_motion => |mm| {
                     const pos = try toSurfacePoint(sdl_win, &gw, .{ mm.x, mm.y });
-                    if (mandel_drag) |*md| {
-                        // Panning the mandelbrot: consume the motion (the
-                        // core never sees the drag).
-                        applyMandelbrot(md, pos, 0, mandel_rect, ui.mandelbrot_scale);
-                        continue;
-                    }
-                    _ = try app.handle(T, root, .{ .mouse_move = .{ .x = pos[0], .y = pos[1] } });
+                    const event: Event = .{ .mouse_move = .{ .x = pos[0], .y = pos[1] } };
+                    dispatchRootEvent(T, root, event);
+                    _ = try app.handle(T, root, event);
                 },
                 .window_mouse_leave => |we| {
-                    if (we.id == win_id) _ = try app.handle(T, root, .mouse_leave);
+                    if (we.id == win_id) {
+                        const event: Event = .{ .mouse_leave = {} };
+                        dispatchRootEvent(T, root, event);
+                        _ = try app.handle(T, root, event);
+                    }
                 },
                 .mouse_button_down => |mb| {
                     const pos = try toSurfacePoint(sdl_win, &gw, .{ mb.x, mb.y });
@@ -1529,16 +1408,13 @@ pub fn run(
                         .right
                     else
                         .middle;
-                    // Grab the mandelbrot for a pan drag if the press lands
-                    // inside its box (consumed by the driver).
-                    if (button == .left and mandel_rect.w > 0 and
-                        pos[0] >= mandel_rect.x and pos[0] < mandel_rect.x + mandel_rect.w and
-                        pos[1] >= mandel_rect.y and pos[1] < mandel_rect.y + mandel_rect.h)
-                    {
-                        mandel_drag = .{ .mouse = pos, .center = ui.mandelbrot_center };
-                        continue;
-                    }
-                    _ = try app.handle(T, root, .{ .mouse_down = .{ .button = button, .x = pos[0], .y = pos[1] } });
+                    const event: Event = .{ .mouse_down = .{
+                        .button = button,
+                        .x = pos[0],
+                        .y = pos[1],
+                    } };
+                    dispatchRootEvent(T, root, event);
+                    _ = try app.handle(T, root, event);
                 },
                 .mouse_button_up => |mb| {
                     const pos = try toSurfacePoint(sdl_win, &gw, .{ mb.x, mb.y });
@@ -1548,25 +1424,24 @@ pub fn run(
                         .right
                     else
                         .middle;
-                    if (mandel_drag != null) {
-                        mandel_drag = null; // release the pan
-                        continue;
-                    }
-                    _ = try app.handle(T, root, .{ .mouse_up = .{ .button = button, .x = pos[0], .y = pos[1] } });
+                    const event: Event = .{ .mouse_up = .{
+                        .button = button,
+                        .x = pos[0],
+                        .y = pos[1],
+                    } };
+                    dispatchRootEvent(T, root, event);
+                    _ = try app.handle(T, root, event);
                 },
                 .mouse_wheel => |mw| {
                     const pos = try toSurfacePoint(sdl_win, &gw, .{ mw.x, mw.y });
-                    _ = try app.handle(T, root, .{ .mouse_wheel = .{
+                    const event: Event = .{ .mouse_wheel = .{
                         .x = pos[0],
                         .y = pos[1],
                         .delta_x = mw.scroll_x,
                         .delta_y = mw.scroll_y,
-                    } });
-                    // Keep the demo's Mandelbrot zoom in addition to the
-                    // core wheel event. SDL separates the cursor position
-                    // (x/y) from the horizontal and vertical deltas.
-                    applyMandelbrot(null, .{ 0, 0 }, mw.scroll_y, mandel_rect, ui.mandelbrot_scale);
-                    continue;
+                    } };
+                    dispatchRootEvent(T, root, event);
+                    _ = try app.handle(T, root, event);
                 },
                 .key_down => |kd| {
                     if (kd.key) |kc| {
@@ -1605,20 +1480,13 @@ pub fn run(
                             std.log.info("chroma damping: {s}", .{if (batch.damp_chroma) "on" else "off"});
                             continue;
                         }
-                        if (kc == .p) {
-                            // Cycle the mandelbrot precision: 0 f32, 1 f64, 2 adaptive.
-                            ui.mandelbrot_precision = (ui.mandelbrot_precision + 1) % 3;
-                            std.log.info("mandelbrot precision: {s}", .{switch (ui.mandelbrot_precision) {
-                                0 => "f32",
-                                1 => "f64",
-                                else => "adaptive",
-                            }});
-                            continue;
-                        }
+                        if (kc == .p and dispatchRootPrecisionKey(T, root)) continue;
                     }
                     const core_key = mapSdlKey(kd.key orelse continue) orelse continue;
                     const shift = kd.mod.left_shift or kd.mod.right_shift;
-                    _ = try app.handle(T, root, .{ .key_down = .{ .key = core_key, .shift = shift } });
+                    const event: Event = .{ .key_down = .{ .key = core_key, .shift = shift } };
+                    dispatchRootEvent(T, root, event);
+                    _ = try app.handle(T, root, event);
                 },
                 else => {},
             }
@@ -1661,6 +1529,7 @@ pub fn run(
         const size = gw.surfaceSize();
         try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, size.width, size.height, blit_heap);
         var cmd = gw.commandsBegin();
+        dispatchRootFrame(T, root, time_ms);
         var gpu_frame: nogui.GpuFrame = .{
             .endpoint = &gpu_endpoint,
             .command_buffer = &cmd,
@@ -1728,7 +1597,6 @@ pub fn run(
             }
         }
         defer if (out.json) |j| gpa.free(j);
-        mandel_rect = mandelbrotRect(out.tree, ui.mandelbrot_idx);
 
         // Slice rects: draw commands → solid rects, then glyphs on top.
         // The clip-stack walk appends the frame's clip rects to the tree
@@ -1755,21 +1623,6 @@ pub fn run(
         // CS1 sort (stable on (z, order)) must restore the paint order,
         // so the frame renders byte-identical to the ordered submission.
         if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
-
-        // App GPU hooks have already run after layout and before this
-        // driver-owned Mandelbrot compute, which remains before the GUI pass.
-        // The component callbacks do not own this compute or Surface frame.
-        const draws_mandelbrot = blk: {
-            if (ui.mandelbrot_idx) |mi| {
-                for (slice_rects.items) |r| if (r.tex_idx == mi) break :blk true;
-            }
-            break :blk false;
-        };
-        if (draws_mandelbrot) {
-            cmd.beginZone(.{ .name = "mandelbrot_gpu", .src = @src() });
-            recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, time_ms);
-            cmd.endZone();
-        }
 
         // Pass 1: GUI into the offscreen Oklab target.
         cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
@@ -1969,10 +1822,6 @@ pub fn runShot(
     ui.texture_idx = try uploadDemoTexture(gpa, &gpu, &tex_registry);
     try uploadReferenceTexture(gpa, &gpu, &tex_registry);
 
-    // Mandelbrot compute pass (Part A) — the shot renders it like run().
-    var mandelbrot = try MandelbrotPass.init(gpa, io, &gpu, &tex_registry);
-    defer mandelbrot.deinit(&gpu);
-
     // The stroke test scene (the TestStrokesApp root) loads the curved
     // thin-stroke set; everything else loads the tiger.
     var svg_view = if (comptime T == ui.TestStrokesApp)
@@ -2002,6 +1851,17 @@ pub fn runShot(
     var rt_w: u32 = 0;
     var rt_h: u32 = 0;
     defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
+    configureGpuComponents(T, root, tex_registry.heap);
+    var gpu_texture_runtime: nogui.TextureRegistry = .{
+        .ptr = &tex_registry,
+        .register = registerRuntimeTexture,
+    };
+    var gpu_endpoint: nogui.GpuEndpoint = .{
+        .gpu = &gpu,
+        .textures = &gpu_texture_runtime,
+    };
+    try app.attachGpu(&gpu_endpoint);
+    defer app.detachGpu();
 
     // Sync the toggle state BEFORE the frame builds the tree: the shot's
     // header status line reads debug_state, so a late sync would stamp the
@@ -2015,10 +1875,26 @@ pub fn runShot(
 
     // One frame: fresh tree + layout at the fixed window size.
     const surface_size = gw.surfaceSize();
-    const out = try app.frame(T, root, 1, .{
-        .width = @floatFromInt(surface_size.width),
-        .height = @floatFromInt(surface_size.height),
-    });
+    try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, surface_size.width, surface_size.height, blit_heap);
+    var cmd = try gpu.commandsBegin();
+    var gpu_frame: nogui.GpuFrame = .{
+        .endpoint = &gpu_endpoint,
+        .command_buffer = &cmd,
+        .extent = surface_size,
+        .frame_index = 0,
+    };
+    dispatchRootFrame(T, root, 1200);
+    const out = try app.frameWithGpuAtTime(
+        T,
+        root,
+        1,
+        1200,
+        .{
+            .width = @floatFromInt(surface_size.width),
+            .height = @floatFromInt(surface_size.height),
+        },
+        &gpu_frame,
+    );
     defer if (out.json) |j| gpa.free(j);
 
     const base_cmds = try collectDrawCmds(gpa, @constCast(out.tree), null, 0);
@@ -2045,34 +1921,11 @@ pub fn runShot(
     // sort must restore it, so the shot stays byte-identical.
     if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
 
-    try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, surface_size.width, surface_size.height, blit_heap);
-
     // Readback buffer: one rgba32_float pixel per screen pixel.
     const pixel_bytes: u64 = @as(u64, surface_size.width) * surface_size.height * 4 * @sizeOf(f32);
     const readback = try gpu.gpuMalloc(pixel_bytes, 64, .readback);
     defer gpu.gpuFree(readback);
 
-    // One-shot command buffer: mandelbrot compute pass first (the shot
-    // uses the init time — one frame, so the hue phase is static), then
-    // render pass 1 into the offscreen target, then copy the target into
-    // the readback buffer.
-    var cmd = try gpu.commandsBegin();
-    // The shot's mandelbrot hue phase is PINNED to a natural-range value
-    // (1200 ms) instead of the live init timer: the live timer varied by
-    // ±250 ms between runs (the fractal hue shifts with process timing),
-    // which made runShot unreproducible at the byte level. The pinned
-    // phase renders the same fractal as a typical interactive start.
-    // Dispatched only when the shot's frame actually draws the fractal
-    // (the same dynamic gate as the interactive loop).
-    const draws_mandelbrot = blk: {
-        if (ui.mandelbrot_idx) |mi| {
-            for (slice_rects.items) |r| if (r.tex_idx == mi) break :blk true;
-        }
-        break :blk false;
-    };
-    if (draws_mandelbrot) {
-        recordMandelbrot(&cmd, &mandelbrot, tex_registry.heap, 1200);
-    }
     try renderPass1(
         &batch,
         &cmd,

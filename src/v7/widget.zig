@@ -5,9 +5,18 @@ const std = @import("std");
 
 const Id = @import("id.zig").Id;
 const callback = @import("callback.zig");
+const style = @import("style.zig");
 
-const FlexStyle = @import("flex.zig").FlexStyle;
-
+pub const Style = style.Style;
+pub const PaintStyle = style.PaintStyle;
+pub const StyleOverride = style.StyleOverride;
+pub const PaintStyleOverride = style.PaintStyleOverride;
+pub const Display = style.Display;
+pub const FlexDirection = style.FlexDirection;
+pub const Justify = style.Justify;
+pub const Align = style.Align;
+pub const BoxSizing = style.BoxSizing;
+pub const Sides = style.Sides;
 /// Axis-aligned rectangle in layout space.
 ///
 /// RELATIVE semantics: a node's rect is its BORDER box, positioned relative
@@ -32,22 +41,6 @@ pub const ClipRect = struct {
     w: f32 = 0,
     h: f32 = 0,
 };
-
-/// Per-side box extents (CSS: margin, border width, padding, radius).
-/// Order: top, right, bottom, left.
-pub const Sides = struct {
-    top: f32 = 0,
-    right: f32 = 0,
-    bottom: f32 = 0,
-    left: f32 = 0,
-};
-
-/// CSS box-sizing. With auto (natural) sizing both modes produce the same
-/// border box (content + border + padding); the mode matters once a fixed
-/// `flex.basis` arrives: `.content_box` adds the item's own main-axis
-/// border + padding on top of the basis, `.border_box` treats the basis as
-/// the full border-box main (see flex.zig's basis handling).
-pub const BoxSizing = enum { content_box, border_box };
 
 /// The CSS box model for one node: margin (outside, handled by the parent
 /// when positioning), border + radius (painted as a ring), padding (inside,
@@ -248,9 +241,12 @@ pub const WidgetNode = struct {
     /// BORDER box, positioned relative to the parent's CONTENT box (see
     /// Rect's doc). Filled by flex.layout().
     rect: Rect = .{},
-    /// CSS box model: margin/border/padding/radius. Set at creation from
-    /// the DrawCtx opts; flex and the renderer read it.
+    /// Legacy box mirror retained for draw command and caller compatibility.
     box: Box = .{},
+    /// Resolved typed layout values. This is the canonical flex/style view.
+    style: Style = .{},
+    /// Resolved typed paint values. This is the canonical paint view.
+    paint: PaintStyle = .{},
     scroll: ?ScrollSpec = null,
     text_overflow: TextOverflow = .visible,
     text_max_width: ?f32 = null,
@@ -261,17 +257,128 @@ pub const WidgetNode = struct {
     font_size: f32 = 0,
     /// Font selection: 0 = the host default font, 1 = the second font.
     font_id: u8 = 0,
-    flex: FlexChild = .{}, // per-child sizing
+    /// Legacy per-child flex mirror retained for caller compatibility.
+    flex: FlexChild = .{},
     /// The item's natural (measured/hugged) main size before any basis
     /// override, recorded by the parent when placing. The flex-shrink
     /// floor: shrink never crosses it (the canonical automatic minimum,
     /// CSS flexbox §4.5). Filled by flex.layout().
     natural_main: f32 = 0,
-    style: FlexStyle = .{}, // per-container layout style (justify/align); direction+gap come from kind
     /// The clip rect id (index into WidgetTree.clip_rects) enclosing this
     /// node, stamped by collectDrawCmds during its walk; 0xFFFFFFFF = no
     /// clip. The renderer clips the node's glyphs to that rect.
     clip_id: u32 = 0xFFFFFFFF,
+    // Snapshots let layout accept either the canonical style or the legacy
+    // mirror when an existing caller mutates a node after construction.
+    box_snapshot: Box = .{},
+    style_snapshot: Style = .{},
+    paint_snapshot: PaintStyle = .{},
+    flex_snapshot: FlexChild = .{},
+
+    /// Reconcile legacy public mirrors before layout. This keeps old direct
+    /// box/flex writes working while flex consumes the resolved values.
+    pub fn syncResolvedStyle(self: *WidgetNode) void {
+        const legacy_box_changed = !std.meta.eql(self.box, self.box_snapshot);
+        const typed_box_changed = !std.meta.eql(self.style.margin, self.style_snapshot.margin) or
+            !std.meta.eql(self.style.border, self.style_snapshot.border) or
+            !std.meta.eql(self.style.padding, self.style_snapshot.padding) or
+            self.style.box_sizing != self.style_snapshot.box_sizing;
+        const legacy_paint_changed = !std.meta.eql(self.box.border_color, self.box_snapshot.border_color) or
+            !std.meta.eql(self.box.radius, self.box_snapshot.radius) or
+            self.box.shadow != self.box_snapshot.shadow or
+            !std.meta.eql(self.box.gradient, self.box_snapshot.gradient) or
+            !std.meta.eql(self.box.color, self.box_snapshot.color) or
+            self.box.transparent != self.box_snapshot.transparent or
+            self.box.clip != self.box_snapshot.clip or
+            self.box.texture != self.box_snapshot.texture or
+            self.box.layer != self.box_snapshot.layer;
+        const typed_paint_changed = !std.meta.eql(self.paint, self.paint_snapshot);
+        if (legacy_box_changed and !typed_box_changed) {
+            self.style.margin = self.box.margin;
+            self.style.border = self.box.border;
+            self.style.padding = self.box.padding;
+            self.style.box_sizing = self.box.box_sizing;
+        } else if (typed_box_changed) {
+            self.box.margin = self.style.margin;
+            self.box.border = self.style.border;
+            self.box.padding = self.style.padding;
+            self.box.box_sizing = self.style.box_sizing;
+        }
+        if (legacy_paint_changed and !typed_paint_changed) {
+            self.paint.fill = self.box.color;
+            self.paint.border_color = self.box.border_color;
+            self.paint.radius = self.box.radius;
+            self.paint.shadow = self.box.shadow;
+            self.paint.gradient = self.box.gradient;
+            self.paint.transparent = self.box.transparent;
+            self.paint.clip = self.box.clip;
+            self.paint.texture = self.box.texture;
+            self.paint.layer = self.box.layer;
+        } else if (typed_paint_changed) {
+            self.box.color = self.paint.fill;
+            self.box.border_color = self.paint.border_color;
+            self.box.radius = self.paint.radius;
+            self.box.shadow = self.paint.shadow;
+            self.box.gradient = self.paint.gradient;
+            self.box.transparent = self.paint.transparent;
+            self.box.clip = self.paint.clip;
+            self.box.texture = self.paint.texture;
+            self.box.layer = self.paint.layer;
+        }
+        const legacy_flex_changed = !std.meta.eql(self.flex, self.flex_snapshot);
+        const typed_flex_changed = self.style.grow != self.style_snapshot.grow or
+            self.style.shrink != self.style_snapshot.shrink or
+            self.style.basis != self.style_snapshot.basis or
+            self.style.min_main != self.style_snapshot.min_main;
+        if (legacy_flex_changed and !typed_flex_changed) {
+            self.style.grow = self.flex.grow;
+            self.style.shrink = self.flex.shrink;
+            self.style.basis = self.flex.basis;
+            self.style.min_main = self.flex.min_main;
+        } else if (typed_flex_changed) {
+            self.flex = .{
+                .grow = self.style.grow,
+                .shrink = self.style.shrink,
+                .basis = self.style.basis,
+                .min_main = self.style.min_main,
+            };
+        }
+        self.box_snapshot = self.box;
+        self.style_snapshot = self.style;
+        self.paint_snapshot = self.paint;
+        self.flex_snapshot = self.flex;
+    }
+
+    /// Populate both typed values and their legacy mirrors from one resolve.
+    pub fn setResolvedStyle(self: *WidgetNode, resolved_style: Style, resolved_paint: PaintStyle) void {
+        self.style = resolved_style;
+        self.paint = resolved_paint;
+        self.box = .{
+            .margin = resolved_style.margin,
+            .border = resolved_style.border,
+            .border_color = resolved_paint.border_color,
+            .radius = resolved_paint.radius,
+            .padding = resolved_style.padding,
+            .box_sizing = resolved_style.box_sizing,
+            .shadow = resolved_paint.shadow,
+            .gradient = resolved_paint.gradient,
+            .color = resolved_paint.fill,
+            .transparent = resolved_paint.transparent,
+            .clip = resolved_paint.clip,
+            .texture = resolved_paint.texture,
+            .layer = resolved_paint.layer,
+        };
+        self.flex = .{
+            .grow = resolved_style.grow,
+            .shrink = resolved_style.shrink,
+            .basis = resolved_style.basis,
+            .min_main = resolved_style.min_main,
+        };
+        self.box_snapshot = self.box;
+        self.style_snapshot = self.style;
+        self.paint_snapshot = self.paint;
+        self.flex_snapshot = self.flex;
+    }
 };
 
 /// The per-frame widget tree.

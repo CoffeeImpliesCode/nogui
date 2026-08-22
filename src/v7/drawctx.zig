@@ -27,10 +27,15 @@ const Id = @import("id.zig").Id;
 const ComponentKey = @import("key.zig").ComponentKey;
 const ComponentId = @import("key.zig").ComponentId;
 const Box = @import("widget.zig").Box;
-const Sides = @import("widget.zig").Sides;
-const BoxSizing = @import("widget.zig").BoxSizing;
-const Justify = @import("flex.zig").Justify;
-const Align = @import("flex.zig").Align;
+const style = @import("style.zig");
+const Style = style.Style;
+const StyleOverride = style.StyleOverride;
+const PaintStyle = style.PaintStyle;
+const PaintStyleOverride = style.PaintStyleOverride;
+const Sides = style.Sides;
+const BoxSizing = style.BoxSizing;
+const Justify = style.Justify;
+const Align = style.Align;
 const layout = @import("flex.zig").layout;
 const hitButton = @import("input.zig").hitButton;
 const StateKey = @import("state.zig").Key;
@@ -52,36 +57,76 @@ const SharedColumns = @import("widget.zig").SharedColumns;
 const ColumnTrack = @import("widget.zig").ColumnTrack;
 const callback = @import("callback.zig");
 
-/// Assemble a CSS `Box` from a DrawCtx opts struct. Each box field is read
-/// only when present in the opts; absent fields keep the `Box` defaults.
-/// `opts` is `anytype` so widgets can pass exactly the fields they carry.
-/// `anytype` opts freeze struct literals into distinct anonymous types,
-/// and anonymous struct VALUES never coerce (only literals do) — copy the
-/// fields explicitly instead of casting.
-/// Read optional `justify` / `align` from container opts into the node's
-/// FlexStyle (enum literals coerce via @as).
+/// Resolve typed layout and paint values from an anonymous widget options
+/// value. Missing fields stay unspecified and therefore retain defaults.
+fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
+    var local: StyleOverride = .{};
+    const T = @TypeOf(opts);
+    if (@hasField(T, "display")) local.display = @as(style.Display, opts.display);
+    if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
+    if (@hasField(T, "flex_direction")) {
+        local.flex_direction = @as(style.FlexDirection, opts.flex_direction);
+    }
+    if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
+    if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
+    if (@hasField(T, "gap")) local.gap = opts.gap;
+    if (@hasField(T, "grow")) local.grow = opts.grow;
+    if (@hasField(T, "shrink")) local.shrink = opts.shrink;
+    if (@hasField(T, "basis")) local.basis = opts.basis;
+    if (@hasField(T, "min_main")) local.min_main = .{ .value = opts.min_main };
+    if (@hasField(T, "margin")) local.margin = asSides(opts.margin);
+    if (@hasField(T, "border")) local.border = asSides(opts.border);
+    if (@hasField(T, "padding")) local.padding = asSides(opts.padding);
+    if (@hasField(T, "box_sizing")) local.box_sizing = @as(BoxSizing, opts.box_sizing);
+    return Style.resolve(.{ .direction = direction }, local);
+}
+
+fn paintStyleFromOpts(opts: anytype) PaintStyle {
+    var local: PaintStyleOverride = .{};
+    const T = @TypeOf(opts);
+    if (@hasField(T, "border_color")) local.border_color = asColor(opts.border_color);
+    if (@hasField(T, "radius")) local.radius = asSides(opts.radius);
+    if (@hasField(T, "shadow")) local.shadow = opts.shadow;
+    if (@hasField(T, "transparent")) local.transparent = opts.transparent;
+    if (@hasField(T, "clip")) local.clip = opts.clip;
+    if (@hasField(T, "layer")) local.layer = opts.layer;
+    if (@hasField(T, "texture")) local.texture = .{ .value = opts.texture };
+    if (@hasField(T, "gradient")) local.gradient = asColor(opts.gradient);
+    if (@hasField(T, "fill")) local.fill = asColor(opts.fill);
+    return PaintStyle.resolve(.{}, local);
+}
+
 fn applyFlexStyle(self: *DrawCtx, id: Id, opts: anytype) void {
     const T = @TypeOf(opts);
-    if (@hasField(T, "justify")) self.tree.node(id).?.style.justify = @as(Justify, opts.justify);
-    if (@hasField(T, "align")) self.tree.node(id).?.style.@"align" = @as(Align, opts.@"align");
+    const node = self.tree.node(id).?;
+    if (@hasField(T, "justify")) node.style.justify = @as(Justify, opts.justify);
+    if (@hasField(T, "align")) node.style.@"align" = @as(Align, opts.@"align");
 }
 
 /// Apply explicit main-axis flex sizing from any widget's options.
 fn applyFlexSizing(self: *DrawCtx, id: Id, opts: anytype) void {
     const node = self.tree.node(id).?;
     const T = @TypeOf(opts);
-    if (@hasField(T, "grow")) node.flex.grow = opts.grow;
-    if (@hasField(T, "shrink")) node.flex.shrink = opts.shrink;
-    if (@hasField(T, "basis")) node.flex.basis = opts.basis;
-    if (@hasField(T, "min_main")) node.flex.min_main = opts.min_main;
+    if (@hasField(T, "grow")) node.style.grow = opts.grow;
+    if (@hasField(T, "shrink")) node.style.shrink = opts.shrink;
+    if (@hasField(T, "basis")) node.style.basis = opts.basis;
+    if (@hasField(T, "min_main")) node.style.min_main = opts.min_main;
+    node.flex = .{
+        .grow = node.style.grow,
+        .shrink = node.style.shrink,
+        .basis = node.style.basis,
+        .min_main = node.style.min_main,
+    };
 }
 
 /// Apply only explicit shrink/min-main bounds to a generated button label.
 fn applyButtonLabelSizing(self: *DrawCtx, id: Id, opts: anytype) void {
     const node = self.tree.node(id).?;
     const T = @TypeOf(opts);
-    if (@hasField(T, "shrink")) node.flex.shrink = opts.shrink;
-    if (@hasField(T, "min_main")) node.flex.min_main = opts.min_main;
+    if (@hasField(T, "shrink")) node.style.shrink = opts.shrink;
+    if (@hasField(T, "min_main")) node.style.min_main = opts.min_main;
+    node.flex.shrink = node.style.shrink;
+    node.flex.min_main = node.style.min_main;
 }
 
 /// Seed a direct row child from its parent's shared column track.
@@ -95,11 +140,15 @@ fn applySharedColumnDefaults(self: *DrawCtx, id: Id) void {
     const child_index: usize = @intCast(parent.children.len - 1);
     if (child_index >= columns.tracks.len) return;
     const track = columns.tracks[child_index];
+    child.style.grow = track.grow;
+    child.style.shrink = track.shrink;
+    child.style.basis = track.basis;
+    child.style.min_main = track.min_main;
     child.flex = .{
-        .grow = track.grow,
-        .shrink = track.shrink,
-        .basis = track.basis,
-        .min_main = track.min_main,
+        .grow = child.style.grow,
+        .shrink = child.style.shrink,
+        .basis = child.style.basis,
+        .min_main = child.style.min_main,
     };
 }
 
@@ -107,6 +156,7 @@ fn applyScrollOptions(self: *DrawCtx, id: Id, opts: anytype) void {
     const T = @TypeOf(opts);
     if (!@hasField(T, "scroll_state")) return;
     const node = self.tree.node(id).?;
+    node.paint.clip = true;
     node.box.clip = true;
     node.scroll = .{
         .state = opts.scroll_state,
@@ -139,31 +189,6 @@ fn asSides(x: anytype) Sides {
 
 fn asColor(x: anytype) [4]f32 {
     return .{ x[0], x[1], x[2], x[3] };
-}
-
-fn boxFromOpts(opts: anytype) Box {
-    var box: Box = .{};
-    const T = @TypeOf(opts);
-    if (@hasField(T, "margin")) box.margin = asSides(opts.margin);
-    if (@hasField(T, "padding")) box.padding = asSides(opts.padding);
-    if (@hasField(T, "border")) box.border = asSides(opts.border);
-    if (@hasField(T, "border_color")) box.border_color = asColor(opts.border_color);
-    if (@hasField(T, "radius")) box.radius = asSides(opts.radius);
-    if (@hasField(T, "box_sizing")) box.box_sizing = @as(BoxSizing, opts.box_sizing);
-    // Paint-only fields (absent keeps the Box defaults).
-    if (@hasField(T, "shadow")) box.shadow = opts.shadow;
-    if (@hasField(T, "transparent")) box.transparent = opts.transparent;
-    if (@hasField(T, "clip")) box.clip = opts.clip;
-    // layer is a u32 — copy it directly (absent keeps the Box default 0).
-    if (@hasField(T, "layer")) box.layer = opts.layer;
-    // texture is an optional u32 — copy the optional directly.
-    if (@hasField(T, "texture")) box.texture = opts.texture;
-    // gradient is a [4]f32 like a color — copy element-wise via indexing.
-    if (@hasField(T, "gradient")) box.gradient = asColor(opts.gradient);
-    // fill = the flat fill color (the gradient's top vertex color; pair
-    // with the same gradient for a flat fill).
-    if (@hasField(T, "fill")) box.color = asColor(opts.fill);
-    return box;
 }
 
 pub const DrawCtx = struct {
@@ -230,19 +255,27 @@ pub const DrawCtx = struct {
         return 0;
     }
 
-    pub fn create(self: *DrawCtx, kind: WidgetKind, box: Box, font_size: f32, font_id: u8) !Id {
+    pub fn create(
+        self: *DrawCtx,
+        kind: WidgetKind,
+        resolved_style: Style,
+        resolved_paint: PaintStyle,
+        font_size: f32,
+        font_id: u8,
+    ) !Id {
         const id: Id = @enumFromInt(self.tree.next_id);
         self.tree.next_id += 1;
 
         const parent = self.parent_stack[self.depth];
-        try self.tree.nodes.append(self.arena, .{
+        var node: widget.WidgetNode = .{
             .id = id,
             .kind = kind,
             .parent = parent,
-            .box = box,
             .font_size = font_size,
             .font_id = font_id,
-        });
+        };
+        node.setResolvedStyle(resolved_style, resolved_paint);
+        try self.tree.nodes.append(self.arena, node);
 
         // Wire into the parent's children array via a linear scan (the
         // parent was created earlier, so it is already in the array).
@@ -263,11 +296,11 @@ pub const DrawCtx = struct {
     /// (padding/border/radius/margin) comes from the opts and lands on the
     /// node's `.box` — padding/border define where flex places children.
     pub fn column(self: *DrawCtx, opts: anytype) !Id {
-        var gap: f32 = 0;
-        if (@hasField(@TypeOf(opts), "gap")) gap = opts.gap;
+        const resolved_style = styleFromOpts(opts, .column);
         const id = try self.create(
-            .{ .column = .{ .gap = gap } },
-            boxFromOpts(opts),
+            .{ .column = .{ .gap = resolved_style.gap } },
+            resolved_style,
+            paintStyleFromOpts(opts),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -277,14 +310,13 @@ pub const DrawCtx = struct {
         self.descend(id);
         return id;
     }
-
     /// Container: create + descend (row variant). See `column`.
     pub fn row(self: *DrawCtx, opts: anytype) !Id {
-        var gap: f32 = 0;
-        if (@hasField(@TypeOf(opts), "gap")) gap = opts.gap;
+        const resolved_style = styleFromOpts(opts, .row);
         const id = try self.create(
-            .{ .row = .{ .gap = gap } },
-            boxFromOpts(opts),
+            .{ .row = .{ .gap = resolved_style.gap } },
+            resolved_style,
+            paintStyleFromOpts(opts),
             optsFontSize(opts),
             optsFontId(opts),
         );
@@ -332,7 +364,13 @@ pub const DrawCtx = struct {
         const text = try self.arena.dupe(u8, opts.text);
         var kind: WidgetKind = .{ .label = .{ .text = text } };
         if (@hasField(@TypeOf(opts), "color")) kind.label.color = asColor(opts.color);
-        const id = try self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        const id = try self.create(
+            kind,
+            styleFromOpts(opts, .column),
+            paintStyleFromOpts(opts),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
         applyFlexSizing(self, id, opts);
         applyTextOptions(self, id, opts);
         return id;
@@ -378,7 +416,13 @@ pub const DrawCtx = struct {
 
         const font_size = optsFontSize(opts);
         const font_id = optsFontId(opts);
-        const id = try self.create(kind, boxFromOpts(opts), font_size, font_id);
+        const id = try self.create(
+            kind,
+            styleFromOpts(opts, .row),
+            paintStyleFromOpts(opts),
+            font_size,
+            font_id,
+        );
         applyFlexSizing(self, id, opts);
         applyTextOptions(self, id, opts);
 
@@ -407,6 +451,7 @@ pub const DrawCtx = struct {
                         if (opts.max_width > 0) {
                             // A bounded button label may shrink to its parent's
                             // final content box instead of its natural width.
+                            self.tree.node(label_id).?.style.min_main = 0;
                             self.tree.node(label_id).?.flex.min_main = 0;
                         }
                     }
@@ -434,11 +479,16 @@ pub const DrawCtx = struct {
             .max = opts.max,
         } };
         if (@hasField(T, "color")) kind.slider.color = asColor(opts.color);
-        const id = try self.create(kind, boxFromOpts(opts), optsFontSize(opts), optsFontId(opts));
+        const id = try self.create(
+            kind,
+            styleFromOpts(opts, .column),
+            paintStyleFromOpts(opts),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
         applyFlexSizing(self, id, opts);
         return id;
     }
-
     /// An empty spacer of the given size (`opts.size`, default 0). Box
     /// fields are allowed but inert: the size still rules the node.
     pub fn spacer(self: *DrawCtx, opts: anytype) !Id {
@@ -446,7 +496,8 @@ pub const DrawCtx = struct {
         if (@hasField(@TypeOf(opts), "size")) size = opts.size;
         const id = try self.create(
             .{ .spacer = .{ .size = size } },
-            boxFromOpts(opts),
+            styleFromOpts(opts, .column),
+            paintStyleFromOpts(opts),
             optsFontSize(opts),
             optsFontId(opts),
         );

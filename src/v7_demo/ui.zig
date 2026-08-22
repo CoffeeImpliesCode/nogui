@@ -14,6 +14,7 @@
 //! `zig test src/v7_demo/ui.zig`.
 
 const std = @import("std");
+const noapi = @import("noapi");
 
 const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
@@ -23,6 +24,8 @@ const WidgetTree = nogui.WidgetTree;
 const WidgetNode = nogui.WidgetNode;
 const App = nogui.App;
 const Id = nogui.Id;
+const Event = nogui.Event;
+const MandelbrotComponent = @import("mandelbrot_component.zig").MandelbrotComponent;
 
 /// The demo texture's bindless heap index, set by the window backend after
 /// it creates + registers the procedural texture (the demo UI cannot touch
@@ -30,14 +33,10 @@ const Id = nogui.Id;
 /// then renders as a plain fill. Same driver→UI channel as text_mod.
 pub var texture_idx: ?u32 = null;
 
-/// The mandelbrot compute target's bindless heap index (set by the window
-/// backend, like texture_idx) and the view the window dispatches the
-/// compute with — center/scale are the pan/zoom knobs Part B will drive;
-/// the window feeds the frame time into the shader's hue animation itself.
-pub var mandelbrot_idx: ?u32 = null;
 /// The SVG showcase box's node id (the window injects the tiger's scene
 /// rects at this box's absolute rect each frame).
 pub var svg_box_id: ?u32 = null;
+
 /// The stroke test scene's tunables (driven by sliders): `stroke_scale`
 /// (the whole scene's extra scale), `stroke_algo` (0 = naive SDF, 1 =
 /// marching quads, 2 = Cairo running-cover), `stroke_oversize` (the AA
@@ -55,11 +54,6 @@ pub var stroke_oversize: f32 = 0.0;
 /// the rsvg-rendered tiger PNG as a texture; the tiger demo samples it
 /// next to our GPU sweep).
 pub var tiger_ref_idx: ?u32 = null;
-pub var mandelbrot_center: [2]f64 = .{ -0.5, 0 };
-pub var mandelbrot_scale: f64 = 300;
-
-/// The mandelbrot compute precision mode: 0 f32, 1 f64, 2 adaptive (default).
-pub var mandelbrot_precision: u32 = 2;
 
 /// Frames per second (a rolling average), set by the window driver each frame.
 pub var fps: f32 = 0;
@@ -420,6 +414,7 @@ pub const TodoApp = struct {
     counter: u32 = 0, // 0..99
     volume: VolumeSlider = .{},
     showcase: Showcase = .{},
+    mandelbrot: MandelbrotComponent = .{},
     done: [4]bool = .{ false, false, false, false },
     visible_count: u8 = 2, // how many of the 4 pool items are shown (1..4)
 
@@ -655,41 +650,16 @@ pub const TodoApp = struct {
             _ = try ctx.row(.{ .gap = 12 });
             defer ctx.pop();
             {
-                // Mandelbrot showcase (Part A): the compute shader renders
-                // the fractal into a 512x384 rgba32_float texture each
-                // frame (the window dispatches it BEFORE the GUI pass and
-                // registers it in the texture heap — sampled + storage
-                // views); this box samples it through the same bindless
-                // TYPE_TEXTURE path as the stripe tile. Colors are
-                // Oklab-authored.
+                // The component owns its texture, GPU lifecycle, and view
+                // interaction. Its stable key keeps GPU state attached to
+                // this showcase slot across rebuilt widget trees.
                 _ = try card(false, ctx, false);
                 defer ctx.pop();
-                {
-                    _ = try ctx.row(.{ .gap = 8, .@"align" = .center });
-                    defer ctx.pop();
-                    const prec_text = switch (mandelbrot_precision) {
-                        0 => "f32",
-                        1 => "f64",
-                        else => "adaptive",
-                    };
-                    const mb_label = try std.fmt.allocPrint(ctx.arena, "Mandelbrot  [{s}]", .{prec_text});
-                    _ = try caption(ctx, mb_label, 0);
-                    _ = try btn(ctx, "reset", TodoApp.mandelbrotReset);
-                }
-                {
-                    _ = try ctx.row(.{});
-                    defer ctx.pop();
-                    _ = try ctx.column(.{
-                        .texture = mandelbrot_idx,
-                        .basis = 480, // fixed width (the row's main axis)
-                        .box_sizing = .border_box,
-                        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                        .border_color = c_border,
-                        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
-                    });
-                    defer ctx.pop();
-                    _ = try ctx.spacer(.{ .size = 190 }); // content height
-                }
+                try ctx.component(
+                    MandelbrotComponent,
+                    .{ .key = .{ .static = "mandelbrot" } },
+                    &self.mandelbrot,
+                );
             }
             {
                 // SVG showcase: the tiger (the classic SVG reference) —
@@ -720,14 +690,20 @@ pub const TodoApp = struct {
             }
         }
     }
+    pub fn setGpuDescriptorHeap(self: *TodoApp, heap: noapi.DescriptorHeap) void {
+        self.mandelbrot.setDescriptorHeap(heap);
+    }
 
-    // --- interactions (click-injection targets; all pub) ---
+    pub fn onFrame(self: *TodoApp, time_ms: u64) void {
+        self.mandelbrot.onFrame(time_ms);
+    }
 
-    /// Reset the mandelbrot's pan/zoom to the default full-set view.
-    pub fn mandelbrotReset(self: *TodoApp) void {
-        _ = self;
-        mandelbrot_center = .{ -0.5, 0 };
-        mandelbrot_scale = 300;
+    pub fn onEvent(self: *TodoApp, event: *const Event) void {
+        self.mandelbrot.onEvent(event);
+    }
+
+    pub fn onPrecisionKey(self: *TodoApp) void {
+        self.mandelbrot.cyclePrecision();
     }
 
     // Header pill clicks — the window applies the request before the next
