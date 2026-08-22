@@ -48,6 +48,10 @@ pub const MandelbrotComponent = struct {
     bindless_index: ?u32 = null,
     descriptor_heap: ?noapi.DescriptorHeap = null,
     gpu_ready: bool = false,
+    gpu_init_count: u32 = 0,
+    gpu_deinit_count: u32 = 0,
+    last_unregistered_index: ?u32 = null,
+
 
     center: [2]f64 = .{ -0.5, 0 },
     scale: f64 = 300,
@@ -75,6 +79,26 @@ pub const MandelbrotComponent = struct {
     pub fn cyclePrecision(self: *MandelbrotComponent) void {
         self.precision = (self.precision + 1) % 3;
     }
+    pub fn bindlessSlot(self: *const MandelbrotComponent) ?u32 {
+        return self.bindless_index;
+    }
+
+    pub fn gpuInitCount(self: *const MandelbrotComponent) u32 {
+        return self.gpu_init_count;
+    }
+
+    pub fn gpuDeinitCount(self: *const MandelbrotComponent) u32 {
+        return self.gpu_deinit_count;
+    }
+
+    pub fn lastUnregisteredSlot(self: *const MandelbrotComponent) ?u32 {
+        return self.last_unregistered_index;
+    }
+
+    pub fn isGpuReady(self: *const MandelbrotComponent) bool {
+        return self.gpu_ready;
+    }
+
 
     pub fn initGpu(self: *MandelbrotComponent, endpoint: *GpuEndpoint) !void {
         const gpu = endpoint.gpu;
@@ -98,6 +122,8 @@ pub const MandelbrotComponent = struct {
         self.params_bda = params_buf.gpu;
         self.bindless_index = bindless_index;
         self.gpu_ready = true;
+        self.gpu_init_count += 1;
+
     }
 
     pub fn frameGpu(self: *MandelbrotComponent, frame: *GpuFrame) !void {
@@ -135,12 +161,15 @@ pub const MandelbrotComponent = struct {
         self.shader = null;
         self.params_bda = 0;
         self.gpu_ready = false;
+        self.gpu_deinit_count += 1;
+
     }
 
     fn releaseBindlessTexture(self: *MandelbrotComponent, endpoint: *GpuEndpoint) void {
         const index = self.bindless_index orelse return;
         self.bindless_index = null;
         endpoint.unregisterTexture(index);
+        self.last_unregistered_index = index;
     }
 
     pub fn onEvent(self: *MandelbrotComponent, event: *const Event) void {

@@ -58,6 +58,11 @@ pub var stroke_oversize: f32 = 0.0;
 /// the rsvg-rendered tiger PNG as a texture; the tiger demo samples it
 /// next to our GPU sweep).
 pub var tiger_ref_idx: ?u32 = null;
+/// Enables the bounded GPU lifecycle smoke path. The window driver sets this
+/// only for `--gpu-remount-smoke`; normal windowed and headless paths leave it
+/// false, so Mandelbrot remains mounted as usual.
+pub var gpu_remount_smoke: bool = false;
+
 
 /// Frames per second (a rolling average), set by the window driver each frame.
 pub var fps: f32 = 0;
@@ -633,6 +638,10 @@ pub const TodoApp = struct {
     volume: VolumeSlider = .{},
     showcase: Showcase = .{},
     mandelbrot: MandelbrotComponent = .{},
+    /// The window driver toggles this only during the opt-in GPU remount
+    /// smoke path. It remains true for normal demo frames.
+    mandelbrot_visible: bool = true,
+
     done: [4]bool = .{ false, false, false, false },
     visible_count: u8 = 2, // how many of the 4 pool items are shown (1..4)
 
@@ -878,12 +887,15 @@ pub const TodoApp = struct {
                 // this showcase slot across rebuilt widget trees.
                 _ = try card(false, ctx, false);
                 defer ctx.pop();
-                try ctx.component(
-                    MandelbrotComponent,
-                    .{ .key = .{ .static = "mandelbrot" } },
-                    &self.mandelbrot,
-                );
+                if (self.mandelbrot_visible) {
+                    try ctx.component(
+                        MandelbrotComponent,
+                        .{ .key = .{ .static = "mandelbrot" } },
+                        &self.mandelbrot,
+                    );
+                }
             }
+
             {
                 // SVG showcase: the tiger (the classic SVG reference) —
                 // parsed + converted by the window's SvgView (the path
@@ -920,6 +932,10 @@ pub const TodoApp = struct {
 
     pub fn onFrame(self: *TodoApp, time_ms: u64) void {
         self.mandelbrot.onFrame(time_ms);
+    }
+
+    pub fn setMandelbrotVisible(self: *TodoApp, visible: bool) void {
+        self.mandelbrot_visible = visible;
     }
 
     pub fn onEvent(self: *TodoApp, event: *const Event) void {

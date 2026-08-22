@@ -84,6 +84,38 @@ const spotify_ui = @import("spotify.zig");
 /// so the dupe lives here for the duration of run()/runShot().
 var exts_copy_global: []const [*:0]const u8 = &.{};
 
+const GpuRemountSmokePhase = enum {
+    initial_visible,
+    hidden,
+    remounted,
+    complete,
+};
+
+const GpuRemountSmokeObservation = struct {
+    slot: ?u32 = null,
+    init_count: u32 = 0,
+    deinit_count: u32 = 0,
+    last_unregistered_slot: ?u32 = null,
+    ready: bool = false,
+};
+
+fn setGpuRemountSmokeVisibility(comptime T: type, root: *T, visible: bool) void {
+    if (comptime T == ui.TodoApp) root.setMandelbrotVisible(visible);
+}
+
+fn gpuRemountSmokeObservation(comptime T: type, root: *T) GpuRemountSmokeObservation {
+    if (comptime T == ui.TodoApp) {
+        return .{
+            .slot = root.mandelbrot.bindlessSlot(),
+            .init_count = root.mandelbrot.gpuInitCount(),
+            .deinit_count = root.mandelbrot.gpuDeinitCount(),
+            .last_unregistered_slot = root.mandelbrot.lastUnregisteredSlot(),
+            .ready = root.mandelbrot.isGpuReady(),
+        };
+    }
+    return .{};
+}
+
 fn getExts() []const [*:0]const u8 {
     return exts_copy_global;
 }
@@ -1268,6 +1300,10 @@ pub fn run(
     max_frames: ?u32,
     audio_tracks: ?[]const LocalTrack,
 ) !void {
+    if (ui.gpu_remount_smoke) {
+        if (comptime T != ui.TodoApp) return error.GpuRemountSmokeRequiresTodo;
+    }
+
     const gpa = app.gpa;
 
     // OVERRIDE priority: the SDL gives env vars precedence over
@@ -1466,6 +1502,9 @@ pub fn run(
     var frame_index: u32 = 0;
     var last_frame_ms: u64 = 0;
     var should_close = false;
+    var remount_smoke_phase: GpuRemountSmokePhase = .initial_visible;
+    var remount_smoke_initial_slot: ?u32 = null;
+
     while (!should_close) {
         // Frame pacer: sleep the recommended delay BEFORE polling input so
         // the frame lands just before the vblank instead of blocking after
@@ -1621,6 +1660,15 @@ pub fn run(
             }
         }
         if (should_close) break;
+        if (ui.gpu_remount_smoke) {
+            const visible = switch (remount_smoke_phase) {
+                .initial_visible, .remounted => true,
+                .hidden => false,
+                .complete => return error.GpuRemountSmokeExtraFrame,
+            };
+            setGpuRemountSmokeVisibility(T, root, visible);
+        }
+
 
         // Apply the header pill clicks (the UI sets a request; the window
         // owns the options). Keys and requests use the same configuration
@@ -1677,6 +1725,49 @@ pub fn run(
             },
             &gpu_frame,
         );
+        if (ui.gpu_remount_smoke) {
+            const observed = gpuRemountSmokeObservation(T, root);
+            switch (remount_smoke_phase) {
+                .initial_visible => {
+                    if (!observed.ready) return error.GpuRemountSmokeInitialNotReady;
+                    if (observed.init_count != 1) return error.GpuRemountSmokeUnexpectedInitialInit;
+                    if (observed.deinit_count != 0) return error.GpuRemountSmokeUnexpectedInitialDeinit;
+                    remount_smoke_initial_slot = observed.slot orelse
+                        return error.GpuRemountSmokeInitialSlotMissing;
+                    remount_smoke_phase = .hidden;
+                },
+                .hidden => {
+                    if (observed.ready) return error.GpuRemountSmokeUnmountStillReady;
+                    if (observed.slot != null) return error.GpuRemountSmokeUnmountSlotStillLive;
+                    if (observed.deinit_count != 1) return error.GpuRemountSmokeUnmountDidNotDeinit;
+                    if (!std.meta.eql(observed.last_unregistered_slot, remount_smoke_initial_slot)) {
+                        return error.GpuRemountSmokeUnregisterOrder;
+                    }
+                    remount_smoke_phase = .remounted;
+                },
+                .remounted => {
+                    if (!observed.ready) return error.GpuRemountSmokeRemountNotReady;
+                    if (observed.init_count != 2) return error.GpuRemountSmokeUnexpectedRemountInit;
+                    if (observed.deinit_count != 1) return error.GpuRemountSmokeUnexpectedRemountDeinit;
+                    const initial_slot = remount_smoke_initial_slot orelse
+                        return error.GpuRemountSmokeInitialSlotMissing;
+                    const remounted_slot = observed.slot orelse
+                        return error.GpuRemountSmokeRemountSlotMissing;
+                    if (remounted_slot != initial_slot or
+                        !std.meta.eql(observed.last_unregistered_slot, remount_smoke_initial_slot))
+                    {
+                        return error.GpuRemountSmokeSlotNotReused;
+                    }
+                    remount_smoke_phase = .complete;
+                    std.log.info(
+                        "gpu-remount-smoke: Mandelbrot slot {d} reused after one hidden frame",
+                        .{remounted_slot},
+                    );
+                },
+                .complete => return error.GpuRemountSmokeExtraFrame,
+            }
+        }
+
         if (audio_player) |*player| {
             if (comptime T == spotify_ui.SpotifyApp) {
                 const sync_result = player.sync(
@@ -1806,10 +1897,16 @@ pub fn run(
         // Frame pacer: feed the slop (CPU ns blocked on the GPU this frame)
         // and get the sleep recommendation for the next frame.
         pacer_sleep_ns = pacer.update(io, gw.slopNs());
+        if (ui.gpu_remount_smoke and remount_smoke_phase == .complete) break;
+
         if (max_frames) |mf| {
             if (tick >= mf) break;
         }
     }
+    if (ui.gpu_remount_smoke and remount_smoke_phase != .complete) {
+        return error.GpuRemountSmokeInterrupted;
+    }
+
 
     try gpu.waitIdle();
 }

@@ -65,6 +65,8 @@ pub fn main(init: std.process.Init) !void {
     var spotify_mode = false; // --spotify: the Spotify layout stress scene
     var tiger_mode = false; // --tiger: the dedicated tiger showcase window
     var strokes_mode = false; // --strokes: the stroke test scene
+    var gpu_remount_smoke = false; // --gpu-remount-smoke: finite GPU lifecycle run
+
     var frames: ?u32 = null;
     var shot_path: ?[]const u8 = null;
     var shot_hover: ?[2]f32 = null;
@@ -92,6 +94,8 @@ pub fn main(init: std.process.Init) !void {
             strokes_mode = true;
         } else if (std.mem.eql(u8, arg, "--window")) {
             window_mode = true;
+        } else if (std.mem.eql(u8, arg, "--gpu-remount-smoke")) {
+            gpu_remount_smoke = true;
         } else if (std.mem.eql(u8, arg, "--gpu-sort-verify")) {
             // V1b verification: the CPU submits the drawable bag in
             // REVERSE paint order; the CS1 sort (stable on (z, order))
@@ -141,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (spotify_mode) {
+    if (spotify_mode and !gpu_remount_smoke) {
         _ = try app.register(spotify_ui.SpotifyApp, &spotify);
     } else {
         // Keep the default root registered for specialized modes until they
@@ -149,6 +153,30 @@ pub fn main(init: std.process.Init) !void {
         // legacy modes.
         _ = try app.register(ui.TodoApp, &todo);
     }
+
+    if (gpu_remount_smoke) {
+        // This path is deliberately separate from --window and --frames:
+        // the window driver owns a fixed three-frame lifecycle schedule.
+        ui.gpu_remount_smoke = true;
+        defer ui.gpu_remount_smoke = false;
+        window_backend.run(
+            ui.TodoApp,
+            &app,
+            &todo,
+            subpixel,
+            quad_debug,
+            bgr,
+            damp,
+            gpu_sort_verify,
+            null,
+            null,
+        ) catch |e| {
+            std.log.err("gpu-remount-smoke failed: {s}", .{@errorName(e)});
+            return e;
+        };
+        return;
+    }
+
 
     // Headless driver: read JSON-lines events from a script, feed them to
     // the core (time included — every .frame event carries the driver's
