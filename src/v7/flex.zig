@@ -468,7 +468,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         var total_grow: f32 = 0;
         var total_shrink: f32 = 0;
         var flow_count: usize = 0;
-        // Children's FINAL border-box mains + margins + gaps.
+        // Repeated finalization restarts from each child's stable pre-flex main.
         for (0..count) |i| {
             const child = tree.node(p.children.items[i]) orelse continue;
             if (child.style.position == .absolute) {
@@ -480,13 +480,13 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 parent_content,
                 .{ .width = child.rect.w, .height = child.rect.h },
             );
-            mains[i] = if (directionIsColumn(dir)) child.rect.h else child.rect.w;
+            mains[i] = child.natural_main;
             if (resolvedMainDimension(child, dir)) |dimension| {
                 mains[i] = clampMain(child, dir, dimension);
             } else if (resolvedFlexBasis(
                 child,
                 if (directionIsColumn(dir)) parent_content.height else parent_content.width,
-                if (directionIsColumn(dir)) child.rect.h else child.rect.w,
+                child.natural_main,
             )) |basis| {
                 mains[i] = clampMain(child, dir, basis);
             }
@@ -565,10 +565,21 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
             mains[i] = clampMain(child, dir, mains[i]);
         }
 
-        // Justify distributes the remaining free space (grow/shrink consumed
-        // it all, so nothing is left when either ran).
+        // Justify distributes free space left after flex distribution.
+        // Recompute fitted extent after final min/max clamps. A clamp can
+        // change residual space for justify without changing flex growth or
+        // shrink distribution.
+        var final_fitted: f32 = 0;
+        for (0..count) |i| {
+            const child = tree.node(p.children.items[i]) orelse continue;
+            if (child.style.position == .absolute) continue;
+            const m = child.style.margin;
+            final_fitted += mains[i] +
+                (if (directionIsColumn(dir)) m.top + m.bottom else m.left + m.right);
+        }
+        if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
         const spread = flow_count > 0 and free > 0 and justify != .start;
-        const fitted = content + (if (grew or shrank) free else 0);
+        const fitted = if (grew or shrank) content + free else final_fitted;
         const free_for_justify = if (grew or shrank or spread)
             @max(0, container_main - inset_main - fitted)
         else
@@ -792,9 +803,9 @@ fn layoutAdvancedFlexContainer(
     for (0..node.children.len) |child_index| {
         const child = tree.node(node.children.items[child_index]) orelse continue;
         if (child.style.position == .absolute) continue;
-        const natural_main = if (main_is_column) child.rect.h else child.rect.w;
+        // Finalization runs repeatedly, so the current rect is not a stable flex base.
+        const natural_main = child.natural_main;
         const natural_cross = if (main_is_column) child.rect.w else child.rect.h;
-        child.natural_main = natural_main;
         child.resolveTypedStyle(content, .{ .width = child.rect.w, .height = child.rect.h });
         var main = if (child.style.basis > 0)
             child.style.basis
@@ -1801,12 +1812,12 @@ fn rootBasisMain(n: *const WidgetNode, containing_main: f32) f32 {
             const b = n.style;
             main += b.border.top + b.border.bottom + b.padding.top + b.padding.bottom;
         }
-    } else if (resolvedFlexBasis(n, containing_main, n.rect.h)) |basis| {
+    } else if (resolvedFlexBasis(n, containing_main, n.natural_main)) |basis| {
         main = basis;
     } else if (n.resolved_dimensions.height) |height| {
         main = height;
     } else {
-        main = n.rect.h;
+        main = n.natural_main;
     }
     return clampMain(n, .column, main);
 }

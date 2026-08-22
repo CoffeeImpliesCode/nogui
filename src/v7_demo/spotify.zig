@@ -446,6 +446,44 @@ test "SpotifyApp compact layout verifier omits now-playing and labels" {
     try verifySpotifyLayout(.{ .width = 640, .height = 1160 }, false);
 }
 
+test "Spotify compact generated sidebar labels use the final button width" {
+    const surface: widget.Size = .{ .width = 640, .height = 1160 };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    defer measure_cpu.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{
+        .tree = &tree,
+        .arena = arena.allocator(),
+        .surface = surface,
+    };
+
+    var app: SpotifyApp = .{};
+    try app.draw(&ctx);
+    flex.layoutWith(&tree, surface, measure_cpu.measure);
+
+    // Compact sidebar buttons give each generated label a 36 px minimum.
+    // The final main pass must recalculate centering after that minimum applies.
+    const epsilon: f32 = 0.001;
+    var compact_label_count: usize = 0;
+    for (tree.nodes.items) |*node| {
+        const parent = tree.nodeConst(node.parent) orelse continue;
+        const visual_label = switch (parent.kind) {
+            .button => |button| button.visual_label orelse continue,
+            else => continue,
+        };
+        if (visual_label.len == 0) continue;
+        const parent_content = widget.contentRect(&tree, parent.id);
+        if (@abs(parent_content.w - theme.sidebar_compact_target_size) > epsilon) continue;
+
+        compact_label_count += 1;
+        try std.testing.expectApproxEqAbs(@as(f32, 0), node.rect.x, epsilon);
+        try std.testing.expectApproxEqAbs(parent_content.w, node.rect.w, epsilon);
+    }
+    try std.testing.expectEqual(@as(usize, 10), compact_label_count);
+}
+
 test "Spotify seek slider keeps legacy minimum on its parent axis" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -107,6 +107,9 @@ pub const widget = @import("widget.zig");
 pub const runtime = @import("runtime.zig");
 
 test {
+    _ = @import("taffy_block_conformance.zig");
+    _ = @import("taffy_flex_conformance.zig");
+    _ = @import("taffy_grid_conformance.zig");
     std.testing.refAllDecls(@This());
 }
 
