@@ -68,69 +68,10 @@ pub const ClipRect = struct {
     h: f32 = 0,
 };
 
-/// The CSS box model for one node: margin (outside, handled by the parent
-/// when positioning), border + radius (painted as a ring), padding (inside,
-/// separating the border from the content). `node.rect` is the BORDER box;
-/// the content box = rect inset by border + padding.
-pub const Box = struct {
-    margin: Sides = .{},
-    border: Sides = .{}, // widths only; color/radius are paint
-    border_color: [4]f32 = .{ 0, 0, 0, 1 },
-    /// Per-axis corner radii (l/r/t/b) of the OUTER border edge, matching
-    /// SceneRect's corners[0..4] geometry (each corner = l|r x t|b). The
-    /// inner (fill) radius = max(0, radius - border) per axis.
-    radius: Sides = .{},
-    padding: Sides = .{},
-    box_sizing: BoxSizing = .content_box,
-    /// Paint-only: drop-shadow softness/offset in px (0 = none). Never
-    /// affects layout; excluded from the layout fingerprint.
-    shadow: f32 = 0,
-    /// Paint-only: the gradient's bottom color in Oklab (all-zero = flat
-    /// fill). The vertex color is the gradient's top. Excluded from the
-    /// layout fingerprint.
-    gradient: [4]f32 = .{ 0, 0, 0, 0 },
-    /// Paint-only: the node's FLAT fill color in sRGB (alpha 0 = the
-    /// renderer's palette fallback). The gradient's top vertex color —
-    /// set it to the same color as the gradient for a flat fill. Excluded
-    /// from the layout fingerprint.
-    color: [4]f32 = .{ 0, 0, 0, 0 },
-    /// When true, the node participates in layout and interaction but emits no fill.
-    transparent: bool = false,
-    /// Paint-only: this container clips its own + descendants' content to
-    /// its border box (collectDrawCmds stamps a clip id on the subtree's
-    /// draw commands; the fragment shader discards outside the rect).
-    /// Never affects layout; excluded from the layout fingerprint.
-    clip: bool = false,
-    /// Paint-only: the bindless texture heap index of a texture registered
-    /// by the host (the `.texture` box option). When set, the node's FILL
-    /// samples the texture instead of the flat color (the fragment shader's
-    /// TYPE_TEXTURE branch, before the material dispatch); the border ring
-    /// and shadow stay untextured. Null = flat fill. The fill's vColor is
-    /// white (identity tint) so the texture's own pixels show through.
-    /// Never affects layout; excluded from the layout fingerprint.
-    texture: ?u32 = null,
-    /// Paint-only: the layer key (the GPU sort's z) this node's drawables
-    /// submit with. 0 = the base tree; >0 = overlays/popups that paint over
-    /// the WHOLE z=0 tree regardless of their position in the drawable bag
-    /// (the v1 spec §2: the stable radix sorts on (z << 32) | order).
-    /// collectDrawCmds stamps it onto every cmd the node emits (shadow,
-    /// ring, fill) and buildSliceRects stamps it onto the node's glyphs, so
-    /// a layered node paints as one unit. Never affects layout; excluded
-    /// from the layout fingerprint.
-    layer: u32 = 0,
-};
-
 /// Horizontal+vertical sums of a Sides (for content-box derivation).
 pub fn sidesSum(s: Sides) struct { w: f32, h: f32 } {
     return .{ .w = s.left + s.right, .h = s.top + s.bottom };
 }
-/// Per-child flexbox sizing parameters (main axis).
-pub const FlexChild = struct {
-    grow: f32 = 0,
-    shrink: f32 = 1,
-    basis: f32 = 0,
-    min_main: ?f32 = null,
-};
 
 /// Sizing parameters for one shared column track.
 pub const ColumnTrack = struct {
@@ -267,8 +208,6 @@ pub const WidgetNode = struct {
     /// BORDER box, positioned relative to the parent's CONTENT box (see
     /// Rect's doc). Filled by the layout dispatcher.
     rect: Rect = .{},
-    /// Legacy box mirror retained for draw command and caller compatibility.
-    box: Box = .{},
     /// Resolved typed layout values. This is the canonical flex/style view.
     resolved_style: ResolvedStyle = .{},
     resolved_dimensions: ResolvedDimensions = .{},
@@ -295,8 +234,6 @@ pub const WidgetNode = struct {
     font_size: f32 = 0,
     /// Font selection: 0 = the host default font, 1 = the second font.
     font_id: u8 = 0,
-    /// Legacy per-child flex mirror retained for caller compatibility.
-    flex: FlexChild = .{},
     /// The item's natural (measured/hugged) main size before any basis
     /// override, recorded by the parent when placing. The flex-shrink
     /// floor: shrink never crosses it (the canonical automatic minimum,
@@ -306,12 +243,6 @@ pub const WidgetNode = struct {
     /// node, stamped by collectDrawCmds during its walk; 0xFFFFFFFF = no
     /// clip. The renderer clips the node's glyphs to that rect.
     clip_id: u32 = 0xFFFFFFFF,
-    // Snapshots let layout accept either the canonical style or the legacy
-    // mirror when an existing caller mutates a node after construction.
-    box_snapshot: Box = .{},
-    style_snapshot: Style = .{},
-    paint_snapshot: PaintStyle = .{},
-    flex_snapshot: FlexChild = .{},
 
     /// Resolve typed dimensions, constraints, insets, and overflow for the
     /// containing block known by the current layout pass.
@@ -343,147 +274,6 @@ pub const WidgetNode = struct {
         self.resolved_constraints = resolved.constraints;
         self.resolved_aspect_ratio = resolved.aspect_ratio;
         self.resolved_overflow = resolved.overflow;
-    }
-
-    /// Reconcile legacy public mirrors before layout. This keeps old direct
-    /// box/flex writes working while flex consumes the resolved values.
-    pub fn syncResolvedStyle(self: *WidgetNode) void {
-        const legacy_box_changed = !std.meta.eql(self.box, self.box_snapshot);
-        const typed_margin_changed = !std.meta.eql(
-            self.style.margin_inset,
-            self.style_snapshot.margin_inset,
-        );
-        const typed_box_changed = !std.meta.eql(self.style.margin, self.style_snapshot.margin) or
-            !std.meta.eql(self.style.border, self.style_snapshot.border) or
-            !std.meta.eql(self.style.padding, self.style_snapshot.padding) or
-            self.style.box_sizing != self.style_snapshot.box_sizing;
-        const legacy_paint_changed = !std.meta.eql(self.box.border_color, self.box_snapshot.border_color) or
-            !std.meta.eql(self.box.radius, self.box_snapshot.radius) or
-            self.box.shadow != self.box_snapshot.shadow or
-            !std.meta.eql(self.box.gradient, self.box_snapshot.gradient) or
-            !std.meta.eql(self.box.color, self.box_snapshot.color) or
-            self.box.transparent != self.box_snapshot.transparent or
-            self.box.clip != self.box_snapshot.clip or
-            self.box.texture != self.box_snapshot.texture or
-            self.box.layer != self.box_snapshot.layer;
-        const typed_paint_changed = !std.meta.eql(self.paint, self.paint_snapshot);
-        if (legacy_box_changed and !typed_box_changed) {
-            self.style.margin = self.box.margin;
-            self.style.border = self.box.border;
-            self.style.padding = self.box.padding;
-            self.style.box_sizing = self.box.box_sizing;
-            self.style.margin_inset = .{
-                .top = .{ .length = self.box.margin.top },
-                .right = .{ .length = self.box.margin.right },
-                .bottom = .{ .length = self.box.margin.bottom },
-                .left = .{ .length = self.box.margin.left },
-            };
-            self.style.border_inset = .{
-                .top = .{ .length = self.box.border.top },
-                .right = .{ .length = self.box.border.right },
-                .bottom = .{ .length = self.box.border.bottom },
-                .left = .{ .length = self.box.border.left },
-            };
-            self.style.padding_inset = .{
-                .top = .{ .length = self.box.padding.top },
-                .right = .{ .length = self.box.padding.right },
-                .bottom = .{ .length = self.box.padding.bottom },
-                .left = .{ .length = self.box.padding.left },
-            };
-        } else if (typed_box_changed) {
-            if (!typed_margin_changed) {
-                self.style.margin_inset = .{
-                    .top = .{ .length = self.style.margin.top },
-                    .right = .{ .length = self.style.margin.right },
-                    .bottom = .{ .length = self.style.margin.bottom },
-                    .left = .{ .length = self.style.margin.left },
-                };
-            }
-            self.box.margin = self.style.margin;
-            self.box.border = self.style.border;
-            self.box.padding = self.style.padding;
-            self.box.box_sizing = self.style.box_sizing;
-        }
-        if (legacy_paint_changed and !typed_paint_changed) {
-            self.paint.fill = self.box.color;
-            self.paint.border_color = self.box.border_color;
-            self.paint.radius = self.box.radius;
-            self.paint.shadow = self.box.shadow;
-            self.paint.gradient = self.box.gradient;
-            self.paint.transparent = self.box.transparent;
-            self.paint.clip = self.box.clip;
-            self.paint.texture = self.box.texture;
-            self.paint.layer = self.box.layer;
-        } else if (typed_paint_changed) {
-            self.box.color = self.paint.fill;
-            self.box.border_color = self.paint.border_color;
-            self.box.radius = self.paint.radius;
-            self.box.shadow = self.paint.shadow;
-            self.box.gradient = self.paint.gradient;
-            self.box.transparent = self.paint.transparent;
-            self.box.clip = self.paint.clip;
-            self.box.texture = self.paint.texture;
-            self.box.layer = self.paint.layer;
-        }
-        const legacy_flex_changed = !std.meta.eql(self.flex, self.flex_snapshot);
-        const typed_flex_changed = self.style.grow != self.style_snapshot.grow or
-            self.style.shrink != self.style_snapshot.shrink or
-            self.style.basis != self.style_snapshot.basis or
-            !std.meta.eql(self.style.flex_basis, self.style_snapshot.flex_basis) or
-            self.style.min_main != self.style_snapshot.min_main;
-        if (legacy_flex_changed and !typed_flex_changed) {
-            self.style.grow = self.flex.grow;
-            self.style.shrink = self.flex.shrink;
-            self.style.basis = self.flex.basis;
-            self.style.flex_basis = if (self.flex.basis > 0)
-                .{ .length = self.flex.basis }
-            else
-                .auto;
-            self.style.min_main = self.flex.min_main;
-        } else if (typed_flex_changed) {
-            self.flex = .{
-                .grow = self.style.grow,
-                .shrink = self.style.shrink,
-                .basis = self.style.basis,
-                .min_main = self.style.min_main,
-            };
-        }
-        self.box_snapshot = self.box;
-        self.style_snapshot = self.style;
-        self.paint_snapshot = self.paint;
-        self.flex_snapshot = self.flex;
-    }
-
-    /// Populate both typed values and their legacy mirrors from one resolve.
-    pub fn setResolvedStyle(self: *WidgetNode, resolved_style: Style, resolved_paint: PaintStyle) void {
-        self.style = resolved_style;
-        self.paint = resolved_paint;
-        self.box = .{
-            .margin = resolved_style.margin,
-            .border = resolved_style.border,
-            .border_color = resolved_paint.border_color,
-            .radius = resolved_paint.radius,
-            .padding = resolved_style.padding,
-            .box_sizing = resolved_style.box_sizing,
-            .shadow = resolved_paint.shadow,
-            .gradient = resolved_paint.gradient,
-            .color = resolved_paint.fill,
-            .transparent = resolved_paint.transparent,
-            .clip = resolved_paint.clip,
-            .texture = resolved_paint.texture,
-            .layer = resolved_paint.layer,
-        };
-        self.flex = .{
-            .grow = resolved_style.grow,
-            .shrink = resolved_style.shrink,
-            .basis = resolved_style.basis,
-            .min_main = resolved_style.min_main,
-        };
-        self.resolveTypedStyle(null, .{ .width = 0, .height = 0 });
-        self.box_snapshot = self.box;
-        self.style_snapshot = self.style;
-        self.paint_snapshot = self.paint;
-        self.flex_snapshot = self.flex;
     }
 };
 
@@ -565,8 +355,8 @@ pub fn absoluteBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
         ox += n.rect.x;
         oy += n.rect.y;
         const parent = tree.nodeConst(n.parent) orelse break;
-        ox += parent.box.border.left + parent.box.padding.left;
-        oy += parent.box.border.top + parent.box.padding.top;
+        ox += parent.style.border.left + parent.style.padding.left;
+        oy += parent.style.border.top + parent.style.padding.top;
         cur = n.parent;
     }
     return .{ ox, oy };
@@ -590,8 +380,8 @@ pub fn visualBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
         ox += n.rect.x;
         oy += n.rect.y;
         const parent = tree.nodeConst(n.parent) orelse break;
-        ox += parent.box.border.left + parent.box.padding.left;
-        oy += parent.box.border.top + parent.box.padding.top;
+        ox += parent.style.border.left + parent.style.padding.left;
+        oy += parent.style.border.top + parent.style.padding.top;
         if (parent.scroll) |scroll| {
             ox -= scroll.state.offset[0];
             oy -= scroll.state.offset[1];
@@ -612,12 +402,20 @@ pub fn visualBorderRect(tree: *const WidgetTree, id: Id) Rect {
 pub fn visualContentRect(tree: *const WidgetTree, id: Id) Rect {
     const r = visualBorderRect(tree, id);
     const n = tree.nodeConst(id) orelse return r;
-    const b = n.box;
+    const resolved_style = n.style;
     return .{
-        .x = r.x + b.border.left + b.padding.left,
-        .y = r.y + b.border.top + b.padding.top,
-        .w = @max(0, r.w - b.border.left - b.border.right - b.padding.left - b.padding.right),
-        .h = @max(0, r.h - b.border.top - b.border.bottom - b.padding.top - b.padding.bottom),
+        .x = r.x + resolved_style.border.left + resolved_style.padding.left,
+        .y = r.y + resolved_style.border.top + resolved_style.padding.top,
+        .w = @max(
+            0,
+            r.w - resolved_style.border.left - resolved_style.border.right -
+                resolved_style.padding.left - resolved_style.padding.right,
+        ),
+        .h = @max(
+            0,
+            r.h - resolved_style.border.top - resolved_style.border.bottom -
+                resolved_style.padding.top - resolved_style.padding.bottom,
+        ),
     };
 }
 
@@ -626,7 +424,7 @@ pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
     var cur = id;
     while (cur != .root) {
         const n = tree.nodeConst(cur) orelse break;
-        if (n.box.clip and !rectContainsPoint(visualBorderRect(tree, cur), pos)) return false;
+        if (n.paint.clip and !rectContainsPoint(visualBorderRect(tree, cur), pos)) return false;
         cur = n.parent;
     }
     return true;
@@ -641,12 +439,20 @@ fn rectContainsPoint(rect: Rect, pos: [2]f32) bool {
 /// node's own border + padding. Where children live and text draws.
 pub fn contentRect(tree: *const WidgetTree, id: Id) Rect {
     const r = absoluteRect(tree, id);
-    const b = tree.nodeConst(id).?.box;
+    const resolved_style = tree.nodeConst(id).?.style;
     return .{
-        .x = r.x + b.border.left + b.padding.left,
-        .y = r.y + b.border.top + b.padding.top,
-        .w = @max(0, r.w - b.border.left - b.border.right - b.padding.left - b.padding.right),
-        .h = @max(0, r.h - b.border.top - b.border.bottom - b.padding.top - b.padding.bottom),
+        .x = r.x + resolved_style.border.left + resolved_style.padding.left,
+        .y = r.y + resolved_style.border.top + resolved_style.padding.top,
+        .w = @max(
+            0,
+            r.w - resolved_style.border.left - resolved_style.border.right -
+                resolved_style.padding.left - resolved_style.padding.right,
+        ),
+        .h = @max(
+            0,
+            r.h - resolved_style.border.top - resolved_style.border.bottom -
+                resolved_style.padding.top - resolved_style.padding.bottom,
+        ),
     };
 }
 
@@ -741,14 +547,14 @@ test "absoluteRect: walks parent content boxes through border+padding" {
         .kind = .{ .row = .{} },
         .parent = col,
         .rect = .{ .x = 10, .y = 10, .w = 100, .h = 40 },
-        .box = .{ .border = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 } },
+        .style = .{ .border = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 } },
     });
     try tree.nodes.append(std.testing.allocator, .{
         .id = col,
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 200, .h = 200 },
-        .box = .{ .padding = .{ .top = 8, .left = 8 } },
+        .style = .{ .padding = .{ .top = 8, .left = 8 } },
     });
 
     // Label absolute border box: col content origin (8,8) + row rect
@@ -789,11 +595,9 @@ test "WidgetNode: defaults are zero-valued" {
     };
 
     try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 0, .h = 0 }, n.rect);
-    try std.testing.expectEqual(Box{}, n.box);
+    try std.testing.expectEqual(Style{}, n.style);
+    try std.testing.expectEqual(PaintStyle{}, n.paint);
     try std.testing.expectEqual(@as(u8, 0), n.children.len);
-    try std.testing.expectEqual(@as(f32, 0), n.flex.grow);
-    try std.testing.expectEqual(@as(f32, 1), n.flex.shrink);
-    try std.testing.expectEqual(@as(f32, 0), n.flex.basis);
 }
 test "WidgetNode: typed dimensions and constraints are stored after resolution" {
     var node: WidgetNode = .{
@@ -864,7 +668,7 @@ test "visualBorderRect: scroll offset applies only to descendants" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
-        .box = .{
+        .style = .{
             .border = .{ .top = 3, .left = 2 },
             .padding = .{ .top = 2, .left = 1 },
         },
@@ -900,32 +704,10 @@ test "pointInClipChain: rejects points outside a scrolled ancestor clip" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 10, .y = 20, .w = 30, .h = 30 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
         .scroll = .{ .state = &scroll_state },
     });
 
     try std.testing.expect(pointInClipChain(&tree, child_id, .{ 35, 27 }));
     try std.testing.expect(!pointInClipChain(&tree, child_id, .{ 45, 27 }));
-}
-
-test "WidgetNode: typed flex sync compares dimension payloads" {
-    var node: WidgetNode = .{
-        .id = .root,
-        .kind = .{ .label = .{ .text = "typed" } },
-        .parent = .root,
-    };
-
-    node.style.flex_basis = .{ .length = 24 };
-    node.syncResolvedStyle();
-    try std.testing.expect(std.meta.eql(
-        @as(Dimension, .{ .length = 24 }),
-        node.style_snapshot.flex_basis,
-    ));
-
-    node.style.flex_basis = .{ .length = 36 };
-    node.syncResolvedStyle();
-    try std.testing.expect(std.meta.eql(
-        @as(Dimension, .{ .length = 36 }),
-        node.style_snapshot.flex_basis,
-    ));
 }

@@ -24,7 +24,6 @@ const WidgetNode = widget.WidgetNode;
 const WidgetKind = widget.WidgetKind;
 const Rect = widget.Rect;
 const Size = widget.Size;
-const FlexChild = widget.FlexChild;
 
 /// Main axis direction of a container.
 pub const Direction = style.FlexDirection;
@@ -39,18 +38,14 @@ pub const Justify = style.Justify;
 pub const Align = style.Align;
 pub const AlignContent = style.AlignContent;
 pub const AlignSelf = style.AlignSelf;
-/// The resolved style type is the public flex-style compatibility name.
-/// `layout` reads direction, gap, justify, and align from the node's
-/// resolved `Style`; the node kind remains the semantic container tag.
-pub const FlexStyle = style.Style;
 /// text: the label; font_size: the node's px size (0 = host default).
 pub const MeasureFn = *const fn (text: []const u8, font_size: f32, font_id: u8) Size;
 
 /// Flex layout. Fills `WidgetNode.rect` for all nodes.
 /// Root-level nodes (parent == .root) are laid out as a column against
-/// `available` (the root pseudo-container, styled like `FlexStyle{}`:
+/// `available` (the root pseudo-container, styled like `Style{}`:
 /// justify=start, align=stretch, gap=0); children recurse per their
-/// container's FlexStyle.
+/// container's `Style`.
 ///
 /// Node order is post-order: children already have final rects when the
 /// container is placed, so the bottom-up pass can size containers from their
@@ -73,9 +68,6 @@ pub fn layout(tree: *WidgetTree, available: Size) void {
 /// advances); measureLeaf adds the node's border + padding on top to form
 /// its border box. Without it, leaves use the baked approximation below.
 pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void {
-    // Legacy box/flex fields remain writable for existing callers. Reconcile
-    // them once, then consume the resolved style for every layout decision.
-    for (tree.nodes.items) |*node| node.syncResolvedStyle();
     for (tree.nodes.items) |*node| {
         node.resolveTypedStyle(null, .{ .width = 0, .height = 0 });
     }
@@ -220,6 +212,16 @@ fn effectiveWrap(node: *const WidgetNode) style.FlexWrap {
     return if (node.style.flex_wrap != .nowrap) node.style.flex_wrap else node.style.wrap;
 }
 
+fn effectiveMarginInset(
+    value: style.LengthPercentageAuto,
+    legacy: f32,
+) style.LengthPercentageAuto {
+    return switch (value) {
+        .length => |length| if (length == legacy) value else .{ .length = legacy },
+        .auto, .percent => if (legacy != 0) .{ .length = legacy } else value,
+    };
+}
+
 fn resolvedMarginValue(
     value: style.LengthPercentageAuto,
     containing: ?f32,
@@ -248,22 +250,22 @@ fn marginAxes(
     const main_containing: ?f32 = if (main_is_column) containing.height else containing.width;
     const cross_containing: ?f32 = if (main_is_column) containing.width else containing.height;
     const top = resolvedMarginValue(
-        inset.top,
+        effectiveMarginInset(inset.top, margin.top),
         if (main_is_column) main_containing else cross_containing,
         margin.top,
     );
     const right = resolvedMarginValue(
-        inset.right,
+        effectiveMarginInset(inset.right, margin.right),
         if (main_is_column) cross_containing else main_containing,
         margin.right,
     );
     const bottom = resolvedMarginValue(
-        inset.bottom,
+        effectiveMarginInset(inset.bottom, margin.bottom),
         if (main_is_column) main_containing else cross_containing,
         margin.bottom,
     );
     const left = resolvedMarginValue(
-        inset.left,
+        effectiveMarginInset(inset.left, margin.left),
         if (main_is_column) cross_containing else main_containing,
         margin.left,
     );
@@ -606,7 +608,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         for (0..count) |i| finalizeMain(tree, p.children.items[i], available);
     } else {
         // Root pseudo-container: re-run the root grow/shrink against the
-        // available main (root justify is the FlexStyle{} default: start).
+        // available main (root justify is the Style{} default: start).
         var content: f32 = 0;
         var total_grow: f32 = 0;
         var total_shrink: f32 = 0;
@@ -876,15 +878,21 @@ fn layoutAdvancedFlexContainer(
         line_cross_total += lines[line_index].cross_size;
         if (line_index + 1 < line_count) line_cross_total += gap;
     }
-    if (shouldRecomputeAdvancedCross(tree, node, direction) and
-        line_cross_total > available_cross)
-    {
+    const recompute_cross = shouldRecomputeAdvancedCross(tree, node, direction);
+    if (recompute_cross and line_cross_total > available_cross) {
         available_cross = line_cross_total;
         if (main_is_column) {
             node.rect.w = available_cross + inset_cross;
         } else {
             node.rect.h = available_cross + inset_cross;
         }
+    }
+    // A nowrap line in a container with a final cross size uses that content
+    // extent even when an item's cross margins overflow it. Stretch then
+    // subtracts those margins without enlarging margin-free siblings.
+    if (!recompute_cross and wrap == .nowrap) {
+        lines[0].cross_size = available_cross;
+        line_cross_total = available_cross;
     }
 
     var cross_free = @max(0, available_cross - line_cross_total);
@@ -1804,7 +1812,7 @@ fn rootBasisMain(n: *const WidgetNode, containing_main: f32) f32 {
 }
 
 /// Place root-level nodes against `available` as a column: the root
-/// pseudo-container with `FlexStyle{}` defaults (justify=start, align=stretch,
+/// pseudo-container with `Style{}` defaults (justify=start, align=stretch,
 /// gap=0), including grow/shrink on root-level nodes. Root nodes get the
 /// available size as their border box and are positioned at (0,0) relative
 /// to the surface — their rects are already relative, so no offset folding.
@@ -2610,7 +2618,7 @@ test "column grow: first child gets remaining height" {
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .column = .{ .gap = 4 } });
     wireChildren(&tree);
-    tree.node(id1).?.flex = FlexChild{ .grow = 1 };
+    tree.node(id1).?.style.grow = 1;
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -2682,9 +2690,9 @@ test "column shrink: fixed children reduced proportionally to shrink weight" {
     try appendNode(&tree, id3, id4, .{ .label = .{ .text = "ccc" } });
     try appendNode(&tree, id4, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(id1).?.flex = FlexChild{ .shrink = 1 };
-    tree.node(id2).?.flex = FlexChild{ .shrink = 1 };
-    tree.node(id3).?.flex = FlexChild{ .shrink = 2 };
+    tree.node(id1).?.style.shrink = 1;
+    tree.node(id2).?.style.shrink = 1;
+    tree.node(id3).?.style.shrink = 2;
 
     layout(&tree, .{ .width = 100, .height = 24 });
 
@@ -2745,7 +2753,7 @@ test "column padding: children sit in the content box, natural h includes paddin
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(id3).?.box.padding = .{ .left = 8, .top = 8 };
+    tree.node(id3).?.style.padding = .{ .left = 8, .top = 8 };
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -2772,8 +2780,8 @@ test "row margins: advance includes margin.l+r, gap sits between margin boxes" {
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .row = .{ .gap = 3 } });
     wireChildren(&tree);
-    tree.node(id1).?.box.margin = .{ .right = 6 };
-    tree.node(id2).?.box.margin = .{ .left = 4 };
+    tree.node(id1).?.style.margin = .{ .right = 6 };
+    tree.node(id2).?.style.margin = .{ .left = 4 };
 
     layout(&tree, .{ .width = 300, .height = 40 });
 
@@ -2795,7 +2803,7 @@ test "column stretch subtracts child margins" {
     try appendNode(&tree, id1, id2, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(id1).?.box.margin = .{ .left = 5, .right = 5 };
+    tree.node(id1).?.style.margin = .{ .left = 5, .right = 5 };
 
     layout(&tree, .{ .width = 100, .height = 600 });
 
@@ -2819,8 +2827,8 @@ test "bordered container: children sit inside border + padding" {
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(id3).?.box.border = .{ .top = 1, .right = 2, .bottom = 1, .left = 2 };
-    tree.node(id3).?.box.padding = .{ .left = 4, .top = 3 };
+    tree.node(id3).?.style.border = .{ .top = 1, .right = 2, .bottom = 1, .left = 2 };
+    tree.node(id3).?.style.padding = .{ .left = 4, .top = 3 };
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -2872,9 +2880,9 @@ test "root column grow with padding: child ends at the content box bottom" {
     try appendNode(&tree, label, col, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, col, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(label).?.flex = FlexChild{ .grow = 1 };
+    tree.node(label).?.style.grow = 1;
     // 12px top padding: the content box is 12px shorter than the border box.
-    tree.node(col).?.box.padding = .{ .top = 12 };
+    tree.node(col).?.style.padding = .{ .top = 12 };
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -2901,9 +2909,9 @@ test "column shrink clamps at zero: no negative mains, no inverted rects" {
     try appendNode(&tree, id3, id4, .{ .label = .{ .text = "ccc" } });
     try appendNode(&tree, id4, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(id1).?.flex = FlexChild{ .shrink = 1 };
-    tree.node(id2).?.flex = FlexChild{ .shrink = 1 };
-    tree.node(id3).?.flex = FlexChild{ .shrink = 8 };
+    tree.node(id1).?.style.shrink = 1;
+    tree.node(id2).?.style.shrink = 1;
+    tree.node(id3).?.style.shrink = 8;
 
     layout(&tree, .{ .width = 100, .height = 10 });
 
@@ -2932,7 +2940,7 @@ test "root-level margins: node offset by margin, width minus cross margins, adva
     try appendNode(&tree, id1, .root, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, .root, .{ .label = .{ .text = "bbb" } });
     wireChildren(&tree);
-    tree.node(id1).?.box.margin = .{ .top = 20, .left = 10, .right = 10 };
+    tree.node(id1).?.style.margin = .{ .top = 20, .left = 10, .right = 10 };
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -2974,7 +2982,7 @@ test "finalizeMain: nested justify=end re-placed against the FINAL main" {
     wireChildren(&tree);
     tree.node(inner).?.style.justify = .end;
     // The outer column grows the inner column to the available height.
-    tree.node(inner).?.flex = FlexChild{ .grow = 1 };
+    tree.node(inner).?.style.grow = 1;
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -2996,10 +3004,10 @@ test "finalizeMain: nested grow child fills the FINAL content main" {
     try appendNode(&tree, inner, outer, .{ .column = .{} });
     try appendNode(&tree, outer, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(label).?.flex = FlexChild{ .grow = 1 };
-    // The outer column stretches to the available height and grows the inner
+    tree.node(label).?.style.grow = 1;
+    // The outer column stretches the inner column to the available height and grows the inner
     // column along with it.
-    tree.node(inner).?.flex = FlexChild{ .grow = 1 };
+    tree.node(inner).?.style.grow = 1;
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -3022,10 +3030,10 @@ test "column main margins: top/bottom counted, left/right ignored" {
     try appendNode(&tree, b, col, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, col, .root, .{ .column = .{} });
     wireChildren(&tree);
-    tree.node(a).?.box.margin = .{ .top = 10 };
+    tree.node(a).?.style.margin = .{ .top = 10 };
     // Left/right margins are CROSS-axis for a column — they must neither
     // inflate the main-axis sum nor advance the next child.
-    tree.node(b).?.box.margin = .{ .left = 99, .right = 99 };
+    tree.node(b).?.style.margin = .{ .left = 99, .right = 99 };
 
     layout(&tree, .{ .width = 100, .height = 600 });
 
@@ -3051,8 +3059,10 @@ test "shrink uses scaled factor + content floor" {
     try appendNode(&tree, b, row, .{ .label = .{ .text = "bb" } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
     wireChildren(&tree);
-    tree.node(a).?.flex = FlexChild{ .basis = 80, .shrink = 1 };
-    tree.node(b).?.flex = FlexChild{ .basis = 40, .shrink = 1 };
+    tree.node(a).?.style.basis = 80;
+    tree.node(a).?.style.shrink = 1;
+    tree.node(b).?.style.basis = 40;
+    tree.node(b).?.style.shrink = 1;
 
     layout(&tree, .{ .width = 100, .height = 40 });
 
@@ -3081,9 +3091,12 @@ test "shrink freezes at the floor and redistributes" {
     try appendNode(&tree, c, row1, .{ .label = .{ .text = "cc" } });
     try appendNode(&tree, row1, .root, .{ .row = .{} });
     wireChildren(&tree);
-    tree.node(a).?.flex = FlexChild{ .basis = 60, .shrink = 1 };
-    tree.node(b).?.flex = FlexChild{ .basis = 60, .shrink = 1 };
-    tree.node(c).?.flex = FlexChild{ .basis = 60, .shrink = 1 };
+    tree.node(a).?.style.basis = 60;
+    tree.node(a).?.style.shrink = 1;
+    tree.node(b).?.style.basis = 60;
+    tree.node(b).?.style.shrink = 1;
+    tree.node(c).?.style.basis = 60;
+    tree.node(c).?.style.shrink = 1;
 
     layout(&tree, .{ .width = 100, .height = 40 });
 
@@ -3111,9 +3124,12 @@ test "shrink freezes at the floor and redistributes" {
     try appendNode(&tree2, c2, row2, .{ .label = .{ .text = "cc" } });
     try appendNode(&tree2, row2, .root, .{ .row = .{} });
     wireChildren(&tree2);
-    tree2.node(a2).?.flex = FlexChild{ .basis = 80, .shrink = 1 };
-    tree2.node(b2).?.flex = FlexChild{ .basis = 20, .shrink = 1 };
-    tree2.node(c2).?.flex = FlexChild{ .basis = 20, .shrink = 1 };
+    tree2.node(a2).?.style.basis = 80;
+    tree2.node(a2).?.style.shrink = 1;
+    tree2.node(b2).?.style.basis = 20;
+    tree2.node(b2).?.style.shrink = 1;
+    tree2.node(c2).?.style.basis = 20;
+    tree2.node(c2).?.style.shrink = 1;
 
     layout(&tree2, .{ .width = 100, .height = 40 });
 
@@ -3141,8 +3157,8 @@ test "stretch-after-grow: stretch child fills the grown container" {
     try appendNode(&tree, card, row, .{ .column = .{} });
     try appendNode(&tree, row, .root, .{ .row = .{} });
     wireChildren(&tree);
-    tree.node(card).?.box.padding = .{ .left = 12, .right = 12 };
-    tree.node(card).?.flex = FlexChild{ .grow = 1 };
+    tree.node(card).?.style.padding = .{ .left = 12, .right = 12 };
+    tree.node(card).?.style.grow = 1;
 
     layout(&tree, .{ .width = 600, .height = 40 });
 
@@ -3165,7 +3181,7 @@ test "nested stretch container keeps its own inset" {
     try appendNode(&tree, col, row, .{ .column = .{} });
     try appendNode(&tree, row, .root, .{ .row = .{} });
     wireChildren(&tree);
-    tree.node(col).?.box.padding = .{ .left = 10, .right = 10 };
+    tree.node(col).?.style.padding = .{ .left = 10, .right = 10 };
 
     layout(&tree, .{ .width = 200, .height = 40 });
 
@@ -3191,7 +3207,7 @@ test "text_max_width caps clipped text but not visible text" {
     wireChildren(&tree);
     tree.node(clipped_label).?.text_overflow = .clip;
     tree.node(clipped_label).?.text_max_width = 25;
-    tree.node(clipped_label).?.box.padding = .{ .left = 2, .right = 3 };
+    tree.node(clipped_label).?.style.padding = .{ .left = 2, .right = 3 };
     tree.node(visible_label).?.text_max_width = 25;
 
     layout(&tree, .{ .width = 200, .height = 40 });
@@ -3215,8 +3231,11 @@ test "min_main overrides the natural shrink floor in a row" {
     try appendNode(&tree, b, row, .{ .label = .{ .text = "bb" } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
     wireChildren(&tree);
-    tree.node(a).?.flex = .{ .basis = 80, .shrink = 1, .min_main = 70 };
-    tree.node(b).?.flex = .{ .basis = 40, .shrink = 1 };
+    tree.node(a).?.style.basis = 80;
+    tree.node(a).?.style.shrink = 1;
+    tree.node(a).?.style.min_main = 70;
+    tree.node(b).?.style.basis = 40;
+    tree.node(b).?.style.shrink = 1;
 
     layout(&tree, .{ .width = 100, .height = 40 });
 
@@ -3233,8 +3252,11 @@ test "min_main overrides the natural shrink floor at the root" {
     const b: Id = @enumFromInt(2);
     try appendNode(&tree, a, .root, .{ .label = .{ .text = "aa" } });
     try appendNode(&tree, b, .root, .{ .label = .{ .text = "bb" } });
-    tree.node(a).?.flex = .{ .basis = 80, .shrink = 1, .min_main = 70 };
-    tree.node(b).?.flex = .{ .basis = 40, .shrink = 1 };
+    tree.node(a).?.style.basis = 80;
+    tree.node(a).?.style.shrink = 1;
+    tree.node(a).?.style.min_main = 70;
+    tree.node(b).?.style.basis = 40;
+    tree.node(b).?.style.shrink = 1;
 
     layout(&tree, .{ .width = 100, .height = 100 });
 
@@ -3264,8 +3286,10 @@ test "shared column row redistributes after ancestor cross stretch" {
     };
     const shared_columns: widget.SharedColumns = .{ .tracks = &tracks };
     tree.node(row).?.shared_columns = &shared_columns;
-    tree.node(a).?.flex = .{ .grow = tracks[0].grow, .basis = tracks[0].basis };
-    tree.node(b).?.flex = .{ .grow = tracks[1].grow, .basis = tracks[1].basis };
+    tree.node(a).?.style.grow = tracks[0].grow;
+    tree.node(a).?.style.basis = tracks[0].basis;
+    tree.node(b).?.style.grow = tracks[1].grow;
+    tree.node(b).?.style.basis = tracks[1].basis;
 
     layout(&tree, .{ .width = 200, .height = 40 });
 
@@ -3297,10 +3321,10 @@ test "nested column button label stays within final content width" {
     // than the nested column's final cross size.
     tree.node(button_label).?.text_overflow = .ellipsis;
     tree.node(button_label).?.text_max_width = 184;
-    tree.node(button_label).?.flex.min_main = 0;
+    tree.node(button_label).?.style.min_main = 0;
     tree.node(button).?.style.justify = .start;
     tree.node(button).?.style.@"align" = .center;
-    tree.node(column).?.flex.min_main = 0;
+    tree.node(column).?.style.min_main = 0;
     tree.node(row).?.style.@"align" = .center;
 
     const wideText = struct {
@@ -3332,9 +3356,9 @@ test "scroll max_offset uses child margin-box extent" {
     var state: widget.ScrollState = .{};
     tree.node(scroll).?.scroll = .{ .state = &state, .axis = .both };
     tree.node(scroll).?.style.@"align" = .start;
-    tree.node(scroll).?.box.border = .{ .left = 2, .right = 3, .top = 2, .bottom = 3 };
-    tree.node(scroll).?.box.padding = .{ .left = 3, .right = 2, .top = 3, .bottom = 2 };
-    tree.node(child).?.box.margin = .{ .left = 3, .right = 7, .top = 4, .bottom = 9 };
+    tree.node(scroll).?.style.border = .{ .left = 2, .right = 3, .top = 2, .bottom = 3 };
+    tree.node(scroll).?.style.padding = .{ .left = 3, .right = 2, .top = 3, .bottom = 2 };
+    tree.node(child).?.style.margin = .{ .left = 3, .right = 7, .top = 4, .bottom = 9 };
 
     layout(&tree, .{ .width = 100, .height = 80 });
 

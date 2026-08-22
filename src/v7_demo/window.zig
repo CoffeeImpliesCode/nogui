@@ -136,7 +136,7 @@ fn svgCardRect(tree: *const WidgetTree) SvgCard {
     if (ui.svg_box_id) |id_raw| {
         const id: Id = @enumFromInt(id_raw);
         for (tree.nodes.items) |n| {
-            if (n.id == id) return .{ .rect = contentRect(tree, id), .layer = n.box.layer };
+            if (n.id == id) return .{ .rect = contentRect(tree, id), .layer = n.paint.layer };
         }
     }
     return .{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .layer = 0 };
@@ -787,11 +787,24 @@ fn buildSliceRects(
     const glyph_slots = text_engine.glyphSlotCount();
 
     for (cmds) |cmd| {
-        const b = cmd.box;
-        const corner_l: f32 = if (cmd.ring) b.radius.left else @max(0, b.radius.left - b.border.left);
-        const corner_r: f32 = if (cmd.ring) b.radius.right else @max(0, b.radius.right - b.border.right);
-        const corner_t: f32 = if (cmd.ring) b.radius.top else @max(0, b.radius.top - b.border.top);
-        const corner_b: f32 = if (cmd.ring) b.radius.bottom else @max(0, b.radius.bottom - b.border.bottom);
+        const style = cmd.style;
+        const paint = cmd.paint;
+        const corner_l: f32 = if (cmd.ring)
+            paint.radius.left
+        else
+            @max(0, paint.radius.left - style.border.left);
+        const corner_r: f32 = if (cmd.ring)
+            paint.radius.right
+        else
+            @max(0, paint.radius.right - style.border.right);
+        const corner_t: f32 = if (cmd.ring)
+            paint.radius.top
+        else
+            @max(0, paint.radius.top - style.border.top);
+        const corner_b: f32 = if (cmd.ring)
+            paint.radius.bottom
+        else
+            @max(0, paint.radius.bottom - style.border.bottom);
 
         // Rounded-rect material geometry: one radius per axis (the SDF
         // rounds all four corners; demo boxes use uniform radii). Rings
@@ -800,7 +813,10 @@ fn buildSliceRects(
         const rx: f32 = @max(corner_l, corner_r);
         const ry: f32 = @max(corner_t, corner_b);
         const border: f32 = if (cmd.ring)
-            @max(@max(b.border.left, b.border.right), @max(b.border.top, b.border.bottom))
+            @max(
+                @max(style.border.left, style.border.right),
+                @max(style.border.top, style.border.bottom),
+            )
         else
             0;
 
@@ -812,7 +828,7 @@ fn buildSliceRects(
         var slice_corner_r: f32 = corner_r;
         var slice_corner_t: f32 = corner_t;
         var slice_corner_b: f32 = corner_b;
-        if (cmd.shadow > 0) {
+        if (cmd.paint.shadow > 0) {
             // Shadow cmd: feathered rounded-rect material (type 3). The
             // shader fades the coverage over feather/2 px BEYOND the SDF
             // edge — so the quad must be expanded by the feather on every
@@ -821,13 +837,13 @@ fn buildSliceRects(
             // ~1px line). The material's win_w/h stay the WIDGET's size
             // (the SDF's rect) and the origin stays its top-left; only the
             // rasterized quad grows.
-            slice_corner_l = b.radius.left;
-            slice_corner_r = b.radius.right;
-            slice_corner_t = b.radius.top;
-            slice_corner_b = b.radius.bottom;
-            const shadow_rx: f32 = @max(b.radius.left, b.radius.right);
-            const shadow_ry: f32 = @max(b.radius.top, b.radius.bottom);
-            const feather = cmd.shadow;
+            slice_corner_l = paint.radius.left;
+            slice_corner_r = paint.radius.right;
+            slice_corner_t = paint.radius.top;
+            slice_corner_b = paint.radius.bottom;
+            const shadow_rx: f32 = @max(paint.radius.left, paint.radius.right);
+            const shadow_ry: f32 = @max(paint.radius.top, paint.radius.bottom);
+            const feather = cmd.paint.shadow;
             std.debug.assert(material_slot > glyph_slots); // never reach the live glyph slots
             material_slot -= 1;
             proto.GlyphSweeper.writeShadowMaterial(
@@ -855,7 +871,7 @@ fn buildSliceRects(
                 .clip_id = cmd.clip_id,
                 .origin = .{ cmd.rect.x, cmd.rect.y },
                 .tex_idx = cmd.tex_idx,
-                .z = cmd.layer,
+                .z = cmd.paint.layer,
             });
             continue;
         } else if (cmd.ring or rx > 0 or ry > 0) {
@@ -863,7 +879,7 @@ fn buildSliceRects(
             material_slot -= 1;
             // Ring materials always carry the ring's gradient (the demo sets
             // none); fills carry one only when the gradient flag is set.
-            const gradient: [4]f32 = if (cmd.ring or cmd.gradient[3] > 0) cmd.gradient else .{ 0, 0, 0, 0 };
+            const gradient: [4]f32 = if (cmd.ring or cmd.paint.gradient[3] > 0) cmd.paint.gradient else .{ 0, 0, 0, 0 };
             proto.GlyphSweeper.writeRoundedRectMaterial(
                 text_engine.materials,
                 material_slot,
@@ -892,7 +908,7 @@ fn buildSliceRects(
             .clip_id = cmd.clip_id,
             .origin = .{ cmd.rect.x, cmd.rect.y },
             .tex_idx = cmd.tex_idx,
-            .z = cmd.layer,
+            .z = cmd.paint.layer,
         });
     }
 
@@ -969,8 +985,8 @@ fn buildSliceRects(
             if (n.id != hid) continue;
             const r = visualBorderRect(tree, n.id);
             if (r.w <= 0 or r.h <= 0) break;
-            const ring_rx: f32 = @max(n.box.radius.left, n.box.radius.right);
-            const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
+            const ring_rx: f32 = @max(n.paint.radius.left, n.paint.radius.right);
+            const ring_ry: f32 = @max(n.paint.radius.top, n.paint.radius.bottom);
             std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
             proto.GlyphSweeper.writeRoundedRectMaterial(
@@ -986,7 +1002,12 @@ fn buildSliceRects(
             try out.append(gpa, .{
                 .dst = .{ r.x, r.y, r.w, r.h },
                 .src = .{ 0, 0, 1, 1 },
-                .corners = .{ n.box.radius.left, n.box.radius.right, n.box.radius.top, n.box.radius.bottom },
+                .corners = .{
+                    n.paint.radius.left,
+                    n.paint.radius.right,
+                    n.paint.radius.top,
+                    n.paint.radius.bottom,
+                },
                 // Amber ring fades in by hover_alpha (the core eases it);
                 // hover_alpha 1 reproduces the solid ring.
                 .color = srgbToOklab(.{ 1.0, 0.8, 0.2, hover_alpha }),
@@ -1005,8 +1026,8 @@ fn buildSliceRects(
             if (n.id != fid) continue;
             const r = visualBorderRect(tree, n.id);
             if (r.w <= 0 or r.h <= 0) break;
-            const ring_rx: f32 = @max(n.box.radius.left, n.box.radius.right);
-            const ring_ry: f32 = @max(n.box.radius.top, n.box.radius.bottom);
+            const ring_rx: f32 = @max(n.paint.radius.left, n.paint.radius.right);
+            const ring_ry: f32 = @max(n.paint.radius.top, n.paint.radius.bottom);
             std.debug.assert(material_slot > glyph_slots);
             material_slot -= 1;
             proto.GlyphSweeper.writeRoundedRectMaterial(
@@ -1022,7 +1043,12 @@ fn buildSliceRects(
             try out.append(gpa, .{
                 .dst = .{ r.x, r.y, r.w, r.h },
                 .src = .{ 0, 0, 1, 1 },
-                .corners = .{ n.box.radius.left, n.box.radius.right, n.box.radius.top, n.box.radius.bottom },
+                .corners = .{
+                    n.paint.radius.left,
+                    n.paint.radius.right,
+                    n.paint.radius.top,
+                    n.paint.radius.bottom,
+                },
                 .color = srgbToOklab(.{ 0.25, 0.85, 0.85, 1 }),
                 .curve = .{ 0, 0, 0, 0 },
                 .material_index = material_slot,
@@ -1072,8 +1098,8 @@ fn buildSliceRects(
             max_width,
             out,
         );
-        if (n.box.layer > 0) {
-            for (out.items[before..]) |*r| r.z = n.box.layer;
+        if (n.paint.layer > 0) {
+            for (out.items[before..]) |*r| r.z = n.paint.layer;
         }
     }
 
@@ -1105,7 +1131,7 @@ fn buildSliceRects(
                     .clip_id = n.clip_id,
                     .origin = .{ ox + r.origin[0], oy + r.origin[1] },
                     .tex_idx = r.tex_idx,
-                    .z = n.box.layer,
+                    .z = n.paint.layer,
                 });
             }
         }

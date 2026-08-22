@@ -329,7 +329,7 @@ test "sliderSet: resolves the absolute rect through a padded+bordered parent" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 200, .h = 200 },
-        .box = .{ .padding = .{ .left = 10, .top = 10 }, .border = .{ .left = 2 } },
+        .style = .{ .padding = .{ .left = 10, .top = 10 }, .border = .{ .left = 2 } },
     });
 
     // Absolute slider box = (0 + 0 + 2 + 10, 0 + 0 + 0 + 10, 100, 24):

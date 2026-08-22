@@ -1044,7 +1044,7 @@ test "App: mouse wheel stops at the nearest scroll ancestor" {
         .kind = .{ .column = .{} },
         .parent = outer_id,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
         .scroll = .{ .state = &inner_state, .axis = .vertical },
     });
     try tree.nodes.append(std.testing.allocator, .{
@@ -1052,7 +1052,7 @@ test "App: mouse wheel stops at the nearest scroll ancestor" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
         .scroll = .{ .state = &outer_state, .axis = .vertical },
     });
     app.tree_ptr = &tree;

@@ -502,13 +502,13 @@ fn visualText(node: *const WidgetNode) ?[]const u8 {
 }
 
 /// Deterministic layout fingerprint for golden comparisons: one compact
-/// JSON object per node — id, kind, the four rect values, and the box's
-/// layout-relevant sides (margin/border/padding, four floats each). The
-/// rects are the RAW RELATIVE border boxes (parent-content-relative, see
+/// JSON object per node — id, kind, the four rect values, and the typed
+/// Style's layout-relevant sides (margin/border/padding, four floats each).
+/// Rects are the RAW RELATIVE border boxes (parent-content-relative, see
 /// widget.zig Rect), so the fingerprint is stable when a subtree moves as
 /// a unit — a parent offset change does not invalidate child rects.
-/// border_color and radius are paint-only (they change nothing about the
-/// layout), so they are intentionally omitted: two frames with the same
+/// PaintStyle border_color and radius are paint-only (they change nothing
+/// about layout), so they are intentionally omitted: two frames with the same
 /// geometry but different paint flags hash identically, which is what a
 /// golden LAYOUT comparison wants. No labels, no values, no frame
 /// counters — two runs with the same layout always produce the same
@@ -527,15 +527,15 @@ pub fn layoutFingerprint(allocator: std.mem.Allocator, tree: *const WidgetTree) 
                 "\"border_top\":{d:.2},\"border_right\":{d:.2},\"border_bottom\":{d:.2},\"border_left\":{d:.2}," ++
                 "\"padding_top\":{d:.2},\"padding_right\":{d:.2},\"padding_bottom\":{d:.2},\"padding_left\":{d:.2}}}",
             .{
-                n.id.index(),         @tagName(n.kind),
-                n.rect.x,             n.rect.y,
-                n.rect.w,             n.rect.h,
-                n.box.margin.top,     n.box.margin.right,
-                n.box.margin.bottom,  n.box.margin.left,
-                n.box.border.top,     n.box.border.right,
-                n.box.border.bottom,  n.box.border.left,
-                n.box.padding.top,    n.box.padding.right,
-                n.box.padding.bottom, n.box.padding.left,
+                n.id.index(),           @tagName(n.kind),
+                n.rect.x,               n.rect.y,
+                n.rect.w,               n.rect.h,
+                n.style.margin.top,     n.style.margin.right,
+                n.style.margin.bottom,  n.style.margin.left,
+                n.style.border.top,     n.style.border.right,
+                n.style.border.bottom,  n.style.border.left,
+                n.style.padding.top,    n.style.padding.right,
+                n.style.padding.bottom, n.style.padding.left,
             },
         );
     }
@@ -555,7 +555,7 @@ fn isLayered(tree: *const WidgetTree, id: Id) bool {
     var cur: ?Id = id;
     while (cur) |cid| {
         const n = tree.nodeConst(cid) orelse return false;
-        if (n.box.layer != 0) return true;
+        if (n.paint.layer != 0) return true;
         cur = if (n.parent == .root) null else n.parent;
     }
     return false;
@@ -581,12 +581,12 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
             try add("negative size: id {d} {d}x{d}", w, &problems, .{ n.id.index(), r.w, r.h });
         }
 
-        // Box sides: borders and paddings must not be negative. Margins may
+        // Style borders and paddings must not be negative. Margins may
         // be negative (legal CSS — the layer badge's -44 bottom margin is a
         // deliberate layout trick).
         const side_vals = [_]f32{
-            n.box.border.top,  n.box.border.right,  n.box.border.bottom,  n.box.border.left,
-            n.box.padding.top, n.box.padding.right, n.box.padding.bottom, n.box.padding.left,
+            n.style.border.top,  n.style.border.right,  n.style.border.bottom,  n.style.border.left,
+            n.style.padding.top, n.style.padding.right, n.style.padding.bottom, n.style.padding.left,
         };
         for (side_vals) |v| {
             if (v < -0.001) {
@@ -606,11 +606,13 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
             };
             const pw = @max(
                 0,
-                p.rect.w - p.box.border.left - p.box.border.right - p.box.padding.left - p.box.padding.right,
+                p.rect.w - p.style.border.left - p.style.border.right -
+                    p.style.padding.left - p.style.padding.right,
             );
             const ph = @max(
                 0,
-                p.rect.h - p.box.border.top - p.box.border.bottom - p.box.padding.top - p.box.padding.bottom,
+                p.rect.h - p.style.border.top - p.style.border.bottom -
+                    p.style.padding.top - p.style.padding.bottom,
             );
             if (r.x < -0.001 or r.y < -0.001 or
                 r.x + r.w > pw + 0.001 or r.y + r.h > ph + 0.001)
@@ -659,8 +661,8 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
                 // padding (widget.sidesSum) to the content measure; the old
                 // +16 baked approximation disagrees whenever they sum to
                 // anything else.
-                const insets = widget.sidesSum(n.box.border);
-                const pads = widget.sidesSum(n.box.padding);
+                const insets = widget.sidesSum(n.style.border);
+                const pads = widget.sidesSum(n.style.padding);
                 const need_w = switch (n.kind) {
                     .button => ms.width + insets.w + pads.w,
                     .slider => @max(100, ms.width + insets.w + pads.w),
@@ -758,7 +760,7 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
     // squished-title class — two labels' text colliding even when their
     // rects do not.
     if (measure) |_| {
-        const TextBox = struct { id: Id, box: Rect };
+        const TextBox = struct { id: Id, rect: Rect };
         var boxes: std.ArrayList(TextBox) = .empty;
         defer boxes.deinit(allocator);
         for (nodes) |*n| {
@@ -766,15 +768,15 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
             if (text == null) continue;
             if (text.?.len == 0) continue;
             if (n.rect.w <= 0 or n.rect.h <= 0) continue;
-            try boxes.append(allocator, .{ .id = n.id, .box = widget.contentRect(tree, n.id) });
+            try boxes.append(allocator, .{ .id = n.id, .rect = widget.contentRect(tree, n.id) });
         }
         // Strictly-ordered pairs (i < j): each overlap is reported once.
         // Ancestor-descendant pairs are skipped: nested text nodes can
         // intentionally share a content box without colliding.
         for (0..boxes.items.len) |i| {
             for (i + 1..boxes.items.len) |j| {
-                const a = boxes.items[i].box;
-                const b = boxes.items[j].box;
+                const a = boxes.items[i].rect;
+                const b = boxes.items[j].rect;
                 const overlap_x = a.x < b.x + b.w - 0.001 and b.x < a.x + a.w - 0.001;
                 const overlap_y = a.y < b.y + b.h - 0.001 and b.y < a.y + a.h - 0.001;
                 if (!(overlap_x and overlap_y)) continue;
@@ -1277,7 +1279,7 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
-        .box = .{
+        .style = .{
             .border = .{ .left = 2, .top = 3 },
             .padding = .{ .left = 4, .top = 5 },
         },
@@ -1346,7 +1348,7 @@ test "renderAscii: nested node renders at its absolute position" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .box = .{ .padding = .{ .left = 8, .top = 8 } },
+        .style = .{ .padding = .{ .left = 8, .top = 8 } },
     });
     tree.node(col).?.children.items[0] = btn;
     tree.node(col).?.children.len = 1;
@@ -1384,7 +1386,7 @@ test "verifyLayout: nested tree with padding and border verifies OK" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 60 },
-        .box = .{
+        .style = .{
             .border = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 },
             .padding = .{ .top = 8, .right = 6, .bottom = 7, .left = 8 },
         },
@@ -1417,7 +1419,7 @@ test "verifyLayout: child outside the parent's content box is flagged" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .box = .{ .padding = .{ .left = 8, .right = 8 } },
+        .style = .{ .padding = .{ .left = 8, .right = 8 } },
     });
     tree.node(col).?.children.items[0] = child;
     tree.node(col).?.children.len = 1;
@@ -1437,7 +1439,7 @@ test "verifyLayout: negative box sides are reported" {
         .kind = .{ .label = .{ .text = "x" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
-        .box = .{ .padding = .{ .top = -2 } },
+        .style = .{ .padding = .{ .top = -2 } },
     });
 
     const report = try verifyLayout(std.testing.allocator, &tree, null, null);
@@ -1564,7 +1566,7 @@ test "verifyLayout: root-level sibling overlap and surface bounds are flagged" {
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
 }
 
-test "layoutFingerprint: identical rects with different box sides differ" {
+test "layoutFingerprint: identical rects with different Style sides differ" {
     var tree_a = WidgetTree.init(std.testing.allocator);
     defer tree_a.nodes.deinit(std.testing.allocator);
     var tree_b = WidgetTree.init(std.testing.allocator);
@@ -1583,7 +1585,7 @@ test "layoutFingerprint: identical rects with different box sides differ" {
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
-        .box = .{ .padding = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 } },
+        .style = .{ .padding = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 } },
     });
 
     const fpa = try layoutFingerprint(std.testing.allocator, &tree_a);
@@ -1599,14 +1601,14 @@ test "layoutFingerprint: identical rects with different box sides differ" {
     try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_left\":4.00") != null);
 }
 
-test "layoutFingerprint: paint-only box fields (layer) are excluded" {
+test "layoutFingerprint: paint-only fields (layer) are excluded" {
     var tree_a = WidgetTree.init(std.testing.allocator);
     defer tree_a.nodes.deinit(std.testing.allocator);
     var tree_b = WidgetTree.init(std.testing.allocator);
     defer tree_b.nodes.deinit(std.testing.allocator);
 
-    // Same ids, kinds, and rects — only box.layer differs (a paint-only
-    // field, like shadow/gradient/clip/texture). The golden LAYOUT
+    // Same ids, kinds, and rects — only PaintStyle.layer differs (a
+    // paint-only field, like shadow/gradient/clip/texture). The golden LAYOUT
     // comparison must ignore it: two frames with the same geometry but
     // different layer keys hash identically.
     try tree_a.nodes.append(std.testing.allocator, .{
@@ -1614,14 +1616,14 @@ test "layoutFingerprint: paint-only box fields (layer) are excluded" {
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
-        .box = .{ .layer = 0 },
+        .paint = .{ .layer = 0 },
     });
     try tree_b.nodes.append(std.testing.allocator, .{
         .id = @enumFromInt(1),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
-        .box = .{ .layer = 5 },
+        .paint = .{ .layer = 5 },
     });
 
     const fpa = try layoutFingerprint(std.testing.allocator, &tree_a);

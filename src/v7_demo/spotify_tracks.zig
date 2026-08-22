@@ -54,8 +54,8 @@ fn columnsFor(spec: layout.Spec) *const widget.SharedColumns {
 
 fn constrainIdentityText(tree: *widget.WidgetTree, id: Id, max_width: ?f32) void {
     const node = tree.node(id).?;
-    node.flex.shrink = 1;
-    node.flex.min_main = 0;
+    node.style.shrink = 1;
+    node.style.min_main = 0;
     node.text_overflow = .ellipsis;
     if (max_width) |width| node.text_max_width = width;
 }

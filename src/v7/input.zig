@@ -222,7 +222,7 @@ test "hitTest: resolves absolute rect through parent padding + border" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .box = .{
+        .style = .{
             .padding = .{ .left = 8, .top = 8 },
             .border = .{ .left = 2, .top = 1 },
         },
@@ -272,7 +272,7 @@ test "hitTest: clipped child outside parent clip returns null" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
     });
 
     // The child's visual border box contains this point, but the parent's
@@ -297,7 +297,7 @@ test "hitButton: clipped child outside parent clip returns null" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
     });
 
     try std.testing.expectEqual(@as(?Id, null), hitButton(&tree, .{ 25, 10 }));

@@ -26,6 +26,7 @@ const App = nogui.App;
 const Id = nogui.Id;
 const Event = nogui.Event;
 const MandelbrotComponent = @import("mandelbrot_component.zig").MandelbrotComponent;
+const layout = nogui.flex;
 
 /// The demo texture's bindless heap index, set by the window backend after
 /// it creates + registers the procedural texture (the demo UI cannot touch
@@ -811,10 +812,10 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
     try std.testing.expect(n_roots >= 3);
     const badge_col = roots_buf[0];
     try std.testing.expectEqual(Id.root, badge_col.parent);
-    try std.testing.expectEqual(@as(u32, 1), badge_col.box.layer);
+    try std.testing.expectEqual(@as(u32, 1), badge_col.paint.layer);
     var caption_has_layer = false;
     for (tree.nodes.items) |n| {
-        if (n.kind == .label and n.parent == badge_col.id and n.box.layer == 1) caption_has_layer = true;
+        if (n.kind == .label and n.parent == badge_col.id and n.paint.layer == 1) caption_has_layer = true;
     }
     try std.testing.expect(caption_has_layer);
 
@@ -822,7 +823,6 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
     // 1100px surface) chip at y=0; its -44 bottom margin cancels the
     // advance exactly, so the Showcase row starts at y=0 and the root
     // column follows it directly — no badge-induced offset anywhere.
-    const flex = nogui.flex;
     const Rect = nogui.Rect;
     const Size = nogui.Size;
     const fakeMeasure = struct {
@@ -830,7 +830,7 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
             return .{ .width = 40, .height = 24 };
         }
     }.f;
-    flex.layoutWith(&tree, .{ .width = 1100, .height = 1160 }, fakeMeasure);
+    layout.layoutWith(&tree, .{ .width = 1100, .height = 1160 }, fakeMeasure);
 
     try std.testing.expectEqual(Rect{ .x = 20, .y = 0, .w = 200, .h = 44 }, badge_col.rect);
     try std.testing.expectEqual(@as(f32, 0), roots_buf[1].rect.y); // Showcase row, unchanged

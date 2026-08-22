@@ -62,7 +62,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 track.artwork_seed,
                 track.artwork_texture_index,
             );
-            ctx.tree.node(artwork_tile).?.box.padding.bottom = 0;
+            ctx.tree.node(artwork_tile).?.style.padding.bottom = 0;
         }
         _ = try ctx.label(.{
             .text = track.title,

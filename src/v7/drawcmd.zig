@@ -17,68 +17,52 @@
 //!   label                     — not painted (glyph strokes carry it)
 //!   spacer                    — not painted (skipped entirely)
 //!
-//! Bordered nodes (any box.border side > 0) emit a ring cmd first (the
-//! full absolute border box, box.border_color, ring = true), then the
+//! Bordered nodes (any Style.border side > 0) emit a ring cmd first (the
+//! full absolute border box, PaintStyle.border_color, ring = true), then the
 //! fill cmd (border box inset by the border, palette color, ring = false).
 //! A bordered label emits only the ring; a spacer emits nothing.
 //!
-//! Painted nodes with box.shadow > 0 emit a shadow cmd FIRST — the
+//! Painted nodes with PaintStyle.shadow > 0 emit a shadow cmd FIRST — the
 //! absolute border box dropped (+2, +3) px in soft black (alpha 0.28),
-//! feathered by box.shadow — so the shadow paints behind the ring and
-//! fill. `shadow > 0` marks the cmd as a shadow cmd to the renderer.
-//! Every cmd a node emits carries its box's paint-only `shadow` /
-//! `gradient` fields.
+//! feathered by PaintStyle.shadow — so the shadow paints behind the ring and
+//! fill. Every cmd a node emits carries its typed style and paint values.
 //!
 //! Nodes whose rect has w == 0 or h == 0 are skipped: nothing to paint.
 //!
-//! A node with the `.texture` box option (a bindless heap index) emits its
-//! FILL with that tex_idx: the fragment shader's TYPE_TEXTURE branch samples
+//! A node with the `.texture` PaintStyle option emits its FILL with its
+//! bindless heap index: the fragment shader's TYPE_TEXTURE branch samples
 //! the texture before the material dispatch, so the fill ignores the flat
 //! color (painted white = identity tint) and the gradient. The ring and
 //! shadow cmds stay untextured.
+//!
 
 const std = @import("std");
 const tracy = @import("tracy");
 
 const Id = @import("id.zig").Id;
 const Rect = @import("widget.zig").Rect;
-const Box = @import("widget.zig").Box;
+const Style = @import("widget.zig").Style;
+const PaintStyle = @import("widget.zig").PaintStyle;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const absoluteRect = @import("widget.zig").absoluteRect;
 
 /// One paint command: a solid fill (`ring = false`) or a border ring
-/// (`ring = true`). `box` carries the node's box model so the renderer can
-/// derive corner radii per axis.
+/// (`ring = true`). Typed `style` and `paint` values carry the geometry and
+/// visual data required by the renderer.
 pub const DrawCmd = struct {
     rect: Rect,
     color: [4]f32, // sRGB, alpha 1
     kind: enum { solid },
-    box: Box = .{},
+    style: Style = .{},
+    paint: PaintStyle = .{},
     ring: bool = false,
-    /// Paint-only: drop-shadow softness in px (0 = none). A cmd with
-    /// `shadow > 0` is a shadow cmd: the renderer feathers it into a
-    /// rounded-rect shadow behind the node (the box radius feeds the
-    /// corner radius).
-    shadow: f32 = 0,
-    /// Paint-only: the gradient's bottom color in Oklab (all-zero = flat
-    /// fill). Copied from the node's box onto every cmd the node emits.
-    gradient: [4]f32 = .{ 0, 0, 0, 0 },
     /// Clip id: index into the frame's clip-rect list (WidgetTree.
     /// clip_rects); 0xFFFFFFFF = no clip. Stamped by collectDrawCmds from
-    /// the enclosing `.clip` containers (a container's own cmds carry its
-    /// own clip; descendants carry the deepest enclosing one).
+    /// the enclosing `.clip` containers.
     clip_id: u32 = 0xFFFFFFFF,
-    /// Bindless texture heap index (the node's `.texture` box option):
-    /// 0xFFFFFFFF = flat fill. Only the FILL cmd carries it — the fragment
-    /// shader's TYPE_TEXTURE branch samples the texture before the material
-    /// dispatch; ring and shadow cmds never carry a texture.
+    /// Bindless texture heap index. 0xFFFFFFFF = flat fill. Only the FILL
+    /// cmd carries it.
     tex_idx: u32 = 0xFFFFFFFF,
-    /// Paint-only: the node's layer key (the GPU sort's z, v1 spec §2).
-    /// Copied from the node's box onto EVERY cmd the node emits — the
-    /// shadow, the ring, and the fill share the node's layer, so a layered
-    /// node paints as one unit over the whole z=0 tree regardless of the
-    /// bag position. buildSliceRects stamps it as the SceneRect's z.
-    layer: u32 = 0,
 };
 
 const palette = struct {
@@ -148,7 +132,7 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
             clip_len -= 1;
         }
         // A clip-marked container opens a clip for itself and its subtree.
-        if (node.box.clip and abs.w > 0 and abs.h > 0) {
+        if (node.paint.clip and abs.w > 0 and abs.h > 0) {
             if (tree.pushClipRect(.{ .x = abs.x, .y = abs.y, .w = abs.w, .h = abs.h })) |cid| {
                 std.debug.assert(clip_len < clip_stack.len); // nesting beyond 64 clip containers
                 clip_stack[clip_len] = .{ .container = node.id, .clip_id = cid };
@@ -163,11 +147,12 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
         // fix upstream — but the renderer must never emit them).
         if (abs.w <= 0 or abs.h <= 0) continue;
 
-        const b = node.box;
+        const resolved_style = node.style;
+        const paint = node.paint;
         const base_color: ?[4]f32 = switch (node.kind) {
             .column, .row => palette.container,
             // Transparent buttons retain their hit target without a painted slab.
-            .button => if (b.transparent) null else if (b.color[3] > 0) b.color else palette.button,
+            .button => if (paint.transparent) null else if (paint.fill[3] > 0) paint.fill else palette.button,
             .slider => palette.slider,
             .label => null, // no fill — the glyph strokes carry the label
             .spacer => null, // spacer paints nothing
@@ -176,38 +161,33 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
 
         // Shadow first — paints behind everything else for this node: the
         // absolute border box dropped (+2, +3) px, soft black at 28%
-        // alpha, feathered by box.shadow (the box's radius feeds the
-        // shadow's corner radius). Only painted nodes cast shadows;
-        // `shadow > 0` marks the cmd as a shadow cmd to the renderer.
-        if (painted and b.shadow > 0) {
+        // alpha, feathered by PaintStyle.shadow. Only painted nodes cast
+        // shadows; `shadow > 0` marks a shadow cmd for the renderer.
+        if (painted and paint.shadow > 0) {
             try list.append(allocator, .{
                 .rect = Rect{ .x = abs.x + 2, .y = abs.y + 3, .w = abs.w, .h = abs.h },
                 .color = .{ 0, 0, 0, 0.28 },
                 .kind = .solid,
-                .box = b,
+                .style = resolved_style,
+                .paint = paint,
                 .ring = false,
-                .shadow = b.shadow,
-                .gradient = b.gradient,
                 .clip_id = clip_id,
-                .layer = b.layer,
             });
         }
 
-        const bordered = b.border.top > 0 or b.border.right > 0 or
-            b.border.bottom > 0 or b.border.left > 0;
+        const bordered = resolved_style.border.top > 0 or resolved_style.border.right > 0 or
+            resolved_style.border.bottom > 0 or resolved_style.border.left > 0;
 
         // Ring next (paints behind the fill and the children).
         if (bordered and node.kind != .spacer) {
             try list.append(allocator, .{
                 .rect = abs,
-                .color = b.border_color,
+                .color = paint.border_color,
                 .kind = .solid,
-                .box = b,
+                .style = resolved_style,
+                .paint = paint,
                 .ring = true,
-                .shadow = b.shadow,
-                .gradient = b.gradient,
                 .clip_id = clip_id,
-                .layer = b.layer,
             });
         }
 
@@ -218,7 +198,7 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
         // Oklab "white" (1,0,0) would zero the sample's a/b chroma and
         // render every texture desaturated. The texture rect carries the
         // registered heap index.
-        const tex_idx: u32 = b.texture orelse 0xFFFFFFFF;
+        const tex_idx: u32 = paint.texture orelse 0xFFFFFFFF;
         // The held-down button eases from its normal fill to the darker
         // pressed palette color by press_alpha (1 = fully pressed; the
         // core drives the eased value, so the fill tracks the press-in
@@ -233,23 +213,21 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
         // Fill = border box inset by the border (ring area stays clear).
         // Skip fills the border fully consumes (zero/negative size).
         const fill_rect: Rect = .{
-            .x = abs.x + b.border.left,
-            .y = abs.y + b.border.top,
-            .w = @max(0, abs.w - b.border.left - b.border.right),
-            .h = @max(0, abs.h - b.border.top - b.border.bottom),
+            .x = abs.x + resolved_style.border.left,
+            .y = abs.y + resolved_style.border.top,
+            .w = @max(0, abs.w - resolved_style.border.left - resolved_style.border.right),
+            .h = @max(0, abs.h - resolved_style.border.top - resolved_style.border.bottom),
         };
         if (fill_rect.w <= 0 or fill_rect.h <= 0) continue;
         try list.append(allocator, .{
             .rect = fill_rect,
             .color = color,
             .kind = .solid,
-            .box = b,
+            .style = resolved_style,
+            .paint = paint,
             .ring = false,
-            .shadow = b.shadow,
-            .gradient = b.gradient,
             .clip_id = clip_id,
             .tex_idx = tex_idx,
-            .layer = b.layer,
         });
     }
     return list.toOwnedSlice(allocator);
@@ -479,16 +457,17 @@ test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
     defer tree.nodes.deinit(std.testing.allocator);
 
     const btn: Id = @enumFromInt(1);
-    const box: Box = .{
+    const resolved_style: Style = .{
         .border = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 },
-        .border_color = .{ 1, 0, 0, 1 },
     };
+    const paint: PaintStyle = .{ .border_color = .{ 1, 0, 0, 1 } };
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
         .kind = .{ .button = .{ .label = "go" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
-        .box = box,
+        .style = resolved_style,
+        .paint = paint,
     });
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
@@ -499,13 +478,15 @@ test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
     try std.testing.expect(cmds[0].ring);
     try std.testing.expectEqual(Rect{ .x = 10, .y = 10, .w = 80, .h = 30 }, cmds[0].rect);
     try expectColor(cmds[0].color, .{ 1, 0, 0, 1 });
-    try std.testing.expectEqual(box, cmds[0].box);
+    try std.testing.expectEqual(resolved_style, cmds[0].style);
+    try std.testing.expectEqual(paint, cmds[0].paint);
 
     // Fill cmd second: the border box inset by the border, palette color.
     try std.testing.expect(!cmds[1].ring);
     try std.testing.expectEqual(Rect{ .x = 14, .y = 11, .w = 80 - 6, .h = 30 - 4 }, cmds[1].rect);
     try expectColor(cmds[1].color, palette.button);
-    try std.testing.expectEqual(box, cmds[1].box);
+    try std.testing.expectEqual(resolved_style, cmds[1].style);
+    try std.testing.expectEqual(paint, cmds[1].paint);
 }
 
 test "collectDrawCmds: nested node under a column resolves to its absolute rect" {
@@ -543,34 +524,35 @@ test "collectDrawCmds: shadowed node emits one shadow cmd first with offset rect
     defer tree.nodes.deinit(std.testing.allocator);
 
     const btn: Id = @enumFromInt(1);
-    const box: Box = .{ .shadow = 3 };
+    const paint: PaintStyle = .{ .shadow = 3 };
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
         .kind = .{ .button = .{ .label = "go" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
-        .box = box,
+        .paint = paint,
     });
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     // Shadow cmd first: the absolute border box translated (+2, +3), soft
-    // black at 28% alpha, feathered by box.shadow; then the plain fill.
+    // black at 28% alpha, feathered by PaintStyle.shadow; then the plain fill.
     try std.testing.expectEqual(@as(usize, 2), cmds.len);
     try std.testing.expect(!cmds[0].ring);
-    try std.testing.expectEqual(@as(f32, 3), cmds[0].shadow);
+    try std.testing.expectEqual(@as(f32, 3), cmds[0].paint.shadow);
     try std.testing.expectEqual(Rect{ .x = 12, .y = 13, .w = 80, .h = 30 }, cmds[0].rect);
     try expectColor(cmds[0].color, .{ 0, 0, 0, 0.28 });
-    try std.testing.expectEqual(box, cmds[0].box);
+    try std.testing.expectEqual(paint, cmds[0].paint);
 
-    // Fill second: the un-offset border box, palette color, and the box's
-    // paint-only fields carried over.
+    // Fill second: the un-offset border box, palette color, and typed paint
+    // fields carried over.
     try std.testing.expect(!cmds[1].ring);
     try std.testing.expectEqual(Rect{ .x = 10, .y = 10, .w = 80, .h = 30 }, cmds[1].rect);
     try expectColor(cmds[1].color, palette.button);
-    try std.testing.expectEqual(@as(f32, 3), cmds[1].shadow);
-    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, cmds[1].gradient);
+    try std.testing.expectEqual(@as(f32, 3), cmds[1].paint.shadow);
+    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, cmds[1].paint.gradient);
+    try std.testing.expectEqual(paint, cmds[1].paint);
 }
 
 test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
@@ -581,23 +563,27 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
     // fill) — every one must carry the node's layer key so the drawable
     // bag sorts the whole node as one unit onto its z level.
     const btn: Id = @enumFromInt(1);
-    const box: Box = .{ .layer = 2, .shadow = 3, .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 } };
+    const resolved_style: Style = .{
+        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+    };
+    const paint: PaintStyle = .{ .layer = 2, .shadow = 3 };
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
         .kind = .{ .button = .{ .label = "go" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
-        .box = box,
+        .style = resolved_style,
+        .paint = paint,
     });
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
     try std.testing.expectEqual(@as(usize, 3), cmds.len);
-    try std.testing.expectEqual(@as(f32, 3), cmds[0].shadow); // shadow first
+    try std.testing.expectEqual(@as(f32, 3), cmds[0].paint.shadow); // shadow first
     try std.testing.expect(cmds[1].ring);
     try std.testing.expect(!cmds[2].ring);
-    for (cmds) |c| try std.testing.expectEqual(@as(u32, 2), c.layer);
+    for (cmds) |c| try std.testing.expectEqual(@as(u32, 2), c.paint.layer);
 
     // A plain (unlayered) node's cmds default to layer 0.
     const plain: Id = @enumFromInt(2);
@@ -611,8 +597,8 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
     defer std.testing.allocator.free(cmds2);
     // Reversed post-order: the plain button (appended last) emits first.
     try std.testing.expectEqual(@as(usize, 4), cmds2.len);
-    try std.testing.expectEqual(@as(u32, 0), cmds2[0].layer); // plain fill
-    for (cmds2[1..]) |c| try std.testing.expectEqual(@as(u32, 2), c.layer);
+    try std.testing.expectEqual(@as(u32, 0), cmds2[0].paint.layer); // plain fill
+    for (cmds2[1..]) |c| try std.testing.expectEqual(@as(u32, 2), c.paint.layer);
 }
 
 test "collectDrawCmds: bordered label emits exactly one ring cmd" {
@@ -620,16 +606,17 @@ test "collectDrawCmds: bordered label emits exactly one ring cmd" {
     defer tree.nodes.deinit(std.testing.allocator);
 
     const lbl: Id = @enumFromInt(1);
-    const box: Box = .{
+    const resolved_style: Style = .{
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = .{ 0.42, 0.42, 0.48, 1 },
     };
+    const paint: PaintStyle = .{ .border_color = .{ 0.42, 0.42, 0.48, 1 } };
     try tree.nodes.append(std.testing.allocator, .{
         .id = lbl,
         .kind = .{ .label = .{ .text = "hi" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 40, .h = 24 },
-        .box = box,
+        .style = resolved_style,
+        .paint = paint,
     });
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
@@ -640,7 +627,8 @@ test "collectDrawCmds: bordered label emits exactly one ring cmd" {
     try std.testing.expect(cmds[0].ring);
     try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 24 }, cmds[0].rect);
     try expectColor(cmds[0].color, .{ 0.42, 0.42, 0.48, 1 });
-    try std.testing.expectEqual(box, cmds[0].box);
+    try std.testing.expectEqual(resolved_style, cmds[0].style);
+    try std.testing.expectEqual(paint, cmds[0].paint);
 }
 
 test "collectDrawCmds: a .clip container stamps its clip id on its own and descendants' cmds, then pops for siblings" {
@@ -664,7 +652,7 @@ test "collectDrawCmds: a .clip container stamps its clip id on its own and desce
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 60, .h = 40 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
     });
     try tree.nodes.append(std.testing.allocator, .{
         .id = sibling_btn,
@@ -722,14 +710,14 @@ test "collectDrawCmds: nested clip containers stamp the deepest enclosing clip" 
         .kind = .{ .column = .{} },
         .parent = outer,
         .rect = .{ .x = 5, .y = 5, .w = 60, .h = 40 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
     });
     try tree.nodes.append(std.testing.allocator, .{
         .id = outer,
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .box = .{ .clip = true },
+        .paint = .{ .clip = true },
     });
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
