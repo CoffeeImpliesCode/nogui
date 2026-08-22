@@ -6,7 +6,7 @@ pub const TextureId = u32;
 pub const Layer = u32;
 
 /// Layout modes supported by the v7 dispatcher.
-pub const Display = enum { block, flex };
+pub const Display = enum { block, flex, grid };
 
 /// Whether a node participates in normal flow or is removed from it.
 pub const Position = enum { relative, absolute };
@@ -18,6 +18,55 @@ pub const Align = enum { stretch, start, center, end };
 pub const AlignContent = enum { stretch, start, center, end, space_between, space_around };
 pub const AlignSelf = enum { auto, stretch, start, center, end };
 pub const BoxSizing = enum { content_box, border_box };
+
+/// One non-recursive grid track bound. Percentages are fractions in 0..1.
+pub const GridTrackBreadth = union(enum) {
+    fixed: f32,
+    percent: f32,
+    auto,
+    min_content,
+    max_content,
+    fr: f32,
+};
+
+pub const GridMinMax = struct {
+    min: GridTrackBreadth,
+    max: GridTrackBreadth,
+};
+
+/// A CSS-grid track sizing function.
+pub const GridTrack = union(enum) {
+    fixed: f32,
+    percent: f32,
+    auto,
+    min_content,
+    max_content,
+    fr: f32,
+    minmax: GridMinMax,
+
+    pub fn fraction(weight: f32) GridTrack {
+        return .{ .fr = weight };
+    }
+};
+
+/// One grid line value. Positive lines are one-based; spans are track counts.
+pub const GridPlacement = union(enum) {
+    auto,
+    line: i16,
+    span: u8,
+};
+
+pub const GridLine = struct {
+    start: GridPlacement = .auto,
+    end: GridPlacement = .auto,
+};
+
+pub const GridAutoFlow = enum {
+    row,
+    column,
+    row_dense,
+    column_dense,
+};
 
 pub fn directionIsColumn(direction: FlexDirection) bool {
     return direction == .column or direction == .column_reverse;
@@ -439,6 +488,30 @@ pub const Style = struct {
     align_content: AlignContent = .stretch,
     align_self: AlignSelf = .auto,
     gap: f32 = 0,
+    column_gap: f32 = 0,
+    row_gap: f32 = 0,
+
+    /// Grid container track definitions. Slices must have frame-stable
+    /// storage, such as static option data or the frame arena.
+    grid_template_columns: []const GridTrack = &.{},
+    grid_template_rows: []const GridTrack = &.{},
+    grid_auto_columns: GridTrack = .auto,
+    grid_auto_rows: GridTrack = .auto,
+    grid_auto_flow: GridAutoFlow = .row,
+    grid_column_gap: f32 = 0,
+    grid_row_gap: f32 = 0,
+    grid_justify_content: Justify = .start,
+    grid_align_content: AlignContent = .stretch,
+    grid_justify_items: Align = .stretch,
+    grid_align_items: Align = .stretch,
+    grid_justify_self: AlignSelf = .auto,
+    grid_column_start: GridPlacement = .auto,
+    grid_column_end: GridPlacement = .auto,
+    grid_row_start: GridPlacement = .auto,
+    grid_row_end: GridPlacement = .auto,
+    grid_align_self: AlignSelf = .auto,
+    grid_column: GridLine = .{},
+    grid_row: GridLine = .{},
 
     /// Legacy flex values are consumed by the parent; their axis is not the
     /// node's own `direction`.
@@ -484,6 +557,27 @@ pub const Style = struct {
         if (local.align_content) |value| result.align_content = value;
         if (local.align_self) |value| result.align_self = value;
         if (local.gap) |value| result.gap = value;
+        if (local.column_gap) |value| result.column_gap = value;
+        if (local.row_gap) |value| result.row_gap = value;
+        if (local.grid_template_columns) |value| result.grid_template_columns = value;
+        if (local.grid_template_rows) |value| result.grid_template_rows = value;
+        if (local.grid_auto_columns) |value| result.grid_auto_columns = value;
+        if (local.grid_auto_rows) |value| result.grid_auto_rows = value;
+        if (local.grid_auto_flow) |value| result.grid_auto_flow = value;
+        if (local.grid_column_gap) |value| result.grid_column_gap = value;
+        if (local.grid_row_gap) |value| result.grid_row_gap = value;
+        if (local.grid_justify_content) |value| result.grid_justify_content = value;
+        if (local.grid_align_content) |value| result.grid_align_content = value;
+        if (local.grid_justify_items) |value| result.grid_justify_items = value;
+        if (local.grid_align_items) |value| result.grid_align_items = value;
+        if (local.grid_justify_self) |value| result.grid_justify_self = value;
+        if (local.grid_align_self) |value| result.grid_align_self = value;
+        if (local.grid_column) |value| result.grid_column = value;
+        if (local.grid_column_start) |value| result.grid_column_start = value;
+        if (local.grid_column_end) |value| result.grid_column_end = value;
+        if (local.grid_row_start) |value| result.grid_row_start = value;
+        if (local.grid_row_end) |value| result.grid_row_end = value;
+        if (local.grid_row) |value| result.grid_row = value;
         if (local.grow) |value| result.grow = value;
         if (local.shrink) |value| result.shrink = value;
         if (local.basis) |value| {
@@ -656,6 +750,27 @@ pub const StyleOverride = struct {
     align_content: ?AlignContent = null,
     align_self: ?AlignSelf = null,
     gap: ?f32 = null,
+    column_gap: ?f32 = null,
+    row_gap: ?f32 = null,
+    grid_template_columns: ?[]const GridTrack = null,
+    grid_template_rows: ?[]const GridTrack = null,
+    grid_auto_columns: ?GridTrack = null,
+    grid_auto_rows: ?GridTrack = null,
+    grid_auto_flow: ?GridAutoFlow = null,
+    grid_column_gap: ?f32 = null,
+    grid_row_gap: ?f32 = null,
+    grid_justify_content: ?Justify = null,
+    grid_align_content: ?AlignContent = null,
+    grid_justify_items: ?Align = null,
+    grid_align_items: ?Align = null,
+    grid_justify_self: ?AlignSelf = null,
+    grid_align_self: ?AlignSelf = null,
+    grid_column: ?GridLine = null,
+    grid_row: ?GridLine = null,
+    grid_column_start: ?GridPlacement = null,
+    grid_column_end: ?GridPlacement = null,
+    grid_row_start: ?GridPlacement = null,
+    grid_row_end: ?GridPlacement = null,
 
     grow: ?f32 = null,
     shrink: ?f32 = null,
@@ -931,5 +1046,30 @@ test "typed wrapped flex options resolve fieldwise" {
     try std.testing.expect(std.meta.eql(
         @as(LengthPercentageAuto, .auto),
         resolved.margin_inset.top,
+    ));
+}
+
+test "grid style types and overrides retain typed placement" {
+    const tracks = [_]GridTrack{
+        .{ .fixed = 40 },
+        .{ .minmax = .{ .min = .auto, .max = .{ .fr = 1 } } },
+    };
+    const resolved = Style.resolve(.{}, .{
+        .display = .grid,
+        .grid_template_columns = tracks[0..],
+        .grid_auto_flow = .row_dense,
+        .grid_column = .{
+            .start = .{ .line = 1 },
+            .end = .{ .span = 2 },
+        },
+        .grid_row_gap = 6,
+    });
+    try std.testing.expectEqual(Display.grid, resolved.display);
+    try std.testing.expectEqual(@as(usize, 2), resolved.grid_template_columns.len);
+    try std.testing.expectEqual(GridAutoFlow.row_dense, resolved.grid_auto_flow);
+    try std.testing.expectEqual(@as(f32, 6), resolved.grid_row_gap);
+    try std.testing.expect(std.meta.eql(
+        @as(GridPlacement, .{ .span = 2 }),
+        resolved.grid_column.end,
     ));
 }

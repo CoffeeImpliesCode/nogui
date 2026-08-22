@@ -83,7 +83,10 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
     // size and position children relative to the container's content box.
     for (tree.nodes.items) |*node| {
         switch (node.kind) {
-            .column, .row, .button => placeContainer(tree, node, available),
+            .column, .row, .button => if (node.style.display == .grid)
+                layoutGridContainer(tree, node, available)
+            else
+                placeContainer(tree, node, available),
             else => measureLeaf(node, measure),
         }
     }
@@ -348,7 +351,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
     const parent = if (parent_id == .root) null else tree.node(parent_id).?;
     if (parent) |p| {
         if (p.kind != .column and p.kind != .row and p.kind != .button) return;
-        if (p.style.display == .block) return;
+        if (p.style.display == .block or p.style.display == .grid) return;
         const resolved = p.style;
         if (needsAdvancedFlex(tree, p)) {
             for (p.children.items[0..p.children.len]) |child_id|
@@ -434,7 +437,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
     const parent = if (parent_id == .root) null else tree.node(parent_id).?;
     if (parent) |p| {
         if (p.kind != .column and p.kind != .row and p.kind != .button) return;
-        if (p.style.display == .block) return;
+        if (p.style.display == .block or p.style.display == .grid) return;
         const dir: Direction = p.style.direction;
         const gap: f32 = p.style.gap;
         const justify = p.style.justify;
@@ -1015,7 +1018,7 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
     if (parent_id != .root) {
         const parent = tree.node(parent_id) orelse return;
         if (parent.kind != .column and parent.kind != .row and parent.kind != .button) return;
-        if (parent.style.display == .block) return;
+        if (parent.style.display == .block or parent.style.display == .grid) return;
         if (needsAdvancedFlex(tree, parent)) {
             layoutAdvancedFlexContainer(tree, parent, available);
             for (parent.children.items[0..parent.children.len]) |child_id|
@@ -1337,6 +1340,28 @@ fn finalizeSpecialNode(
     if (node.kind != .column and node.kind != .row and node.kind != .button) return;
     if (node.style.display == .block) {
         finalizeBlockChildren(tree, node, available, width_definite, height_definite);
+    } else if (node.style.display == .grid) {
+        layoutGridContainer(tree, node, available);
+        const containing: Size = .{
+            .width = @max(
+                0,
+                node.rect.w - node.style.border.left - node.style.border.right -
+                    node.style.padding.left - node.style.padding.right,
+            ),
+            .height = @max(
+                0,
+                node.rect.h - node.style.border.top - node.style.border.bottom -
+                    node.style.padding.top - node.style.padding.bottom,
+            ),
+        };
+        for (node.children.items[0..node.children.len]) |child_id| {
+            const child = tree.node(child_id) orelse continue;
+            if (child.style.position == .absolute) {
+                placeAbsoluteChild(child, containing, width_definite, height_definite);
+            } else {
+                applyRelativeInsets(child, containing, true, true);
+            }
+        }
     } else {
         const containing: Size = .{
             .width = @max(
@@ -1386,6 +1411,26 @@ fn finalizeSpecialRoots(tree: *WidgetTree, available: Size) void {
         if (node.style.position == .absolute) {
             placeAbsoluteChild(node, available, true, true);
             reflowFlexContainer(tree, node, available);
+        } else if (node.style.display == .grid) {
+            const intrinsic: Size = .{ .width = node.rect.w, .height = node.rect.h };
+            node.resolveTypedStyleAxes(available.width, available.height, intrinsic);
+            const width = blockDimension(
+                node,
+                node.style.size.width,
+                available.width,
+                intrinsic.width,
+                true,
+            ) orelse node.rect.w;
+            const height = blockDimension(
+                node,
+                node.style.size.height,
+                available.height,
+                intrinsic.height,
+                false,
+            ) orelse node.rect.h;
+            node.rect.w = clampBlockAxis(node, width, available.width, intrinsic.width, true);
+            node.rect.h = clampBlockAxis(node, height, available.height, intrinsic.height, false);
+            layoutGridContainer(tree, node, available);
         } else if (node.style.display == .block) {
             const intrinsic: Size = .{ .width = node.rect.w, .height = node.rect.h };
             node.resolveTypedStyleAxes(
@@ -1858,6 +1903,636 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
         n.rect.x = m.left;
         n.rect.y = y + m.top;
         y += main + m.top + m.bottom;
+    }
+}
+
+const GridTrack = style.GridTrack;
+const GridTrackBreadth = style.GridTrackBreadth;
+const GridPlacement = style.GridPlacement;
+
+fn gridTrackMin(track: GridTrack, containing: ?f32) f32 {
+    return switch (track) {
+        .fixed => |value| @max(0, value),
+        .percent => |fraction| if (containing) |size| @max(0, size * fraction) else 0,
+        .auto, .min_content, .max_content, .fr => 0,
+        .minmax => |value| gridBreadthMin(value.min, containing),
+    };
+}
+
+fn gridBreadthMin(breadth: GridTrackBreadth, containing: ?f32) f32 {
+    return switch (breadth) {
+        .fixed => |value| @max(0, value),
+        .percent => |fraction| if (containing) |size| @max(0, size * fraction) else 0,
+        .auto, .min_content, .max_content, .fr => 0,
+    };
+}
+
+fn gridTrackFr(track: GridTrack) f32 {
+    return switch (track) {
+        .fr => |weight| @max(0, weight),
+        .minmax => |value| switch (value.max) {
+            .fr => |weight| @max(0, weight),
+            else => 0,
+        },
+        else => 0,
+    };
+}
+
+fn gridTrackAllowsIntrinsic(track: GridTrack) bool {
+    return switch (track) {
+        .auto, .min_content, .max_content => true,
+        .minmax => |value| switch (value.min) {
+            .auto, .min_content, .max_content => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn gridTrackMax(track: GridTrack, containing: ?f32) ?f32 {
+    return switch (track) {
+        .fixed => |value| @max(0, value),
+        .percent => |fraction| if (containing) |size| @max(0, size * fraction) else null,
+        .auto, .min_content, .max_content, .fr => null,
+        .minmax => |value| switch (value.max) {
+            .fixed => |size| @max(0, size),
+            .percent => |fraction| if (containing) |size| @max(0, size * fraction) else null,
+            .auto, .min_content, .max_content, .fr => null,
+        },
+    };
+}
+
+fn gridLineIndex(value: GridPlacement, explicit_count: usize) ?usize {
+    return switch (value) {
+        .auto, .span => null,
+        .line => |line| if (line > 0)
+            @as(usize, @intCast(line - 1))
+        else if (line < 0 and explicit_count > 0)
+            @as(usize, @intCast(@as(i32, @intCast(explicit_count)) + @as(i32, line)))
+        else
+            null,
+    };
+}
+
+fn gridSpan(value: GridPlacement) usize {
+    return switch (value) {
+        .span => |span| @max(@as(usize, 1), @as(usize, span)),
+        else => 1,
+    };
+}
+
+fn gridPlacementFor(
+    line: style.GridLine,
+    explicit_count: usize,
+) struct { start: usize, end: usize, explicit: bool } {
+    var start = gridLineIndex(line.start, explicit_count);
+    var end = gridLineIndex(line.end, explicit_count);
+    if (start) |value| {
+        if (end == null) end = value + gridSpan(line.end);
+    } else if (end) |value| {
+        start = if (value >= gridSpan(line.start)) value - gridSpan(line.start) else 0;
+    }
+    if (start) |start_value| {
+        const end_value = end orelse start_value + 1;
+        if (end_value > start_value) {
+            return .{
+                .start = start_value,
+                .end = end_value,
+                .explicit = true,
+            };
+        }
+    }
+    return .{ .start = 0, .end = 1, .explicit = false };
+}
+
+fn gridAreaFree(
+    occupied: *const [32 * 32]bool,
+    row: usize,
+    column: usize,
+    row_span: usize,
+    column_span: usize,
+) bool {
+    if (row + row_span > 32 or column + column_span > 32) return false;
+    for (row..row + row_span) |row_index| {
+        for (column..column + column_span) |column_index| {
+            if (occupied[row_index * 32 + column_index]) return false;
+        }
+    }
+    return true;
+}
+
+fn gridMarkArea(
+    occupied: *[32 * 32]bool,
+    row: usize,
+    column: usize,
+    row_span: usize,
+    column_span: usize,
+) void {
+    for (row..row + row_span) |row_index| {
+        for (column..column + column_span) |column_index| {
+            occupied[row_index * 32 + column_index] = true;
+        }
+    }
+}
+
+fn gridAlign(value: style.AlignSelf, fallback: style.Align) style.Align {
+    return switch (value) {
+        .auto => fallback,
+        .stretch => .stretch,
+        .start => .start,
+        .center => .center,
+        .end => .end,
+    };
+}
+
+fn gridContentOffset(
+    mode: style.Justify,
+    free: f32,
+    count: usize,
+) struct { offset: f32, extra_gap: f32 } {
+    if (free <= 0 or count == 0) return .{ .offset = 0, .extra_gap = 0 };
+    return switch (mode) {
+        .start => .{ .offset = 0, .extra_gap = 0 },
+        .center => .{ .offset = free / 2, .extra_gap = 0 },
+        .end => .{ .offset = free, .extra_gap = 0 },
+        .space_between => .{
+            .offset = 0,
+            .extra_gap = if (count > 1) free / @as(f32, @floatFromInt(count - 1)) else 0,
+        },
+    };
+}
+
+fn gridAlignContentOffset(
+    mode: style.AlignContent,
+    free: f32,
+    count: usize,
+) struct { offset: f32, extra_gap: f32, stretch: f32 } {
+    if (free <= 0 or count == 0) return .{ .offset = 0, .extra_gap = 0, .stretch = 0 };
+    return switch (mode) {
+        .start => .{ .offset = 0, .extra_gap = 0, .stretch = 0 },
+        .center => .{ .offset = free / 2, .extra_gap = 0, .stretch = 0 },
+        .end => .{ .offset = free, .extra_gap = 0, .stretch = 0 },
+        .space_between => .{
+            .offset = 0,
+            .extra_gap = if (count > 1) free / @as(f32, @floatFromInt(count - 1)) else 0,
+            .stretch = 0,
+        },
+        .space_around => .{
+            .offset = free / @as(f32, @floatFromInt(count * 2)),
+            .extra_gap = free / @as(f32, @floatFromInt(count)),
+            .stretch = 0,
+        },
+        .stretch => .{
+            .offset = 0,
+            .extra_gap = 0,
+            .stretch = free / @as(f32, @floatFromInt(count)),
+        },
+    };
+}
+
+/// Place one grid container with bounded stack storage. Explicit tracks are
+/// resolved first, intrinsic contributions grow auto tracks, and `fr` tracks
+/// receive the remaining definite content-box space.
+fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
+    const inset_width = blockInsetWidth(node);
+    const inset_height = blockInsetHeight(node);
+    var flow_ids: [32]Id = undefined;
+    var flow_count: usize = 0;
+    for (node.children.items[0..node.children.len]) |child_id| {
+        const child = tree.node(child_id) orelse continue;
+        if (child.style.position == .absolute) continue;
+        if (flow_count < flow_ids.len) {
+            flow_ids[flow_count] = child_id;
+            flow_count += 1;
+        }
+    }
+
+    var columns: [32]GridTrack = [_]GridTrack{.auto} ** 32;
+    var rows: [32]GridTrack = [_]GridTrack{.auto} ** 32;
+    var column_count: usize = @min(node.style.grid_template_columns.len, columns.len);
+    var row_count: usize = @min(node.style.grid_template_rows.len, rows.len);
+    for (0..column_count) |index| columns[index] = node.style.grid_template_columns[index];
+    for (0..row_count) |index| rows[index] = node.style.grid_template_rows[index];
+    if (column_count == 0) column_count = 1;
+    if (row_count == 0) row_count = 1;
+    const explicit_column_count = column_count;
+    const explicit_row_count = row_count;
+    for (explicit_column_count..columns.len) |index| columns[index] = node.style.grid_auto_columns;
+    for (explicit_row_count..rows.len) |index| rows[index] = node.style.grid_auto_rows;
+
+    var column_start: [32]usize = [_]usize{0} ** 32;
+    var column_end: [32]usize = [_]usize{1} ** 32;
+    var row_start: [32]usize = [_]usize{0} ** 32;
+    var row_end: [32]usize = [_]usize{1} ** 32;
+    var occupied: [32 * 32]bool = [_]bool{false} ** (32 * 32);
+
+    // First reserve fully explicit items. This makes auto placement stable
+    // even when the source order interleaves explicit and automatic items.
+    for (0..flow_count) |index| {
+        const child = tree.node(flow_ids[index]) orelse continue;
+        const column_line: style.GridLine = if (!std.meta.eql(child.style.grid_column, style.GridLine{}))
+            child.style.grid_column
+        else
+            .{ .start = child.style.grid_column_start, .end = child.style.grid_column_end };
+        const row_line: style.GridLine = if (!std.meta.eql(child.style.grid_row, style.GridLine{}))
+            child.style.grid_row
+        else
+            .{ .start = child.style.grid_row_start, .end = child.style.grid_row_end };
+        const column_place = gridPlacementFor(column_line, column_count);
+        const row_place = gridPlacementFor(row_line, row_count);
+        if (!column_place.explicit or !row_place.explicit) continue;
+        if (column_place.start >= 32 or row_place.start >= 32) continue;
+        column_start[index] = column_place.start;
+        column_end[index] = @min(32, column_place.end);
+        row_start[index] = row_place.start;
+        row_end[index] = @min(32, row_place.end);
+        column_count = @max(column_count, column_end[index]);
+        row_count = @max(row_count, row_end[index]);
+        if (column_count > 32) column_count = 32;
+        if (row_count > 32) row_count = 32;
+        if (gridAreaFree(
+            &occupied,
+            row_start[index],
+            column_start[index],
+            row_end[index] - row_start[index],
+            column_end[index] - column_start[index],
+        )) {
+            gridMarkArea(
+                &occupied,
+                row_start[index],
+                column_start[index],
+                row_end[index] - row_start[index],
+                column_end[index] - column_start[index],
+            );
+        }
+    }
+
+    const dense = node.style.grid_auto_flow == .row_dense or
+        node.style.grid_auto_flow == .column_dense;
+    const column_flow = node.style.grid_auto_flow == .column or
+        node.style.grid_auto_flow == .column_dense;
+    var cursor_row: usize = 0;
+    var cursor_column: usize = 0;
+    for (0..flow_count) |index| {
+        if (column_end[index] > column_start[index] and row_end[index] > row_start[index]) {
+            const child = tree.node(flow_ids[index]) orelse continue;
+            const column_line: style.GridLine = if (!std.meta.eql(child.style.grid_column, style.GridLine{}))
+                child.style.grid_column
+            else
+                .{ .start = child.style.grid_column_start, .end = child.style.grid_column_end };
+            const row_line: style.GridLine = if (!std.meta.eql(child.style.grid_row, style.GridLine{}))
+                child.style.grid_row
+            else
+                .{ .start = child.style.grid_row_start, .end = child.style.grid_row_end };
+            if (gridPlacementFor(column_line, column_count).explicit and
+                gridPlacementFor(row_line, row_count).explicit) continue;
+        }
+        const child = tree.node(flow_ids[index]) orelse continue;
+        const column_line: style.GridLine = if (!std.meta.eql(child.style.grid_column, style.GridLine{}))
+            child.style.grid_column
+        else
+            .{ .start = child.style.grid_column_start, .end = child.style.grid_column_end };
+        const row_line: style.GridLine = if (!std.meta.eql(child.style.grid_row, style.GridLine{}))
+            child.style.grid_row
+        else
+            .{ .start = child.style.grid_row_start, .end = child.style.grid_row_end };
+        const column_place = gridPlacementFor(column_line, column_count);
+        const row_place = gridPlacementFor(row_line, row_count);
+        const column_span = gridSpan(column_line.start);
+        const row_span = gridSpan(row_line.start);
+        var placed = false;
+        var attempts: usize = 0;
+        var candidate_row = if (dense) 0 else cursor_row;
+        var candidate_column = if (dense) 0 else cursor_column;
+        while (attempts < 1024 and !placed) : (attempts += 1) {
+            var candidate_column_span = column_span;
+            var candidate_row_span = row_span;
+            if (column_place.explicit) {
+                candidate_column = column_place.start;
+                candidate_column_span = @max(1, column_place.end - column_place.start);
+            }
+            if (row_place.explicit) {
+                candidate_row = row_place.start;
+                candidate_row_span = @max(1, row_place.end - row_place.start);
+            }
+            if (candidate_column + candidate_column_span > 32 or
+                candidate_row + candidate_row_span > 32)
+            {
+                break;
+            }
+            if (candidate_column + candidate_column_span > column_count) {
+                if (column_flow or row_place.explicit) {
+                    column_count = @min(32, candidate_column + candidate_column_span);
+                } else {
+                    candidate_column = 0;
+                    candidate_row += 1;
+                    continue;
+                }
+            }
+            if (candidate_row + candidate_row_span > row_count) {
+                if (!column_flow or column_place.explicit) {
+                    row_count = @min(32, candidate_row + candidate_row_span);
+                } else {
+                    candidate_row = 0;
+                    candidate_column += 1;
+                    continue;
+                }
+            }
+            if (gridAreaFree(
+                &occupied,
+                candidate_row,
+                candidate_column,
+                candidate_row_span,
+                candidate_column_span,
+            )) {
+                column_start[index] = candidate_column;
+                column_end[index] = candidate_column + candidate_column_span;
+                row_start[index] = candidate_row;
+                row_end[index] = candidate_row + candidate_row_span;
+                gridMarkArea(
+                    &occupied,
+                    candidate_row,
+                    candidate_column,
+                    candidate_row_span,
+                    candidate_column_span,
+                );
+                placed = true;
+                if (!dense) {
+                    if (column_flow) {
+                        cursor_column = candidate_column;
+                        cursor_row = candidate_row + 1;
+                    } else {
+                        cursor_row = candidate_row;
+                        cursor_column = candidate_column + 1;
+                    }
+                }
+            } else if (column_flow) {
+                candidate_row += 1;
+                if (candidate_row >= row_count) {
+                    candidate_row = 0;
+                    candidate_column += 1;
+                }
+            } else {
+                candidate_column += 1;
+                if (candidate_column >= column_count) {
+                    candidate_column = 0;
+                    candidate_row += 1;
+                }
+            }
+        }
+    }
+
+    const intrinsic_width = blk: {
+        var result: f32 = 0;
+        for (0..flow_count) |index| result = @max(result, tree.node(flow_ids[index]).?.rect.w);
+        break :blk result;
+    };
+    const intrinsic_height = blk: {
+        var result: f32 = 0;
+        for (0..flow_count) |index| result = @max(result, tree.node(flow_ids[index]).?.rect.h);
+        break :blk result;
+    };
+    node.resolveTypedStyle(null, .{ .width = intrinsic_width, .height = intrinsic_height });
+    const explicit_width = blockDimension(
+        node,
+        node.style.size.width,
+        null,
+        intrinsic_width,
+        true,
+    );
+    const explicit_height = blockDimension(
+        node,
+        node.style.size.height,
+        null,
+        intrinsic_height,
+        false,
+    );
+    const existing_width = if (node.rect.w > inset_width) node.rect.w - inset_width else null;
+    const existing_height = if (node.rect.h > inset_height) node.rect.h - inset_height else null;
+    const width_containing = if (explicit_width) |value| value - inset_width else existing_width;
+    const height_containing = if (explicit_height) |value| value - inset_height else existing_height;
+    var column_sizes: [32]f32 = [_]f32{0} ** 32;
+    var row_sizes: [32]f32 = [_]f32{0} ** 32;
+    for (0..column_count) |index| column_sizes[index] = gridTrackMin(columns[index], width_containing);
+    for (0..row_count) |index| row_sizes[index] = gridTrackMin(rows[index], height_containing);
+
+    const intrinsic_column_gap = if (node.style.grid_column_gap != 0)
+        node.style.grid_column_gap
+    else if (node.style.column_gap != 0)
+        node.style.column_gap
+    else
+        node.style.gap;
+    const intrinsic_row_gap = if (node.style.grid_row_gap != 0)
+        node.style.grid_row_gap
+    else if (node.style.row_gap != 0)
+        node.style.row_gap
+    else
+        node.style.gap;
+    for (0..flow_count) |index| {
+        const child = tree.node(flow_ids[index]) orelse continue;
+        const margin = child.style.margin;
+        const need_width = child.rect.w + margin.left + margin.right;
+        const need_height = child.rect.h + margin.top + margin.bottom;
+        const column_span = @max(1, column_end[index] - column_start[index]);
+        const row_span = @max(1, row_end[index] - row_start[index]);
+        if (column_span == 1 and gridTrackAllowsIntrinsic(columns[column_start[index]])) {
+            column_sizes[column_start[index]] = @max(column_sizes[column_start[index]], need_width);
+        } else if (column_span > 1) {
+            var current: f32 = 0;
+            for (column_start[index]..column_end[index]) |track_index| current += column_sizes[track_index];
+            const extra = @max(0, need_width - current -
+                @max(0, @as(f32, @floatFromInt(column_span - 1)) * @max(0, intrinsic_column_gap)));
+            if (extra > 0) {
+                const addition = extra / @as(f32, @floatFromInt(column_span));
+                for (column_start[index]..column_end[index]) |track_index| {
+                    column_sizes[track_index] += addition;
+                }
+            }
+        }
+        if (row_span == 1 and gridTrackAllowsIntrinsic(rows[row_start[index]])) {
+            row_sizes[row_start[index]] = @max(row_sizes[row_start[index]], need_height);
+        } else if (row_span > 1) {
+            var current: f32 = 0;
+            for (row_start[index]..row_end[index]) |track_index| current += row_sizes[track_index];
+            const extra = @max(0, need_height - current -
+                @max(0, @as(f32, @floatFromInt(row_span - 1)) * @max(0, intrinsic_row_gap)));
+            if (extra > 0) {
+                const addition = extra / @as(f32, @floatFromInt(row_span));
+                for (row_start[index]..row_end[index]) |track_index| row_sizes[track_index] += addition;
+            }
+        }
+    }
+    for (0..column_count) |index| {
+        if (gridTrackMax(columns[index], width_containing)) |maximum|
+            column_sizes[index] = @min(column_sizes[index], maximum);
+    }
+    for (0..row_count) |index| {
+        if (gridTrackMax(rows[index], height_containing)) |maximum|
+            row_sizes[index] = @min(row_sizes[index], maximum);
+    }
+
+    const column_gap = @max(0, if (node.style.grid_column_gap != 0)
+        node.style.grid_column_gap
+    else if (node.style.column_gap != 0)
+        node.style.column_gap
+    else
+        node.style.gap);
+    const row_gap = @max(0, if (node.style.grid_row_gap != 0)
+        node.style.grid_row_gap
+    else if (node.style.row_gap != 0)
+        node.style.row_gap
+    else
+        node.style.gap);
+    const column_gap_total = if (column_count > 1)
+        column_gap * @as(f32, @floatFromInt(column_count - 1))
+    else
+        0;
+    const row_gap_total = if (row_count > 1)
+        row_gap * @as(f32, @floatFromInt(row_count - 1))
+    else
+        0;
+    const column_sum = blk: {
+        var result: f32 = 0;
+        for (0..column_count) |index| result += column_sizes[index];
+        break :blk result;
+    };
+    const row_sum = blk: {
+        var result: f32 = 0;
+        for (0..row_count) |index| result += row_sizes[index];
+        break :blk result;
+    };
+    const content_width = @max(0, width_containing orelse column_sum + column_gap_total);
+    const content_height = @max(0, height_containing orelse row_sum + row_gap_total);
+    const width_free = content_width - column_sum - column_gap_total;
+    const height_free = content_height - row_sum - row_gap_total;
+    var total_column_fr: f32 = 0;
+    var total_row_fr: f32 = 0;
+    for (0..column_count) |index| total_column_fr += gridTrackFr(columns[index]);
+    for (0..row_count) |index| total_row_fr += gridTrackFr(rows[index]);
+    if (width_free > 0 and total_column_fr > 0) {
+        for (0..column_count) |index| {
+            const weight = gridTrackFr(columns[index]);
+            if (weight > 0) column_sizes[index] += width_free * weight / total_column_fr;
+        }
+    }
+    if (height_free > 0 and total_row_fr > 0) {
+        for (0..row_count) |index| {
+            const weight = gridTrackFr(rows[index]);
+            if (weight > 0) row_sizes[index] += height_free * weight / total_row_fr;
+        }
+    }
+    const final_column_sum = blk: {
+        var result: f32 = 0;
+        for (0..column_count) |index| result += column_sizes[index];
+        break :blk result;
+    };
+    const final_row_sum = blk: {
+        var result: f32 = 0;
+        for (0..row_count) |index| result += row_sizes[index];
+        break :blk result;
+    };
+    const grid_justify_content = if (node.style.grid_justify_content == .start and node.style.justify != .start)
+        node.style.justify
+    else
+        node.style.grid_justify_content;
+    const grid_align_content = if (node.style.grid_align_content == .stretch and node.style.align_content != .stretch)
+        node.style.align_content
+    else
+        node.style.grid_align_content;
+    const grid_justify_items = if (node.style.grid_justify_items == .stretch and node.style.@"align" != .stretch)
+        node.style.@"align"
+    else
+        node.style.grid_justify_items;
+    const grid_align_items = if (node.style.grid_align_items == .stretch and node.style.@"align" != .stretch)
+        node.style.@"align"
+    else
+        node.style.grid_align_items;
+    const justify_offset = gridContentOffset(
+        grid_justify_content,
+        @max(0, content_width - final_column_sum - column_gap_total),
+        column_count,
+    );
+    const align_offset = gridAlignContentOffset(
+        grid_align_content,
+        @max(0, content_height - final_row_sum - row_gap_total),
+        row_count,
+    );
+    var column_offsets: [32]f32 = [_]f32{0} ** 32;
+    var row_offsets: [32]f32 = [_]f32{0} ** 32;
+    var cursor: f32 = justify_offset.offset;
+    for (0..column_count) |index| {
+        column_offsets[index] = cursor;
+        cursor += column_sizes[index] + column_gap + justify_offset.extra_gap;
+    }
+    cursor = align_offset.offset;
+    for (0..row_count) |index| {
+        row_offsets[index] = cursor;
+        cursor += row_sizes[index] + row_gap + align_offset.extra_gap + align_offset.stretch;
+        if (align_offset.stretch > 0) row_sizes[index] += align_offset.stretch;
+    }
+
+    const final_width = explicit_width orelse
+        if (existing_width) |value| value + inset_width else content_width + inset_width;
+    const final_height = explicit_height orelse
+        if (existing_height) |value| value + inset_height else content_height + inset_height;
+    node.rect.w = clampBlockAxis(node, final_width, available.width, intrinsic_width, true);
+    node.rect.h = clampBlockAxis(node, final_height, available.height, intrinsic_height, false);
+
+    for (0..flow_count) |index| {
+        const child = tree.node(flow_ids[index]) orelse continue;
+        if (column_start[index] >= column_count or row_start[index] >= row_count) continue;
+        const column_span = @min(column_count, column_end[index]) - column_start[index];
+        const row_span = @min(row_count, row_end[index]) - row_start[index];
+        var area_width: f32 = 0;
+        var area_height: f32 = 0;
+        for (column_start[index]..column_start[index] + column_span) |track_index|
+            area_width += column_sizes[track_index];
+        for (row_start[index]..row_start[index] + row_span) |track_index|
+            area_height += row_sizes[track_index];
+        if (column_span > 1) area_width += column_gap * @as(f32, @floatFromInt(column_span - 1));
+        if (row_span > 1) area_height += row_gap * @as(f32, @floatFromInt(row_span - 1));
+        child.resolveTypedStyleAxes(
+            area_width,
+            area_height,
+            .{ .width = child.rect.w, .height = child.rect.h },
+        );
+        const margin = child.style.margin;
+        const explicit_child_width = child.resolved_dimensions.width;
+        const explicit_child_height = child.resolved_dimensions.height;
+        var child_width = if (explicit_child_width) |value|
+            child.resolved_style.clampWidth(value)
+        else if (gridAlign(child.style.grid_justify_self, grid_justify_items) == .stretch)
+            @max(0, area_width - margin.left - margin.right)
+        else
+            child.rect.w;
+        var child_height = if (explicit_child_height) |value|
+            child.resolved_style.clampHeight(value)
+        else if (gridAlign(child.style.grid_align_self, grid_align_items) == .stretch)
+            @max(0, area_height - margin.top - margin.bottom)
+        else
+            child.rect.h;
+        child_width = child.resolved_style.clampWidth(child_width);
+        child_height = child.resolved_style.clampHeight(child_height);
+        const justify_self = gridAlign(child.style.grid_justify_self, grid_justify_items);
+        const align_self = gridAlign(child.style.grid_align_self, grid_align_items);
+        const free_width = @max(0, area_width - child_width - margin.left - margin.right);
+        const free_height = @max(0, area_height - child_height - margin.top - margin.bottom);
+        const child_x = column_offsets[column_start[index]] + margin.left + switch (justify_self) {
+            .stretch, .start => 0,
+            .center => free_width / 2,
+            .end => free_width,
+        };
+        const child_y = row_offsets[row_start[index]] + margin.top + switch (align_self) {
+            .stretch, .start => 0,
+            .center => free_height / 2,
+            .end => free_height,
+        };
+        child.rect = .{
+            .x = child_x,
+            .y = child_y,
+            .w = child_width,
+            .h = child_height,
+        };
     }
 }
 
@@ -3063,6 +3738,7 @@ test "wrapped flex excludes absolute children from line formation" {
     const second: Id = @enumFromInt(3);
     const row: Id = @enumFromInt(4);
     try appendNode(&tree, first, row, .{ .spacer = .{ .size = 30 } });
+
     try appendNode(&tree, absolute, row, .{ .spacer = .{ .size = 90 } });
     try appendNode(&tree, second, row, .{ .spacer = .{ .size = 30 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
@@ -3085,6 +3761,239 @@ test "wrapped flex excludes absolute children from line formation" {
     try testing.expectEqual(@as(f32, 40), tree.node(second).?.rect.x);
     try testing.expectEqual(@as(f32, 0), tree.node(second).?.rect.y);
     try testing.expectEqual(@as(f32, 90), tree.node(absolute).?.rect.w);
+}
+test "grid fixed and percentage tracks resolve against definite content" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const grid: Id = @enumFromInt(3);
+    try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 8 } });
+    try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 8 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    const columns = [_]style.GridTrack{ .{ .fixed = 40 }, .{ .percent = 0.5 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 200 },
+            .height = .{ .length = 80 },
+        },
+        .grid_template_columns = columns[0..],
+        .grid_template_rows = rows[0..],
+        .grid_column = .{},
+        .grid_row = .{},
+    };
+    tree.node(first).?.style.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    tree.node(second).?.style.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 3 },
+    };
+    layout(&tree, .{ .width = 300, .height = 200 });
+    try testing.expectEqual(@as(f32, 40), tree.node(first).?.rect.w);
+    try testing.expectEqual(@as(f32, 100), tree.node(second).?.rect.w);
+    try testing.expectEqual(@as(f32, 40), tree.node(second).?.rect.x);
+}
+
+test "grid explicit placement and spans cover the requested cells" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const spanning: Id = @enumFromInt(1);
+    const grid: Id = @enumFromInt(2);
+    try appendNode(&tree, spanning, grid, .{ .spacer = .{ .size = 8 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    const columns = [_]style.GridTrack{
+        .{ .fixed = 20 },
+        .{ .fixed = 30 },
+        .{ .fixed = 40 },
+    };
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 90 },
+            .height = .{ .length = 40 },
+        },
+        .grid_template_columns = columns[0..],
+        .grid_template_rows = &[_]style.GridTrack{.{ .fixed = 20 }},
+    };
+    tree.node(spanning).?.style.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .span = 2 },
+    };
+    tree.node(spanning).?.style.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    layout(&tree, .{ .width = 120, .height = 80 });
+    try testing.expectEqual(@as(f32, 50), tree.node(spanning).?.rect.w);
+    try testing.expectEqual(@as(f32, 0), tree.node(spanning).?.rect.x);
+}
+
+test "grid row auto flow advances to the next free row" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const third: Id = @enumFromInt(3);
+    const grid: Id = @enumFromInt(4);
+    for ([_]Id{ first, second, third }) |id|
+        try appendNode(&tree, id, grid, .{ .spacer = .{ .size = 8 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    const columns = [_]style.GridTrack{ .{ .fixed = 10 }, .{ .fixed = 10 } };
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 30 },
+        },
+        .grid_template_columns = columns[0..],
+        .grid_template_rows = &[_]style.GridTrack{.{ .fixed = 10 }},
+        .grid_auto_flow = .row,
+    };
+    layout(&tree, .{ .width = 40, .height = 40 });
+    try testing.expectEqual(@as(f32, 0), tree.node(first).?.rect.x);
+    try testing.expectEqual(@as(f32, 10), tree.node(second).?.rect.x);
+    try testing.expectEqual(@as(f32, 11.5), tree.node(third).?.rect.y);
+    try testing.expectEqual(@as(f32, 0), tree.node(third).?.rect.x);
+}
+
+test "grid gaps separate tracks without changing item border sizes" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const grid: Id = @enumFromInt(3);
+    try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 8 } });
+    try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 8 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 45 },
+            .height = .{ .length = 20 },
+        },
+        .grid_template_columns = columns[0..],
+        .grid_template_rows = &[_]style.GridTrack{.{ .fixed = 10 }},
+        .grid_column_gap = 5,
+    };
+    layout(&tree, .{ .width = 60, .height = 40 });
+    try testing.expectEqual(@as(f32, 20), tree.node(first).?.rect.w);
+    try testing.expectEqual(@as(f32, 25), tree.node(second).?.rect.x);
+}
+
+test "grid item typed min and max constraints clamp the cell size" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const item: Id = @enumFromInt(1);
+    const grid: Id = @enumFromInt(2);
+    try appendNode(&tree, item, grid, .{ .spacer = .{ .size = 4 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 20 },
+        },
+        .grid_template_columns = &[_]style.GridTrack{.{ .fixed = 50 }},
+        .grid_template_rows = &[_]style.GridTrack{.{ .fixed = 10 }},
+    };
+    tree.node(item).?.style.min_size.width = .{ .length = 60 };
+    tree.node(item).?.style.max_size.width = .{ .length = 70 };
+    layout(&tree, .{ .width = 70, .height = 30 });
+    try testing.expectEqual(@as(f32, 60), tree.node(item).?.rect.w);
+}
+
+test "grid intrinsic auto tracks use child natural sizes" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const grid: Id = @enumFromInt(3);
+    try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 18 } });
+    try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 26 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 44 },
+            .height = .{ .length = 20 },
+        },
+        .grid_template_columns = &[_]style.GridTrack{
+            .auto,
+            .auto,
+        },
+        .grid_template_rows = &[_]style.GridTrack{
+            .{ .fixed = 10 },
+        },
+    };
+    layout(&tree, .{ .width = 60, .height = 40 });
+    try testing.expectEqual(@as(f32, 18), tree.node(first).?.rect.w);
+    try testing.expectEqual(@as(f32, 26), tree.node(second).?.rect.w);
+}
+
+test "grid fr tracks distribute remaining definite space" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const grid: Id = @enumFromInt(3);
+    try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 4 } });
+    try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 4 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 20 },
+        },
+        .grid_template_columns = &[_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 2 } },
+        .grid_template_rows = &[_]style.GridTrack{.{ .fixed = 10 }},
+    };
+    layout(&tree, .{ .width = 120, .height = 40 });
+    try testing.expectEqual(@as(f32, 100.0 / 3.0), tree.node(first).?.rect.w);
+    try testing.expectEqual(@as(f32, 200.0 / 3.0), tree.node(second).?.rect.w);
+}
+
+test "grid excludes absolute children from auto flow" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+    const normal: Id = @enumFromInt(1);
+    const absolute: Id = @enumFromInt(2);
+    const second: Id = @enumFromInt(3);
+    const grid: Id = @enumFromInt(4);
+    try appendNode(&tree, normal, grid, .{ .spacer = .{ .size = 10 } });
+    try appendNode(&tree, absolute, grid, .{ .spacer = .{ .size = 50 } });
+    try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 10 } });
+    try appendNode(&tree, grid, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    tree.node(grid).?.style = .{
+        .display = .grid,
+        .size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 20 },
+        },
+        .grid_template_columns = &[_]style.GridTrack{ .{ .fixed = 10 }, .{ .fixed = 10 } },
+        .grid_template_rows = &[_]style.GridTrack{.{ .fixed = 10 }},
+    };
+    tree.node(absolute).?.style.position = .absolute;
+    tree.node(absolute).?.style.size = .{
+        .width = .{ .length = 50 },
+        .height = .{ .length = 10 },
+    };
+    layout(&tree, .{ .width = 50, .height = 30 });
+    try testing.expectEqual(@as(f32, 10), tree.node(second).?.rect.x);
+    try testing.expectEqual(@as(f32, 50), tree.node(absolute).?.rect.w);
 }
 
 test "column reverse places source order from the main-end edge" {

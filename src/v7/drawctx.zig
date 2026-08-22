@@ -130,6 +130,20 @@ fn asLengthPercentageRect(x: anytype) style.LengthPercentageRect {
     };
 }
 
+fn asGridPlacement(value: anytype) style.GridPlacement {
+    const T = @TypeOf(value);
+    if (T == style.GridPlacement) return value;
+    return switch (@typeInfo(T)) {
+        .@"struct" => {
+            if (@hasField(T, "line")) return .{ .line = value.line };
+            if (@hasField(T, "span")) return .{ .span = value.span };
+            return .auto;
+        },
+        .enum_literal => .auto,
+        else => @compileError("expected grid placement"),
+    };
+}
+
 fn asOverflowAxes(x: anytype) style.OverflowAxes {
     const T = @TypeOf(x);
     if (@typeInfo(T) != .@"struct") return .{ .width = .visible, .height = .visible };
@@ -207,6 +221,45 @@ fn styleFromOpts(opts: anytype, direction: style.FlexDirection) Style {
     if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
     if (@hasField(T, "gap")) local.gap = opts.gap;
+    if (@hasField(T, "column_gap")) local.column_gap = opts.column_gap;
+    if (@hasField(T, "row_gap")) local.row_gap = opts.row_gap;
+    if (@hasField(T, "grid_template_columns")) {
+        local.grid_template_columns = opts.grid_template_columns;
+    }
+    if (@hasField(T, "grid_template_rows")) {
+        local.grid_template_rows = opts.grid_template_rows;
+    }
+    if (@hasField(T, "grid_auto_columns")) local.grid_auto_columns = opts.grid_auto_columns;
+    if (@hasField(T, "grid_auto_rows")) local.grid_auto_rows = opts.grid_auto_rows;
+    if (@hasField(T, "grid_auto_flow")) local.grid_auto_flow = @as(style.GridAutoFlow, opts.grid_auto_flow);
+    if (@hasField(T, "grid_column_gap")) local.grid_column_gap = opts.grid_column_gap;
+    if (@hasField(T, "grid_row_gap")) local.grid_row_gap = opts.grid_row_gap;
+    if (@hasField(T, "grid_justify_content")) {
+        local.grid_justify_content = @as(Justify, opts.grid_justify_content);
+    }
+    if (@hasField(T, "grid_align_content")) {
+        local.grid_align_content = @as(AlignContent, opts.grid_align_content);
+    }
+    if (@hasField(T, "grid_justify_items")) local.grid_justify_items = @as(Align, opts.grid_justify_items);
+    if (@hasField(T, "grid_align_items")) local.grid_align_items = @as(Align, opts.grid_align_items);
+    if (@hasField(T, "grid_justify_self")) local.grid_justify_self = @as(AlignSelf, opts.grid_justify_self);
+    if (@hasField(T, "grid_align_self")) local.grid_align_self = @as(AlignSelf, opts.grid_align_self);
+    if (@hasField(T, "grid_column")) {
+        local.grid_column = .{
+            .start = asGridPlacement(opts.grid_column.start),
+            .end = asGridPlacement(opts.grid_column.end),
+        };
+    }
+    if (@hasField(T, "grid_row")) {
+        local.grid_row = .{
+            .start = asGridPlacement(opts.grid_row.start),
+            .end = asGridPlacement(opts.grid_row.end),
+        };
+    }
+    if (@hasField(T, "grid_column_start")) local.grid_column_start = opts.grid_column_start;
+    if (@hasField(T, "grid_column_end")) local.grid_column_end = opts.grid_column_end;
+    if (@hasField(T, "grid_row_start")) local.grid_row_start = opts.grid_row_start;
+    if (@hasField(T, "grid_row_end")) local.grid_row_end = opts.grid_row_end;
     if (@hasField(T, "grow")) local.grow = opts.grow;
     if (@hasField(T, "shrink")) local.shrink = opts.shrink;
     if (@hasField(T, "basis")) local.basis = opts.basis;
@@ -528,6 +581,33 @@ pub const DrawCtx = struct {
         if (@hasField(@TypeOf(opts), "columns")) {
             self.tree.node(id).?.shared_columns = opts.columns;
         }
+        applyScrollOptions(self, id, opts);
+        applyFlexStyle(self, id, opts);
+        self.descend(id);
+        return id;
+    }
+    /// Grid container: it uses the same tree container kind as column, but
+    /// dispatches to the bounded grid algorithm through Style.display.
+    pub fn grid(self: *DrawCtx, opts: anytype) !Id {
+        var resolved_style = styleFromOpts(opts, .column);
+        resolved_style.display = .grid;
+        const T = @TypeOf(opts);
+        if (!@hasField(T, "grid_justify_content") and @hasField(T, "justify"))
+            resolved_style.grid_justify_content = resolved_style.justify;
+        if (!@hasField(T, "grid_align_content") and @hasField(T, "align_content"))
+            resolved_style.grid_align_content = resolved_style.align_content;
+        if (!@hasField(T, "grid_justify_items") and @hasField(T, "align"))
+            resolved_style.grid_justify_items = resolved_style.@"align";
+        if (!@hasField(T, "grid_align_items") and @hasField(T, "align"))
+            resolved_style.grid_align_items = resolved_style.@"align";
+        const id = try self.create(
+            .{ .column = .{ .gap = resolved_style.gap } },
+            resolved_style,
+            paintStyleFromOpts(opts),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        applyFlexSizing(self, id, opts);
         applyScrollOptions(self, id, opts);
         applyFlexStyle(self, id, opts);
         self.descend(id);
@@ -1465,4 +1545,30 @@ test "DrawCtx: wrapped flex options translate into typed Style" {
     try std.testing.expectEqual(style.AlignContent.space_around, resolved.align_content);
     try std.testing.expectEqual(style.AlignSelf.end, resolved.align_self);
     try std.testing.expect(std.meta.eql(@as(style.LengthPercentageAuto, .auto), resolved.margin_inset.top));
+}
+
+test "DrawCtx: grid constructor translates tracks placement and gaps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.nodes.deinit(arena.allocator());
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    const tracks = [_]style.GridTrack{ .{ .fixed = 32 }, .{ .fr = 1 } };
+
+    const id = try ctx.grid(.{
+        .grid_template_columns = tracks[0..],
+        .grid_column_gap = 4,
+        .grid_row_gap = 8,
+        .grid_auto_flow = .column,
+        .grid_column = .{
+            .start = .{ .line = 1 },
+            .end = .{ .span = 2 },
+        },
+    });
+    ctx.pop();
+    const resolved = tree.node(id).?.style;
+    try std.testing.expectEqual(style.Display.grid, resolved.display);
+    try std.testing.expectEqual(@as(usize, 2), resolved.grid_template_columns.len);
+    try std.testing.expectEqual(@as(f32, 4), resolved.grid_column_gap);
+    try std.testing.expectEqual(style.GridAutoFlow.column, resolved.grid_auto_flow);
 }
