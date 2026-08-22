@@ -52,7 +52,6 @@ pub const MandelbrotComponent = struct {
     gpu_deinit_count: u32 = 0,
     last_unregistered_index: ?u32 = null,
 
-
     center: [2]f64 = .{ -0.5, 0 },
     scale: f64 = 300,
     precision: u32 = 2,
@@ -99,7 +98,6 @@ pub const MandelbrotComponent = struct {
         return self.gpu_ready;
     }
 
-
     pub fn initGpu(self: *MandelbrotComponent, endpoint: *GpuEndpoint) !void {
         const gpu = endpoint.gpu;
         const texture = try gpu.textureCreate(.{
@@ -123,7 +121,6 @@ pub const MandelbrotComponent = struct {
         self.bindless_index = bindless_index;
         self.gpu_ready = true;
         self.gpu_init_count += 1;
-
     }
 
     pub fn frameGpu(self: *MandelbrotComponent, frame: *GpuFrame) !void {
@@ -162,7 +159,6 @@ pub const MandelbrotComponent = struct {
         self.params_bda = 0;
         self.gpu_ready = false;
         self.gpu_deinit_count += 1;
-
     }
 
     fn releaseBindlessTexture(self: *MandelbrotComponent, endpoint: *GpuEndpoint) void {

@@ -63,7 +63,6 @@ pub var tiger_ref_idx: ?u32 = null;
 /// false, so Mandelbrot remains mounted as usual.
 pub var gpu_remount_smoke: bool = false;
 
-
 /// Frames per second (a rolling average), set by the window driver each frame.
 pub var fps: f32 = 0;
 

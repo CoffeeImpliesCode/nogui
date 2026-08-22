@@ -177,7 +177,6 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-
     // Headless driver: read JSON-lines events from a script, feed them to
     // the core (time included — every .frame event carries the driver's
     // tick + clock), and print one JSON frame dump per frame event. Fully

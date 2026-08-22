@@ -1669,7 +1669,6 @@ pub fn run(
             setGpuRemountSmokeVisibility(T, root, visible);
         }
 
-
         // Apply the header pill clicks (the UI sets a request; the window
         // owns the options). Keys and requests use the same configuration
         // path so both routes agree.
@@ -1906,7 +1905,6 @@ pub fn run(
     if (ui.gpu_remount_smoke and remount_smoke_phase != .complete) {
         return error.GpuRemountSmokeInterrupted;
     }
-
 
     try gpu.waitIdle();
 }
