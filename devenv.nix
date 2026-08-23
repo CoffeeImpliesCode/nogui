@@ -16,6 +16,7 @@ rec {
     glslang
     # mesa
     wayland
+    wayland-utils
     udev
     alsa-lib
     libdecor
