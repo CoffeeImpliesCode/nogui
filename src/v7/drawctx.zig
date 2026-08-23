@@ -499,8 +499,7 @@ pub const DrawCtx = struct {
             .font_size = font_size,
             .font_id = font_id,
         };
-        try self.tree.nodes.append(self.arena, node);
-
+        try self.tree.appendNode(node);
         // Wire into the parent's children array via a linear scan (the
         // parent was created earlier, so it is already in the array).
         if (parent != .root) {
@@ -582,21 +581,9 @@ pub const DrawCtx = struct {
         const id = self.parent_stack[self.depth];
         self.depth -= 1;
 
-        // Everything after the container in the array is one of its
-        // descendants (nodes are only created while the cursor is inside
-        // it), so moving it to the end puts children before their container.
-        var idx: usize = 0;
-        var found = false;
-        for (self.tree.nodes.items, 0..) |*n, i| {
-            if (n.id == id) {
-                idx = i;
-                found = true;
-                break;
-            }
-        }
-        std.debug.assert(found); // created by column()/row()
-        const node = self.tree.nodes.orderedRemove(idx);
-        self.tree.nodes.appendAssumeCapacity(node); // no growth: len just shrank
+        const index = self.tree.nodeIndex(id);
+        std.debug.assert(index != null);
+        self.tree.moveNodeToEnd(index.?);
     }
 
     /// A static text leaf. The text is DUPLICATED into the frame arena:

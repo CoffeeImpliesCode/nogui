@@ -109,8 +109,9 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
     const zone = tracy.Zone.begin(.{ .name = "collectDrawCmds", .src = @src() });
     defer zone.end();
     var list: std.ArrayList(DrawCmd) = .empty;
+    const capacity = std.math.mul(usize, tree.nodes.items.len, 3) catch return error.OutOfMemory;
+    try list.ensureTotalCapacity(allocator, capacity);
     defer list.deinit(allocator);
-
     // Clip stack: mirrors the enclosing clip-marked containers. The
     // reversed walk meets a container before its subtree, so a clip
     // container's entry is pushed when the container is reached and

@@ -441,16 +441,17 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         if (p.kind != .column and p.kind != .row and p.kind != .button) return;
         if (p.style.display == .block or p.style.display == .grid) return;
         const dir: Direction = p.style.direction;
+        const main_is_column = directionIsColumn(dir);
         const gap: f32 = p.style.gap;
         const justify = p.style.justify;
 
         // The container's own box insets its content box on the main axis.
         const box = p.style;
-        const own_border_main = if (directionIsColumn(dir))
+        const own_border_main = if (main_is_column)
             box.border.top + box.border.bottom
         else
             box.border.left + box.border.right;
-        const own_padding_main = if (directionIsColumn(dir))
+        const own_padding_main = if (main_is_column)
             box.padding.top + box.padding.bottom
         else
             box.padding.left + box.padding.right;
@@ -485,22 +486,23 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 mains[i] = clampMain(child, dir, dimension);
             } else if (resolvedFlexBasis(
                 child,
-                if (directionIsColumn(dir)) parent_content.height else parent_content.width,
+                if (main_is_column) parent_content.height else parent_content.width,
                 child.natural_main,
             )) |basis| {
                 mains[i] = clampMain(child, dir, basis);
             }
             // Main-axis margins: top+bottom in a column, left+right in a row.
             const m = child.style.margin;
-            content += mains[i] + (if (directionIsColumn(dir)) m.top + m.bottom else m.left + m.right);
+            content += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
             if (child.style.grow > 0) total_grow += child.style.grow;
             if (child.style.shrink > 0) total_shrink += child.style.shrink;
         }
         if (flow_count > 1) content += gap * @as(f32, @floatFromInt(flow_count - 1));
 
         // Free space in the container's FINAL content box.
-        const container_main = if (directionIsColumn(dir)) p.rect.h else p.rect.w;
-        const free = (container_main - inset_main) - content;
+        const container_main = if (main_is_column) p.rect.h else p.rect.w;
+        const container_content_main = container_main - inset_main;
+        const free = container_content_main - content;
         const grew = free > 0 and total_grow > 0;
         const shrank = free < 0 and total_shrink > 0;
         if (grew) {
@@ -552,10 +554,10 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                     const child = tree.node(p.children.items[i]) orelse continue;
                     if (child.style.position == .absolute) continue;
                     const m = child.style.margin;
-                    fitted += mains[i] + (if (directionIsColumn(dir)) m.top + m.bottom else m.left + m.right);
+                    fitted += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
                 }
                 if (flow_count > 1) fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
-                remaining = @max(0, fitted - (container_main - inset_main));
+                remaining = @max(0, fitted - container_content_main);
                 if (remaining <= 0) break;
             }
         }
@@ -566,22 +568,27 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         }
 
         // Justify distributes free space left after flex distribution.
-        // Recompute fitted extent after final min/max clamps. A clamp can
-        // change residual space for justify without changing flex growth or
-        // shrink distribution.
-        var final_fitted: f32 = 0;
-        for (0..count) |i| {
-            const child = tree.node(p.children.items[i]) orelse continue;
-            if (child.style.position == .absolute) continue;
-            const m = child.style.margin;
-            final_fitted += mains[i] +
-                (if (directionIsColumn(dir)) m.top + m.bottom else m.left + m.right);
-        }
-        if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
+        // Recompute fitted extent after final min/max clamps only when a
+        // justify mode will consume it. Grow and shrink deliberately use
+        // content + free below, while start and non-positive free space do
+        // not consume a fitted extent. A lone space-between item has no gap.
         const spread = flow_count > 0 and free > 0 and justify != .start;
+        const need_fitted = !grew and !shrank and spread and
+            (justify != .space_between or flow_count > 1);
+        var final_fitted: f32 = 0;
+        if (need_fitted) {
+            for (0..count) |i| {
+                const child = tree.node(p.children.items[i]) orelse continue;
+                if (child.style.position == .absolute) continue;
+                const m = child.style.margin;
+                final_fitted += mains[i] +
+                    (if (main_is_column) m.top + m.bottom else m.left + m.right);
+            }
+            if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
+        }
         const fitted = if (grew or shrank) content + free else final_fitted;
         const free_for_justify = if (grew or shrank or spread)
-            @max(0, container_main - inset_main - fitted)
+            @max(0, container_content_main - fitted)
         else
             0;
         var main_offset: f32 = 0;
@@ -601,7 +608,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
             const child = tree.node(p.children.items[i]) orelse continue;
             if (child.style.position == .absolute) continue;
             const m = child.style.margin;
-            if (directionIsColumn(dir)) {
+            if (main_is_column) {
                 child.rect.h = mains[i];
                 child.rect.y = m.top + main_pos;
             } else {
@@ -610,7 +617,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
             }
             // Advance by the border box + the MAIN-axis margins (top+bottom
             // in a column, left+right in a row).
-            const m_main = if (directionIsColumn(dir)) m.top + m.bottom else m.left + m.right;
+            const m_main = if (main_is_column) m.top + m.bottom else m.left + m.right;
             flow_index += 1;
             main_pos += mains[i] + m_main +
                 (if (flow_index < flow_count) gap + extra_gap else 0);

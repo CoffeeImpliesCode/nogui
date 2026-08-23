@@ -413,29 +413,32 @@ pub const TextEngine = struct {
         return self.run_cache.getPtr(key).?;
     }
 
-    /// Rasterize glyph `gid` on demand: extract curves → sweeper (GPU curve
-    /// buffer) → glyph material → entry. Glyph id 0 (.notdef, from chars
-    /// absent in the font) and glyphs whose outline extraction fails are
-    /// skipped (no entry, no error). Returns error.TooManyGlyphs once the
-    /// max_materials slot budget is exhausted (checked only for glyphs that
-    /// would actually consume a new slot).
-    fn ensureGlyph(self: *TextEngine, font: *FontState, gid: u32) !void {
-        if (gid == 0) return; // .notdef: missing glyph, skip
-        for (self.entries.items) |e| {
-            if (e.font_id == font.font_id and e.size == font.size and e.gid == gid) return; // already rasterized
+    /// Rasterize glyph `gid` on demand. Glyph id 0 and glyphs without a
+    /// supported outline are skipped. Returns the index into `entries` so
+    /// callers do not need a second cache scan.
+    fn glyphIndex(self: *const TextEngine, font_id: u8, size: u32, gid: u32) ?usize {
+        if (gid == 0) return null;
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.font_id == font_id and entry.size == size and entry.gid == gid) return index;
         }
+        return null;
+    }
 
-        // Slot budget exhausted: fail with a real error instead of writing
-        // OOB into the GPU material heap — a debug-only assert would compile
-        // out in ReleaseFast. The assert stays as belt-and-suspenders.
-        std.debug.assert(self.next_slot < max_materials); // slot 0 reserved for solid
-        if (self.next_slot >= max_materials) return error.TooManyGlyphs;
+    /// Ensure a glyph is rasterized. Missing glyphs and unsupported outlines
+    /// return null; allocation and material-budget failures remain errors.
+    fn ensureGlyph(self: *TextEngine, font: *FontState, gid: u32) !?usize {
+        if (gid == 0) return null;
+        if (self.glyphIndex(font.font_id, font.size, gid)) |index| return index;
+        return self.ensureGlyphInner(font, gid);
+    }
 
-        // Extraction failures (missing outline, draw error) → skip glyph.
-        const curves = extractGlyphCurves(self.gpa, font.hb_font, gid) catch return;
+    fn ensureGlyphInner(self: *TextEngine, font: *FontState, gid: u32) !?usize {
+        const curves = extractGlyphCurves(self.gpa, font.hb_font, gid) catch |err| switch (err) {
+            error.GlyphNotFound, error.GlyphDrawFailed => return null,
+            else => return err,
+        };
         defer self.gpa.free(curves);
-
-        var sweeper = try renderer.GlyphSweeper.init(self.gpu, curves);
+        if (curves.len == 0) return null;
 
         // Metrics from HarfBuzz (the same 26.6 fixed-point scale as the
         // shaped positions; /64.0 → pixels). No FreeType in our code.
@@ -446,19 +449,20 @@ pub const TextEngine = struct {
         // SAFETY: assigned by hb_font_get_glyph_extents before any read; a
         // zero return (no ink) skips the glyph.
         var ext: c.hb_glyph_extents_t = undefined;
-        // No ink: the sweeper's GPU curve buffer was already allocated by
-        // init above, so free it here or it leaks (the success path hands
-        // ownership to self.sweepers, which deinits at TextEngine.deinit).
-        if (c.hb_font_get_glyph_extents(font.hb_font.handle, gid, &ext) == 0) {
-            sweeper.deinit();
-            return; // no ink
-        }
+        if (c.hb_font_get_glyph_extents(font.hb_font.handle, gid, &ext) == 0) return null;
         const bearing_x: f32 = @floatCast(@as(f64, @floatFromInt(ext.x_bearing)) / 64.0);
         const bearing_y: f32 = @floatCast(@as(f64, @floatFromInt(ext.y_bearing)) / 64.0);
         const glyph_w: f32 = @floatCast(@as(f64, @floatFromInt(ext.width)) / 64.0);
         // hb extents: height is NEGATIVE for y-up fonts (the box extends
         // downward from the top bearing) — the magnitude is the ink height.
         const glyph_h: f32 = @floatCast(@as(f64, @floatFromInt(@abs(ext.height))) / 64.0);
+
+        // Slot 0 is reserved for solid materials. Check the budget only
+        // after confirming that this glyph has drawable ink.
+        if (self.next_slot >= max_materials) return error.TooManyGlyphs;
+        std.debug.assert(self.next_slot < max_materials);
+
+        var sweeper = try renderer.GlyphSweeper.init(self.gpu, curves);
 
         // The shader sweeps the curves per fragment at DISPLAY resolution
         // (analytic AA — no intermediate bitmap), so the material only
@@ -479,10 +483,11 @@ pub const TextEngine = struct {
         // Transfer the sweeper into the parallel list. On any append failure
         // free the GPU curve buffer so nothing leaks and the two lists stay
         // index-aligned.
-        self.sweepers.append(self.gpa, sweeper) catch |e| {
+        self.sweepers.append(self.gpa, sweeper) catch |err| {
             sweeper.deinit();
-            return e;
+            return err;
         };
+        const entry_index = self.entries.items.len;
         self.entries.append(self.gpa, .{
             .gid = gid,
             .size = font.size,
@@ -497,11 +502,12 @@ pub const TextEngine = struct {
             .curve_bottom = sweeper.curve_bottom,
             .curve_w = sweeper.curve_w,
             .curve_h = sweeper.curve_h,
-        }) catch |e| {
+        }) catch |err| {
             var orphan = self.sweepers.pop().?;
             orphan.deinit();
-            return e;
+            return err;
         };
+        return entry_index;
     }
 
     /// Shape `text` (kerning/ligatures included), ensure the glyphs exist
@@ -550,27 +556,21 @@ pub const TextEngine = struct {
         const zone = tracy.Zone.begin(.{ .name = "emitText", .src = @src() });
         defer zone.end();
         const font = try self.fontFor(font_id, size);
-        const ellipsis_key: ?RunKey = if (max_width != null)
-            (try self.getOrShape(font, "...")).key
-        else
-            null;
         const run_key = (try self.getOrShape(font, text)).key;
-        // Re-fetch both keys after shaping. The second cache operation may
-        // rehash the map and invalidate the first returned pointer.
-        const run = self.run_cache.getPtr(run_key).?;
-        const ellipsis_run = if (ellipsis_key) |key| self.run_cache.getPtr(key) else null;
+        const shaped_run = self.run_cache.getPtr(run_key).?;
         const run_x = snapRunOrigin(x);
         const run_baseline = @round(baseline_y);
 
         const truncate = if (max_width) |width| blk: {
             if (std.math.isNan(width)) break :blk false;
-            break :blk run.width > @max(0, width);
+            break :blk shaped_run.width > @max(0, width);
         } else false;
         if (!truncate) {
+            try out.ensureTotalCapacity(self.gpa, out.items.len + shaped_run.glyphs.len);
             _ = try self.emitRun(
                 font,
-                run,
-                run.glyphs.len,
+                shaped_run,
+                shaped_run.glyphs.len,
                 run_x,
                 0,
                 run_baseline,
@@ -581,11 +581,17 @@ pub const TextEngine = struct {
             return;
         }
 
-        const suffix = ellipsis_run.?;
+        const ellipsis_key = (try self.getOrShape(font, "...")).key;
+        // Shaping the ellipsis can rehash the cache, so fetch both pointers
+        // only after the second cache operation.
+        const run = self.run_cache.getPtr(run_key).?;
+        const suffix = self.run_cache.getPtr(ellipsis_key).?;
         const width = @max(0, max_width.?);
         if (suffix.width > width) return;
         const prefix_limit = width - suffix.width;
         const prefix_count = fitGlyphCount(run, prefix_limit);
+
+        try out.ensureTotalCapacity(self.gpa, out.items.len + prefix_count + suffix.glyphs.len);
         const cursor = try self.emitRun(
             font,
             run,
@@ -609,7 +615,6 @@ pub const TextEngine = struct {
             out,
         );
     }
-
     fn fitGlyphCount(run: *const TextRun, width: f32) usize {
         var cursor: f32 = 0;
         for (run.glyphs, 0..) |g, i| {
@@ -634,15 +639,18 @@ pub const TextEngine = struct {
     ) !f32 {
         var cursor = initial_cursor;
         for (run.glyphs[0..glyph_count]) |g| {
-            try self.ensureGlyph(font, g.gid);
-            const entry = self.entryFor(font.font_id, font.size, g.gid) orelse continue;
+            const entry_index = (try self.ensureGlyph(font, g.gid)) orelse {
+                cursor += g.x_advance;
+                continue;
+            };
+            const entry = &self.entries.items[entry_index];
             const ch_x = run_x + cursor + g.x_offset + entry.bearing_x;
             const ch_y = run_baseline - entry.bearing_y - g.y_offset;
             if (entry.glyph_w <= 0 or entry.glyph_h <= 0) {
                 cursor += g.x_advance;
                 continue;
             }
-            try out.append(self.gpa, .{
+            out.appendAssumeCapacity(.{
                 .dst = .{ ch_x - 2, ch_y - 2, @ceil(entry.glyph_w) + 4, @ceil(entry.glyph_h) + 4 },
                 .src = .{ 0, 0, 1, 1 },
                 .corners = .{ 0, 0, 0, 0 },
@@ -675,13 +683,6 @@ pub const TextEngine = struct {
             return .{ .width = len_f * 10, .height = 24 };
         };
         return .{ .width = run.width, .height = run.line_height };
-    }
-
-    fn entryFor(self: *const TextEngine, font_id: u8, size: u32, gid: u32) ?GlyphEntry {
-        for (self.entries.items) |e| {
-            if (e.font_id == font_id and e.size == size and e.gid == gid) return e;
-        }
-        return null;
     }
 };
 

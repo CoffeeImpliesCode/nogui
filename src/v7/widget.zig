@@ -292,6 +292,9 @@ pub const WidgetTree = struct {
     nodes: std.ArrayListUnmanaged(WidgetNode) = .empty,
     allocator: std.mem.Allocator,
     next_id: u32 = 1,
+    /// Frame-local index maintained by `appendNode` for production trees.
+    /// Directly assembled trees can leave it incomplete; lookup then scans.
+    id_index: std.AutoHashMapUnmanaged(Id, u32) = .empty,
     /// Per-frame clip-rect list (cap 64 = the GPU clip buffer's size). Clip
     /// ids are indices into this list; 0xFFFFFFFF = no clip. The core
     /// appends here (DrawCtx.pushClip + drawcmd's clip-stack walk); the
@@ -305,8 +308,48 @@ pub const WidgetTree = struct {
         return .{ .allocator = allocator };
     }
 
+    /// Append a node and atomically add its frame-local lookup entry.
+    pub fn appendNode(self: *WidgetTree, node_value: WidgetNode) !void {
+        try self.nodes.append(self.allocator, node_value);
+        errdefer _ = self.nodes.pop();
+        try self.id_index.put(
+            self.allocator,
+            node_value.id,
+            @intCast(self.nodes.items.len - 1),
+        );
+    }
+
+    /// Return a node's array index. Production trees use the complete map;
+    /// directly assembled trees fall back to their original linear lookup.
+    pub fn nodeIndex(self: *const WidgetTree, id: Id) ?usize {
+        if (self.id_index.get(id)) |stored_index| {
+            const index: usize = @intCast(stored_index);
+            if (index < self.nodes.items.len and self.nodes.items[index].id == id) {
+                return index;
+            }
+        } else if (self.id_index.count() == self.nodes.items.len) {
+            return null;
+        }
+
+        for (self.nodes.items, 0..) |node_value, index| {
+            if (node_value.id == id) return index;
+        }
+        return null;
+    }
+
+    /// Move one node to the end while updating every shifted map entry.
+    pub fn moveNodeToEnd(self: *WidgetTree, index: usize) void {
+        std.debug.assert(index < self.nodes.items.len);
+        const moved = self.nodes.orderedRemove(index);
+        self.nodes.appendAssumeCapacity(moved);
+        for (self.nodes.items[index..], index..) |node_value, new_index| {
+            if (self.id_index.getPtr(node_value.id)) |stored_index| {
+                stored_index.* = @intCast(new_index);
+            }
+        }
+    }
+
     /// Append a clip rect, returning its id (the index into clip_rects).
-    /// Null when the list is full (64): the caller then skips clipping.
     pub fn pushClipRect(self: *WidgetTree, r: ClipRect) ?u32 {
         if (self.clip_count >= self.clip_rects.len) return null;
         const id = self.clip_count;
@@ -315,20 +358,17 @@ pub const WidgetTree = struct {
         return id;
     }
 
-    /// Linear scan by id. Null if absent.
+    /// Lookup by id. Indexed frame trees resolve in O(1); directly assembled
+    /// trees retain linear lookup semantics. Unknown IDs return null.
     pub fn node(self: *WidgetTree, id: Id) ?*WidgetNode {
-        for (self.nodes.items) |*n| {
-            if (n.id == id) return n;
-        }
-        return null;
+        const index = self.nodeIndex(id) orelse return null;
+        return &self.nodes.items[index];
     }
 
-    /// Const-safe linear scan by id. Null if absent.
+    /// Const-safe lookup with the same indexed and fallback behavior as `node`.
     pub fn nodeConst(self: *const WidgetTree, id: Id) ?*const WidgetNode {
-        for (self.nodes.items) |*n| {
-            if (n.id == id) return n;
-        }
-        return null;
+        const index = self.nodeIndex(id) orelse return null;
+        return &self.nodes.items[index];
     }
 
     /// All nodes whose parent == .root (top-level).
@@ -459,27 +499,53 @@ pub fn contentRect(tree: *const WidgetTree, id: Id) Rect {
     };
 }
 
-test "WidgetTree: node() finds pushed ids, null for unknown" {
+test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.id_index.deinit(std.testing.allocator);
     defer tree.nodes.deinit(std.testing.allocator);
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
-    try tree.nodes.append(std.testing.allocator, .{
+    try tree.appendNode(.{
         .id = id1,
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
     });
-    try tree.nodes.append(std.testing.allocator, .{
+    try tree.appendNode(.{
         .id = id2,
         .kind = .{ .spacer = .{} },
         .parent = id1,
     });
 
-    const found = tree.node(id2).?;
-    try std.testing.expectEqual(id2, found.id);
-    try std.testing.expectEqual(id1, found.parent);
+    try std.testing.expectEqual(id2, tree.node(id2).?.id);
+    try std.testing.expectEqual(id1, tree.nodeConst(id1).?.id);
     try std.testing.expectEqual(@as(?*WidgetNode, null), tree.node(@enumFromInt(99)));
+}
+
+test "WidgetTree: moving a node to the end reindexes shifted nodes" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.id_index.deinit(std.testing.allocator);
+    defer tree.nodes.deinit(std.testing.allocator);
+
+    const id1: Id = @enumFromInt(1);
+    const id2: Id = @enumFromInt(2);
+    const id3: Id = @enumFromInt(3);
+    for ([_]Id{ id1, id2, id3 }) |id| {
+        try tree.appendNode(.{
+            .id = id,
+            .kind = .{ .spacer = .{} },
+            .parent = .root,
+        });
+    }
+
+    tree.moveNodeToEnd(0);
+
+    try std.testing.expectEqual(id2, tree.nodes.items[0].id);
+    try std.testing.expectEqual(id3, tree.nodes.items[1].id);
+    try std.testing.expectEqual(id1, tree.nodes.items[2].id);
+    try std.testing.expectEqual(id1, tree.node(id1).?.id);
+    try std.testing.expectEqual(id2, tree.node(id2).?.id);
+    try std.testing.expectEqual(id3, tree.nodeConst(id3).?.id);
 }
 
 test "WidgetTree: roots() returns only top-level nodes in append order" {

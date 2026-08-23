@@ -2,10 +2,8 @@
 //! Pure geometry over the laid-out tree (widget.zig): no allocation, no side
 //! effects. Node rects are RELATIVE border boxes (relative to the parent's
 //! CONTENT box; root-level nodes relative to the surface), so each
-//! candidate's visual rect is resolved via `widget.visualBorderRect` (a
-//! parent walk through border+padding+scroll offsets) and accepted only when
-//! `widget.pointInClipChain` contains the pointer. Per the prototype spec
-//! (notes/v7-prototype-spec.md §7, click dispatch).
+//! candidate's visual rect is resolved once and reused for containment and
+//! clipping; ancestor clip rectangles are resolved as the chain is walked.
 
 const std = @import("std");
 
@@ -19,8 +17,9 @@ const Rect = widget.Rect;
 /// first (a button inside a column hits the button, not the column).
 pub fn hitTest(tree: *const WidgetTree, pos: [2]f32) ?Id {
     for (tree.nodes.items) |n| {
-        if (widget.pointInClipChain(tree, n.id, pos) and
-            contains(widget.visualBorderRect(tree, n.id), pos))
+        const visual_rect = widget.visualBorderRect(tree, n.id);
+        if (pointInClipChainFromRect(tree, n.id, pos, visual_rect) and
+            contains(visual_rect, pos))
         {
             return n.id;
         }
@@ -31,14 +30,33 @@ pub fn hitTest(tree: *const WidgetTree, pos: [2]f32) ?Id {
 /// hitTest restricted to .button nodes (for click dispatch).
 pub fn hitButton(tree: *const WidgetTree, pos: [2]f32) ?Id {
     for (tree.nodes.items) |n| {
-        if (n.kind == .button and
-            widget.pointInClipChain(tree, n.id, pos) and
-            contains(widget.visualBorderRect(tree, n.id), pos))
+        if (n.kind != .button) continue;
+        const visual_rect = widget.visualBorderRect(tree, n.id);
+        if (pointInClipChainFromRect(tree, n.id, pos, visual_rect) and
+            contains(visual_rect, pos))
         {
             return n.id;
         }
     }
     return null;
+}
+
+/// Check clipping while reusing the candidate's already-resolved rectangle.
+fn pointInClipChainFromRect(
+    tree: *const WidgetTree,
+    id: Id,
+    pos: [2]f32,
+    candidate_rect: Rect,
+) bool {
+    var cur = id;
+    var current_rect = candidate_rect;
+    while (cur != .root) {
+        const n = tree.nodeConst(cur) orelse break;
+        if (n.paint.clip and !contains(current_rect, pos)) return false;
+        cur = n.parent;
+        if (cur != .root) current_rect = widget.visualBorderRect(tree, cur);
+    }
+    return true;
 }
 
 /// Rect containment: pos.x >= rect.x and pos.x < rect.x + rect.w, same for y.
