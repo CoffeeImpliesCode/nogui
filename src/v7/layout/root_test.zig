@@ -59,6 +59,303 @@ test "layoutTree preserves legacy relative column geometry" {
     );
 }
 
+test "layoutTree dispatches a single flow root through block float layout" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const normal_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try tree.appendNode(.{
+        .id = float_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .float = .left,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 30 }, .height = .{ .length = 20 } },
+        },
+    });
+    try tree.appendNode(.{
+        .id = normal_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 40 }, .height = .{ .length = 10 } },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .auto },
+        },
+    });
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, normal_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 30, .h = 20 },
+        tree.node(float_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 40, .h = 10 },
+        tree.node(normal_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 100, .h = 20 },
+        tree.node(root_id).?.rect,
+    );
+}
+
+test "layoutTree keeps a leaf root on the legacy measurement path" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const root_id: Id = @enumFromInt(1);
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .label = .{ .text = "leaf" } },
+        .parent = .root,
+        .style = .{ .display = .flow_root },
+    });
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 100, .h = 12 },
+        tree.node(root_id).?.rect,
+    );
+}
+
+test "layoutTree keeps nested block trees on the legacy path" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const label_id: Id = @enumFromInt(1);
+    const nested_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try tree.appendNode(.{
+        .id = label_id,
+        .kind = .{ .label = .{ .text = "nested" } },
+        .parent = nested_id,
+        .style = .{ .display = .block },
+    });
+    try tree.appendNode(.{
+        .id = nested_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{ .display = .block },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .auto },
+        },
+    });
+    try tree.appendChild(nested_id, label_id);
+    try tree.appendChild(root_id, nested_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 100, .h = 12 },
+        tree.node(label_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 100, .h = 12 },
+        tree.node(nested_id).?.rect,
+    );
+}
+
+test "layoutTree keeps scroll roots on the legacy offset path" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var scroll_state: widget.ScrollState = .{};
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .spacer = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 20 } },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 10 } },
+        },
+        .scroll = .{ .state = &scroll_state, .axis = .vertical },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual([2]f32{ 0, 10 }, scroll_state.max_offset);
+}
+
+test "layoutTree falls back for a direct auto-sized slider" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var value: f32 = 0.5;
+    const slider_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try tree.appendNode(.{
+        .id = slider_id,
+        .kind = .{ .slider = .{
+            .label = "volume",
+            .value = &value,
+            .min = 0,
+            .max = 1,
+        } },
+        .parent = root_id,
+        .style = .{ .display = .block },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        },
+    });
+    try tree.appendChild(root_id, slider_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    const slider_rect = tree.node(slider_id).?.rect;
+    try std.testing.expect(slider_rect.w > 0);
+    try std.testing.expect(slider_rect.h > 0);
+}
+
+test "layoutTree keeps capped direct labels on the legacy path" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const label_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try tree.appendNode(.{
+        .id = label_id,
+        .kind = .{ .label = .{ .text = "too wide" } },
+        .parent = root_id,
+        .style = .{ .display = .block, .position = .absolute },
+        .text_overflow = .clip,
+        .text_max_width = 20,
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        },
+    });
+    try tree.appendChild(root_id, label_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(@as(f32, 20), tree.node(label_id).?.rect.w);
+}
+
+test "layoutTree preserves legacy root flex-item growth" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 10 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .grow = 1,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .auto },
+        },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(@as(f32, 100), tree.node(root_id).?.rect.h);
+}
+
 test "layoutTree rejects non-finite available width" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
