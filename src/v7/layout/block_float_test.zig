@@ -2060,6 +2060,114 @@ test "percentage vertical sibling margins collapse against parent width" {
     try expectRelative(&tree, second_id, .{ .x = 0, .y = 60, .w = 20, .h = 10 });
 }
 
+test "ordinary block collapses its first child top margin" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const inner_id: Id = @enumFromInt(1);
+    const outer_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, inner_id, outer_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin = .{ .top = 10 },
+    });
+    try appendNode(&tree, outer_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 40 }, .height = .auto },
+        .margin = .{ .top = 5 },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(outer_id, inner_id);
+    try tree.appendChild(root_id, outer_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 100), null);
+
+    try expectRelative(&tree, outer_id, .{ .x = 0, .y = 10, .w = 40, .h = 10 });
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
+    try expectRect(
+        .{ .x = 0, .y = 10, .w = 20, .h = 10 },
+        widget.absoluteRect(&tree, inner_id),
+    );
+}
+
+test "ordinary block collapses its last child bottom margin" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const inner_id: Id = @enumFromInt(1);
+    const outer_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, inner_id, outer_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin = .{ .bottom = 10 },
+    });
+    try appendNode(&tree, outer_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 40 }, .height = .auto },
+        .margin = .{ .bottom = 5 },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(outer_id, inner_id);
+    try tree.appendChild(root_id, outer_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 100), null);
+
+    try expectRelative(&tree, outer_id, .{ .x = 0, .y = 0, .w = 40, .h = 10 });
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+}
+
+test "top border blocks parent first-child margin collapse" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const inner_id: Id = @enumFromInt(1);
+    const outer_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, inner_id, outer_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin = .{ .top = 10 },
+    });
+    try appendNode(&tree, outer_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 40 }, .height = .auto },
+        .margin = .{ .top = 5 },
+        .border = .{ .top = 1 },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(outer_id, inner_id);
+    try tree.appendChild(root_id, outer_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 100), null);
+
+    try expectRelative(&tree, outer_id, .{ .x = 0, .y = 5, .w = 40, .h = 21 });
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 10, .w = 20, .h = 10 });
+}
+
 test "prepared pass updates scroll limits after recursive child geometry" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();

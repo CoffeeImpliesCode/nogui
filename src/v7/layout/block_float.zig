@@ -53,6 +53,11 @@ const CollapsibleMarginSet = struct {
         return self.positive + self.negative;
     }
 };
+const MarginCollapseResult = struct {
+    top: CollapsibleMarginSet = .{},
+    bottom: CollapsibleMarginSet = .{},
+    through: bool = false,
+};
 
 /// A prepared block-layout pass for one widget tree.
 ///
@@ -73,13 +78,13 @@ pub const LayoutPass = struct {
         context: sizing.SizingContext,
         measure: ?flex.MeasureFn,
     ) sizing.Error!void {
-        try validateContext(context);
-        return layoutPreparedContainerUnchecked(
+        _ = try layoutPreparedContainerUnchecked(
             self.tree,
             container_id,
             context,
             measure,
             null,
+            true,
         );
     }
 };
@@ -93,12 +98,13 @@ pub fn layoutContainer(
 ) sizing.Error!void {
     try validateContext(context);
     const pass = try LayoutPass.init(tree);
-    return layoutPreparedContainerUnchecked(
+    _ = try layoutPreparedContainerUnchecked(
         pass.tree,
         container_id,
         context,
         measure,
         null,
+        true,
     );
 }
 
@@ -109,12 +115,14 @@ fn layoutPreparedContainerUnchecked(
     context: sizing.SizingContext,
     measure: ?flex.MeasureFn,
     forced_border_height: ?f32,
-) sizing.Error!void {
+    is_layout_root: bool,
+) sizing.Error!MarginCollapseResult {
     const container_index = tree.nodeIndex(container_id) orelse return error.InvalidStyle;
-    if (tree.nodes.items[container_index].layout_hidden) return;
+    if (tree.nodes.items[container_index].layout_hidden) return .{};
 
     const container_style = tree.nodes.items[container_index].style;
-    const container_establishes_bfc = establishesBfc(container_style) or
+    const container_establishes_bfc = is_layout_root or
+        establishesBfc(container_style) or
         tree.nodes.items[container_index].parent == .root;
     const container_edges = try resolveBoxEdges(
         container_style,
@@ -138,6 +146,16 @@ fn layoutPreparedContainerUnchecked(
         @max(0, height - container_edges.vertical)
     else
         null;
+    const margins_collapse_with_children = container_style.display == .block and
+        container_style.position == .relative and
+        !container_establishes_bfc and
+        content_height_fixed == null;
+    const top_margin_collapses_with_children = margins_collapse_with_children and
+        container_edges.border.top == 0 and
+        container_edges.padding.top == 0;
+    const bottom_margin_collapses_with_children = margins_collapse_with_children and
+        container_edges.border.bottom == 0 and
+        container_edges.padding.bottom == 0;
     const child_context: sizing.SizingContext = .{
         .available = .{
             .width = .{ .definite = content_width },
@@ -161,6 +179,10 @@ fn layoutPreparedContainerUnchecked(
     var float_bottom: f32 = 0;
     var float_ceiling: f32 = 0;
     var pending_bottom: ?CollapsibleMarginSet = null;
+    var first_child_top: CollapsibleMarginSet = .{};
+    var last_child_bottom: ?CollapsibleMarginSet = null;
+    var top_collapse_open = top_margin_collapses_with_children;
+    var all_in_flow_children_collapse_through = true;
 
     for (child_ids, 0..) |child_id, child_index| {
         const child = tree.node(child_id) orelse return error.InvalidStyle;
@@ -222,14 +244,15 @@ fn layoutPreparedContainerUnchecked(
         var child_height = child_size.height;
 
         if (float_side != .none) {
-            if (try layoutNestedBlockAtWidth(
+            const nested_result = try layoutNestedBlockAtWidth(
                 tree,
                 child_id,
                 child_context,
                 child_width,
                 measure,
                 null,
-            )) {
+            );
+            if (nested_result != null) {
                 intrinsic = try intrinsicContentSize(child, child_edges, measure);
                 child_size = try resolveChildSize(
                     child_style,
@@ -283,19 +306,62 @@ fn layoutPreparedContainerUnchecked(
             child_width,
             &margins,
         );
+        var nested_result: ?MarginCollapseResult = null;
+        if (!child_establishes_bfc) {
+            nested_result = try layoutNestedBlockAtWidth(
+                tree,
+                child_id,
+                child_context,
+                child_width,
+                measure,
+                null,
+            );
+            if (nested_result != null) {
+                intrinsic = try intrinsicContentSize(child, child_edges, measure);
+                child_size = try resolveChildSize(
+                    child_style,
+                    child_context,
+                    intrinsic,
+                    child_edges,
+                    used_auto_width_border,
+                    null,
+                );
+                child_width = child_size.width;
+                child_height = child_size.height;
+            }
+        }
+        const child_top_margin = CollapsibleMarginSet.fromMargin(margins.top).collapse(
+            if (nested_result) |result| result.top else .{},
+        );
+        var child_bottom_margin = CollapsibleMarginSet.fromMargin(margins.bottom).collapse(
+            if (nested_result) |result| result.bottom else .{},
+        );
+        var child_collapses_through = if (nested_result) |result|
+            result.through
+        else
+            child_height == 0 and
+                child_style.size.height == .auto and
+                child_edges.vertical == 0 and
+                !child_establishes_bfc;
+        if (clear_y > flow_y) {
+            child_collapses_through = false;
+        }
+        const vertical_margin = if (top_collapse_open and
+            clear_y <= flow_y and
+            !child_establishes_bfc)
+            0
+        else if (clear_y <= flow_y)
+            if (pending_bottom) |bottom_margin|
+                bottom_margin.collapse(child_top_margin).resolve()
+            else
+                child_top_margin.resolve()
+        else
+            child_top_margin.resolve();
         var child_x = inlineStartX(
             container_style.writing_direction,
             content_width,
             child_width,
         );
-        const top_margin = CollapsibleMarginSet.fromMargin(margins.top);
-        const vertical_margin = if (clear_y <= flow_y)
-            if (pending_bottom) |bottom_margin|
-                bottom_margin.collapse(top_margin).resolve()
-            else
-                top_margin.resolve()
-        else
-            top_margin.resolve();
         var child_y = try addFinite(start_y, vertical_margin);
         if (container_style.writing_direction == .ltr) {
             child_x = try addFinite(child_x, margins.left);
@@ -374,26 +440,32 @@ fn layoutPreparedContainerUnchecked(
             child_x = try addFinite(placement.x, margins.left);
             child_y = try addFinite(placement.y, margins.top);
         }
-
-        if (try layoutNestedBlockAtWidth(
-            tree,
-            child_id,
-            child_context,
-            child_width,
-            measure,
-            null,
-        )) {
-            intrinsic = try intrinsicContentSize(child, child_edges, measure);
-            child_size = try resolveChildSize(
-                child_style,
+        if (child_establishes_bfc) {
+            nested_result = try layoutNestedBlockAtWidth(
+                tree,
+                child_id,
                 child_context,
-                intrinsic,
-                child_edges,
-                used_auto_width_border,
+                child_width,
+                measure,
                 null,
             );
-            child_width = child_size.width;
-            child_height = child_size.height;
+            if (nested_result) |result| {
+                intrinsic = try intrinsicContentSize(child, child_edges, measure);
+                child_size = try resolveChildSize(
+                    child_style,
+                    child_context,
+                    intrinsic,
+                    child_edges,
+                    used_auto_width_border,
+                    null,
+                );
+                child_width = child_size.width;
+                child_height = child_size.height;
+                child_bottom_margin = CollapsibleMarginSet.fromMargin(margins.bottom).collapse(
+                    result.bottom,
+                );
+                child_collapses_through = result.through;
+            }
         }
         if (child_establishes_bfc) {
             const inline_side = physicalInlineStart(container_style.writing_direction);
@@ -429,16 +501,37 @@ fn layoutPreparedContainerUnchecked(
             content_width,
             0,
         );
+        if (top_collapse_open and !child_establishes_bfc and clear_y <= flow_y) {
+            first_child_top = first_child_top.collapse(child_top_margin);
+            if (child_collapses_through) {
+                first_child_top = first_child_top.collapse(child_bottom_margin);
+            } else {
+                top_collapse_open = false;
+            }
+        } else if (top_collapse_open) {
+            top_collapse_open = false;
+        }
+        all_in_flow_children_collapse_through = all_in_flow_children_collapse_through and
+            child_collapses_through;
         flow_y = try addFinite(static_y, child_height);
-        pending_bottom = CollapsibleMarginSet.fromMargin(margins.bottom);
+        const child_pending_bottom = if (child_collapses_through)
+            child_top_margin.collapse(child_bottom_margin)
+        else
+            child_bottom_margin;
+        pending_bottom = child_pending_bottom;
+        last_child_bottom = child_pending_bottom;
         in_flow_bottom = @max(in_flow_bottom, flow_y);
     }
-
+    const bottom_collapses = bottom_margin_collapses_with_children and
+        last_child_bottom != null;
     const content_height = content_height_fixed orelse blk: {
-        const normal_bottom = try addFinite(
-            in_flow_bottom,
-            if (pending_bottom) |bottom_margin| bottom_margin.resolve() else 0,
-        );
+        const bottom_margin_for_height = if (bottom_collapses)
+            0
+        else if (pending_bottom) |bottom_margin|
+            bottom_margin.resolve()
+        else
+            0;
+        const normal_bottom = try addFinite(in_flow_bottom, bottom_margin_for_height);
         const auto_content_height = if (container_establishes_bfc)
             @max(normal_bottom, float_bottom)
         else
@@ -470,6 +563,13 @@ fn layoutPreparedContainerUnchecked(
         content_height,
         child_context.percentage_basis.width,
     );
+    return .{
+        .top = if (top_margin_collapses_with_children) first_child_top else .{},
+        .bottom = if (bottom_collapses) last_child_bottom.? else .{},
+        .through = top_margin_collapses_with_children and
+            bottom_margin_collapses_with_children and
+            all_in_flow_children_collapse_through,
+    };
 }
 
 fn layoutNestedBlockAtWidth(
@@ -479,23 +579,24 @@ fn layoutNestedBlockAtWidth(
     used_width: f32,
     measure: ?flex.MeasureFn,
     forced_border_height: ?f32,
-) sizing.Error!bool {
+) sizing.Error!?MarginCollapseResult {
     const child = tree.node(child_id) orelse return error.InvalidStyle;
-    if (child.children.items.len == 0) return false;
+    if (child.children.items.len == 0) return null;
     switch (child.style.display) {
         .block, .flow_root => {},
-        else => return false,
+        else => return null,
     }
     var nested_context = parent_context;
     nested_context.available.width = .{ .definite = try finite(used_width) };
-    try layoutPreparedContainerUnchecked(
+    const result = try layoutPreparedContainerUnchecked(
         tree,
         child_id,
         nested_context,
         measure,
         forced_border_height,
+        false,
     );
-    return true;
+    return result;
 }
 
 fn validateContext(context: sizing.SizingContext) sizing.Error!void {
@@ -760,7 +861,7 @@ fn layoutAbsoluteChildren(
             child_size.width,
             measure,
             auto_height_border,
-        )) {
+        )) |_| {
             intrinsic = try intrinsicContentSize(child, child_edges, measure);
             child_size = try resolveChildSize(
                 child_style,
