@@ -37,7 +37,7 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
     const root = &tree.nodes.items[root_index];
     root.rect.x = 0;
     root.rect.y = 0;
-    try layoutNodeCallback(
+    try layoutRoot(
         &layout_context,
         tree,
         root,
@@ -51,8 +51,49 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
     );
 }
 
-/// Return true only for a concrete tree that contains a real display boundary.
-/// The facade uses this conservative predicate before selecting this path.
+/// Resolve the root pseudo-container's natural size before forced placement.
+///
+/// Auto width stretches to the surface, while auto height keeps the measured
+/// natural border height. Concrete dimensions come from the same measurement.
+fn layoutRoot(
+    self: *context.LayoutContext,
+    tree: *widget.WidgetTree,
+    node: *widget.WidgetNode,
+    request: context.Request,
+) LayoutError!void {
+    var layout_request = request;
+    if (needsRootNaturalPlacement(node)) {
+        const natural = try self.measure_node(self, tree, node, request);
+        layout_request.forced_border = .{
+            .width = if (isConcreteDimension(node.style.size.width))
+                natural.border.width
+            else
+                request.available.width,
+            .height = natural.border.height,
+        };
+    }
+    try self.layout_node(self, tree, node, layout_request);
+}
+
+fn needsRootNaturalPlacement(node: *const widget.WidgetNode) bool {
+    const mixed_display = node.style.display == .flex or node.style.display == .grid;
+    if (!mixed_display) return false;
+    return !isConcreteDimension(node.style.size.width) or
+        !isConcreteDimension(node.style.size.height);
+}
+
+fn rootIndex(tree: *const widget.WidgetTree) ?usize {
+    var result: ?usize = null;
+    for (tree.nodes.items, 0..) |node, index| {
+        if (node.parent != .root) continue;
+        if (result != null) return null;
+        result = index;
+    }
+    return result;
+}
+
+/// Return true only for a tree whose descendants are concrete and whose
+/// single root uses supported surface placement and dimensions.
 pub fn eligibleMixedFixedTree(tree: *const widget.WidgetTree) bool {
     const root_index = rootIndex(tree) orelse return false;
     if (tree.nodes.items[root_index].style.display == .none) return false;
@@ -374,16 +415,6 @@ fn markHidden(
     }
 }
 
-fn rootIndex(tree: *const widget.WidgetTree) ?usize {
-    var result: ?usize = null;
-    for (tree.nodes.items, 0..) |node, index| {
-        if (node.parent != .root) continue;
-        if (result != null) return null;
-        result = index;
-    }
-    return result;
-}
-
 fn hasMixedDisplay(tree: *const widget.WidgetTree, index: usize, depth: usize) bool {
     if (depth == 0) return false;
     const node = &tree.nodes.items[index];
@@ -402,6 +433,7 @@ fn hasDefaultSurfacePlacement(node: *const widget.WidgetNode) bool {
     if (input.float != .none or input.clear != .none) return false;
     if (node.scroll != null) return false;
     if (input.grow != 0 or input.shrink != 1 or input.basis != 0) return false;
+    if (input.min_main != null) return false;
     if (!isZeroMargins(input)) return false;
     if (!hasAutomaticInsets(input)) return false;
     return switch (input.flex_basis) {
@@ -453,12 +485,14 @@ fn isConcreteTree(
     const node = &tree.nodes.items[index];
     if (node.scroll != null) return false;
     if (node.style.display != .none and node.children.items.len != 0) {
-        if (is_root and !isConcreteDimension(node.style.size.width)) return false;
-        if (is_root and node.style.display != .block and
-            node.style.display != .flow_root and
-            !isConcreteDimension(node.style.size.height))
-        {
-            return false;
+        if (is_root) {
+            if (!isSupportedRootDimension(node.style.size.width)) return false;
+            if (node.style.display != .block and
+                node.style.display != .flow_root and
+                !isSupportedRootDimension(node.style.size.height))
+            {
+                return false;
+            }
         }
         switch (node.kind) {
             .row, .column => {},
@@ -470,6 +504,13 @@ fn isConcreteTree(
         if (!isConcreteTree(tree, child_index, depth - 1, false)) return false;
     }
     return true;
+}
+
+fn isSupportedRootDimension(value: style.Dimension) bool {
+    return switch (value) {
+        .auto, .length, .percent => true,
+        .min_content, .max_content => false,
+    };
 }
 
 fn isConcreteDimension(value: style.Dimension) bool {
