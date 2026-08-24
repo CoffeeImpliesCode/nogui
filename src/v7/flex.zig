@@ -71,14 +71,18 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
     for (tree.nodes.items) |*node| {
         node.resolveTypedStyle(null, .{ .width = 0, .height = 0 });
     }
+    clearHiddenSubtrees(tree);
     // Bottom-up pass: leaves get natural sizes; containers compute their own
     // size and position children relative to the container's content box.
     for (tree.nodes.items) |*node| {
+        if (isHidden(tree, node)) continue;
         switch (node.kind) {
-            .column, .row, .button => if (node.style.display == .grid)
-                layoutGridContainer(tree, node, available)
-            else
-                placeContainer(tree, node, available),
+            .column, .row, .button => switch (node.style.display) {
+                .grid => layoutGridContainer(tree, node, available),
+                .block, .flow_root => placeBlockContainer(tree, node, available),
+                .flex => placeContainer(tree, node, available),
+                .none => unreachable,
+            },
             else => measureLeaf(node, measure),
         }
     }
@@ -89,8 +93,8 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
     // bottom-up, their parent allocates it later. finalizeCross then
     // re-stretches every stretch-aligned child to the parent's FINAL content
     // cross, recursing so the propagation reaches nested containers (a
-    // 776px grown card must stretch its slider to 758px, not leave it at
-    // the 125px hug width). The first main pass runs before the first cross
+    // 776px grown card must stretch its slider to 758px, not leave it at the
+    // 125px hug width). The first main pass runs before the first cross
     // pass: the stretch pass must see the container's grown main, or grown
     // cards never fill their stretched children.
     finalizeMain(tree, .root, available);
@@ -106,10 +110,35 @@ pub fn layoutWith(tree: *WidgetTree, available: Size, measure: ?MeasureFn) void 
     finalizeCross(tree, .root, available);
     finalizeMain(tree, .root, available);
     finalizeSpecialRoots(tree, available);
-    for (tree.nodes.items) |*node| updateScrollOffset(tree, node);
+    clearHiddenSubtrees(tree);
+    for (tree.nodes.items) |*node| {
+        if (isHidden(tree, node)) continue;
+        updateScrollOffset(tree, node);
+    }
+}
+
+fn isHidden(tree: *const WidgetTree, node: *const WidgetNode) bool {
+    var current = node;
+    var steps: usize = 0;
+    while (true) {
+        if (current.style.display == .none) return true;
+        if (current.parent == .root) return false;
+        current = tree.nodeConst(current.parent) orelse return false;
+        steps += 1;
+        if (steps >= tree.nodes.items.len) return true;
+    }
+}
+
+fn clearHiddenSubtrees(tree: *WidgetTree) void {
+    for (tree.nodes.items) |*node| {
+        if (!isHidden(tree, node)) continue;
+        node.rect = .{};
+        node.natural_main = 0;
+    }
 }
 
 fn updateScrollOffset(tree: *WidgetTree, node: *WidgetNode) void {
+    if (isHidden(tree, node)) return;
     if (node.scroll == null) return;
     const resolved = node.style;
     const container_content_w = @max(
@@ -126,6 +155,7 @@ fn updateScrollOffset(tree: *WidgetTree, node: *WidgetNode) void {
     var content_h: f32 = 0;
     for (node.children.items[0..node.children.len]) |child_id| {
         const child = tree.node(child_id) orelse continue;
+        if (isHidden(tree, child)) continue;
         const margin = child.style.margin;
         content_w = @max(content_w, child.rect.x + child.rect.w + margin.right);
         content_h = @max(content_h, child.rect.y + child.rect.h + margin.bottom);
@@ -334,6 +364,7 @@ fn needsAdvancedFlex(tree: *WidgetTree, parent: *const WidgetNode) bool {
     if (directionIsReverse(parent.style.direction)) return true;
     for (parent.children.items[0..parent.children.len]) |child_id| {
         const child = tree.nodeConst(child_id) orelse continue;
+        if (isHidden(tree, child)) continue;
         if (child.style.align_self != .auto) return true;
         if (childHasAutoMargin(child)) return true;
         if (childHasTypedMargin(child)) return true;
@@ -352,12 +383,16 @@ fn needsAdvancedFlex(tree: *WidgetTree, parent: *const WidgetNode) bool {
 fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
     const parent = if (parent_id == .root) null else tree.node(parent_id).?;
     if (parent) |p| {
+        if (isHidden(tree, p)) return;
         if (p.kind != .column and p.kind != .row and p.kind != .button) return;
-        if (p.style.display == .block or p.style.display == .grid) return;
+        if (p.style.display == .block or p.style.display == .flow_root or p.style.display == .grid) return;
         const resolved = p.style;
         if (needsAdvancedFlex(tree, p)) {
-            for (p.children.items[0..p.children.len]) |child_id|
+            for (p.children.items[0..p.children.len]) |child_id| {
+                const child = tree.nodeConst(child_id) orelse continue;
+                if (isHidden(tree, child)) continue;
                 finalizeCross(tree, child_id, available);
+            }
             return;
         }
         const content_w = @max(
@@ -374,6 +409,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
         const is_col = directionIsColumn(p.style.direction);
         for (p.children.items[0..p.children.len]) |cid| {
             const child = tree.node(cid).?;
+            if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) continue;
             const m = child.style.margin;
             child.resolveTypedStyle(
@@ -411,6 +447,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
         // Root pseudo-container: root-level nodes take the available width
         // minus their own cross margins (align = stretch at the root).
         for (tree.nodes.items) |*n| {
+            if (isHidden(tree, n)) continue;
             if (n.parent != .root) continue;
             if (n.style.position == .absolute) continue;
             const m = n.style.margin;
@@ -438,8 +475,9 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
 fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
     const parent = if (parent_id == .root) null else tree.node(parent_id).?;
     if (parent) |p| {
+        if (isHidden(tree, p)) return;
         if (p.kind != .column and p.kind != .row and p.kind != .button) return;
-        if (p.style.display == .block or p.style.display == .grid) return;
+        if (p.style.display == .block or p.style.display == .flow_root or p.style.display == .grid) return;
         const dir: Direction = p.style.direction;
         const main_is_column = directionIsColumn(dir);
         const gap: f32 = p.style.gap;
@@ -472,7 +510,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         // Repeated finalization restarts from each child's stable pre-flex main.
         for (0..count) |i| {
             const child = tree.node(p.children.items[i]) orelse continue;
-            if (child.style.position == .absolute) {
+            if (isHidden(tree, child) or child.style.position == .absolute) {
                 mains[i] = 0;
                 continue;
             }
@@ -508,7 +546,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         if (grew) {
             for (0..count) |i| {
                 const child = tree.node(p.children.items[i]) orelse continue;
-                if (child.style.position == .absolute) continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
                 if (child.style.grow > 0) mains[i] += free * child.style.grow / total_grow;
             }
         } else if (shrank) {
@@ -527,14 +565,14 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 for (0..count) |i| {
                     if (frozen[i]) continue;
                     const child = tree.node(p.children.items[i]) orelse continue;
-                    if (child.style.position == .absolute) continue;
+                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
                     if (child.style.shrink > 0) total_scaled += child.style.shrink * mains[i];
                 }
                 if (total_scaled <= 0) break;
                 var any_frozen = false;
                 for (0..count) |i| {
                     const child = tree.node(p.children.items[i]) orelse continue;
-                    if (child.style.position == .absolute) continue;
+                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
                     if (frozen[i] or child.style.shrink <= 0) continue;
                     const base = mains[i];
                     const target = base - remaining * child.style.shrink * base / total_scaled;
@@ -552,7 +590,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 var fitted: f32 = 0;
                 for (0..count) |i| {
                     const child = tree.node(p.children.items[i]) orelse continue;
-                    if (child.style.position == .absolute) continue;
+                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
                     const m = child.style.margin;
                     fitted += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
                 }
@@ -563,7 +601,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         }
         for (0..count) |i| {
             const child = tree.node(p.children.items[i]) orelse continue;
-            if (child.style.position == .absolute) continue;
+            if (isHidden(tree, child) or child.style.position == .absolute) continue;
             mains[i] = clampMain(child, dir, mains[i]);
         }
 
@@ -579,7 +617,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         if (need_fitted) {
             for (0..count) |i| {
                 const child = tree.node(p.children.items[i]) orelse continue;
-                if (child.style.position == .absolute) continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
                 const m = child.style.margin;
                 final_fitted += mains[i] +
                     (if (main_is_column) m.top + m.bottom else m.left + m.right);
@@ -606,7 +644,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         var flow_index: usize = 0;
         for (0..count) |i| {
             const child = tree.node(p.children.items[i]) orelse continue;
-            if (child.style.position == .absolute) continue;
+            if (isHidden(tree, child) or child.style.position == .absolute) continue;
             const m = child.style.margin;
             if (main_is_column) {
                 child.rect.h = mains[i];
@@ -623,7 +661,11 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 (if (flow_index < flow_count) gap + extra_gap else 0);
         }
         // Recurse so nested containers distribute against their FINAL mains.
-        for (0..count) |i| finalizeMain(tree, p.children.items[i], available);
+        for (0..count) |i| {
+            const child = tree.node(p.children.items[i]) orelse continue;
+            if (isHidden(tree, child)) continue;
+            finalizeMain(tree, p.children.items[i], available);
+        }
     } else {
         // Root pseudo-container: re-run the root grow/shrink against the
         // available main (root justify is the Style{} default: start).
@@ -631,8 +673,8 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         var total_grow: f32 = 0;
         var total_shrink: f32 = 0;
         for (tree.nodes.items) |*n| {
+            if (n.parent != .root or isHidden(tree, n)) continue;
             if (n.style.position == .absolute) continue;
-            if (n.parent != .root) continue;
             const margin = n.style.margin;
             content += n.rect.h + margin.top + margin.bottom;
             if (n.style.grow > 0) total_grow += n.style.grow;
@@ -643,8 +685,8 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         const shrank = free < 0 and total_shrink > 0;
         var y: f32 = 0;
         for (tree.nodes.items) |*n| {
+            if (n.parent != .root or isHidden(tree, n)) continue;
             if (n.style.position == .absolute) continue;
-            if (n.parent != .root) continue;
             const m = n.style.margin;
             var main = n.rect.h;
             if (grew and n.style.grow > 0) {
@@ -772,6 +814,7 @@ fn layoutAdvancedFlexContainer(
     node: *WidgetNode,
     _: Size,
 ) void {
+    if (isHidden(tree, node)) return;
     const direction = node.style.direction;
     const main_is_column = directionIsColumn(direction);
     const main_reverse = directionIsReverse(direction);
@@ -809,7 +852,7 @@ fn layoutAdvancedFlexContainer(
 
     for (0..node.children.len) |child_index| {
         const child = tree.node(node.children.items[child_index]) orelse continue;
-        if (child.style.position == .absolute) continue;
+        if (isHidden(tree, child) or child.style.position == .absolute) continue;
         // Finalization runs repeatedly, so the current rect is not a stable flex base.
         const natural_main = child.natural_main;
         const natural_cross = if (main_is_column) child.rect.w else child.rect.h;
@@ -1043,12 +1086,18 @@ fn layoutAdvancedFlexContainer(
 fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
     if (parent_id != .root) {
         const parent = tree.node(parent_id) orelse return;
+        if (isHidden(tree, parent)) return;
         if (parent.kind != .column and parent.kind != .row and parent.kind != .button) return;
-        if (parent.style.display == .block or parent.style.display == .grid) return;
+        if (parent.style.display == .block or
+            parent.style.display == .flow_root or
+            parent.style.display == .grid) return;
         if (needsAdvancedFlex(tree, parent)) {
             layoutAdvancedFlexContainer(tree, parent, available);
-            for (parent.children.items[0..parent.children.len]) |child_id|
+            for (parent.children.items[0..parent.children.len]) |child_id| {
+                const child = tree.nodeConst(child_id) orelse continue;
+                if (isHidden(tree, child)) continue;
                 finalizeMain(tree, child_id, available);
+            }
             return;
         }
     }
@@ -1157,6 +1206,7 @@ fn applyRelativeInsets(
 }
 
 fn placeBlockContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
+    if (isHidden(tree, node)) return;
     const inset_width = blockInsetWidth(node);
     const inset_height = blockInsetHeight(node);
     var content_height: f32 = 0;
@@ -1164,7 +1214,7 @@ fn placeBlockContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
 
     for (node.children.items[0..node.children.len]) |child_id| {
         const child = tree.node(child_id) orelse continue;
-        if (child.style.position == .absolute) continue;
+        if (isHidden(tree, child) or child.style.position == .absolute) continue;
         const margin = child.style.margin;
         content_height += child.rect.h + margin.top + margin.bottom;
         max_child_width = @max(
@@ -1210,7 +1260,7 @@ fn placeBlockContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
     var cursor_y: f32 = 0;
     for (node.children.items[0..node.children.len]) |child_id| {
         const child = tree.node(child_id) orelse continue;
-        if (child.style.position == .absolute) continue;
+        if (isHidden(tree, child) or child.style.position == .absolute) continue;
         const margin = child.style.margin;
         child.rect.x = margin.left;
         child.rect.y = cursor_y + margin.top;
@@ -1301,6 +1351,7 @@ fn finalizeBlockChildren(
     width_definite: bool,
     height_definite: bool,
 ) void {
+    if (isHidden(tree, parent)) return;
     const containing: Size = .{
         .width = @max(
             0,
@@ -1316,6 +1367,7 @@ fn finalizeBlockChildren(
     var cursor_y: f32 = 0;
     for (parent.children.items[0..parent.children.len]) |child_id| {
         const child = tree.node(child_id) orelse continue;
+        if (isHidden(tree, child)) continue;
         if (child.style.position == .absolute) {
             placeAbsoluteChild(child, containing, width_definite, height_definite);
             reflowFlexContainer(tree, child, available);
@@ -1363,8 +1415,9 @@ fn finalizeSpecialNode(
     width_definite: bool,
     height_definite: bool,
 ) void {
+    if (isHidden(tree, node)) return;
     if (node.kind != .column and node.kind != .row and node.kind != .button) return;
-    if (node.style.display == .block) {
+    if (node.style.display == .block or node.style.display == .flow_root) {
         finalizeBlockChildren(tree, node, available, width_definite, height_definite);
     } else if (node.style.display == .grid) {
         layoutGridContainer(tree, node, available);
@@ -1382,6 +1435,7 @@ fn finalizeSpecialNode(
         };
         for (node.children.items[0..node.children.len]) |child_id| {
             const child = tree.node(child_id) orelse continue;
+            if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) {
                 placeAbsoluteChild(child, containing, width_definite, height_definite);
             } else {
@@ -1403,6 +1457,7 @@ fn finalizeSpecialNode(
         };
         for (node.children.items[0..node.children.len]) |child_id| {
             const child = tree.node(child_id) orelse continue;
+            if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) {
                 placeAbsoluteChild(child, containing, width_definite, height_definite);
                 reflowFlexContainer(tree, child, available);
@@ -1414,8 +1469,9 @@ fn finalizeSpecialNode(
 
     for (node.children.items[0..node.children.len]) |child_id| {
         const child = tree.node(child_id) orelse continue;
+        if (isHidden(tree, child)) continue;
         const child_width_definite = true;
-        const child_height_definite = if (node.style.display == .block)
+        const child_height_definite = if (node.style.display == .block or node.style.display == .flow_root)
             styleDimensionIsDefinite(
                 child.style.size.height,
                 height_definite,
@@ -1433,6 +1489,7 @@ fn finalizeSpecialNode(
 }
 fn finalizeSpecialRoots(tree: *WidgetTree, available: Size) void {
     for (tree.nodes.items) |*node| {
+        if (isHidden(tree, node)) continue;
         if (node.parent != .root) continue;
         if (node.style.position == .absolute) {
             placeAbsoluteChild(node, available, true, true);
@@ -1457,7 +1514,7 @@ fn finalizeSpecialRoots(tree: *WidgetTree, available: Size) void {
             node.rect.w = clampBlockAxis(node, width, available.width, intrinsic.width, true);
             node.rect.h = clampBlockAxis(node, height, available.height, intrinsic.height, false);
             layoutGridContainer(tree, node, available);
-        } else if (node.style.display == .block) {
+        } else if (node.style.display == .block or node.style.display == .flow_root) {
             const intrinsic: Size = .{ .width = node.rect.w, .height = node.rect.h };
             node.resolveTypedStyleAxes(
                 available.width,
@@ -1482,14 +1539,14 @@ fn finalizeSpecialRoots(tree: *WidgetTree, available: Size) void {
             node.rect.h = clampBlockAxis(node, height, available.height, intrinsic.height, false);
         }
         if (node.style.position == .relative) {
-            const relative_height_definite = if (node.style.display == .block)
+            const relative_height_definite = if (node.style.display == .block or node.style.display == .flow_root)
                 styleDimensionIsDefinite(node.style.size.height, true)
             else
                 true;
             applyRelativeInsets(node, available, true, relative_height_definite);
         }
         const width_definite = true;
-        const height_definite = if (node.style.display == .block)
+        const height_definite = if (node.style.display == .block or node.style.display == .flow_root)
             styleDimensionIsDefinite(node.style.size.height, true)
         else
             true;
@@ -1498,7 +1555,8 @@ fn finalizeSpecialRoots(tree: *WidgetTree, available: Size) void {
 }
 
 fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
-    if (node.style.display == .block) {
+    if (isHidden(tree, node)) return;
+    if (node.style.display == .block or node.style.display == .flow_root) {
         placeBlockContainer(tree, node, available);
         return;
     }
@@ -1540,7 +1598,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
 
     for (0..count) |i| {
         const child = tree.node(node.children.items[i]) orelse continue;
-        if (child.style.position == .absolute) {
+        if (isHidden(tree, child) or child.style.position == .absolute) {
             mains[i] = 0;
             crosses[i] = 0;
             continue;
@@ -1604,7 +1662,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     if (grew) {
         for (0..count) |i| {
             const child = tree.node(node.children.items[i]) orelse continue;
-            if (child.style.position == .absolute) continue;
+            if (isHidden(tree, child) or child.style.position == .absolute) continue;
             if (child.style.grow > 0) mains[i] += free * child.style.grow / total_grow;
         }
     } else if (shrank) {
@@ -1621,7 +1679,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
             for (0..count) |i| {
                 if (frozen[i]) continue;
                 const child = tree.node(node.children.items[i]) orelse continue;
-                if (child.style.position == .absolute) continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
                 if (child.style.shrink > 0) total_scaled += child.style.shrink * mains[i];
             }
             if (total_scaled <= 0) break;
@@ -1629,7 +1687,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
             for (0..count) |i| {
                 const child = tree.node(node.children.items[i]) orelse continue;
                 if (frozen[i] or child.style.shrink <= 0) continue;
-                if (child.style.position == .absolute) continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
                 const base = mains[i];
                 const target = base - remaining * child.style.shrink * base / total_scaled;
                 const floor = resolvedMainFloor(child, dir, child.natural_main);
@@ -1646,7 +1704,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
             var fitted: f32 = 0;
             for (0..count) |i| {
                 const child = tree.node(node.children.items[i]) orelse continue;
-                if (child.style.position == .absolute) continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
                 const m = child.style.margin;
                 fitted += mains[i] + (if (directionIsColumn(dir)) m.top + m.bottom else m.left + m.right);
             }
@@ -1658,7 +1716,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
 
     for (0..count) |i| {
         const child = tree.node(node.children.items[i]) orelse continue;
-        if (child.style.position == .absolute) continue;
+        if (isHidden(tree, child) or child.style.position == .absolute) continue;
         mains[i] = clampMain(child, dir, mains[i]);
     }
     // The container takes the available main size when space was distributed
@@ -1710,7 +1768,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     var flow_index: usize = 0;
     for (0..count) |i| {
         const child = tree.node(node.children.items[i]) orelse continue;
-        if (child.style.position == .absolute) continue;
+        if (isHidden(tree, child) or child.style.position == .absolute) continue;
         // Cross size: stretch fills the content-box cross minus the child's
         // own cross margins, otherwise the child keeps its natural cross.
         const cross_margin = if (directionIsColumn(dir))
@@ -1844,7 +1902,7 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
     var total_grow: f32 = 0;
     var total_shrink: f32 = 0;
     for (tree.nodes.items) |*n| {
-        if (n.parent != .root) continue;
+        if (n.parent != .root or isHidden(tree, n)) continue;
         if (n.style.position == .absolute) continue;
         root_count += 1;
         // The natural (pre-basis) main is the flex-shrink floor.
@@ -1872,14 +1930,14 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
     if (shrank) {
         for (tree.nodes.items) |*n| {
             if (n.style.position == .absolute) continue;
-            if (n.parent != .root) continue;
+            if (n.parent != .root or isHidden(tree, n)) continue;
             n.rect.h = rootBasisMain(n, available.height);
         }
         var remaining = -free;
         for (0..root_count) |_| {
             var total_scaled: f32 = 0;
             for (tree.nodes.items) |*n| {
-                if (n.parent != .root) continue;
+                if (n.parent != .root or isHidden(tree, n)) continue;
                 if (n.style.position == .absolute) continue;
                 const floor = resolvedMainFloor(n, .column, n.natural_main);
                 if (n.style.shrink > 0 and n.rect.h > floor)
@@ -1889,7 +1947,7 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
             var changed = false;
             for (tree.nodes.items) |*n| {
                 if (n.style.position == .absolute) continue;
-                if (n.parent != .root) continue;
+                if (n.parent != .root or isHidden(tree, n)) continue;
                 const floor = resolvedMainFloor(n, .column, n.natural_main);
                 if (n.style.shrink <= 0 or n.rect.h <= floor) continue;
                 const base = n.rect.h;
@@ -1903,7 +1961,7 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
             if (!changed) break;
             var fitted: f32 = 0;
             for (tree.nodes.items) |*n| {
-                if (n.parent != .root) continue;
+                if (n.parent != .root or isHidden(tree, n)) continue;
                 if (n.style.position == .absolute) continue;
                 fitted += n.rect.h + n.style.margin.top + n.style.margin.bottom;
             }
@@ -1914,7 +1972,7 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
 
     var y: f32 = 0;
     for (tree.nodes.items) |*n| {
-        if (n.parent != .root) continue;
+        if (n.parent != .root or isHidden(tree, n)) continue;
         if (n.style.position == .absolute) continue;
         const m = n.style.margin;
         // After the shrink pass rect.h already holds the basis-applied (and
@@ -2120,13 +2178,14 @@ fn gridAlignContentOffset(
 /// resolved first, intrinsic contributions grow auto tracks, and `fr` tracks
 /// receive the remaining definite content-box space.
 fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
+    if (isHidden(tree, node)) return;
     const inset_width = blockInsetWidth(node);
     const inset_height = blockInsetHeight(node);
     var flow_ids: [32]Id = undefined;
     var flow_count: usize = 0;
     for (node.children.items[0..node.children.len]) |child_id| {
         const child = tree.node(child_id) orelse continue;
-        if (child.style.position == .absolute) continue;
+        if (isHidden(tree, child) or child.style.position == .absolute) continue;
         if (flow_count < flow_ids.len) {
             flow_ids[flow_count] = child_id;
             flow_count += 1;
@@ -4059,4 +4118,21 @@ test "column reverse places source order from the main-end edge" {
 
     try testing.expectEqual(@as(f32, 80), tree.node(first).?.rect.y);
     try testing.expectEqual(@as(f32, 60), tree.node(second).?.rect.y);
+}
+
+test "display none hides directly constructed subtree" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.nodes.deinit(testing.allocator);
+
+    const child: Id = @enumFromInt(1);
+    const root: Id = @enumFromInt(2);
+    try appendNode(&tree, child, root, .{ .label = .{ .text = "visible child" } });
+    try appendNode(&tree, root, .root, .{ .column = .{} });
+    wireChildren(&tree);
+    tree.node(root).?.style.display = .none;
+
+    layout(&tree, .{ .width = 800, .height = 600 });
+
+    try testing.expectEqual(Rect{}, tree.node(root).?.rect);
+    try testing.expectEqual(Rect{}, tree.node(child).?.rect);
 }

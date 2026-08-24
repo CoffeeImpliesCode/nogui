@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "upstream_repository": "https://github.com/DioxusLabs/taffy",
+  "upstream_tag": "v0.13.0",
+  "upstream_commit": "45a56299d366ddb383e593a1f0372158d00e8530",
+  "generator": "tools/import_taffy_v013_fixtures.py",
+  "generator_version": 1,
+  "source_count": 1,
+  "case_count": 1,
+  "sources": [
+    {
+      "path": "test_fixtures/leaf/leaf_with_content_and_border.html",
+      "sha256": "f4befcf21719a21b30a7afb2d34ff23f208a0051094d610b6011369f9a9adc55"
+    }
+  ],
+  "selection": {
+    "source": "test_fixtures/leaf/leaf_with_content_and_border.html",
+    "variant": "border_box_ltr"
+  }
+}

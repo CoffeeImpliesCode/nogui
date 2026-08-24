@@ -1,12 +1,21 @@
 //! Typed, fieldwise-resolved layout and paint values.
 const std = @import("std");
+const values = @import("layout/values.zig");
+
+pub const Direction = values.Direction;
+pub const Float = values.Float;
+pub const Clear = values.Clear;
+pub const Alignment = values.Alignment;
+pub const Calc = values.Calc;
+pub const CalcError = values.CalcError;
+pub const calc = values.calc;
 
 pub const Color = [4]f32;
 pub const TextureId = u32;
 pub const Layer = u32;
 
 /// Layout modes supported by the v7 dispatcher.
-pub const Display = enum { block, flex, grid };
+pub const Display = enum { block, flex, grid, flow_root, none };
 
 /// Whether a node participates in normal flow or is removed from it.
 pub const Position = enum { relative, absolute };
@@ -14,7 +23,15 @@ pub const Position = enum { relative, absolute };
 pub const FlexDirection = enum { column, row, column_reverse, row_reverse };
 pub const FlexWrap = enum { nowrap, wrap, wrap_reverse };
 pub const Justify = enum { start, center, end, space_between };
-pub const Align = enum { stretch, start, center, end };
+pub const Align = enum {
+    stretch,
+    start,
+    center,
+    end,
+
+    pub const safe_center: Alignment = .safe_center;
+    pub const unsafe_center: Alignment = .unsafe_center;
+};
 pub const AlignContent = enum { stretch, start, center, end, space_between, space_around };
 pub const AlignSelf = enum { auto, stretch, start, center, end };
 pub const BoxSizing = enum { content_box, border_box };
@@ -179,7 +196,7 @@ pub const ResolvedSize = Size(?f32);
 pub const ResolvedInsets = Rect(?f32);
 
 /// Overflow behavior for one axis.
-pub const Overflow = enum { visible, clip, scroll };
+pub const Overflow = enum { visible, clip, scroll, auto };
 pub const OverflowAxes = Size(Overflow);
 
 /// Distinguishes no override, a replacement value, and an explicit clear.
@@ -479,7 +496,12 @@ pub const TextureOverride = union(enum) {
 pub const Style = struct {
     display: Display = .flex,
     position: Position = .relative,
+    /// Legacy flex main-axis direction. Kept until the typed style cutover.
     direction: FlexDirection = .column,
+    /// Canonical inline direction.
+    writing_direction: Direction = .ltr,
+    float: Float = .none,
+    clear: Clear = .none,
     wrap: FlexWrap = .nowrap,
     /// Compatibility spelling for callers that use the CSS property name.
     flex_wrap: FlexWrap = .nowrap,
@@ -543,6 +565,9 @@ pub const Style = struct {
         var result = defaults;
         if (local.display) |value| result.display = value;
         if (local.position) |value| result.position = value;
+        if (local.writing_direction) |value| result.writing_direction = value;
+        if (local.float) |value| result.float = value;
+        if (local.clear) |value| result.clear = value;
         if (local.direction) |value| result.direction = value;
         if (local.flex_direction) |value| result.direction = value;
         if (local.wrap) |value| {
@@ -742,6 +767,9 @@ pub const OptionalFloatOverride = union(enum) {
 pub const StyleOverride = struct {
     display: ?Display = null,
     position: ?Position = null,
+    writing_direction: ?Direction = null,
+    float: ?Float = null,
+    clear: ?Clear = null,
     direction: ?FlexDirection = null,
     /// Compatibility spelling accepted by option translators.
     flex_direction: ?FlexDirection = null,
@@ -1094,4 +1122,69 @@ test "grid style types and overrides retain typed placement" {
         @as(GridPlacement, .{ .span = 2 }),
         resolved.grid_column.end,
     ));
+}
+
+test "canonical display supports none" {
+    try std.testing.expectEqual(@as(Display, .none), Display.none);
+}
+
+test "canonical direction supports rtl" {
+    try std.testing.expectEqual(@as(Direction, .rtl), Direction.rtl);
+}
+
+test "canonical overflow supports auto" {
+    try std.testing.expectEqual(@as(Overflow, .auto), Overflow.auto);
+}
+
+test "canonical float defaults to none" {
+    try std.testing.expectEqual(Float.none, (Style{}).float);
+}
+
+test "canonical clear defaults to none" {
+    try std.testing.expectEqual(Clear.none, (Style{}).clear);
+}
+
+test "canonical alignment distinguishes safe and unsafe center" {
+    try std.testing.expect(Align.safe_center != Align.unsafe_center);
+}
+
+test "calc resolves length plus percentage" {
+    const resolved = try calc(.add(.length(20), .percent(0.15))).resolve(100);
+    try std.testing.expectEqual(@as(f32, 35), resolved);
+}
+
+test "calc reports indefinite percentage" {
+    try std.testing.expectError(
+        error.IndefinitePercentage,
+        calc(.percent(0.15)).resolve(null),
+    );
+}
+
+test "Style resolve applies canonical flow overrides" {
+    const resolved = Style.resolve(.{}, .{
+        .writing_direction = .rtl,
+        .float = .inline_end,
+        .clear = .both,
+    });
+
+    try std.testing.expectEqual(Direction.rtl, resolved.writing_direction);
+    try std.testing.expectEqual(Float.inline_end, resolved.float);
+    try std.testing.expectEqual(Clear.both, resolved.clear);
+}
+
+test "calc direct percentage literal reports indefinite percentage" {
+    try std.testing.expectError(
+        error.IndefinitePercentage,
+        (Calc{ .percent_sum = 0.5 }).resolve(null),
+    );
+}
+
+test "calc preserves percentage presence when direct terms cancel" {
+    const positive: Calc = .{ .percent_sum = 0.5 };
+    const negative: Calc = .{ .percent_sum = -0.5 };
+
+    try std.testing.expectError(
+        error.IndefinitePercentage,
+        Calc.add(positive, negative).resolve(null),
+    );
 }

@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "leaf/leaf_with_content_and_border.html",
+      "source": "test_fixtures/leaf/leaf_with_content_and_border.html",
+      "source_sha256": "f4befcf21719a21b30a7afb2d34ff23f208a0051094d610b6011369f9a9adc55",
+      "variant": "border_box_ltr",
+      "grid_feature": false,
+      "use_rounding": true,
+      "viewport": {
+        "width": 800,
+        "height": 600
+      },
+      "nodes": [
+        {
+          "kind": "text",
+          "text": "HHHH",
+          "child_count": 0,
+          "style": {
+            "direction": "ltr",
+            "border_top": "2px",
+            "border_right": "4px",
+            "border_bottom": "6px",
+            "border_left": "8px"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "x": 0,
+          "y": 0,
+          "width": 52,
+          "height": 18
+        }
+      ]
+    }
+  ]
+}

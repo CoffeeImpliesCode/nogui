@@ -212,6 +212,11 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     const T = @TypeOf(opts);
     if (@hasField(T, "display")) local.display = @as(style.Display, opts.display);
     if (@hasField(T, "position")) local.position = @as(style.Position, opts.position);
+    if (@hasField(T, "writing_direction")) {
+        local.writing_direction = @as(style.Direction, opts.writing_direction);
+    }
+    if (@hasField(T, "float")) local.float = @as(style.Float, opts.float);
+    if (@hasField(T, "clear")) local.clear = @as(style.Clear, opts.clear);
     if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
     if (@hasField(T, "flex_direction")) {
         local.flex_direction = @as(style.FlexDirection, opts.flex_direction);
