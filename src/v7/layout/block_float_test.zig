@@ -331,6 +331,66 @@ test "scrolling block establishes a float-containing formatting context" {
     );
 }
 
+test "hidden overflow on either axis contains floats while clip does not" {
+    const Scenario = struct {
+        overflow: style.OverflowAxes,
+        expected_height: f32,
+    };
+    const scenarios = [_]Scenario{
+        .{
+            .overflow = .{ .width = .hidden, .height = .clip },
+            .expected_height = 30,
+        },
+        .{
+            .overflow = .{ .width = .clip, .height = .hidden },
+            .expected_height = 30,
+        },
+        .{
+            .overflow = .{ .width = .clip, .height = .clip },
+            .expected_height = 0,
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const float_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+        const root_id: Id = @enumFromInt(3);
+
+        try appendNode(&tree, float_id, container_id, .{
+            .display = .block,
+            .float = .left,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 30 } },
+        });
+        try appendNode(&tree, container_id, root_id, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 60 }, .height = .auto },
+            .overflow = scenario.overflow,
+        });
+        try appendNode(&tree, root_id, .root, .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .auto },
+        });
+        try tree.appendChild(container_id, float_id);
+        try tree.appendChild(root_id, container_id);
+
+        const pass = try block_float.LayoutPass.init(&tree);
+        try pass.layoutContainer(root_id, definiteContext(100, 100), null);
+
+        try expectRelative(
+            &tree,
+            container_id,
+            .{ .x = 0, .y = 0, .w = 60, .h = scenario.expected_height },
+        );
+        try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 20, .h = 30 });
+    }
+}
+
 test "minimum width clamp drives block child aspect-ratio height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();

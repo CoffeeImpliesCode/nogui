@@ -196,7 +196,7 @@ pub const ResolvedSize = Size(?f32);
 pub const ResolvedInsets = Rect(?f32);
 
 /// Overflow behavior for one axis.
-pub const Overflow = enum { visible, clip, scroll, auto };
+pub const Overflow = enum { visible, hidden, clip, scroll, auto };
 pub const OverflowAxes = Size(Overflow);
 
 /// Distinguishes no override, a replacement value, and an explicit clear.

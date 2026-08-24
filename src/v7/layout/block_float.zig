@@ -1664,8 +1664,10 @@ fn establishesBfc(input_style: style.Style) bool {
     if (input_style.display == .flow_root) return true;
     if (input_style.position == .absolute) return true;
     if (input_style.float != .none) return true;
-    return input_style.overflow.width == .scroll or
+    return input_style.overflow.width == .hidden or
+        input_style.overflow.width == .scroll or
         input_style.overflow.width == .auto or
+        input_style.overflow.height == .hidden or
         input_style.overflow.height == .scroll or
         input_style.overflow.height == .auto;
 }
