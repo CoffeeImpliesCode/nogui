@@ -110,6 +110,7 @@ test {
     _ = @import("taffy_block_conformance.zig");
     _ = @import("taffy_flex_conformance.zig");
     _ = @import("taffy_grid_conformance.zig");
+    _ = @import("layout/sizing_test.zig");
     std.testing.refAllDecls(@This());
 }
 
