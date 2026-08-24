@@ -79,6 +79,15 @@ class ImportTaffyFixturesTests(unittest.TestCase):
     def _read_json(self, relative_path: str) -> dict[str, object]:
         return json.loads((self.output / relative_path).read_text(encoding="utf-8"))
 
+    def test_parse_number_accepts_px_and_rejects_other_units(self) -> None:
+        path = Path("fixture.xml")
+        self.assertEqual(
+            importer.parse_number("400px", path=path, attribute="width"),
+            400.0,
+        )
+        with self.assertRaises(importer.ImportError):
+            importer.parse_number("2em", path=path, attribute="width")
+
     def test_seed_import_records_explicit_fixture_and_variant_selection(self) -> None:
         selected_variant = "border_box_ltr"
 

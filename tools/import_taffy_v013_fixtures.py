@@ -119,8 +119,9 @@ def source_sha256(path: Path) -> str:
 
 
 def parse_number(value: str, *, path: Path, attribute: str) -> float:
+    numeric_value = value[:-2] if value.endswith("px") else value
     try:
-        number = float(value)
+        number = float(numeric_value)
     except ValueError as exc:
         raise fail(f"invalid {attribute}={value!r} in {path}") from exc
     if not math.isfinite(number):
