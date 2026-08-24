@@ -552,6 +552,35 @@ fn layoutFlex(
             main_gap,
         );
     }
+    if (options.context) |context| {
+        for (items.items) |*item| {
+            const child = &tree.nodes.items[item.index];
+            if (child.children.items.len == 0 or child.style.display == .flex) continue;
+            const remeasure_available: widget.Size = if (axes.horizontal)
+                .{ .width = item.size, .height = cross_size }
+            else
+                .{ .width = cross_size, .height = item.size };
+            const measured = try context.measure_node(
+                context,
+                tree,
+                child,
+                .{
+                    .available = remeasure_available,
+                    .percentage_basis = .{
+                        .width = remeasure_available.width,
+                        .height = remeasure_available.height,
+                    },
+                    .intrinsic_width = false,
+                    .intrinsic_height = false,
+                },
+            );
+            item.cross = try clamp(
+                axisCross(axes, measured.border),
+                item.cross_min,
+                item.cross_max,
+            );
+        }
+    }
     try lineCrossSizes(lines.items, items.items, cross_size, cross_gap);
     try lineDistribution(lines.items, node.style.align_content, cross_size, cross_gap);
     try placeItems(tree, node, axes, content, lines.items, items.items, main_gap);

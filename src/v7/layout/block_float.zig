@@ -752,6 +752,7 @@ fn layoutPreparedContainerUnchecked(
                 child_collapses_through = result.through;
             }
         }
+        var mixed_child_context = child_context;
         if (child_establishes_bfc) {
             const inline_side = physicalInlineStart(container_style.writing_direction);
             const final_placement = try findSlot(
@@ -773,6 +774,59 @@ fn layoutPreparedContainerUnchecked(
             );
             child_x = try addFinite(final_placement.x, margins.left);
             child_y = try addFinite(final_placement.y, margins.top);
+
+            if (layout_ctx != null and
+                child.children.items.len != 0 and
+                child_style.display != .block and
+                child_style.display != .flow_root)
+            {
+                const final_slot_border_width = if (child_style.size.width == .auto)
+                    @max(
+                        0,
+                        try subtractFinite(
+                            try subtractFinite(
+                                final_placement.slot_width,
+                                margins.left,
+                            ),
+                            margins.right,
+                        ),
+                    )
+                else
+                    child_width;
+                if (child_style.size.width == .auto) {
+                    used_auto_width_border = final_slot_border_width;
+                }
+                mixed_child_context.available.width = .{
+                    .definite = final_slot_border_width,
+                };
+                mixed_child_context.percentage_basis.width = @as(?f32, final_slot_border_width);
+
+                const measured_child_width = child_width;
+                intrinsic = try intrinsicContentSizeWithContext(
+                    tree,
+                    child,
+                    child_edges,
+                    measure,
+                    layout_ctx,
+                    mixed_child_context,
+                );
+                child_size = try resolveChildSize(
+                    child_style,
+                    child_context,
+                    intrinsic,
+                    child_edges,
+                    used_auto_width_border,
+                    null,
+                );
+                child_width = child_size.width;
+                child_height = child_size.height;
+                if (physicalInlineStart(container_style.writing_direction) == .right) {
+                    child_x = try addFinite(
+                        child_x,
+                        try subtractFinite(measured_child_width, child_width),
+                    );
+                }
+            }
         }
         const static_y = child_y;
         child.rect = .{
@@ -786,7 +840,7 @@ fn layoutPreparedContainerUnchecked(
             content_width,
             0,
         );
-        try layoutMixedChild(tree, child, layout_ctx, child_context);
+        try layoutMixedChild(tree, child, layout_ctx, mixed_child_context);
         if (top_collapse_open and !child_establishes_bfc and clear_y <= flow_y) {
             first_child_top = first_child_top.collapse(child_top_margin);
             if (child_collapses_through) {

@@ -140,6 +140,53 @@ test "forest auto root stretches width and keeps natural height" {
     try expectRect(&tree, next_root_id, .{ .x = 0, .y = 17, .w = 100, .h = 5 });
 }
 
+test "forest auto root remeasures wrapped flex at margin-resolved width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_leaf_id: Id = @enumFromInt(1);
+    const second_leaf_id: Id = @enumFromInt(2);
+    const flex_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+
+    try appendNode(
+        &tree,
+        first_leaf_id,
+        flex_id,
+        fixedStyle(.block, 50, 10),
+        .{ .spacer = .{} },
+    );
+    try appendNode(
+        &tree,
+        second_leaf_id,
+        flex_id,
+        fixedStyle(.block, 50, 10),
+        .{ .spacer = .{} },
+    );
+
+    var flex_style = autoStyle(.flex);
+    flex_style.direction = .row;
+    flex_style.wrap = .wrap;
+    flex_style.flex_wrap = .wrap;
+    flex_style.@"align" = .start;
+    try appendNode(&tree, flex_id, root_id, flex_style, .{ .row = .{} });
+
+    var root_style = autoStyle(.flow_root);
+    root_style.margin = .{ .right = 10, .left = 10 };
+    try appendNode(&tree, root_id, .root, root_style, .{ .column = .{} });
+
+    try tree.appendChild(flex_id, first_leaf_id);
+    try tree.appendChild(flex_id, second_leaf_id);
+    try tree.appendChild(root_id, flex_id);
+
+    try layout(&tree, .{ .width = 100, .height = 80 });
+
+    try expectRect(&tree, root_id, .{ .x = 10, .y = 0, .w = 80, .h = 20 });
+    try expectRect(&tree, flex_id, .{ .x = 0, .y = 0, .w = 80, .h = 20 });
+    try expectRect(&tree, first_leaf_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+    try expectRect(&tree, second_leaf_id, .{ .x = 0, .y = 10, .w = 50, .h = 10 });
+}
+
 test "forest root flex basis and grow distribute positive free space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();

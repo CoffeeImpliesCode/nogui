@@ -662,6 +662,31 @@ fn layoutGridNode(
         }
         if (col_span > 1) area_width = try add(area_width, column_gap * @as(f32, @floatFromInt(col_span - 1)));
         if (row_span > 1) area_height = try add(area_height, row_gap * @as(f32, @floatFromInt(row_span - 1)));
+        var resolved_natural = item.natural;
+        if (child.children.items.len != 0) {
+            if (options.context) |context| {
+                if (child.style.display != .grid) {
+                    const measured = try context.measure_node(
+                        context,
+                        tree,
+                        child,
+                        .{
+                            .available = .{ .width = area_width, .height = area_height },
+                            .percentage_basis = .{
+                                .width = area_width,
+                                .height = area_height,
+                            },
+                            .intrinsic_width = false,
+                            .intrinsic_height = false,
+                        },
+                    );
+                    resolved_natural = .{
+                        .content = measured.content,
+                        .border = measured.border,
+                    };
+                }
+            }
+        }
 
         const child_edges = try resolveEdges(child.style, content.width);
         child.resolved_box_edges = .{
@@ -672,7 +697,7 @@ fn layoutGridNode(
         var child_size = try usedSize(
             child.style,
             .{ .width = area_width, .height = area_height },
-            item.natural.content,
+            resolved_natural.content,
             child_edges,
             null,
         );
@@ -689,7 +714,7 @@ fn layoutGridNode(
                     area_width - margins.value.left - margins.value.right,
                 ),
                 content,
-                item.natural.content,
+                resolved_natural.content,
                 child_edges,
             );
         }
@@ -702,7 +727,7 @@ fn layoutGridNode(
                     area_height - margins.value.top - margins.value.bottom,
                 ),
                 content,
-                item.natural.content,
+                resolved_natural.content,
                 child_edges,
             );
         }

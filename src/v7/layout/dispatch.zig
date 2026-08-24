@@ -22,6 +22,10 @@ const Edges = struct {
     horizontal: f32,
     vertical: f32,
 };
+const RootMeasurement = struct {
+    natural: context.Measured,
+    width: f32,
+};
 
 pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
     try validateAvailable(options.available);
@@ -42,37 +46,64 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
     for (roots.items) |root_index| {
         const node = &tree.nodes.items[root_index];
         if (node.layout_hidden) continue;
-        const request: context.Request = .{
-            .available = options.available,
-            .percentage_basis = .{
-                .width = options.available.width,
-                .height = options.available.height,
-            },
-        };
-        const natural = try layout_context.measure_node(
-            &layout_context,
-            tree,
-            node,
-            request,
-        );
         const margins = try resolveRootMargins(node.style, options.available.width);
-        const width = if (node.style.position == .relative)
-            try rootSizeFromInsets(
+        const absolute = node.style.position == .absolute;
+        const measured_root: RootMeasurement = if (absolute) blk: {
+            const natural = try layout_context.measure_node(
+                &layout_context,
+                tree,
+                node,
+                .{
+                    .available = options.available,
+                    .percentage_basis = .{
+                        .width = options.available.width,
+                        .height = options.available.height,
+                    },
+                },
+            );
+            break :blk .{
+                .natural = natural,
+                .width = try rootWidth(
+                    node.style,
+                    natural,
+                    options.available,
+                    margins,
+                ),
+            };
+        } else blk: {
+            const width = try rootSizeFromInsets(
                 options.available.width,
                 0,
                 0,
                 margins.left,
                 margins.right,
-            )
-        else
-            try rootWidth(
-                node.style,
-                natural,
-                options.available,
-                margins,
             );
-        const absolute = node.style.position == .absolute;
-        const edges = try resolveEdges(node.style, options.available.width);
+            const natural = try layout_context.measure_node(
+                &layout_context,
+                tree,
+                node,
+                .{
+                    .available = .{
+                        .width = width,
+                        .height = options.available.height,
+                    },
+                    .percentage_basis = .{
+                        .width = width,
+                        .height = options.available.height,
+                    },
+                    .intrinsic_width = false,
+                    .intrinsic_height = false,
+                },
+            );
+            break :blk .{
+                .natural = natural,
+                .width = width,
+            };
+        };
+        const natural = measured_root.natural;
+        const used_width = measured_root.width;
+        const edge_basis = if (absolute) options.available.width else used_width;
+        const edges = try resolveEdges(node.style, edge_basis);
         const base_height = if (absolute)
             try absoluteRootBaseHeight(
                 node.style,
@@ -117,7 +148,7 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
             .index = root_index,
             .natural = natural,
             .margins = margins,
-            .width = width,
+            .width = used_width,
             .base_height = base_height,
             .height = clampRoot(base_height, min_height, max_height),
             .min_height = min_height,
@@ -237,20 +268,6 @@ fn placeAbsoluteRoot(
         edges.horizontal,
         node.style.box_sizing,
     );
-    const min_height = (try rootDimensionBorder(
-        node.style.min_size.height,
-        available.height,
-        item.natural.content.height,
-        edges.vertical,
-        node.style.box_sizing,
-    )) orelse 0;
-    const max_height = try rootDimensionBorder(
-        node.style.max_size.height,
-        available.height,
-        item.natural.content.height,
-        edges.vertical,
-        node.style.box_sizing,
-    );
     const width_from_insets = node.style.size.width == .auto and
         insets.left != null and insets.right != null;
     const height_from_insets = node.style.size.height == .auto and
@@ -267,6 +284,47 @@ fn placeAbsoluteRoot(
         item.natural.border.width
     else
         item.width;
+    if (width_from_insets and
+        !hasIntrinsicRootConstraint(node.style.min_size.width) and
+        !hasIntrinsicRootConstraint(node.style.max_size.width))
+    {
+        width = try clampRootFinite(width, min_width, max_width);
+        item.natural = try self.measure_node(
+            self,
+            tree,
+            node,
+            .{
+                .available = .{
+                    .width = width,
+                    .height = available.height,
+                },
+                .percentage_basis = .{
+                    .width = width,
+                    .height = available.height,
+                },
+                .intrinsic_width = false,
+                .intrinsic_height = false,
+            },
+        );
+    }
+    const base_height = try absoluteRootBaseHeight(
+        node.style,
+        item.natural,
+        available,
+        edges.vertical,
+    );
+    const min_height = try absoluteRootMinHeight(
+        node.style,
+        item.natural,
+        available,
+        edges.vertical,
+    );
+    const max_height = try rootMaxHeight(
+        node.style,
+        item.natural,
+        available,
+        edges.vertical,
+    );
     var height = if (height_from_insets)
         try rootSizeFromInsets(
             available.height,
@@ -276,7 +334,7 @@ fn placeAbsoluteRoot(
             item.margins.bottom,
         )
     else
-        item.base_height;
+        base_height;
 
     if (node.style.aspect_ratio) |ratio| {
         if (!std.math.isFinite(ratio) or ratio <= 0) return error.InvalidStyle;
@@ -717,6 +775,12 @@ fn isIntrinsicDimension(value: style.Dimension) bool {
     return switch (value) {
         .auto, .min_content, .max_content => true,
         .length, .percent => false,
+    };
+}
+fn hasIntrinsicRootConstraint(value: style.Dimension) bool {
+    return switch (value) {
+        .min_content, .max_content => true,
+        .auto, .length, .percent => false,
     };
 }
 
