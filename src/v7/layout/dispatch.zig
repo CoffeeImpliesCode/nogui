@@ -453,9 +453,10 @@ fn isConcreteTree(
     const node = &tree.nodes.items[index];
     if (node.scroll != null) return false;
     if (node.style.display != .none and node.children.items.len != 0) {
-        if (is_root and
-            (!isConcreteDimension(node.style.size.width) or
-                !isConcreteDimension(node.style.size.height)))
+        if (is_root and !isConcreteDimension(node.style.size.width)) return false;
+        if (is_root and node.style.display != .block and
+            node.style.display != .flow_root and
+            !isConcreteDimension(node.style.size.height))
         {
             return false;
         }
