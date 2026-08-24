@@ -35,7 +35,9 @@ pub const style = @import("style.zig");
 pub const Display = style.Display;
 pub const Position = style.Position;
 pub const FlexDirection = style.FlexDirection;
-pub const Direction = style.FlexDirection;
+pub const Direction = style.Direction;
+pub const Float = style.Float;
+pub const Clear = style.Clear;
 pub const FlexWrap = style.FlexWrap;
 pub const Justify = style.Justify;
 pub const Align = style.Align;
@@ -115,6 +117,7 @@ test {
     _ = @import("layout/root_test.zig");
     _ = @import("layout/block_float_test.zig");
     _ = @import("layout/flex_test.zig");
+    _ = @import("layout/grid_test.zig");
 }
 
 test "canonical module exports App and DrawCtx" {

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Id = @import("../id.zig").Id;
+const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const layout = @import("root.zig");
 
@@ -482,6 +483,75 @@ test "layoutTree falls back for a hidden unsupported grid subtree" {
     try std.testing.expectEqual(widget.Rect{}, tree.node(hidden_id).?.rect);
     try std.testing.expectEqual(widget.Rect{}, tree.node(grid_id).?.rect);
     try std.testing.expectEqual(widget.Rect{}, tree.node(leaf_id).?.rect);
+}
+
+test "layoutTree dispatches an eligible grid root through modular grid" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 10 }};
+    try tree.appendNode(.{
+        .id = first_id,
+        .kind = .{ .spacer = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = second_id,
+        .kind = .{ .spacer = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .grid,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 40 },
+                .height = .{ .length = 10 },
+            },
+            .grid_template_columns = columns[0..],
+            .grid_template_rows = rows[0..],
+        },
+    });
+    try tree.appendChild(root_id, first_id);
+    try tree.appendChild(root_id, second_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 40, .height = 10 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 20, .h = 10 },
+        tree.node(first_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 20, .y = 0, .w = 20, .h = 10 },
+        tree.node(second_id).?.rect,
+    );
 }
 
 test "layoutTree rejects non-finite available width" {
