@@ -14,6 +14,67 @@ pub const Options = struct {
     intrinsic_width: bool = false,
     intrinsic_height: bool = false,
 };
+fn initialRequest(available: widget.Size, options: Options) layout_context.Request {
+    return .{
+        .available = available,
+        .percentage_basis = .{
+            .width = available.width,
+            .height = available.height,
+        },
+        .intrinsic_width = options.intrinsic_width,
+        .intrinsic_height = options.intrinsic_height,
+    };
+}
+
+fn concreteRequest(available: widget.Size) layout_context.Request {
+    return .{
+        .available = available,
+        .percentage_basis = .{
+            .width = available.width,
+            .height = available.height,
+        },
+    };
+}
+
+fn childNaturalRequest(
+    parent: layout_context.Request,
+    parent_node: *const widget.WidgetNode,
+    child: *const widget.WidgetNode,
+    available: widget.Size,
+) layout_context.Request {
+    const width_definite = naturalAxisDefinite(
+        parent_node.style.size.width,
+        parent.intrinsic_width,
+        parent.percentage_basis.width,
+    );
+    const height_definite = naturalAxisDefinite(
+        parent_node.style.size.height,
+        parent.intrinsic_height,
+        parent.percentage_basis.height,
+    );
+    return .{
+        .available = available,
+        .percentage_basis = .{
+            .width = if (width_definite) @as(?f32, available.width) else null,
+            .height = if (height_definite) @as(?f32, available.height) else null,
+        },
+        .intrinsic_width = !width_definite and dimensionAuto(child.style.size.width),
+        .intrinsic_height = !height_definite and dimensionAuto(child.style.size.height),
+    };
+}
+
+fn naturalAxisDefinite(
+    dimension: style.Dimension,
+    intrinsic: bool,
+    percentage_basis: ?f32,
+) bool {
+    return switch (dimension) {
+        .length => true,
+        .min_content, .max_content => false,
+        .percent => percentage_basis != null,
+        .auto => !intrinsic,
+    };
+}
 
 pub fn layoutContainer(tree: *widget.WidgetTree, container_id: Id, options: Options) sizing.Error!void {
     if (!std.math.isFinite(options.available.width)) return error.InvalidStyle;
@@ -45,22 +106,24 @@ pub fn layoutPreparedContainer(
         .border = .{ .width = 0, .height = 0 },
     };
 
+    const request = initialRequest(options.available, options);
     const intrinsic = try measureNode(
         tree,
         index,
-        options.available,
+        request,
         options,
         cache.items,
         tree.nodes.items.len,
         null,
     );
-    const edges = try resolveEdges(tree.nodes.items[index].style, options.available.width);
+    const edges = try resolveEdges(tree.nodes.items[index].style, request.percentage_basis.width);
     const size = forced_border orelse try usedSize(
         tree.nodes.items[index].style,
-        options.available,
+        request.available,
+        request.percentage_basis,
         intrinsic.content,
         edges,
-        options.available,
+        request.available,
     );
     const origin = tree.nodes.items[index].rect;
     tree.nodes.items[index].rect = .{
@@ -91,7 +154,9 @@ pub fn measureNatural(
 ) sizing.Error!layout_context.Measured {
     const index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
     if (&tree.nodes.items[index] != node) return error.InvalidStyle;
-    try layout_context.validateNaturalRequest(tree, node, request);
+    var natural_request = request;
+    natural_request.forced_border = null;
+    try layout_context.validateNaturalRequest(tree, node, natural_request);
 
     var cache: std.ArrayList(Natural) = .empty;
     defer cache.deinit(context.allocator);
@@ -104,14 +169,12 @@ pub fn measureNatural(
     const natural = try measureNode(
         tree,
         index,
-        request.available,
+        natural_request,
         .{
             .allocator = context.allocator,
             .available = request.available,
             .measure = context.measure,
             .context = context,
-            .intrinsic_width = request.intrinsic_width,
-            .intrinsic_height = request.intrinsic_height,
         },
         cache.items,
         tree.nodes.items.len,
@@ -253,7 +316,7 @@ fn markHidden(
 fn measureNode(
     tree: *widget.WidgetTree,
     index: usize,
-    containing: widget.Size,
+    request: layout_context.Request,
     options: Options,
     cache: []Natural,
     depth: usize,
@@ -265,25 +328,24 @@ fn measureNode(
         .content = .{ .width = 0, .height = 0 },
         .border = .{ .width = 0, .height = 0 },
     };
-    const edges = try resolveEdges(node.style, containing.width);
-    var content: widget.Size = .{ .width = 0, .height = 0 };
     if (node.children.items.len == 0) {
-        content = try measureLeaf(node, options.measure);
-    } else if (options.context) |context| {
+        const content = try measureLeaf(node, options.measure);
+        const edges = try resolveEdges(node.style, request.percentage_basis.width);
+        const border = try usedSize(
+            node.style,
+            request.available,
+            request.percentage_basis,
+            content,
+            edges,
+            null,
+        );
+        cache[index] = .{ .content = content, .border = border };
+        return cache[index];
+    }
+    if (options.context) |context| {
         if (parent_display) |display| {
             if (node.style.display != display) {
-                const measured = try context.measure_node(
-                    context,
-                    tree,
-                    node,
-                    .{
-                        .available = containing,
-                        .percentage_basis = .{
-                            .width = containing.width,
-                            .height = containing.height,
-                        },
-                    },
-                );
+                const measured = try context.measure_node(context, tree, node, request);
                 cache[index] = .{
                     .content = measured.content,
                     .border = measured.border,
@@ -291,29 +353,26 @@ fn measureNode(
                 return cache[index];
             }
         }
-        if (node.style.display != .flex) return error.InvalidStyle;
-        content = try measureContainerContent(
-            tree,
-            index,
-            containing,
-            edges,
-            options,
-            cache,
-            depth - 1,
-        );
-    } else {
-        if (node.style.display != .flex) return error.InvalidStyle;
-        content = try measureContainerContent(
-            tree,
-            index,
-            containing,
-            edges,
-            options,
-            cache,
-            depth - 1,
-        );
     }
-    const border = try usedSize(node.style, containing, content, edges, null);
+    if (node.style.display != .flex) return error.InvalidStyle;
+    const edges = try resolveEdges(node.style, request.percentage_basis.width);
+    const content = try measureContainerContent(
+        tree,
+        index,
+        request,
+        edges,
+        options,
+        cache,
+        depth - 1,
+    );
+    const border = try usedSize(
+        node.style,
+        request.available,
+        request.percentage_basis,
+        content,
+        edges,
+        null,
+    );
     cache[index] = .{ .content = content, .border = border };
     return cache[index];
 }
@@ -356,7 +415,7 @@ fn measureLeaf(node: *const widget.WidgetNode, measure: ?MeasureFn) sizing.Error
 fn measureContainerContent(
     tree: *widget.WidgetTree,
     index: usize,
-    containing: widget.Size,
+    request: layout_context.Request,
     edges: Edges,
     options: Options,
     cache: []Natural,
@@ -366,50 +425,60 @@ fn measureContainerContent(
     const axes = axesFor(node.style);
     const preferred_width = try resolveDimensionBorder(
         node.style.size.width,
-        containing.width,
+        request.available.width,
+        request.percentage_basis.width,
         0,
         edges.horizontal,
         node.style.box_sizing,
     );
     const preferred_height = try resolveDimensionBorder(
         node.style.size.height,
-        containing.height,
+        request.available.height,
+        request.percentage_basis.height,
         0,
         edges.vertical,
         node.style.box_sizing,
     );
     const minimum_width = (try resolveDimensionBorder(
         node.style.min_size.width,
-        containing.width,
+        request.available.width,
+        request.percentage_basis.width,
         0,
         edges.horizontal,
         node.style.box_sizing,
     )) orelse 0;
     const minimum_height = (try resolveDimensionBorder(
         node.style.min_size.height,
-        containing.height,
+        request.available.height,
+        request.percentage_basis.height,
         0,
         edges.vertical,
         node.style.box_sizing,
     )) orelse 0;
     const maximum_width = try resolveDimensionBorder(
         node.style.max_size.width,
-        containing.width,
+        request.available.width,
+        request.percentage_basis.width,
         0,
         edges.horizontal,
         node.style.box_sizing,
     );
     const maximum_height = try resolveDimensionBorder(
         node.style.max_size.height,
-        containing.height,
+        request.available.height,
+        request.percentage_basis.height,
         0,
         edges.vertical,
         node.style.box_sizing,
     );
     const measured_border: widget.Size = .{
-        .width = try clamp(preferred_width orelse containing.width, minimum_width, maximum_width),
+        .width = try clamp(
+            preferred_width orelse request.available.width,
+            minimum_width,
+            maximum_width,
+        ),
         .height = try clamp(
-            preferred_height orelse containing.height,
+            preferred_height orelse request.available.height,
             minimum_height,
             maximum_height,
         ),
@@ -425,10 +494,10 @@ fn measureContainerContent(
         node.style.size.width
     else
         node.style.size.height);
-    const intrinsic_main = if (axes.horizontal)
-        options.intrinsic_width
+    const intrinsic_main = auto_main and (if (axes.horizontal)
+        request.intrinsic_width
     else
-        options.intrinsic_height;
+        request.intrinsic_height);
     var line_main: f32 = 0;
     var line_cross: f32 = 0;
     var total_main: f32 = 0;
@@ -441,16 +510,17 @@ fn measureContainerContent(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position == .absolute) continue;
+        const child_request = childNaturalRequest(request, node, child, available);
         const natural = try measureNode(
             tree,
             child_index,
-            available,
+            child_request,
             options,
             cache,
             depth,
             node.style.display,
         );
-        const margins = try resolveMargins(child.style, available.width);
+        const margins = try resolveMargins(child.style, child_request.percentage_basis.width);
         const outer_main = try add(
             try add(axisMain(axes, natural.border), marginStart(axes, margins)),
             marginEnd(axes, margins),
@@ -633,6 +703,7 @@ fn collectItems(
     depth: usize,
 ) sizing.Error!void {
     const main_content = axisMain(axes, content);
+    const request = concreteRequest(content);
     for (container.children.items) |child_id| {
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
@@ -640,19 +711,27 @@ fn collectItems(
         const natural = try measureNode(
             tree,
             child_index,
-            content,
+            request,
             options,
             cache,
             depth,
             container.style.display,
         );
-        const edges = try resolveEdges(child.style, content.width);
+        const edges = try resolveEdges(child.style, request.percentage_basis.width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
-        const preferred = try usedSize(child.style, content, natural.content, edges, null);
+        const preferred = try usedSize(
+            child.style,
+            request.available,
+            request.percentage_basis,
+            natural.content,
+            edges,
+            null,
+        );
         const margins = try resolveMargins(child.style, content.width);
         const constraints = try constraintsFor(
             child.style,
-            content,
+            request.available,
+            request.percentage_basis,
             natural.content,
             edges,
             axes,
@@ -703,6 +782,7 @@ fn collectItems(
 fn constraintsFor(
     input: style.Style,
     containing: widget.Size,
+    percentage_basis: style.Size(?f32),
     intrinsic: widget.Size,
     edges: Edges,
     axes: Axes,
@@ -710,6 +790,7 @@ fn constraintsFor(
     const min_width = (try resolveDimensionBorder(
         input.min_size.width,
         containing.width,
+        percentage_basis.width,
         intrinsic.width,
         edges.horizontal,
         input.box_sizing,
@@ -717,6 +798,7 @@ fn constraintsFor(
     const min_height = (try resolveDimensionBorder(
         input.min_size.height,
         containing.height,
+        percentage_basis.height,
         intrinsic.height,
         edges.vertical,
         input.box_sizing,
@@ -724,6 +806,7 @@ fn constraintsFor(
     const max_width = try resolveDimensionBorder(
         input.max_size.width,
         containing.width,
+        percentage_basis.width,
         intrinsic.width,
         edges.horizontal,
         input.box_sizing,
@@ -731,6 +814,7 @@ fn constraintsFor(
     const max_height = try resolveDimensionBorder(
         input.max_size.height,
         containing.height,
+        percentage_basis.height,
         intrinsic.height,
         edges.vertical,
         input.box_sizing,
@@ -765,6 +849,7 @@ fn flexBasis(
         .auto => null,
         .length, .percent, .min_content, .max_content => try resolveDimensionBorder(
             input.flex_basis,
+            containing_main,
             containing_main,
             intrinsic,
             edge_sum,
@@ -1052,7 +1137,7 @@ fn placeAbsolute(
         const natural = try measureNode(
             tree,
             child_index,
-            content,
+            concreteRequest(content),
             options,
             cache,
             depth,
@@ -1060,7 +1145,14 @@ fn placeAbsolute(
         );
         const edges = try resolveEdges(child.style, content.width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
-        const size = try usedSize(child.style, content, natural.content, edges, null);
+        const size = try usedSize(
+            child.style,
+            content,
+            .{ .width = content.width, .height = content.height },
+            natural.content,
+            edges,
+            null,
+        );
         const left = try resolveInset(child.style.inset.left, content.width);
         const right = try resolveInset(child.style.inset.right, content.width);
         const top = try resolveInset(child.style.inset.top, content.height);
@@ -1109,12 +1201,23 @@ fn placeAbsolute(
 fn usedSize(
     input: style.Style,
     containing: widget.Size,
+    percentage_basis: style.Size(?f32),
     intrinsic: widget.Size,
     edges: Edges,
     fallback: ?widget.Size,
 ) sizing.Error!widget.Size {
-    var width = try dimensionValue(input.size.width, containing.width, intrinsic.width);
-    var height = try dimensionValue(input.size.height, containing.height, intrinsic.height);
+    var width = try dimensionValue(
+        input.size.width,
+        containing.width,
+        percentage_basis.width,
+        intrinsic.width,
+    );
+    var height = try dimensionValue(
+        input.size.height,
+        containing.height,
+        percentage_basis.height,
+        intrinsic.height,
+    );
     if (width == null) {
         width = if (fallback) |value|
             try borderToSizing(value.width, edges.horizontal, input.box_sizing)
@@ -1142,6 +1245,7 @@ fn usedSize(
         .horizontal,
         result.width,
         containing,
+        percentage_basis,
         intrinsic,
         edges,
     );
@@ -1150,6 +1254,7 @@ fn usedSize(
         .vertical,
         result.height,
         containing,
+        percentage_basis,
         intrinsic,
         edges,
     );
@@ -1166,6 +1271,7 @@ fn clampSize(
     axis: PhysicalAxis,
     candidate: f32,
     containing: widget.Size,
+    percentage_basis: style.Size(?f32),
     intrinsic: widget.Size,
     edges: Edges,
 ) sizing.Error!f32 {
@@ -1177,11 +1283,16 @@ fn clampSize(
         input.max_size.width
     else
         input.max_size.height;
-    const basis = if (axis == .horizontal) containing.width else containing.height;
+    const available = if (axis == .horizontal) containing.width else containing.height;
+    const basis = if (axis == .horizontal)
+        percentage_basis.width
+    else
+        percentage_basis.height;
     const natural = if (axis == .horizontal) intrinsic.width else intrinsic.height;
     const edge_sum = if (axis == .horizontal) edges.horizontal else edges.vertical;
     const minimum = (try resolveDimensionBorder(
         minimum_dimension,
+        available,
         basis,
         natural,
         edge_sum,
@@ -1189,6 +1300,7 @@ fn clampSize(
     )) orelse 0;
     const maximum = try resolveDimensionBorder(
         maximum_dimension,
+        available,
         basis,
         natural,
         edge_sum,
@@ -1200,6 +1312,7 @@ fn clampSize(
 fn dimensionValue(
     dimension: style.Dimension,
     containing: f32,
+    percentage_basis: ?f32,
     intrinsic: f32,
 ) sizing.Error!?f32 {
     return switch (dimension) {
@@ -1208,7 +1321,7 @@ fn dimensionValue(
         .length, .percent => sizing.resolveDimension(
             dimension,
             .{ .definite = containing },
-            containing,
+            percentage_basis,
         ),
     };
 }
@@ -1216,11 +1329,12 @@ fn dimensionValue(
 fn resolveDimensionBorder(
     dimension: style.Dimension,
     containing: f32,
+    percentage_basis: ?f32,
     intrinsic: f32,
     edges: f32,
     box_sizing: style.BoxSizing,
 ) sizing.Error!?f32 {
-    const value = try dimensionValue(dimension, containing, intrinsic);
+    const value = try dimensionValue(dimension, containing, percentage_basis, intrinsic);
     if (value) |number| {
         const border = try sizingToBorder(number, edges, box_sizing);
         return @as(?f32, border);
@@ -1261,7 +1375,7 @@ fn borderToSizing(
     };
 }
 
-fn resolveEdges(input: style.Style, basis: f32) sizing.Error!Edges {
+fn resolveEdges(input: style.Style, basis: ?f32) sizing.Error!Edges {
     const border: style.Sides = .{
         .top = try edge(input.border_inset.top, input.border.top, basis),
         .right = try edge(input.border_inset.right, input.border.right, basis),
@@ -1291,15 +1405,18 @@ fn resolveEdges(input: style.Style, basis: f32) sizing.Error!Edges {
 fn edge(
     value: style.LengthPercentage,
     legacy: f32,
-    basis: f32,
+    basis: ?f32,
 ) sizing.Error!f32 {
     return switch (value) {
         .length => |number| nonNegative(if (number == 0 and legacy != 0) legacy else number),
-        .percent => |fraction| nonNegative(try finite(fraction * basis)),
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk nonNegative(try finite(fraction * percentage_basis));
+        },
     };
 }
 
-fn resolveMargins(input: style.Style, basis: f32) sizing.Error!Margins {
+fn resolveMargins(input: style.Style, basis: ?f32) sizing.Error!Margins {
     return .{
         .value = .{
             .top = try margin(input.margin_inset.top, input.margin.top, basis),
@@ -1317,12 +1434,15 @@ fn resolveMargins(input: style.Style, basis: f32) sizing.Error!Margins {
 fn margin(
     value: style.LengthPercentageAuto,
     legacy: f32,
-    basis: f32,
+    basis: ?f32,
 ) sizing.Error!f32 {
     return switch (value) {
         .auto => 0,
         .length => |number| finite(if (number == 0 and legacy != 0) legacy else number),
-        .percent => |fraction| finite(fraction * basis),
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk finite(fraction * percentage_basis);
+        },
     };
 }
 

@@ -15,14 +15,16 @@ pub const Request = struct {
 };
 /// Validate the first-phase natural-measurement contract.
 ///
-/// Engine adapters use the available content space as their percentage basis.
-/// A missing basis is accepted only when the measured subtree contains no
-/// percentage-dependent style value.
+/// Explicit percentage bases come from the caller's resolution context.
+/// `available` is the space available to the natural-measurement pass.
 pub fn validateNaturalRequest(
     tree: *const widget.WidgetTree,
     node: *const widget.WidgetNode,
     request: Request,
 ) LayoutError!void {
+    try validateConcrete(request.available.width);
+    try validateConcrete(request.available.height);
+
     const dependencies = percentageDependencies(
         tree,
         node,
@@ -31,21 +33,11 @@ pub fn validateNaturalRequest(
     );
     if (request.percentage_basis.width) |basis| {
         try validateConcrete(basis);
-        if (basis != request.available.width and
-            (!request.intrinsic_width or dependencies.width))
-        {
-            return error.InvalidStyle;
-        }
     } else if (dependencies.width) {
         return error.InvalidStyle;
     }
     if (request.percentage_basis.height) |basis| {
         try validateConcrete(basis);
-        if (basis != request.available.height and
-            (!request.intrinsic_height or dependencies.height))
-        {
-            return error.InvalidStyle;
-        }
     } else if (dependencies.height) {
         return error.InvalidStyle;
     }

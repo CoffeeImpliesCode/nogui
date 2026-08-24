@@ -12,7 +12,6 @@ pub const Options = struct {
     measure: ?MeasureFn,
     context: ?*layout_context.LayoutContext = null,
 };
-
 const Error = sizing.Error;
 const TrackAxis = enum { columns, rows };
 
@@ -110,15 +109,17 @@ pub fn measureNatural(
 ) Error!layout_context.Measured {
     const index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
     if (&tree.nodes.items[index] != node) return error.InvalidStyle;
-    try layout_context.validateNaturalRequest(tree, node, request);
+    var natural_request = request;
+    natural_request.forced_border = null;
+    try layout_context.validateNaturalRequest(tree, node, natural_request);
 
     const natural = try measureNode(
         tree,
         index,
-        request.available,
+        natural_request,
         .{
             .allocator = context.allocator,
-            .available = request.available,
+            .available = natural_request.available,
             .measure = context.measure,
             .context = context,
         },
@@ -361,7 +362,7 @@ fn markHidden(tree: *widget.WidgetTree, index: usize, inherited: bool, depth: us
 fn measureNode(
     tree: *widget.WidgetTree,
     index: usize,
-    containing: widget.Size,
+    request: layout_context.Request,
     options: Options,
     depth: usize,
     parent_display: ?style.Display,
@@ -372,9 +373,9 @@ fn measureNode(
         .content = .{ .width = 0, .height = 0 },
         .border = .{ .width = 0, .height = 0 },
     };
-    _ = try finiteNonNegative(containing.width);
-    _ = try finiteNonNegative(containing.height);
-    const edges = try resolveEdges(node.style, containing.width);
+    _ = try finiteNonNegative(request.available.width);
+    _ = try finiteNonNegative(request.available.height);
+    const edges = try resolveEdges(node.style, request.percentage_basis.width);
     var intrinsic: widget.Size = .{ .width = 0, .height = 0 };
     if (node.children.items.len == 0) {
         intrinsic = try measureLeaf(node, options.measure);
@@ -385,13 +386,7 @@ fn measureNode(
                     context,
                     tree,
                     node,
-                    .{
-                        .available = containing,
-                        .percentage_basis = .{
-                            .width = containing.width,
-                            .height = containing.height,
-                        },
-                    },
+                    request,
                 );
                 return .{
                     .content = measured.content,
@@ -400,24 +395,53 @@ fn measureNode(
             }
         }
         if (node.style.display != .grid) return error.InvalidStyle;
-        intrinsic = try measureGridContent(tree, index, containing, options, depth - 1);
+        intrinsic = try measureGridContent(tree, index, request, edges, options, depth - 1);
     } else {
         if (node.style.display != .grid) return error.InvalidStyle;
-        intrinsic = try measureGridContent(tree, index, containing, options, depth - 1);
+        intrinsic = try measureGridContent(tree, index, request, edges, options, depth - 1);
     }
-    const border = try usedSize(node.style, containing, intrinsic, edges, null);
+    const border = try usedSize(
+        node.style,
+        request.percentage_basis,
+        intrinsic,
+        edges,
+        null,
+    );
     return .{ .content = intrinsic, .border = border };
 }
 
 fn measureGridContent(
     tree: *widget.WidgetTree,
     index: usize,
-    containing: widget.Size,
+    request: layout_context.Request,
+    edges: Edges,
     options: Options,
     depth: usize,
 ) Error!widget.Size {
     if (depth == 0) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
+    const provisional = try usedSize(
+        node.style,
+        request.percentage_basis,
+        request.available,
+        edges,
+        request.available,
+    );
+    const child_available: widget.Size = .{
+        .width = @max(0, provisional.width - edges.horizontal),
+        .height = @max(0, provisional.height - edges.vertical),
+    };
+    const width_definite = naturalAxisDefinite(
+        node.style.size.width,
+        request.intrinsic_width,
+        request.percentage_basis.width,
+    );
+    const height_definite = naturalAxisDefinite(
+        node.style.size.height,
+        request.intrinsic_height,
+        request.percentage_basis.height,
+    );
+
     var child_count: usize = 0;
     var max_width: f32 = 0;
     var max_height: f32 = 0;
@@ -425,17 +449,34 @@ fn measureGridContent(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position == .absolute) continue;
+        const child_request: layout_context.Request = .{
+            .available = child_available,
+            .percentage_basis = .{
+                .width = if (width_definite) @as(?f32, child_available.width) else null,
+                .height = if (height_definite) @as(?f32, child_available.height) else null,
+            },
+            .intrinsic_width = !width_definite and dimensionAuto(child.style.size.width),
+            .intrinsic_height = !height_definite and dimensionAuto(child.style.size.height),
+        };
         const natural = try measureNode(
             tree,
             child_index,
-            containing,
+            child_request,
             options,
             depth,
             node.style.display,
         );
         child_count += 1;
-        max_width = @max(max_width, natural.border.width + try marginHorizontal(child.style, containing.width));
-        max_height = @max(max_height, natural.border.height + try marginVertical(child.style, containing.width));
+        max_width = @max(
+            max_width,
+            natural.border.width +
+                try marginHorizontal(child.style, child_request.percentage_basis.width),
+        );
+        max_height = @max(
+            max_height,
+            natural.border.height +
+                try marginVertical(child.style, child_request.percentage_basis.width),
+        );
     }
     if (child_count == 0) return .{ .width = 0, .height = 0 };
 
@@ -443,15 +484,22 @@ fn measureGridContent(
     const row_count = @max(@as(usize, 1), node.style.grid_template_rows.len);
     var final_column_count = column_count;
     var final_row_count = row_count;
-    var width = try trackMinimumSum(node.style.grid_template_columns, containing.width);
-    var height = try trackMinimumSum(node.style.grid_template_rows, containing.height);
+    var width = try trackMinimumSum(
+        node.style.grid_template_columns,
+        request.percentage_basis.width,
+    );
+    var height = try trackMinimumSum(
+        node.style.grid_template_rows,
+        request.percentage_basis.height,
+    );
     if (node.style.grid_template_columns.len == 0 or width == 0) {
         width = max_width * @as(f32, @floatFromInt(column_count));
     }
     if (node.style.grid_template_rows.len == 0 or height == 0) {
         height = max_height * @as(f32, @floatFromInt(row_count));
     }
-    const column_flow = node.style.grid_auto_flow == .column or node.style.grid_auto_flow == .column_dense;
+    const column_flow = node.style.grid_auto_flow == .column or
+        node.style.grid_auto_flow == .column_dense;
     if (column_flow) {
         const needed_columns = (child_count + row_count - 1) / row_count;
         if (needed_columns > column_count) {
@@ -486,6 +534,29 @@ fn measureGridContent(
         );
     }
     return .{ .width = try nonNegative(width), .height = try nonNegative(height) };
+}
+
+fn naturalAxisDefinite(
+    dimension: style.Dimension,
+    intrinsic: bool,
+    percentage_basis: ?f32,
+) bool {
+    return switch (dimension) {
+        .length => true,
+        .min_content, .max_content => false,
+        .percent => percentage_basis != null,
+        .auto => !intrinsic,
+    };
+}
+
+fn concreteRequest(available: widget.Size) layout_context.Request {
+    return .{
+        .available = available,
+        .percentage_basis = .{
+            .width = available.width,
+            .height = available.height,
+        },
+    };
 }
 
 fn measureLeaf(node: *const widget.WidgetNode, measure: ?MeasureFn) Error!widget.Size {
@@ -530,13 +601,19 @@ fn layoutGridNode(
     const natural = try measureNode(
         tree,
         index,
-        containing,
+        concreteRequest(containing),
         options,
         depth - 1,
         null,
     );
     const edges = try resolveEdges(node.style, containing.width);
-    const border = forced_border orelse try usedSize(node.style, containing, natural.content, edges, containing);
+    const border = forced_border orelse try usedSize(
+        node.style,
+        .{ .width = containing.width, .height = containing.height },
+        natural.content,
+        edges,
+        containing,
+    );
     try checkSize(border);
     node.rect.w = border.width;
     node.rect.h = border.height;
@@ -630,7 +707,7 @@ fn layoutGridNode(
             for (rows.items) |*track| {
                 if (trackCanStretch(track.spec)) {
                     track.size = try add(track.size, addition);
-                    if (trackMaximum(track.spec, content.height)) |maximum| {
+                    if (try trackMaximum(track.spec, content.height)) |maximum| {
                         track.size = @min(track.size, maximum);
                     }
                 }
@@ -713,7 +790,7 @@ fn layoutGridNode(
                     0,
                     area_width - margins.value.left - margins.value.right,
                 ),
-                content,
+                .{ .width = content.width, .height = content.height },
                 resolved_natural.content,
                 child_edges,
             );
@@ -726,7 +803,7 @@ fn layoutGridNode(
                     0,
                     area_height - margins.value.top - margins.value.bottom,
                 ),
-                content,
+                .{ .width = content.width, .height = content.height },
                 resolved_natural.content,
                 child_edges,
             );
@@ -828,7 +905,7 @@ fn collectItems(
         const natural = try measureNode(
             tree,
             child_index,
-            content,
+            concreteRequest(content),
             options,
             depth,
             container.style.display,
@@ -1136,7 +1213,7 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
         if (trackAllowsIntrinsic(track.spec)) track.size = try add(track.size, addition);
     }
     for (tracks[start..end]) |*track| {
-        if (trackMaximum(track.spec, basis)) |maximum| track.size = @min(track.size, maximum);
+        if (try trackMaximum(track.spec, basis)) |maximum| track.size = @min(track.size, maximum);
     }
 }
 
@@ -1147,14 +1224,14 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
     var bounded_capacity: f32 = 0;
     for (tracks) |track| {
         if (trackFraction(track.spec) != 0) continue;
-        if (trackMaximum(track.spec, content_size)) |maximum| {
+        if (try trackMaximum(track.spec, content_size)) |maximum| {
             bounded_capacity = try add(bounded_capacity, @max(0, maximum - track.size));
         }
     }
     if (bounded_capacity > 0 and free > 0) {
         for (tracks) |*track| {
             if (trackFraction(track.spec) != 0) continue;
-            if (trackMaximum(track.spec, content_size)) |maximum| {
+            if (try trackMaximum(track.spec, content_size)) |maximum| {
                 const capacity = @max(0, maximum - track.size);
                 if (capacity > 0) {
                     track.size = try add(track.size, @min(capacity, free * capacity / bounded_capacity));
@@ -1174,41 +1251,53 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
         }
     }
     for (tracks) |*track| {
-        if (trackMaximum(track.spec, content_size)) |maximum| track.size = @min(track.size, maximum);
+        if (try trackMaximum(track.spec, content_size)) |maximum| track.size = @min(track.size, maximum);
         track.size = try nonNegative(track.size);
     }
 }
 
-fn trackMinimum(track: style.GridTrack, basis: f32) Error!f32 {
+fn trackMinimum(track: style.GridTrack, basis: ?f32) Error!f32 {
     return switch (track) {
         .fixed => |value| finiteNonNegative(value),
-        .percent => |fraction| finiteNonNegative(try finite(fraction * basis)),
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk finiteNonNegative(try finite(fraction * percentage_basis));
+        },
         .auto, .min_content, .max_content, .fr => 0,
         .minmax => |value| breadthMinimum(value.min, basis),
     };
 }
 
-fn breadthMinimum(breadth: style.GridTrackBreadth, basis: f32) Error!f32 {
+fn breadthMinimum(breadth: style.GridTrackBreadth, basis: ?f32) Error!f32 {
     return switch (breadth) {
         .fixed => |value| finiteNonNegative(value),
-        .percent => |fraction| finiteNonNegative(try finite(fraction * basis)),
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk finiteNonNegative(try finite(fraction * percentage_basis));
+        },
         .auto, .min_content, .max_content, .fr => 0,
     };
 }
 
-fn trackMaximum(track: style.GridTrack, basis: f32) ?f32 {
+fn trackMaximum(track: style.GridTrack, basis: ?f32) Error!?f32 {
     return switch (track) {
         .fixed => |value| value,
-        .percent => |fraction| fraction * basis,
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk fraction * percentage_basis;
+        },
         .auto, .min_content, .max_content, .fr => null,
         .minmax => |value| breadthMaximum(value.max, basis),
     };
 }
 
-fn breadthMaximum(breadth: style.GridTrackBreadth, basis: f32) ?f32 {
+fn breadthMaximum(breadth: style.GridTrackBreadth, basis: ?f32) Error!?f32 {
     return switch (breadth) {
         .fixed => |value| value,
-        .percent => |fraction| fraction * basis,
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk fraction * percentage_basis;
+        },
         .auto, .min_content, .max_content, .fr => null,
     };
 }
@@ -1245,7 +1334,7 @@ fn trackFraction(track: style.GridTrack) f32 {
     };
 }
 
-fn trackMinimumSum(tracks: []const style.GridTrack, basis: f32) Error!f32 {
+fn trackMinimumSum(tracks: []const style.GridTrack, basis: ?f32) Error!f32 {
     var result: f32 = 0;
     for (tracks) |track| result = try add(result, try trackMinimum(track, basis));
     return result;
@@ -1393,7 +1482,7 @@ fn placeAbsolute(
         const natural = try measureNode(
             tree,
             child_index,
-            content,
+            concreteRequest(content),
             options,
             depth,
             container.style.display,
@@ -1401,7 +1490,13 @@ fn placeAbsolute(
         const edges = try resolveEdges(child.style, content.width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
         const margins = try resolveMargins(child.style, content.width);
-        var child_size = try usedSize(child.style, content, natural.content, edges, null);
+        var child_size = try usedSize(
+            child.style,
+            .{ .width = content.width, .height = content.height },
+            natural.content,
+            edges,
+            null,
+        );
         const left = try resolveInset(child.style.inset.left, content.width);
         const right = try resolveInset(child.style.inset.right, content.width);
         const top = try resolveInset(child.style.inset.top, content.height);
@@ -1414,7 +1509,7 @@ fn placeAbsolute(
                     0,
                     content.width - left.? - right.? - margins.value.left - margins.value.right,
                 ),
-                content,
+                .{ .width = content.width, .height = content.height },
                 natural.content,
                 edges,
             );
@@ -1427,7 +1522,7 @@ fn placeAbsolute(
                     0,
                     content.height - top.? - bottom.? - margins.value.top - margins.value.bottom,
                 ),
-                content,
+                .{ .width = content.width, .height = content.height },
                 natural.content,
                 edges,
             );
@@ -1476,21 +1571,21 @@ fn placeAbsolute(
 
 fn usedSize(
     input: style.Style,
-    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
     intrinsic: widget.Size,
     edges: Edges,
     fallback: ?widget.Size,
 ) Error!widget.Size {
     var width = try resolveDimensionBorder(
         input.size.width,
-        containing.width,
+        percentage_basis.width,
         intrinsic.width,
         edges.horizontal,
         input.box_sizing,
     );
     var height = try resolveDimensionBorder(
         input.size.height,
-        containing.height,
+        percentage_basis.height,
         intrinsic.height,
         edges.vertical,
         input.box_sizing,
@@ -1517,26 +1612,55 @@ fn usedSize(
         .width = try sizingToBorder(width orelse 0, edges.horizontal, input.box_sizing),
         .height = try sizingToBorder(height orelse 0, edges.vertical, input.box_sizing),
     };
-    result.width = try clampAxisSize(input, .horizontal, result.width, containing, intrinsic, edges);
-    result.height = try clampAxisSize(input, .vertical, result.height, containing, intrinsic, edges);
-    return .{ .width = @max(edges.horizontal, result.width), .height = @max(edges.vertical, result.height) };
+    result.width = try clampAxisSize(
+        input,
+        .horizontal,
+        result.width,
+        percentage_basis,
+        intrinsic,
+        edges,
+    );
+    result.height = try clampAxisSize(
+        input,
+        .vertical,
+        result.height,
+        percentage_basis,
+        intrinsic,
+        edges,
+    );
+    return .{
+        .width = @max(edges.horizontal, result.width),
+        .height = @max(edges.vertical, result.height),
+    };
 }
 
 fn clampAxisSize(
     input: style.Style,
     axis: enum { horizontal, vertical },
     candidate: f32,
-    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
     intrinsic: widget.Size,
     edges: Edges,
 ) Error!f32 {
     const dimension = if (axis == .horizontal) input.min_size.width else input.min_size.height;
     const maximum_dimension = if (axis == .horizontal) input.max_size.width else input.max_size.height;
-    const basis = if (axis == .horizontal) containing.width else containing.height;
+    const basis = if (axis == .horizontal) percentage_basis.width else percentage_basis.height;
     const natural = if (axis == .horizontal) intrinsic.width else intrinsic.height;
     const edge_sum = if (axis == .horizontal) edges.horizontal else edges.vertical;
-    const minimum = (try resolveDimensionBorder(dimension, basis, natural, edge_sum, input.box_sizing)) orelse 0;
-    const maximum = try resolveDimensionBorder(maximum_dimension, basis, natural, edge_sum, input.box_sizing);
+    const minimum = (try resolveDimensionBorder(
+        dimension,
+        basis,
+        natural,
+        edge_sum,
+        input.box_sizing,
+    )) orelse 0;
+    const maximum = try resolveDimensionBorder(
+        maximum_dimension,
+        basis,
+        natural,
+        edge_sum,
+        input.box_sizing,
+    );
     var result = try nonNegative(candidate);
     if (maximum) |upper| result = @min(result, try nonNegative(upper));
     return @max(result, try nonNegative(minimum));
@@ -1544,16 +1668,19 @@ fn clampAxisSize(
 
 fn resolveDimensionBorder(
     dimension: style.Dimension,
-    basis: f32,
+    percentage_basis: ?f32,
     intrinsic: f32,
     edges: f32,
     box_sizing: style.BoxSizing,
 ) Error!?f32 {
-    const value = switch (dimension) {
+    const value: ?f32 = switch (dimension) {
         .auto => null,
         .min_content, .max_content => try nonNegative(intrinsic),
         .length => |number| try finite(number),
-        .percent => |fraction| try finite(fraction * basis),
+        .percent => |fraction| blk: {
+            const basis = percentage_basis orelse return error.InvalidStyle;
+            break :blk @as(?f32, try finite(fraction * basis));
+        },
     };
     if (value) |number| {
         const result = try sizingToBorder(number, edges, box_sizing);
@@ -1576,7 +1703,7 @@ fn borderToSizing(value: f32, edges: f32, box_sizing: style.BoxSizing) Error!f32
     };
 }
 
-fn resolveEdges(input: style.Style, basis: f32) Error!Edges {
+fn resolveEdges(input: style.Style, basis: ?f32) Error!Edges {
     const border: style.Sides = .{
         .top = try edge(input.border_inset.top, input.border.top, basis),
         .right = try edge(input.border_inset.right, input.border.right, basis),
@@ -1597,14 +1724,17 @@ fn resolveEdges(input: style.Style, basis: f32) Error!Edges {
     };
 }
 
-fn edge(value: style.LengthPercentage, legacy: f32, basis: f32) Error!f32 {
+fn edge(value: style.LengthPercentage, legacy: f32, basis: ?f32) Error!f32 {
     return switch (value) {
         .length => |number| nonNegative(if (number == 0 and legacy != 0) legacy else number),
-        .percent => |fraction| nonNegative(try finite(fraction * basis)),
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk nonNegative(try finite(fraction * percentage_basis));
+        },
     };
 }
 
-fn resolveMargins(input: style.Style, basis: f32) Error!Margins {
+fn resolveMargins(input: style.Style, basis: ?f32) Error!Margins {
     return .{
         .value = .{
             .top = try margin(input.margin_inset.top, input.margin.top, basis),
@@ -1619,20 +1749,23 @@ fn resolveMargins(input: style.Style, basis: f32) Error!Margins {
     };
 }
 
-fn margin(value: style.LengthPercentageAuto, legacy: f32, basis: f32) Error!f32 {
+fn margin(value: style.LengthPercentageAuto, legacy: f32, basis: ?f32) Error!f32 {
     return switch (value) {
         .auto => 0,
         .length => |number| finite(if (number == 0 and legacy != 0) legacy else number),
-        .percent => |fraction| finite(fraction * basis),
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return error.InvalidStyle;
+            break :blk finite(fraction * percentage_basis);
+        },
     };
 }
 
-fn marginHorizontal(input: style.Style, basis: f32) Error!f32 {
+fn marginHorizontal(input: style.Style, basis: ?f32) Error!f32 {
     const margins = try resolveMargins(input, basis);
     return add(margins.value.left, margins.value.right);
 }
 
-fn marginVertical(input: style.Style, basis: f32) Error!f32 {
+fn marginVertical(input: style.Style, basis: ?f32) Error!f32 {
     const margins = try resolveMargins(input, basis);
     return add(margins.value.top, margins.value.bottom);
 }

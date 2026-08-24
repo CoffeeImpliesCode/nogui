@@ -114,10 +114,15 @@ test {
     _ = @import("taffy_flex_conformance.zig");
     _ = @import("taffy_grid_conformance.zig");
     _ = @import("layout/sizing_test.zig");
+    _ = @import("layout/context_test.zig");
     _ = @import("layout/root_test.zig");
     _ = @import("layout/block_float_test.zig");
+    _ = @import("layout/block_intrinsic_request_test.zig");
     _ = @import("layout/flex_test.zig");
+    _ = @import("layout/flex_intrinsic_test.zig");
+    _ = @import("layout/flex_percentage_basis_test.zig");
     _ = @import("layout/grid_test.zig");
+    _ = @import("layout/grid_percentage_basis_test.zig");
     _ = @import("layout/dispatch_test.zig");
     _ = @import("layout/dispatch_auto_test.zig");
     _ = @import("layout/dispatch_root_auto_test.zig");

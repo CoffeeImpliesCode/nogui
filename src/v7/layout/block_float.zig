@@ -132,12 +132,10 @@ pub fn measureNatural(
     const index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
     if (&tree.nodes.items[index] != node) return error.InvalidStyle;
     try layout_context.validateNaturalRequest(tree, node, request);
-    const containing: widget.Size = request.available;
     const natural = try measureNaturalNode(
         tree,
         index,
-        containing,
-        request.percentage_basis,
+        request,
         context,
         tree.nodes.items.len,
     );
@@ -150,8 +148,7 @@ pub fn measureNatural(
 fn measureNaturalNode(
     tree: *widget.WidgetTree,
     index: usize,
-    containing: widget.Size,
-    percentage_basis: style.Size(?f32),
+    request: layout_context.Request,
     context: *layout_context.LayoutContext,
     depth: usize,
 ) sizing.Error!Natural {
@@ -162,19 +159,14 @@ fn measureNaturalNode(
         .border = .{ .width = 0, .height = 0 },
     };
 
-    const basis: style.Size(?f32) = .{
-        .width = percentage_basis.width orelse containing.width,
-        .height = percentage_basis.height orelse containing.height,
-    };
-    const edges = try resolveBoxEdges(node.style, basis.width);
+    const edges = try resolveBoxEdges(node.style, request.percentage_basis.width);
     const content = if (node.children.items.len == 0)
         try measureNaturalLeaf(node, context.measure)
     else switch (node.style.display) {
         .block, .flow_root => try measureNaturalBlockContent(
             tree,
             index,
-            containing,
-            basis,
+            request,
             edges,
             context,
             depth - 1,
@@ -184,10 +176,10 @@ fn measureNaturalNode(
     };
     const sizing_context: sizing.SizingContext = .{
         .available = .{
-            .width = .{ .definite = containing.width },
-            .height = .{ .definite = containing.height },
+            .width = .{ .definite = request.available.width },
+            .height = .{ .definite = request.available.height },
         },
-        .percentage_basis = basis,
+        .percentage_basis = request.percentage_basis,
     };
     const resolved = try resolveChildSize(
         node.style,
@@ -206,8 +198,7 @@ fn measureNaturalNode(
 fn measureNaturalBlockContent(
     tree: *widget.WidgetTree,
     index: usize,
-    containing: widget.Size,
-    percentage_basis: style.Size(?f32),
+    request: layout_context.Request,
     edges: BoxEdges,
     context: *layout_context.LayoutContext,
     depth: usize,
@@ -216,40 +207,57 @@ fn measureNaturalBlockContent(
     const node = &tree.nodes.items[index];
     const sizing_context: sizing.SizingContext = .{
         .available = .{
-            .width = .{ .definite = containing.width },
-            .height = .{ .definite = containing.height },
+            .width = .{ .definite = request.available.width },
+            .height = .{ .definite = request.available.height },
         },
-        .percentage_basis = percentage_basis,
+        .percentage_basis = request.percentage_basis,
     };
     const box_model = try sizing.resolveBoxModel(
         styleForSizing(node.style),
         sizing_context,
     );
-    const border_width = box_model.border_box.width orelse containing.width;
-    const content_width = @max(0, try subtractFinite(border_width, edges.horizontal));
-    const child_containing: widget.Size = .{
-        .width = content_width,
-        .height = containing.height,
+    const provisional_border: widget.Size = .{
+        .width = box_model.border_box.width orelse request.available.width,
+        .height = box_model.border_box.height orelse request.available.height,
     };
-    const child_basis: style.Size(?f32) = .{
-        .width = @as(?f32, content_width),
-        .height = percentage_basis.height,
+    const child_available: widget.Size = .{
+        .width = @max(0, try subtractFinite(provisional_border.width, edges.horizontal)),
+        .height = @max(0, try subtractFinite(provisional_border.height, edges.vertical)),
     };
+    const width_definite = naturalAxisDefinite(
+        node.style.size.width,
+        request.intrinsic_width,
+        request.percentage_basis.width,
+    );
+    const height_definite = naturalAxisDefinite(
+        node.style.size.height,
+        request.intrinsic_height,
+        request.percentage_basis.height,
+    );
     var content_height: f32 = 0;
     var content_width_natural: f32 = 0;
     for (node.children.items) |child_id| {
         const child = tree.nodeConst(child_id) orelse return error.InvalidStyle;
         if (child.layout_hidden or child.style.position == .absolute) continue;
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
+        const child_request: layout_context.Request = .{
+            .available = child_available,
+            .percentage_basis = .{
+                .width = if (width_definite) @as(?f32, child_available.width) else null,
+                .height = if (height_definite) @as(?f32, child_available.height) else null,
+            },
+            .intrinsic_width = !width_definite and dimensionAuto(child.style.size.width),
+            .intrinsic_height = !height_definite and dimensionAuto(child.style.size.height),
+        };
         const natural = if (child.children.items.len == 0 or
             child.style.display == .block or
             child.style.display == .flow_root)
         blk: {
+            try layout_context.validateNaturalRequest(tree, child, child_request);
             break :blk try measureNaturalNode(
                 tree,
                 child_index,
-                child_containing,
-                child_basis,
+                child_request,
                 context,
                 depth,
             );
@@ -259,10 +267,7 @@ fn measureNaturalBlockContent(
                     context,
                     tree,
                     child,
-                    .{
-                        .available = child_containing,
-                        .percentage_basis = child_basis,
-                    },
+                    child_request,
                 );
                 break :blk Natural{
                     .content = measured.content,
@@ -275,7 +280,7 @@ fn measureNaturalBlockContent(
             },
             .block, .flow_root => unreachable,
         };
-        const margins = try resolveMargins(child.style, content_width);
+        const margins = try resolveMargins(child.style, child_request.percentage_basis.width);
         content_width_natural = @max(
             content_width_natural,
             try addFinite(
@@ -294,6 +299,26 @@ fn measureNaturalBlockContent(
     return .{
         .width = content_width_natural,
         .height = content_height,
+    };
+}
+
+fn naturalAxisDefinite(
+    dimension: style.Dimension,
+    intrinsic: bool,
+    percentage_basis: ?f32,
+) bool {
+    return switch (dimension) {
+        .length => true,
+        .percent => percentage_basis != null,
+        .auto => !intrinsic,
+        .min_content, .max_content => false,
+    };
+}
+
+fn dimensionAuto(dimension: style.Dimension) bool {
+    return switch (dimension) {
+        .auto => true,
+        .length, .percent, .min_content, .max_content => false,
     };
 }
 
