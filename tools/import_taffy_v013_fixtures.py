@@ -191,6 +191,7 @@ def normalize_node(
     node: dict[str, object] = {
         "kind": kind,
         "child_count": len(input_children),
+        "attributes": dict(sorted(input_element.attrib.items())),
         "style": {
             "direction": input_element.get("direction", "ltr"),
             "border_top": style_value(input_element, "border-top"),

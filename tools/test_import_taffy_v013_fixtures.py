@@ -88,6 +88,77 @@ class ImportTaffyFixturesTests(unittest.TestCase):
         with self.assertRaises(importer.ImportError):
             importer.parse_number("2em", path=path, attribute="width")
 
+    def test_import_preserves_all_xml_input_attributes(self) -> None:
+        variant = "border_box_ltr"
+        xml_path = (
+            self.source
+            / "tests"
+            / "xml"
+            / "leaf"
+            / f"minimal__{variant}.xml"
+        )
+        xml_path.write_text(
+            """\
+<test use-rounding="true">
+  <viewport width="800" height="600" />
+  <input>
+    <node
+      overflow="hidden"
+      data-layout-case="verbatim-token"
+      width="400px"
+      display="grid"
+      writing-mode="vertical-rl"
+      height="50%"
+      border-top="3px"
+      grid-template-columns="12px minmax(0, 1fr)"
+      direction="rtl"
+    />
+  </input>
+  <expectations>
+    <node x="0" y="0" width="400px" height="300px" />
+  </expectations>
+</test>
+""",
+            encoding="utf-8",
+        )
+
+        self._run_import(
+            "--fixture",
+            FIXTURE_SOURCE,
+            "--variant",
+            variant,
+        )
+
+        corpus = self._read_json("normalized/cases.json")
+        node = corpus["cases"][0]["nodes"][0]
+        self.assertEqual(
+            node["attributes"],
+            {
+                "border-top": "3px",
+                "data-layout-case": "verbatim-token",
+                "direction": "rtl",
+                "display": "grid",
+                "grid-template-columns": "12px minmax(0, 1fr)",
+                "height": "50%",
+                "overflow": "hidden",
+                "width": "400px",
+                "writing-mode": "vertical-rl",
+            },
+        )
+        self.assertEqual(node["kind"], "node")
+        self.assertEqual(node["child_count"], 0)
+        self.assertEqual(node["writing_mode"], "vertical-rl")
+        self.assertEqual(
+            node["style"],
+            {
+                "direction": "rtl",
+                "border_top": "3px",
+                "border_right": "0px",
+                "border_bottom": "0px",
+                "border_left": "0px",
+            },
+        )
+
     def test_seed_import_records_explicit_fixture_and_variant_selection(self) -> None:
         selected_variant = "border_box_ltr"
 
