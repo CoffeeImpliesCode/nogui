@@ -360,8 +360,8 @@ fn seedSharedColumnStyle(self: *DrawCtx, id: Id) void {
     const parent = self.tree.node(child.parent) orelse return;
     if (parent.kind != .row) return;
     const columns = parent.shared_columns orelse return;
-    if (parent.children.len == 0) return;
-    const child_index: usize = @intCast(parent.children.len - 1);
+    if (parent.children.items.len == 0) return;
+    const child_index = parent.children.items.len - 1;
     if (child_index >= columns.tracks.len) return;
     const track = columns.tracks[child_index];
     if (child.style.grow == 0) child.style.grow = track.grow;
@@ -505,15 +505,9 @@ pub const DrawCtx = struct {
             .font_id = font_id,
         };
         try self.tree.appendNode(node);
-        // Wire into the parent's children array via a linear scan (the
-        // parent was created earlier, so it is already in the array).
         if (parent != .root) {
-            const p = self.tree.node(parent).?;
-            if (p.children.len < p.children.items.len) {
-                p.children.items[p.children.len] = id;
-                p.children.len += 1;
-                seedSharedColumnStyle(self, id);
-            }
+            try self.tree.appendChild(parent, id);
+            seedSharedColumnStyle(self, id);
         }
         return id;
     }
@@ -866,7 +860,7 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const col = try ctx.column(.{});
@@ -884,13 +878,13 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
     // Children adjacency, in creation order. The button's label is the
     // BUTTON's child, not the column's.
     const col_node = tree.node(col).?;
-    try std.testing.expectEqual(@as(u8, 2), col_node.children.len);
+    try std.testing.expectEqual(@as(usize, 2), col_node.children.items.len);
     try std.testing.expectEqual(inner_label, col_node.children.items[0]);
     try std.testing.expectEqual(inner_button, col_node.children.items[1]);
 
     // The button's child is its label (a label node with the button's text).
     const btn_node = tree.node(inner_button).?;
-    try std.testing.expectEqual(@as(u8, 1), btn_node.children.len);
+    try std.testing.expectEqual(@as(usize, 1), btn_node.children.items.len);
     const btn_label_id = btn_node.children.items[0];
     const btn_label = tree.node(btn_label_id).?;
     try std.testing.expectEqual(inner_button, btn_label.parent);
@@ -906,13 +900,32 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
     try std.testing.expectEqual(outer_label, tree.nodes.items[4].id);
 }
 
+test "DrawCtx: column wires 33 children in creation order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const column = try ctx.column(.{});
+    var child_ids: [33]Id = undefined;
+    for (&child_ids) |*child_id| {
+        child_id.* = try ctx.label(.{ .text = "child" });
+    }
+    ctx.pop();
+
+    const parent = tree.node(column).?;
+    try std.testing.expectEqual(@as(usize, child_ids.len), parent.children.items.len);
+    try std.testing.expectEqualSlices(Id, &child_ids, parent.children.items);
+}
+
 test "DrawCtx: pop() restores the cursor" {
     // DrawCtx text is arena-owned (duplicated label strings), so tests use
     // a real arena — the testing allocator would leak every duplicate.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const col = try ctx.column(.{});
@@ -925,7 +938,7 @@ test "DrawCtx: pop() restores the cursor" {
 
     // The column's children are unaffected by pop().
     const col_node = tree.node(col).?;
-    try std.testing.expectEqual(@as(u8, 1), col_node.children.len);
+    try std.testing.expectEqual(@as(usize, 1), col_node.children.items.len);
     try std.testing.expectEqual(inner, col_node.children.items[0]);
 }
 
@@ -935,7 +948,7 @@ test "DrawCtx: button owner binds to component_id, incl. inside component()" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     // At the root the owner is .root (the implicit root component).
@@ -971,7 +984,7 @@ test "DrawCtx: component() draws into the current cursor" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const Child = struct {
@@ -994,7 +1007,7 @@ test "DrawCtx: component() draws into the current cursor" {
     var arena2 = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena2.deinit();
     var tree2 = WidgetTree.init(arena2.allocator());
-    defer tree2.nodes.deinit(arena2.allocator());
+    defer tree2.deinit();
     var ctx2: DrawCtx = .{ .tree = &tree2, .arena = arena2.allocator() };
 
     const col = try ctx2.column(.{});
@@ -1005,7 +1018,7 @@ test "DrawCtx: component() draws into the current cursor" {
     const nested: Id = @enumFromInt(3);
     try std.testing.expectEqual(col, tree2.node(nested).?.parent);
     const col_node = tree2.node(col).?;
-    try std.testing.expectEqual(@as(u8, 1), col_node.children.len);
+    try std.testing.expectEqual(@as(usize, 1), col_node.children.items.len);
     try std.testing.expectEqual(nested, col_node.children.items[0]);
 }
 
@@ -1013,7 +1026,7 @@ test "DrawCtx: component defaults apply before local overrides and restore" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const Styled = struct {
@@ -1061,7 +1074,7 @@ test "DrawCtx: component default scope restores after draw error" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const Failing = struct {
@@ -1089,7 +1102,7 @@ test "DrawCtx: nested component defaults replace and isolate parent scope" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const Bare = struct {
@@ -1161,7 +1174,7 @@ test "DrawCtx: justify and align flow into the node's Style" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const jcol = try ctx.column(.{ .justify = .space_between });
@@ -1181,7 +1194,7 @@ test "DrawCtx: button label honors justify and align overrides" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const button = try ctx.button(.{
@@ -1203,7 +1216,7 @@ test "DrawCtx: semantic and visual labels are copied, empty override stays expli
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     var button_text = [_]u8{ 'B', 'u', 't', 't', 'o', 'n' };
@@ -1251,7 +1264,7 @@ test "DrawCtx: icon-only button stays interactive without a label child" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const Counter = struct {
@@ -1274,7 +1287,7 @@ test "DrawCtx: icon-only button stays interactive without a label child" {
     layout(&tree, .{ .width = 80, .height = 40 });
     const button_node = tree.node(button).?;
     const button_kind = button_node.kind.button;
-    try std.testing.expectEqual(@as(u8, 0), button_node.children.len);
+    try std.testing.expectEqual(@as(usize, 0), button_node.children.items.len);
     try std.testing.expectEqualStrings("Play", button_kind.accessible_label.?);
     try std.testing.expectEqual(widget.IconId.play, button_kind.icon.?);
     try std.testing.expect(button_kind.on_click != null);
@@ -1292,7 +1305,7 @@ test "DrawCtx: container gap comes from opts, defaults to 0" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const gapped_col = try ctx.column(.{ .gap = 4 });
@@ -1316,7 +1329,7 @@ test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     // No on_click in opts -> null callback.
@@ -1344,7 +1357,7 @@ test "DrawCtx: shared columns inherit direct-child flex sizing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const tracks = [_]ColumnTrack{
@@ -1386,7 +1399,7 @@ test "DrawCtx: button label does not consume shared column track" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const tracks = [_]ColumnTrack{
@@ -1414,7 +1427,7 @@ test "DrawCtx: scroll options wire state, axis, and clipping" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
     var column_state: ScrollState = .{};
     var row_state: ScrollState = .{};
@@ -1444,7 +1457,7 @@ test "DrawCtx: typed Style and PaintStyle fields flow from opts" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const id = try ctx.label(.{
@@ -1491,7 +1504,7 @@ test "DrawCtx: absent typed fields retain defaults" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const plain_label = try ctx.label(.{ .text = "plain" });
@@ -1519,7 +1532,7 @@ test "DrawCtx: typed PaintStyle layer option" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const layered_col = try ctx.column(.{ .layer = 3 });
@@ -1537,7 +1550,7 @@ test "DrawCtx: typed PaintStyle clip option; pushClip appends to the tree clip l
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const card = try ctx.column(.{ .clip = true });
@@ -1558,7 +1571,7 @@ test "DrawCtx: legacy basis and min_main stay in the parent-axis flex model" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
     const id = try ctx.label(.{ .text = "typed", .basis = 30, .min_main = 12 });
     const node = tree.node(id).?;
@@ -1591,7 +1604,7 @@ test "DrawCtx: fixed and percentage min_main retain legacy axis semantics" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const fixed_id = try ctx.label(.{
@@ -1618,7 +1631,7 @@ test "DrawCtx: constructor translates display and position into Style" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const id = try ctx.column(.{ .display = .block, .position = .absolute });
@@ -1632,7 +1645,7 @@ test "DrawCtx: wrapped flex options translate into typed Style" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const id = try ctx.row(.{
@@ -1661,7 +1674,7 @@ test "DrawCtx: grid constructor translates tracks placement and gaps" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
     const tracks = [_]style.GridTrack{ .{ .fixed = 32 }, .{ .fr = 1 } };
 

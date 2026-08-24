@@ -156,7 +156,7 @@ test "make: vtable.draw dispatches with the correct receiver and ctx" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     var a: Comp = .{ .text = "alpha" };

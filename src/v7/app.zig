@@ -1022,7 +1022,7 @@ test "App: mouse wheel stops at the nearest scroll ancestor" {
     var dummy: Dummy = .{};
 
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
     var outer_state: ScrollState = .{
         .max_offset = .{ 0, 100 },
     };
@@ -1055,6 +1055,8 @@ test "App: mouse wheel stops at the nearest scroll ancestor" {
         .paint = .{ .clip = true },
         .scroll = .{ .state = &outer_state, .axis = .vertical },
     });
+    try tree.appendChild(inner_id, child_id);
+    try tree.appendChild(outer_id, inner_id);
     app.tree_ptr = &tree;
 
     _ = try app.handle(Dummy, &dummy, .{

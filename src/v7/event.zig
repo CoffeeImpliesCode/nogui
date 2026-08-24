@@ -158,7 +158,7 @@ const Harness = struct {
 
     fn init(counter: *TestCounter) !Harness {
         var tree = WidgetTree.init(std.testing.allocator);
-        errdefer tree.nodes.deinit(std.testing.allocator);
+        errdefer tree.deinit();
 
         try tree.nodes.append(std.testing.allocator, .{
             .id = button_id,
@@ -198,7 +198,7 @@ const Harness = struct {
 
     fn deinit(self: *Harness) void {
         self.components.deinit(std.testing.allocator);
-        self.tree.nodes.deinit(std.testing.allocator);
+        self.tree.deinit();
         self.* = undefined;
     }
 };
@@ -217,7 +217,7 @@ test "dispatchClick: invokes a button on_click_with_data callback" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
     var counter: TestCounter = .{};
     var components: std.AutoHashMapUnmanaged(Id, Component) = .empty;
@@ -266,7 +266,7 @@ test "dispatchClick: button with null on_click is a no-op" {
 
 test "sliderSet: maps a click x linearly and clamps" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var volume: f32 = 0.5;
     const slider_id: Id = @enumFromInt(20);
@@ -292,7 +292,7 @@ test "sliderSet: maps a click x linearly and clamps" {
 
 test "sliderSet: maps through a non-zero [min, max] range" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var gain: f32 = 0;
     const slider_id: Id = @enumFromInt(21);
@@ -311,7 +311,7 @@ test "sliderSet: maps through a non-zero [min, max] range" {
 
 test "sliderSet: resolves the absolute rect through a padded+bordered parent" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var volume: f32 = 0.5;
     const col_id: Id = @enumFromInt(40);
@@ -331,6 +331,7 @@ test "sliderSet: resolves the absolute rect through a padded+bordered parent" {
         .rect = .{ .x = 0, .y = 0, .w = 200, .h = 200 },
         .style = .{ .padding = .{ .left = 10, .top = 10 }, .border = .{ .left = 2 } },
     });
+    try tree.appendChild(col_id, slider_id);
 
     // Absolute slider box = (0 + 0 + 2 + 10, 0 + 0 + 0 + 10, 100, 24):
     // x=12 is the left edge → min, x=112 is the right edge → max. Using
@@ -343,7 +344,7 @@ test "sliderSet: resolves the absolute rect through a padded+bordered parent" {
 
 test "sliderSet: non-slider and missing nodes return false, value untouched" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var volume: f32 = 0.5;
     const nope_id: Id = @enumFromInt(30);

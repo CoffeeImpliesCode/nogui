@@ -18,30 +18,27 @@ const WidgetTree = widget.WidgetTree;
 const testing = std.testing;
 
 const epsilon: f32 = 0.01;
-const child_count_max = 10;
 
 const Fixture = struct {
     tree: WidgetTree,
     root: Id,
-    children: [child_count_max]Id,
-    child_count: usize,
+    children: std.ArrayList(Id),
 
     fn init(grid_style: Style, child_styles: []const Style) !Fixture {
-        std.debug.assert(child_styles.len <= child_count_max);
-
         const root: Id = @enumFromInt(@as(u32, @intCast(child_styles.len + 1)));
         var fixture: Fixture = .{
             .tree = WidgetTree.init(testing.allocator),
             .root = root,
-            // SAFETY: each child slot is written before any read; child_count tracks initialized slots.
-            .children = undefined,
-            .child_count = child_styles.len,
+            .children = .empty,
         };
-        errdefer fixture.tree.nodes.deinit(testing.allocator);
+        errdefer {
+            fixture.children.deinit(testing.allocator);
+            fixture.tree.deinit();
+        }
 
         for (child_styles, 0..) |child_style, index| {
             const child: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
-            fixture.children[index] = child;
+            try fixture.children.append(testing.allocator, child);
             try fixture.tree.nodes.append(fixture.tree.allocator, WidgetNode{
                 .id = child,
                 .kind = .{ .spacer = .{} },
@@ -58,16 +55,15 @@ const Fixture = struct {
             .paint = PaintStyle{},
         });
 
-        const root_node = fixture.tree.node(root).?;
-        for (fixture.children[0..fixture.child_count]) |child| {
-            root_node.children.items[root_node.children.len] = child;
-            root_node.children.len += 1;
+        for (fixture.children.items) |child| {
+            try fixture.tree.appendChild(fixture.root, child);
         }
         return fixture;
     }
 
     fn deinit(fixture: *Fixture) void {
-        fixture.tree.nodes.deinit(testing.allocator);
+        fixture.children.deinit(testing.allocator);
+        fixture.tree.deinit();
         // SAFETY: fixture owns deinitialized storage; poison state to prevent reuse.
         fixture.* = undefined;
     }
@@ -81,13 +77,13 @@ const Fixture = struct {
     }
 
     fn childRect(fixture: *const Fixture, index: usize) Rect {
-        std.debug.assert(index < fixture.child_count);
-        return fixture.tree.nodeConst(fixture.children[index]).?.rect;
+        std.debug.assert(index < fixture.children.items.len);
+        return fixture.tree.nodeConst(fixture.children.items[index]).?.rect;
     }
 
     fn childAbsoluteRect(fixture: *const Fixture, index: usize) Rect {
-        std.debug.assert(index < fixture.child_count);
-        return widget.absoluteRect(&fixture.tree, fixture.children[index]);
+        std.debug.assert(index < fixture.children.items.len);
+        return widget.absoluteRect(&fixture.tree, fixture.children.items[index]);
     }
 };
 
@@ -103,7 +99,7 @@ fn expectFixture(
     expected_root: Rect,
     expected_children: []const Rect,
 ) !void {
-    try testing.expectEqual(expected_children.len, fixture.child_count);
+    try testing.expectEqual(expected_children.len, fixture.children.items.len);
     try expectRect(expected_root, fixture.rootRect());
     for (expected_children, 0..) |expected, index| {
         try expectRect(expected, fixture.childRect(index));
@@ -118,6 +114,20 @@ fn fixedGridStyle(width: f32, height: f32) Style {
             .height = .{ .length = height },
         },
     };
+}
+
+test "Fixture.init records eleven child IDs" {
+    const child_styles = [_]Style{.{}} ** 11;
+
+    var fixture = try Fixture.init(fixedGridStyle(1, 1), &child_styles);
+    defer fixture.deinit();
+
+    try testing.expectEqual(child_styles.len, fixture.children.items.len);
+    for (fixture.children.items, 0..) |child, index| {
+        const expected_child: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        try testing.expectEqual(expected_child, child);
+        try testing.expect(fixture.tree.nodeConst(child) != null);
+    }
 }
 
 test "main/test_fixtures/grid/grid_basic.html" {

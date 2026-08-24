@@ -216,7 +216,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                     .text_overflow = .ellipsis,
                 });
                 const title_button_node = ctx.tree.node(title_button).?;
-                std.debug.assert(title_button_node.children.len == 1);
+                std.debug.assert(title_button_node.children.items.len == 1);
                 constrainIdentityText(ctx.tree, title_button_node.children.items[0], identity_text_max_width);
                 const artist_label = try ctx.label(.{
                     .text = track.artist,
@@ -246,7 +246,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .text_overflow = .ellipsis,
             });
             const album_button_node = ctx.tree.node(album_button).?;
-            std.debug.assert(album_button_node.children.len == 1);
+            std.debug.assert(album_button_node.children.items.len == 1);
             constrainIdentityText(
                 ctx.tree,
                 album_button_node.children.items[0],

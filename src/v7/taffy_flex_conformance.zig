@@ -29,12 +29,11 @@ fn appendNode(
     });
 }
 
-fn wireChildren(tree: *WidgetTree) void {
+fn wireChildren(tree: *WidgetTree) !void {
     for (tree.nodes.items) |*node| {
         if (node.parent == .root) continue;
         const parent = tree.node(node.parent).?;
-        parent.children.items[parent.children.len] = node.id;
-        parent.children.len += 1;
+        try tree.appendChild(parent.id, node.id);
     }
 }
 
@@ -53,7 +52,7 @@ fn expectRectApprox(tree: *const WidgetTree, id: Id, expected: Rect) !void {
 
 test "test_fixtures/flex/flex_direction_row.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -69,7 +68,7 @@ test "test_fixtures/flex/flex_direction_row.html" {
         .direction = .row,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -81,7 +80,7 @@ test "test_fixtures/flex/flex_direction_row.html" {
 
 test "test_fixtures/flex/flex_direction_column.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -97,7 +96,7 @@ test "test_fixtures/flex/flex_direction_column.html" {
         .direction = .column,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -109,7 +108,7 @@ test "test_fixtures/flex/flex_direction_column.html" {
 
 test "test_fixtures/flex/flex_direction_row_reverse.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -125,7 +124,7 @@ test "test_fixtures/flex/flex_direction_row_reverse.html" {
         .direction = .row_reverse,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -137,7 +136,7 @@ test "test_fixtures/flex/flex_direction_row_reverse.html" {
 
 test "test_fixtures/flex/flex_direction_column_reverse.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -153,7 +152,7 @@ test "test_fixtures/flex/flex_direction_column_reverse.html" {
         .direction = .column_reverse,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -165,7 +164,7 @@ test "test_fixtures/flex/flex_direction_column_reverse.html" {
 
 test "test_fixtures/flex/wrap_row.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -189,7 +188,7 @@ test "test_fixtures/flex/wrap_row.html" {
         .wrap = .wrap,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 60 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 60 });
 
@@ -202,7 +201,7 @@ test "test_fixtures/flex/wrap_row.html" {
 
 test "test_fixtures/flex/wrap_column.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -226,7 +225,7 @@ test "test_fixtures/flex/wrap_column.html" {
         .wrap = .wrap,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -239,7 +238,7 @@ test "test_fixtures/flex/wrap_column.html" {
 
 test "test_fixtures/flex/wrap_reverse_column_fixed_size.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -268,7 +267,7 @@ test "test_fixtures/flex/wrap_reverse_column_fixed_size.html" {
         .@"align" = .center,
         .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 200, .height = 100 });
 
@@ -282,7 +281,7 @@ test "test_fixtures/flex/wrap_reverse_column_fixed_size.html" {
 
 test "test_fixtures/flex/gap_row_gap_determines_parent_height.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -302,7 +301,7 @@ test "test_fixtures/flex/gap_row_gap_determines_parent_height.html" {
         .gap = 10,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 80 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 80 });
 
@@ -314,7 +313,7 @@ test "test_fixtures/flex/gap_row_gap_determines_parent_height.html" {
 
 test "test_fixtures/flex/gap_column_gap_determines_parent_width.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -334,7 +333,7 @@ test "test_fixtures/flex/gap_column_gap_determines_parent_width.html" {
         .gap = 10,
         .size = .{ .width = .{ .length = 80 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 80, .height = 100 });
 
@@ -346,7 +345,7 @@ test "test_fixtures/flex/gap_column_gap_determines_parent_width.html" {
 
 test "test_fixtures/flex/flex_basis_flex_grow_row.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -362,7 +361,7 @@ test "test_fixtures/flex/flex_basis_flex_grow_row.html" {
         .direction = .row,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -373,7 +372,7 @@ test "test_fixtures/flex/flex_basis_flex_grow_row.html" {
 
 test "test_fixtures/flex/flex_basis_flex_shrink_row.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -388,7 +387,7 @@ test "test_fixtures/flex/flex_basis_flex_shrink_row.html" {
         .direction = .row,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -403,7 +402,7 @@ test "test_fixtures/flex/flex_basis_flex_shrink_row.html" {
 
 test "test_fixtures/flex/align_items_center.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -415,7 +414,7 @@ test "test_fixtures/flex/align_items_center.html" {
         .@"align" = .center,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -425,7 +424,7 @@ test "test_fixtures/flex/align_items_center.html" {
 
 test "test_fixtures/flex/align_items_flex_end.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -437,7 +436,7 @@ test "test_fixtures/flex/align_items_flex_end.html" {
         .@"align" = .end,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -447,7 +446,7 @@ test "test_fixtures/flex/align_items_flex_end.html" {
 
 test "test_fixtures/flex/align_items_stretch.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -459,7 +458,7 @@ test "test_fixtures/flex/align_items_stretch.html" {
         .@"align" = .stretch,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -469,7 +468,7 @@ test "test_fixtures/flex/align_items_stretch.html" {
 
 test "test_fixtures/flex/justify_content_column_center.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -486,7 +485,7 @@ test "test_fixtures/flex/justify_content_column_center.html" {
         .justify = .center,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 100 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 100, .height = 100 });
 
@@ -498,7 +497,7 @@ test "test_fixtures/flex/justify_content_column_center.html" {
 
 test "test_fixtures/flex/margin_auto_left.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -520,7 +519,7 @@ test "test_fixtures/flex/margin_auto_left.html" {
         .@"align" = .center,
         .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 200 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 200, .height = 200 });
 
@@ -531,7 +530,7 @@ test "test_fixtures/flex/margin_auto_left.html" {
 
 test "test_fixtures/flex/margin_auto_top.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -553,7 +552,7 @@ test "test_fixtures/flex/margin_auto_top.html" {
         .@"align" = .center,
         .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 200 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 200, .height = 200 });
 
@@ -564,7 +563,7 @@ test "test_fixtures/flex/margin_auto_top.html" {
 
 test "test_fixtures/flex/percentage_width_height.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -575,7 +574,7 @@ test "test_fixtures/flex/percentage_width_height.html" {
         .direction = .row,
         .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 400 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 200, .height = 400 });
 
@@ -585,7 +584,7 @@ test "test_fixtures/flex/percentage_width_height.html" {
 
 test "test_fixtures/flex/percentage_flex_basis.html" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child_1: Id = @enumFromInt(1);
     const child_2: Id = @enumFromInt(2);
@@ -602,7 +601,7 @@ test "test_fixtures/flex/percentage_flex_basis.html" {
         .direction = .row,
         .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 200 } },
     });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     flex.layout(&tree, Size{ .width = 200, .height = 200 });
 

@@ -257,7 +257,7 @@ fn expectColor(actual: [4]f32, expected: [4]f32) !void {
 
 test "collectDrawCmds: paint order — container before children, spacer skipped" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const col: Id = @enumFromInt(1);
     const l1: Id = @enumFromInt(2);
@@ -321,7 +321,7 @@ test "collectDrawCmds: paint order — container before children, spacer skipped
 
 test "collectDrawCmds: colors — button accent, container dim" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const col: Id = @enumFromInt(1);
     const btn: Id = @enumFromInt(2);
@@ -354,7 +354,7 @@ test "collectDrawCmds: colors — button accent, container dim" {
 
 test "collectDrawCmds: pressed button fill eases to the pressed color at press_alpha 1" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const btn: Id = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
@@ -374,7 +374,7 @@ test "collectDrawCmds: pressed button fill eases to the pressed color at press_a
 
 test "collectDrawCmds: pressed button fill is the midpoint at press_alpha 0.5" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const btn: Id = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
@@ -402,7 +402,7 @@ test "collectDrawCmds: pressed button fill is the midpoint at press_alpha 0.5" {
 
 test "collectDrawCmds: zero-size nodes are skipped" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const col: Id = @enumFromInt(1);
     const btn: Id = @enumFromInt(2);
@@ -445,7 +445,7 @@ test "collectDrawCmds: zero-size nodes are skipped" {
 
 test "collectDrawCmds: empty tree yields zero cmds" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
@@ -455,7 +455,7 @@ test "collectDrawCmds: empty tree yields zero cmds" {
 
 test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const btn: Id = @enumFromInt(1);
     const resolved_style: Style = .{
@@ -492,7 +492,7 @@ test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
 
 test "collectDrawCmds: nested node under a column resolves to its absolute rect" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const col: Id = @enumFromInt(1);
     const btn: Id = @enumFromInt(2);
@@ -522,7 +522,7 @@ test "collectDrawCmds: nested node under a column resolves to its absolute rect"
 
 test "collectDrawCmds: shadowed node emits one shadow cmd first with offset rect and shadow color" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const btn: Id = @enumFromInt(1);
     const paint: PaintStyle = .{ .shadow = 3 };
@@ -558,7 +558,7 @@ test "collectDrawCmds: shadowed node emits one shadow cmd first with offset rect
 
 test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // A layered, bordered, shadowed button emits three cmds (shadow, ring,
     // fill) — every one must carry the node's layer key so the drawable
@@ -604,7 +604,7 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
 
 test "collectDrawCmds: bordered label emits exactly one ring cmd" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const lbl: Id = @enumFromInt(1);
     const resolved_style: Style = .{
@@ -634,7 +634,7 @@ test "collectDrawCmds: bordered label emits exactly one ring cmd" {
 
 test "collectDrawCmds: a .clip container stamps its clip id on its own and descendants' cmds, then pops for siblings" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // Post-order: children before containers. A clip-marked column holds
     // a button; a sibling button sits outside the clip.
@@ -692,7 +692,7 @@ test "collectDrawCmds: a .clip container stamps its clip id on its own and desce
 
 test "collectDrawCmds: nested clip containers stamp the deepest enclosing clip" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // outer (clip) → inner (clip) → button. The button's cmds carry the
     // INNER clip id; both rects are appended (outer id 0, inner id 1).

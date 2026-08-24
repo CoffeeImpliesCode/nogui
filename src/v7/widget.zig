@@ -206,8 +206,7 @@ pub const WidgetNode = struct {
     id: Id,
     kind: WidgetKind,
     parent: Id,
-    // SAFETY: items is filled by flex before any read; len tracks the filled count.
-    children: struct { items: [32]Id = undefined, len: u8 = 0 } = .{}, // fixed cap, prototype
+    children: std.ArrayListUnmanaged(Id) = .empty,
     /// BORDER box, positioned relative to the parent's CONTENT box (see
     /// Rect's doc). Filled by the layout dispatcher.
     rect: Rect = .{},
@@ -308,6 +307,15 @@ pub const WidgetTree = struct {
         return .{ .allocator = allocator };
     }
 
+    pub fn deinit(self: *WidgetTree) void {
+        for (self.nodes.items) |*node_value| {
+            node_value.children.deinit(self.allocator);
+        }
+        self.nodes.deinit(self.allocator);
+        self.id_index.deinit(self.allocator);
+        self.* = undefined;
+    }
+
     /// Append a node and atomically add its frame-local lookup entry.
     pub fn appendNode(self: *WidgetTree, node_value: WidgetNode) !void {
         try self.nodes.append(self.allocator, node_value);
@@ -317,6 +325,12 @@ pub const WidgetTree = struct {
             node_value.id,
             @intCast(self.nodes.items.len - 1),
         );
+    }
+
+    /// Append a child id through the tree-owned frame allocator.
+    pub fn appendChild(self: *WidgetTree, parent: Id, child: Id) !void {
+        const parent_node = self.node(parent).?;
+        try parent_node.children.append(self.allocator, child);
     }
 
     /// Return a node's array index. Production trees use the complete map;
@@ -501,8 +515,7 @@ pub fn contentRect(tree: *const WidgetTree, id: Id) Rect {
 
 test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.id_index.deinit(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -516,16 +529,18 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
         .kind = .{ .spacer = .{} },
         .parent = id1,
     });
+    try tree.appendChild(id1, id2);
 
     try std.testing.expectEqual(id2, tree.node(id2).?.id);
     try std.testing.expectEqual(id1, tree.nodeConst(id1).?.id);
     try std.testing.expectEqual(@as(?*WidgetNode, null), tree.node(@enumFromInt(99)));
+    try std.testing.expectEqual(@as(usize, 1), tree.node(id1).?.children.items.len);
+    try std.testing.expectEqual(id2, tree.node(id1).?.children.items[0]);
 }
 
 test "WidgetTree: moving a node to the end reindexes shifted nodes" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.id_index.deinit(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -550,7 +565,7 @@ test "WidgetTree: moving a node to the end reindexes shifted nodes" {
 
 test "WidgetTree: roots() returns only top-level nodes in append order" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -564,6 +579,8 @@ test "WidgetTree: roots() returns only top-level nodes in append order" {
     try tree.nodes.append(std.testing.allocator, .{ .id = id1, .kind = .{ .column = .{} }, .parent = .root });
     try tree.nodes.append(std.testing.allocator, .{ .id = id2, .kind = .{ .row = .{} }, .parent = .root });
     try tree.nodes.append(std.testing.allocator, .{ .id = id3, .kind = .{ .spacer = .{} }, .parent = .root });
+    try tree.appendChild(id1, id4);
+    try tree.appendChild(id2, id5);
 
     var buf: [8]*WidgetNode = undefined;
     const count = tree.roots(&buf);
@@ -575,7 +592,7 @@ test "WidgetTree: roots() returns only top-level nodes in append order" {
 
 test "WidgetTree: roots() with a too-small buf returns the full count, no overflow" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     for (0..5) |i| {
         try tree.nodes.append(std.testing.allocator, .{
@@ -597,7 +614,7 @@ test "WidgetTree: roots() with a too-small buf returns the full count, no overfl
 
 test "absoluteRect: walks parent content boxes through border+padding" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // root-level column with padding, holding a row with a border, holding
     // a label offset relative to the row's content box.
@@ -625,6 +642,8 @@ test "absoluteRect: walks parent content boxes through border+padding" {
         .rect = .{ .x = 0, .y = 0, .w = 200, .h = 200 },
         .style = .{ .padding = .{ .top = 8, .left = 8 } },
     });
+    try tree.appendChild(row, label);
+    try tree.appendChild(col, row);
 
     // Label absolute border box: col content origin (8,8) + row rect
     // (10,10) + row border (4,1) + label rect (5,3).
@@ -643,7 +662,7 @@ test "absoluteRect: walks parent content boxes through border+padding" {
 
 test "absoluteRect: root-level node is relative to the surface (0,0)" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const col: Id = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
@@ -666,7 +685,7 @@ test "WidgetNode: defaults are zero-valued" {
     try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 0, .h = 0 }, n.rect);
     try std.testing.expectEqual(Style{}, n.style);
     try std.testing.expectEqual(PaintStyle{}, n.paint);
-    try std.testing.expectEqual(@as(u8, 0), n.children.len);
+    try std.testing.expectEqual(@as(usize, 0), n.children.items.len);
 }
 test "WidgetNode: typed dimensions and constraints are stored after resolution" {
     var node: WidgetNode = .{
@@ -720,7 +739,7 @@ test "sliderVisualLabel: null falls back, empty suppresses visible text" {
 
 test "visualBorderRect: scroll offset applies only to descendants" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const scroll_id: Id = @enumFromInt(1);
     const child_id: Id = @enumFromInt(2);
@@ -743,6 +762,7 @@ test "visualBorderRect: scroll offset applies only to descendants" {
         },
         .scroll = .{ .state = &scroll_state },
     });
+    try tree.appendChild(scroll_id, child_id);
 
     try std.testing.expectEqual(
         Rect{ .x = 10, .y = 20, .w = 100, .h = 80 },
@@ -756,7 +776,7 @@ test "visualBorderRect: scroll offset applies only to descendants" {
 
 test "pointInClipChain: rejects points outside a scrolled ancestor clip" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const clip_id: Id = @enumFromInt(1);
     const child_id: Id = @enumFromInt(2);
@@ -776,6 +796,7 @@ test "pointInClipChain: rejects points outside a scrolled ancestor clip" {
         .paint = .{ .clip = true },
         .scroll = .{ .state = &scroll_state },
     });
+    try tree.appendChild(clip_id, child_id);
 
     try std.testing.expect(pointInClipChain(&tree, child_id, .{ 35, 27 }));
     try std.testing.expect(!pointInClipChain(&tree, child_id, .{ 45, 27 }));

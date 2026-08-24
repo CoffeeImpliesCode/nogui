@@ -11,7 +11,7 @@
 //! and distributes main-axis free space, resolves auto margins, distributes
 //! line cross space, applies item alignment, and handles reverse directions.
 //! Block finalization then resolves normal flow and absolute descendants.
-//! No allocation: only in-place `WidgetNode.rect` writes.
+//! Layout scratch uses the tree allocator; node rect writes remain in-place.
 //! Per the prototype spec (notes/v7-prototype-spec.md §6).
 const std = @import("std");
 
@@ -58,7 +58,8 @@ pub const MeasureFn = *const fn (text: []const u8, font_size: f32, font_id: u8) 
 /// CONTENT box (its border box inset by its own border + padding). Because a
 /// container's real content box is only final once ITS parent was sized,
 /// top-down finalization uses main/cross/main/cross/main passes and ends with
-/// a final main-axis distribution against the FINAL content box. No allocation.
+/// a final main-axis distribution against the FINAL content box. Layout scratch
+/// uses the tree allocator.
 pub fn layout(tree: *WidgetTree, available: Size) void {
     layoutWith(tree, available, null);
 }
@@ -153,7 +154,7 @@ fn updateScrollOffset(tree: *WidgetTree, node: *WidgetNode) void {
     );
     var content_w: f32 = 0;
     var content_h: f32 = 0;
-    for (node.children.items[0..node.children.len]) |child_id| {
+    for (node.children.items) |child_id| {
         const child = tree.node(child_id) orelse continue;
         if (isHidden(tree, child)) continue;
         const margin = child.style.margin;
@@ -362,7 +363,7 @@ fn childHasTypedMargin(node: *const WidgetNode) bool {
 fn needsAdvancedFlex(tree: *WidgetTree, parent: *const WidgetNode) bool {
     if (effectiveWrap(parent) != .nowrap) return true;
     if (directionIsReverse(parent.style.direction)) return true;
-    for (parent.children.items[0..parent.children.len]) |child_id| {
+    for (parent.children.items) |child_id| {
         const child = tree.nodeConst(child_id) orelse continue;
         if (isHidden(tree, child)) continue;
         if (child.style.align_self != .auto) return true;
@@ -388,7 +389,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
         if (p.style.display == .block or p.style.display == .flow_root or p.style.display == .grid) return;
         const resolved = p.style;
         if (needsAdvancedFlex(tree, p)) {
-            for (p.children.items[0..p.children.len]) |child_id| {
+            for (p.children.items) |child_id| {
                 const child = tree.nodeConst(child_id) orelse continue;
                 if (isHidden(tree, child)) continue;
                 finalizeCross(tree, child_id, available);
@@ -407,7 +408,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
         );
         const @"align" = resolved.@"align";
         const is_col = directionIsColumn(p.style.direction);
-        for (p.children.items[0..p.children.len]) |cid| {
+        for (p.children.items) |cid| {
             const child = tree.node(cid).?;
             if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) continue;
@@ -501,8 +502,9 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 box.padding.top - box.padding.bottom),
         };
 
-        const count = p.children.len;
-        var mains: [32]f32 = undefined;
+        const count = p.children.items.len;
+        var mains = tree.allocator.alloc(f32, count) catch @panic("layout scratch allocation failed");
+        defer tree.allocator.free(mains);
         var content: f32 = 0;
         var total_grow: f32 = 0;
         var total_shrink: f32 = 0;
@@ -559,7 +561,9 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
             // remaining overflow is redistributed over the unfrozen items
             // until nothing new clamps.
             var remaining = -free;
-            var frozen: [32]bool = [_]bool{false} ** 32;
+            var frozen = tree.allocator.alloc(bool, count) catch @panic("layout scratch allocation failed");
+            defer tree.allocator.free(frozen);
+            @memset(frozen, false);
             for (0..count) |_| {
                 var total_scaled: f32 = 0;
                 for (0..count) |i| {
@@ -712,9 +716,9 @@ const FlexLine = struct {
 
 fn lineFitted(
     line: FlexLine,
-    mains: *const [32]f32,
-    main_leads: *const [32]f32,
-    main_trails: *const [32]f32,
+    mains: []const f32,
+    main_leads: []const f32,
+    main_trails: []const f32,
     gap: f32,
 ) f32 {
     var result: f32 = 0;
@@ -750,13 +754,15 @@ fn distributeAdvancedLine(
     direction: Direction,
     available_main: f32,
     gap: f32,
-    flow_indices: *const [32]usize,
-    mains: *[32]f32,
-    main_leads: *const [32]f32,
-    main_trails: *const [32]f32,
+    flow_indices: []const usize,
+    mains: []f32,
+    main_leads: []const f32,
+    main_trails: []const f32,
 ) void {
-    var frozen: [32]bool = [_]bool{false} ** 32;
-    for (0..32) |_| {
+    var frozen = tree.allocator.alloc(bool, mains.len) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(frozen);
+    @memset(frozen, false);
+    for (0..line.flow_count) |_| {
         const fitted = lineFitted(line, mains, main_leads, main_trails, gap);
         const free = available_main - fitted;
         if (free == 0) break;
@@ -835,22 +841,35 @@ fn layoutAdvancedFlexContainer(
     const available_main = if (main_is_column) content.height else content.width;
     var available_cross = if (main_is_column) content.width else content.height;
 
-    var flow_indices: [32]usize = undefined;
-    var item_mains: [32]f32 = undefined;
-    var item_crosses: [32]f32 = undefined;
-    var main_leads: [32]f32 = undefined;
-    var main_trails: [32]f32 = undefined;
-    var cross_leads: [32]f32 = undefined;
-    var cross_trails: [32]f32 = undefined;
-    var main_auto_leads: [32]bool = [_]bool{false} ** 32;
-    var main_auto_trails: [32]bool = [_]bool{false} ** 32;
-    var cross_auto_leads: [32]bool = [_]bool{false} ** 32;
-    var cross_auto_trails: [32]bool = [_]bool{false} ** 32;
-    var lines: [32]FlexLine = [_]FlexLine{.{}} ** 32;
+    const child_count = node.children.items.len;
+    var flow_indices = tree.allocator.alloc(usize, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(flow_indices);
+    var item_mains = tree.allocator.alloc(f32, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(item_mains);
+    var item_crosses = tree.allocator.alloc(f32, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(item_crosses);
+    var main_leads = tree.allocator.alloc(f32, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(main_leads);
+    var main_trails = tree.allocator.alloc(f32, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(main_trails);
+    var cross_leads = tree.allocator.alloc(f32, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(cross_leads);
+    var cross_trails = tree.allocator.alloc(f32, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(cross_trails);
+    var main_auto_leads = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(main_auto_leads);
+    var main_auto_trails = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(main_auto_trails);
+    var cross_auto_leads = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(cross_auto_leads);
+    var cross_auto_trails = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(cross_auto_trails);
+    var lines = tree.allocator.alloc(FlexLine, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(lines);
     var flow_count: usize = 0;
     var line_count: usize = 0;
 
-    for (0..node.children.len) |child_index| {
+    for (0..node.children.items.len) |child_index| {
         const child = tree.node(node.children.items[child_index]) orelse continue;
         if (isHidden(tree, child) or child.style.position == .absolute) continue;
         // Finalization runs repeatedly, so the current rect is not a stable flex base.
@@ -899,7 +918,7 @@ fn layoutAdvancedFlexContainer(
         }
         var line = &lines[line_count - 1];
         if (wrap != .nowrap and line.flow_count > 0 and
-            lineFitted(line.*, &item_mains, &main_leads, &main_trails, gap) +
+            lineFitted(line.*, item_mains, main_leads, main_trails, gap) +
                 gap + item_extent > available_main)
         {
             lines[line_count] = .{ .first_flow = flow_count, .flow_count = 0 };
@@ -927,10 +946,10 @@ fn layoutAdvancedFlexContainer(
             direction,
             available_main,
             gap,
-            &flow_indices,
-            &item_mains,
-            &main_leads,
-            &main_trails,
+            flow_indices,
+            item_mains,
+            main_leads,
+            main_trails,
         );
     }
 
@@ -984,9 +1003,9 @@ fn layoutAdvancedFlexContainer(
         const line = lines[line_index];
         var main_free = @max(0, available_main - lineFitted(
             line,
-            &item_mains,
-            &main_leads,
-            &main_trails,
+            item_mains,
+            main_leads,
+            main_trails,
             gap,
         ));
         var auto_main_count: usize = 0;
@@ -1093,7 +1112,7 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
             parent.style.display == .grid) return;
         if (needsAdvancedFlex(tree, parent)) {
             layoutAdvancedFlexContainer(tree, parent, available);
-            for (parent.children.items[0..parent.children.len]) |child_id| {
+            for (parent.children.items) |child_id| {
                 const child = tree.nodeConst(child_id) orelse continue;
                 if (isHidden(tree, child)) continue;
                 finalizeMain(tree, child_id, available);
@@ -1212,7 +1231,7 @@ fn placeBlockContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
     var content_height: f32 = 0;
     var max_child_width: f32 = 0;
 
-    for (node.children.items[0..node.children.len]) |child_id| {
+    for (node.children.items) |child_id| {
         const child = tree.node(child_id) orelse continue;
         if (isHidden(tree, child) or child.style.position == .absolute) continue;
         const margin = child.style.margin;
@@ -1258,7 +1277,7 @@ fn placeBlockContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
     );
 
     var cursor_y: f32 = 0;
-    for (node.children.items[0..node.children.len]) |child_id| {
+    for (node.children.items) |child_id| {
         const child = tree.node(child_id) orelse continue;
         if (isHidden(tree, child) or child.style.position == .absolute) continue;
         const margin = child.style.margin;
@@ -1365,7 +1384,7 @@ fn finalizeBlockChildren(
         ),
     };
     var cursor_y: f32 = 0;
-    for (parent.children.items[0..parent.children.len]) |child_id| {
+    for (parent.children.items) |child_id| {
         const child = tree.node(child_id) orelse continue;
         if (isHidden(tree, child)) continue;
         if (child.style.position == .absolute) {
@@ -1433,7 +1452,7 @@ fn finalizeSpecialNode(
                     node.style.padding.top - node.style.padding.bottom,
             ),
         };
-        for (node.children.items[0..node.children.len]) |child_id| {
+        for (node.children.items) |child_id| {
             const child = tree.node(child_id) orelse continue;
             if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) {
@@ -1455,7 +1474,7 @@ fn finalizeSpecialNode(
                     node.style.padding.top - node.style.padding.bottom,
             ),
         };
-        for (node.children.items[0..node.children.len]) |child_id| {
+        for (node.children.items) |child_id| {
             const child = tree.node(child_id) orelse continue;
             if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) {
@@ -1467,7 +1486,7 @@ fn finalizeSpecialNode(
         }
     }
 
-    for (node.children.items[0..node.children.len]) |child_id| {
+    for (node.children.items) |child_id| {
         const child = tree.node(child_id) orelse continue;
         if (isHidden(tree, child)) continue;
         const child_width_definite = true;
@@ -1586,9 +1605,11 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     const inset_main = own_border_main + own_padding_main;
     const inset_cross = own_border_cross + own_padding_cross;
 
-    const count = node.children.len;
-    var mains: [32]f32 = undefined;
-    var crosses: [32]f32 = undefined;
+    const count = node.children.items.len;
+    var mains = tree.allocator.alloc(f32, count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(mains);
+    var crosses = tree.allocator.alloc(f32, count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(crosses);
     // Sum of children's MARGIN-box mains (border box + both margins) + gaps.
     var content: f32 = 0;
     var max_cross: f32 = 0;
@@ -1673,7 +1694,9 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         // at its floor FREEZES there; the remaining overflow is
         // redistributed over the unfrozen items until nothing new clamps.
         var remaining = -free;
-        var frozen: [32]bool = [_]bool{false} ** 32;
+        var frozen = tree.allocator.alloc(bool, count) catch @panic("layout scratch allocation failed");
+        defer tree.allocator.free(frozen);
+        @memset(frozen, false);
         for (0..count) |_| {
             var total_scaled: f32 = 0;
             for (0..count) |i| {
@@ -2174,22 +2197,23 @@ fn gridAlignContentOffset(
     };
 }
 
-/// Place one grid container with bounded stack storage. Explicit tracks are
-/// resolved first, intrinsic contributions grow auto tracks, and `fr` tracks
-/// receive the remaining definite content-box space.
+/// Place one grid container. Child placement uses frame-local allocator
+/// scratch. Explicit tracks are resolved first, intrinsic contributions grow
+/// auto tracks, and `fr` tracks receive the remaining definite content-box
+/// space.
 fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     if (isHidden(tree, node)) return;
     const inset_width = blockInsetWidth(node);
     const inset_height = blockInsetHeight(node);
-    var flow_ids: [32]Id = undefined;
+    const child_count = node.children.items.len;
+    var flow_ids = tree.allocator.alloc(Id, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(flow_ids);
     var flow_count: usize = 0;
-    for (node.children.items[0..node.children.len]) |child_id| {
+    for (node.children.items) |child_id| {
         const child = tree.node(child_id) orelse continue;
         if (isHidden(tree, child) or child.style.position == .absolute) continue;
-        if (flow_count < flow_ids.len) {
-            flow_ids[flow_count] = child_id;
-            flow_count += 1;
-        }
+        flow_ids[flow_count] = child_id;
+        flow_count += 1;
     }
 
     var columns: [32]GridTrack = [_]GridTrack{.auto} ** 32;
@@ -2205,10 +2229,18 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
     for (explicit_column_count..columns.len) |index| columns[index] = node.style.grid_auto_columns;
     for (explicit_row_count..rows.len) |index| rows[index] = node.style.grid_auto_rows;
 
-    var column_start: [32]usize = [_]usize{0} ** 32;
-    var column_end: [32]usize = [_]usize{1} ** 32;
-    var row_start: [32]usize = [_]usize{0} ** 32;
-    var row_end: [32]usize = [_]usize{1} ** 32;
+    var column_start = tree.allocator.alloc(usize, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(column_start);
+    var column_end = tree.allocator.alloc(usize, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(column_end);
+    var row_start = tree.allocator.alloc(usize, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(row_start);
+    var row_end = tree.allocator.alloc(usize, child_count) catch @panic("layout scratch allocation failed");
+    defer tree.allocator.free(row_end);
+    @memset(column_start, 0);
+    @memset(column_end, 1);
+    @memset(row_start, 0);
+    @memset(row_end, 1);
     var occupied: [32 * 32]bool = [_]bool{false} ** (32 * 32);
 
     // First reserve fully explicit items. This makes auto placement stable
@@ -2649,21 +2681,19 @@ fn appendNode(tree: *WidgetTree, id: Id, parent: Id, kind: WidgetKind) !void {
     try tree.nodes.append(tree.allocator, node);
 }
 
-/// Register every non-root node in its parent's children array, in array
-/// order (which is creation order).
-fn wireChildren(tree: *WidgetTree) void {
+/// Register every non-root node in its parent's child list, in creation
+/// order.
+fn wireChildren(tree: *WidgetTree) !void {
     for (tree.nodes.items) |*n| {
         if (n.parent == .root) continue;
         const p = tree.node(n.parent) orelse continue;
-        if (p.children.len == p.children.items.len) continue;
-        p.children.items[p.children.len] = n.id;
-        p.children.len += 1;
+        try tree.appendChild(p.id, n.id);
     }
 }
 
 test "column stacks labels with gap, x=0, heights 20" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2673,7 +2703,7 @@ test "column stacks labels with gap, x=0, heights 20" {
     try appendNode(&tree, id2, id4, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, id4, .{ .label = .{ .text = "ccc" } });
     try appendNode(&tree, id4, .root, .{ .column = .{ .gap = 4 } });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -2686,7 +2716,7 @@ test "column stacks labels with gap, x=0, heights 20" {
 
 test "column grow: first child gets remaining height" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2694,7 +2724,7 @@ test "column grow: first child gets remaining height" {
     try appendNode(&tree, id1, id3, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .column = .{ .gap = 4 } });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id1).?.style.grow = 1;
 
     layout(&tree, .{ .width = 800, .height = 600 });
@@ -2707,7 +2737,7 @@ test "column grow: first child gets remaining height" {
 
 test "row justify space_between: left/center/right, centers equidistant" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2717,7 +2747,7 @@ test "row justify space_between: left/center/right, centers equidistant" {
     try appendNode(&tree, id2, id4, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, id4, .{ .label = .{ .text = "ccc" } });
     try appendNode(&tree, id4, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id4).?.style.justify = .space_between;
 
     layout(&tree, .{ .width = 300, .height = 40 });
@@ -2732,7 +2762,7 @@ test "row justify space_between: left/center/right, centers equidistant" {
 
 test "column align center: children centered on x" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2742,7 +2772,7 @@ test "column align center: children centered on x" {
     try appendNode(&tree, id2, id4, .{ .label = .{ .text = "bb" } });
     try appendNode(&tree, id3, id4, .{ .label = .{ .text = "cc" } });
     try appendNode(&tree, id4, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id4).?.style.@"align" = .center;
 
     layout(&tree, .{ .width = 100, .height = 600 });
@@ -2756,7 +2786,7 @@ test "column align center: children centered on x" {
 
 test "column shrink: fixed children reduced proportionally to shrink weight" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2766,7 +2796,7 @@ test "column shrink: fixed children reduced proportionally to shrink weight" {
     try appendNode(&tree, id2, id4, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, id4, .{ .label = .{ .text = "ccc" } });
     try appendNode(&tree, id4, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id1).?.style.shrink = 1;
     tree.node(id2).?.style.shrink = 1;
     tree.node(id3).?.style.shrink = 2;
@@ -2786,7 +2816,7 @@ test "column shrink: fixed children reduced proportionally to shrink weight" {
 
 test "nested column: inner contains its labels, outer = inner + gap + sibling" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2798,7 +2828,7 @@ test "nested column: inner contains its labels, outer = inner + gap + sibling" {
     try appendNode(&tree, id4, id5, .{ .column = .{ .gap = 3 } });
     try appendNode(&tree, id3, id5, .{ .label = .{ .text = "ccc" } });
     try appendNode(&tree, id5, .root, .{ .column = .{ .gap = 4 } });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id5).?.style.@"align" = .start;
 
     layout(&tree, .{ .width = 400, .height = 600 });
@@ -2821,7 +2851,7 @@ test "nested column: inner contains its labels, outer = inner + gap + sibling" {
 
 test "column padding: children sit in the content box, natural h includes padding" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2829,7 +2859,7 @@ test "column padding: children sit in the content box, natural h includes paddin
     try appendNode(&tree, id1, id3, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id3).?.style.padding = .{ .left = 8, .top = 8 };
 
     layout(&tree, .{ .width = 800, .height = 600 });
@@ -2848,7 +2878,7 @@ test "column padding: children sit in the content box, natural h includes paddin
 
 test "row margins: advance includes margin.l+r, gap sits between margin boxes" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2856,7 +2886,7 @@ test "row margins: advance includes margin.l+r, gap sits between margin boxes" {
     try appendNode(&tree, id1, id3, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .row = .{ .gap = 3 } });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id1).?.style.margin = .{ .right = 6 };
     tree.node(id2).?.style.margin = .{ .left = 4 };
 
@@ -2873,13 +2903,13 @@ test "row margins: advance includes margin.l+r, gap sits between margin boxes" {
 
 test "column stretch subtracts child margins" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
     try appendNode(&tree, id1, id2, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id1).?.style.margin = .{ .left = 5, .right = 5 };
 
     layout(&tree, .{ .width = 100, .height = 600 });
@@ -2895,7 +2925,7 @@ test "column stretch subtracts child margins" {
 
 test "bordered container: children sit inside border + padding" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2903,7 +2933,7 @@ test "bordered container: children sit inside border + padding" {
     try appendNode(&tree, id1, id3, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, id3, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id3).?.style.border = .{ .top = 1, .right = 2, .bottom = 1, .left = 2 };
     tree.node(id3).?.style.padding = .{ .left = 4, .top = 3 };
 
@@ -2922,7 +2952,7 @@ test "bordered container: children sit inside border + padding" {
 
 test "nested row at nonzero offset: descendants stay parent-relative" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2934,7 +2964,7 @@ test "nested row at nonzero offset: descendants stay parent-relative" {
     try appendNode(&tree, id5, id4, .{ .spacer = .{ .size = 40 } });
     try appendNode(&tree, id3, id4, .{ .row = .{} });
     try appendNode(&tree, id4, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     layout(&tree, .{ .width = 400, .height = 600 });
 
@@ -2950,13 +2980,13 @@ test "nested row at nonzero offset: descendants stay parent-relative" {
 
 test "root column grow with padding: child ends at the content box bottom" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const label: Id = @enumFromInt(1);
     const col: Id = @enumFromInt(2);
     try appendNode(&tree, label, col, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, col, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(label).?.style.grow = 1;
     // 12px top padding: the content box is 12px shorter than the border box.
     tree.node(col).?.style.padding = .{ .top = 12 };
@@ -2975,7 +3005,7 @@ test "root column grow with padding: child ends at the content box bottom" {
 
 test "column shrink clamps at zero: no negative mains, no inverted rects" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
@@ -2985,7 +3015,7 @@ test "column shrink clamps at zero: no negative mains, no inverted rects" {
     try appendNode(&tree, id2, id4, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, id3, id4, .{ .label = .{ .text = "ccc" } });
     try appendNode(&tree, id4, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id1).?.style.shrink = 1;
     tree.node(id2).?.style.shrink = 1;
     tree.node(id3).?.style.shrink = 8;
@@ -3010,13 +3040,13 @@ test "column shrink clamps at zero: no negative mains, no inverted rects" {
 
 test "root-level margins: node offset by margin, width minus cross margins, advance includes main margins" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const id1: Id = @enumFromInt(1);
     const id2: Id = @enumFromInt(2);
     try appendNode(&tree, id1, .root, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, id2, .root, .{ .label = .{ .text = "bbb" } });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(id1).?.style.margin = .{ .top = 20, .left = 10, .right = 10 };
 
     layout(&tree, .{ .width = 800, .height = 600 });
@@ -3030,13 +3060,13 @@ test "root-level margins: node offset by margin, width minus cross margins, adva
 
 test "placeRoot places all root-level nodes: no 64-node cap" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     // 70 root-level spacers (1x1 each) — more than the old 64-node buffer.
     for (0..70) |i| {
         try appendNode(&tree, @enumFromInt(@as(u32, @intCast(i + 1))), .root, .{ .spacer = .{ .size = 1 } });
     }
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     layout(&tree, .{ .width = 800, .height = 600 });
 
@@ -3048,7 +3078,7 @@ test "placeRoot places all root-level nodes: no 64-node cap" {
 
 test "finalizeMain: nested justify=end re-placed against the FINAL main" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const label: Id = @enumFromInt(1);
     const inner: Id = @enumFromInt(2);
@@ -3056,7 +3086,7 @@ test "finalizeMain: nested justify=end re-placed against the FINAL main" {
     try appendNode(&tree, label, inner, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, inner, outer, .{ .column = .{} });
     try appendNode(&tree, outer, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(inner).?.style.justify = .end;
     // The outer column grows the inner column to the available height.
     tree.node(inner).?.style.grow = 1;
@@ -3072,7 +3102,7 @@ test "finalizeMain: nested justify=end re-placed against the FINAL main" {
 
 test "finalizeMain: nested grow child fills the FINAL content main" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const label: Id = @enumFromInt(1);
     const inner: Id = @enumFromInt(2);
@@ -3080,7 +3110,7 @@ test "finalizeMain: nested grow child fills the FINAL content main" {
     try appendNode(&tree, label, inner, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, inner, outer, .{ .column = .{} });
     try appendNode(&tree, outer, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(label).?.style.grow = 1;
     // The outer column stretches the inner column to the available height and grows the inner
     // column along with it.
@@ -3098,7 +3128,7 @@ test "finalizeMain: nested grow child fills the FINAL content main" {
 
 test "column main margins: top/bottom counted, left/right ignored" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const a: Id = @enumFromInt(1);
     const b: Id = @enumFromInt(2);
@@ -3106,7 +3136,7 @@ test "column main margins: top/bottom counted, left/right ignored" {
     try appendNode(&tree, a, col, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, b, col, .{ .label = .{ .text = "bbb" } });
     try appendNode(&tree, col, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(a).?.style.margin = .{ .top = 10 };
     // Left/right margins are CROSS-axis for a column — they must neither
     // inflate the main-axis sum nor advance the next child.
@@ -3127,7 +3157,7 @@ test "column main margins: top/bottom counted, left/right ignored" {
 
 test "shrink uses scaled factor + content floor" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const a: Id = @enumFromInt(1);
     const b: Id = @enumFromInt(2);
@@ -3135,7 +3165,7 @@ test "shrink uses scaled factor + content floor" {
     try appendNode(&tree, a, row, .{ .label = .{ .text = "aa" } });
     try appendNode(&tree, b, row, .{ .label = .{ .text = "bb" } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(a).?.style.basis = 80;
     tree.node(a).?.style.shrink = 1;
     tree.node(b).?.style.basis = 40;
@@ -3157,7 +3187,7 @@ test "shrink uses scaled factor + content floor" {
 test "shrink freezes at the floor and redistributes" {
     // Scenario 1: no item clamps — plain scaled reductions over 3 items.
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const a: Id = @enumFromInt(1);
     const b: Id = @enumFromInt(2);
@@ -3167,7 +3197,7 @@ test "shrink freezes at the floor and redistributes" {
     try appendNode(&tree, b, row1, .{ .label = .{ .text = "bb" } });
     try appendNode(&tree, c, row1, .{ .label = .{ .text = "cc" } });
     try appendNode(&tree, row1, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(a).?.style.basis = 60;
     tree.node(a).?.style.shrink = 1;
     tree.node(b).?.style.basis = 60;
@@ -3190,7 +3220,7 @@ test "shrink freezes at the floor and redistributes" {
     // Scenario 2: B and C clamp at their 20px floors; the remaining
     // overflow redistributes to A alone.
     var tree2 = WidgetTree.init(testing.allocator);
-    defer tree2.nodes.deinit(testing.allocator);
+    defer tree2.deinit();
 
     const a2: Id = @enumFromInt(1);
     const b2: Id = @enumFromInt(2);
@@ -3200,7 +3230,7 @@ test "shrink freezes at the floor and redistributes" {
     try appendNode(&tree2, b2, row2, .{ .label = .{ .text = "bb" } });
     try appendNode(&tree2, c2, row2, .{ .label = .{ .text = "cc" } });
     try appendNode(&tree2, row2, .root, .{ .row = .{} });
-    wireChildren(&tree2);
+    try wireChildren(&tree2);
     tree2.node(a2).?.style.basis = 80;
     tree2.node(a2).?.style.shrink = 1;
     tree2.node(b2).?.style.basis = 20;
@@ -3224,7 +3254,7 @@ test "shrink freezes at the floor and redistributes" {
 
 test "stretch-after-grow: stretch child fills the grown container" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const slider: Id = @enumFromInt(1);
     const card: Id = @enumFromInt(2);
@@ -3233,7 +3263,7 @@ test "stretch-after-grow: stretch child fills the grown container" {
     try appendNode(&tree, slider, card, .{ .slider = .{ .label = "s", .value = &value, .min = 0, .max = 1 } });
     try appendNode(&tree, card, row, .{ .column = .{} });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(card).?.style.padding = .{ .left = 12, .right = 12 };
     tree.node(card).?.style.grow = 1;
 
@@ -3249,7 +3279,7 @@ test "stretch-after-grow: stretch child fills the grown container" {
 
 test "nested stretch container keeps its own inset" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const label: Id = @enumFromInt(1);
     const col: Id = @enumFromInt(2);
@@ -3257,7 +3287,7 @@ test "nested stretch container keeps its own inset" {
     try appendNode(&tree, label, col, .{ .label = .{ .text = "aaa" } });
     try appendNode(&tree, col, row, .{ .column = .{} });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(col).?.style.padding = .{ .left = 10, .right = 10 };
 
     layout(&tree, .{ .width = 200, .height = 40 });
@@ -3273,7 +3303,7 @@ test "nested stretch container keeps its own inset" {
 
 test "text_max_width caps clipped text but not visible text" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const clipped_label: Id = @enumFromInt(1);
     const visible_label: Id = @enumFromInt(2);
@@ -3281,7 +3311,7 @@ test "text_max_width caps clipped text but not visible text" {
     try appendNode(&tree, clipped_label, row, .{ .label = .{ .text = "abcdef" } });
     try appendNode(&tree, visible_label, row, .{ .label = .{ .text = "abcdef" } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(clipped_label).?.text_overflow = .clip;
     tree.node(clipped_label).?.text_max_width = 25;
     tree.node(clipped_label).?.style.padding = .{ .left = 2, .right = 3 };
@@ -3299,7 +3329,7 @@ test "text_max_width caps clipped text but not visible text" {
 
 test "min_main overrides the natural shrink floor in a row" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const a: Id = @enumFromInt(1);
     const b: Id = @enumFromInt(2);
@@ -3307,7 +3337,7 @@ test "min_main overrides the natural shrink floor in a row" {
     try appendNode(&tree, a, row, .{ .label = .{ .text = "aa" } });
     try appendNode(&tree, b, row, .{ .label = .{ .text = "bb" } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(a).?.style.basis = 80;
     tree.node(a).?.style.shrink = 1;
     tree.node(a).?.style.min_main = 70;
@@ -3323,7 +3353,7 @@ test "min_main overrides the natural shrink floor in a row" {
 
 test "min_main overrides the natural shrink floor at the root" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const a: Id = @enumFromInt(1);
     const b: Id = @enumFromInt(2);
@@ -3343,7 +3373,7 @@ test "min_main overrides the natural shrink floor at the root" {
 
 test "shared column row redistributes after ancestor cross stretch" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const a: Id = @enumFromInt(1);
     const b: Id = @enumFromInt(2);
@@ -3355,7 +3385,7 @@ test "shared column row redistributes after ancestor cross stretch" {
     try appendNode(&tree, row, inner, .{ .row = .{} });
     try appendNode(&tree, inner, outer, .{ .column = .{} });
     try appendNode(&tree, outer, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     const tracks = [_]widget.ColumnTrack{
         .{ .grow = 1, .basis = 40 },
@@ -3380,7 +3410,7 @@ test "shared column row redistributes after ancestor cross stretch" {
 
 test "nested column button label stays within final content width" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const button_label: Id = @enumFromInt(1);
     const button: Id = @enumFromInt(2);
@@ -3392,7 +3422,7 @@ test "nested column button label stays within final content width" {
     try appendNode(&tree, column, row, .{ .column = .{} });
     try appendNode(&tree, row, outer, .{ .row = .{} });
     try appendNode(&tree, outer, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     // Model a generated button label with ellipsis and a natural width wider
     // than the nested column's final cross size.
@@ -3422,13 +3452,13 @@ test "nested column button label stays within final content width" {
 
 test "scroll max_offset uses child margin-box extent" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const scroll: Id = @enumFromInt(2);
     try appendNode(&tree, child, scroll, .{ .spacer = .{ .size = 200 } });
     try appendNode(&tree, scroll, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     var state: widget.ScrollState = .{};
     tree.node(scroll).?.scroll = .{ .state = &state, .axis = .both };
@@ -3458,7 +3488,7 @@ test "typed minimum precedes the legacy flex shrink floor" {
 
 test "block flow stacks in-flow children and excludes absolute children" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -3468,7 +3498,7 @@ test "block flow stacks in-flow children and excludes absolute children" {
     try appendNode(&tree, second, block, .{ .label = .{ .text = "b" } });
     try appendNode(&tree, absolute, block, .{ .spacer = .{ .size = 50 } });
     try appendNode(&tree, block, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     tree.node(block).?.style.display = .block;
     tree.node(block).?.style.size = .{
@@ -3494,7 +3524,7 @@ test "block flow stacks in-flow children and excludes absolute children" {
 
 test "absolute insets resolve start end both and static placement" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const left: Id = @enumFromInt(1);
     const right: Id = @enumFromInt(2);
@@ -3506,7 +3536,7 @@ test "absolute insets resolve start end both and static placement" {
     try appendNode(&tree, both, block, .{ .spacer = .{ .size = 1 } });
     try appendNode(&tree, static, block, .{ .spacer = .{ .size = 15 } });
     try appendNode(&tree, block, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     tree.node(block).?.style.display = .block;
     tree.node(block).?.style.size = .{
@@ -3555,7 +3585,7 @@ test "absolute insets resolve start end both and static placement" {
 
 test "absolute percentages require definite containing axes" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const definite: Id = @enumFromInt(1);
     const indefinite: Id = @enumFromInt(2);
@@ -3563,7 +3593,7 @@ test "absolute percentages require definite containing axes" {
     try appendNode(&tree, definite, block, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, indefinite, block, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, block, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     tree.node(block).?.style.display = .block;
     tree.node(block).?.style.size.width = .{ .length = 200 };
@@ -3586,7 +3616,7 @@ test "absolute percentages require definite containing axes" {
 
 test "absolute content-box and border-box constraints use border-box rects" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const content: Id = @enumFromInt(1);
     const border: Id = @enumFromInt(2);
@@ -3596,7 +3626,7 @@ test "absolute content-box and border-box constraints use border-box rects" {
     try appendNode(&tree, border, block, .{ .spacer = .{ .size = 1 } });
     try appendNode(&tree, constrained, block, .{ .spacer = .{ .size = 1 } });
     try appendNode(&tree, block, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
 
     tree.node(block).?.style.display = .block;
     tree.node(block).?.style.size = .{
@@ -3629,7 +3659,7 @@ test "absolute content-box and border-box constraints use border-box rects" {
 
 test "wrapped row forms lines and applies cross gap" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -3639,7 +3669,7 @@ test "wrapped row forms lines and applies cross gap" {
     try appendNode(&tree, second, row, .{ .spacer = .{ .size = 30 } });
     try appendNode(&tree, third, row, .{ .spacer = .{ .size = 30 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap;
     tree.node(row).?.style.gap = 10;
     tree.node(row).?.style.size = .{
@@ -3656,7 +3686,7 @@ test "wrapped row forms lines and applies cross gap" {
 
 test "row reverse places source order from the main-end edge" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -3664,7 +3694,7 @@ test "row reverse places source order from the main-end edge" {
     try appendNode(&tree, first, row, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, second, row, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.direction = .row_reverse;
     tree.node(row).?.style.size = .{
         .width = .{ .length = 100 },
@@ -3679,7 +3709,7 @@ test "row reverse places source order from the main-end edge" {
 
 test "wrap reverse reverses the cross-axis line stack" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -3689,7 +3719,7 @@ test "wrap reverse reverses the cross-axis line stack" {
     try appendNode(&tree, second, row, .{ .spacer = .{ .size = 30 } });
     try appendNode(&tree, third, row, .{ .spacer = .{ .size = 30 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap_reverse;
     tree.node(row).?.style.gap = 10;
     tree.node(row).?.style.size = .{
@@ -3706,13 +3736,13 @@ test "wrap reverse reverses the cross-axis line stack" {
 
 test "align-content center offsets the single flex line" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const row: Id = @enumFromInt(2);
     try appendNode(&tree, child, row, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap;
     tree.node(row).?.style.align_content = .center;
     tree.node(row).?.style.size = .{
@@ -3728,7 +3758,7 @@ test "align-content center offsets the single flex line" {
 
 test "align-self overrides align-items per flex item" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const end_child: Id = @enumFromInt(1);
     const center_child: Id = @enumFromInt(2);
@@ -3736,7 +3766,7 @@ test "align-self overrides align-items per flex item" {
     try appendNode(&tree, end_child, row, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, center_child, row, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.size = .{
         .width = .{ .length = 100 },
         .height = .{ .length = 100 },
@@ -3752,13 +3782,13 @@ test "align-self overrides align-items per flex item" {
 
 test "main-axis auto margin absorbs positive free space" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const row: Id = @enumFromInt(2);
     try appendNode(&tree, child, row, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.size = .{
         .width = .{ .length = 100 },
         .height = .{ .length = 40 },
@@ -3777,13 +3807,13 @@ test "main-axis auto margin absorbs positive free space" {
 
 test "cross-axis auto margin absorbs positive line space" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const row: Id = @enumFromInt(2);
     try appendNode(&tree, child, row, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.size = .{
         .width = .{ .length = 100 },
         .height = .{ .length = 100 },
@@ -3803,7 +3833,7 @@ test "cross-axis auto margin absorbs positive line space" {
 
 test "wrapped lines distribute grow independently" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -3813,7 +3843,7 @@ test "wrapped lines distribute grow independently" {
     try appendNode(&tree, second, row, .{ .spacer = .{ .size = 40 } });
     try appendNode(&tree, third, row, .{ .spacer = .{ .size = 40 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap;
     tree.node(row).?.style.gap = 10;
     tree.node(row).?.style.size = .{
@@ -3830,9 +3860,59 @@ test "wrapped lines distribute grow independently" {
     try testing.expectEqual(@as(f32, 55), tree.node(third).?.rect.y);
 }
 
+test "advanced flex redistributes after thirty-two freezes" {
+    const item_count = 33;
+    const row: Id = @enumFromInt(item_count + 1);
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    // Each suffix average is 1.1 times its next grow factor. Thus only the
+    // first unfrozen item exceeds its 2px maximum on each redistribution.
+    var grow_factors: [item_count]f32 = undefined;
+    grow_factors[item_count - 1] = 1;
+    var suffix_total: f32 = 1;
+    var index: usize = item_count - 1;
+    while (index > 0) {
+        index -= 1;
+        const suffix_count: f32 = @floatFromInt(item_count - index);
+        grow_factors[index] =
+            suffix_count * 1.1 * grow_factors[index + 1] - suffix_total;
+        suffix_total += grow_factors[index];
+    }
+
+    for (0..item_count) |item_index| {
+        const child: Id = @enumFromInt(@as(u32, @intCast(item_index + 1)));
+        try appendNode(&tree, child, row, .{ .spacer = .{ .size = 1 } });
+    }
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+    tree.node(row).?.style.wrap = .wrap;
+
+    tree.node(row).?.style.size = .{
+        .width = .{ .length = 66 },
+        .height = .{ .length = 1 },
+    };
+    for (0..item_count) |item_index| {
+        const child: Id = @enumFromInt(@as(u32, @intCast(item_index + 1)));
+        tree.node(child).?.style.grow = grow_factors[item_index];
+        if (item_index + 1 < item_count) {
+            tree.node(child).?.style.max_size.width = .{ .length = 2 };
+        }
+    }
+
+    layout(&tree, .{ .width = 66, .height = 1 });
+
+    for (0..item_count) |item_index| {
+        const child: Id = @enumFromInt(@as(u32, @intCast(item_index + 1)));
+        const expected_x: f32 = @floatFromInt(item_index * 2);
+        try testing.expectApproxEqAbs(@as(f32, 2), tree.node(child).?.rect.w, 0.01);
+        try testing.expectApproxEqAbs(expected_x, tree.node(child).?.rect.x, 0.01);
+    }
+}
+
 test "wrapped flex excludes absolute children from line formation" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const absolute: Id = @enumFromInt(2);
@@ -3843,7 +3923,7 @@ test "wrapped flex excludes absolute children from line formation" {
     try appendNode(&tree, absolute, row, .{ .spacer = .{ .size = 90 } });
     try appendNode(&tree, second, row, .{ .spacer = .{ .size = 30 } });
     try appendNode(&tree, row, .root, .{ .row = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap;
     tree.node(row).?.style.gap = 10;
     tree.node(row).?.style.size = .{
@@ -3865,14 +3945,14 @@ test "wrapped flex excludes absolute children from line formation" {
 }
 test "grid fixed and percentage tracks resolve against definite content" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
     const grid: Id = @enumFromInt(3);
     try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     const columns = [_]style.GridTrack{ .{ .fixed = 40 }, .{ .percent = 0.5 } };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
     tree.node(grid).?.style = .{
@@ -3902,12 +3982,12 @@ test "grid fixed and percentage tracks resolve against definite content" {
 
 test "grid explicit placement and spans cover the requested cells" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const spanning: Id = @enumFromInt(1);
     const grid: Id = @enumFromInt(2);
     try appendNode(&tree, spanning, grid, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     const columns = [_]style.GridTrack{
         .{ .fixed = 20 },
         .{ .fixed = 30 },
@@ -3937,7 +4017,7 @@ test "grid explicit placement and spans cover the requested cells" {
 
 test "grid row auto flow advances to the next free row" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
     const third: Id = @enumFromInt(3);
@@ -3945,7 +4025,7 @@ test "grid row auto flow advances to the next free row" {
     for ([_]Id{ first, second, third }) |id|
         try appendNode(&tree, id, grid, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     const columns = [_]style.GridTrack{ .{ .fixed = 10 }, .{ .fixed = 10 } };
     tree.node(grid).?.style = .{
         .display = .grid,
@@ -3966,14 +4046,14 @@ test "grid row auto flow advances to the next free row" {
 
 test "grid gaps separate tracks without changing item border sizes" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
     const grid: Id = @enumFromInt(3);
     try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 8 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     tree.node(grid).?.style = .{
         .display = .grid,
@@ -3992,12 +4072,12 @@ test "grid gaps separate tracks without changing item border sizes" {
 
 test "grid item typed min and max constraints clamp the cell size" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const item: Id = @enumFromInt(1);
     const grid: Id = @enumFromInt(2);
     try appendNode(&tree, item, grid, .{ .spacer = .{ .size = 4 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(grid).?.style = .{
         .display = .grid,
         .size = .{
@@ -4015,14 +4095,14 @@ test "grid item typed min and max constraints clamp the cell size" {
 
 test "grid intrinsic auto tracks use child natural sizes" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
     const grid: Id = @enumFromInt(3);
     try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 18 } });
     try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 26 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(grid).?.style = .{
         .display = .grid,
         .size = .{
@@ -4044,14 +4124,14 @@ test "grid intrinsic auto tracks use child natural sizes" {
 
 test "grid fr tracks distribute remaining definite space" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
     const grid: Id = @enumFromInt(3);
     try appendNode(&tree, first, grid, .{ .spacer = .{ .size = 4 } });
     try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 4 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(grid).?.style = .{
         .display = .grid,
         .size = .{
@@ -4068,7 +4148,7 @@ test "grid fr tracks distribute remaining definite space" {
 
 test "grid excludes absolute children from auto flow" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
     const normal: Id = @enumFromInt(1);
     const absolute: Id = @enumFromInt(2);
     const second: Id = @enumFromInt(3);
@@ -4077,7 +4157,7 @@ test "grid excludes absolute children from auto flow" {
     try appendNode(&tree, absolute, grid, .{ .spacer = .{ .size = 50 } });
     try appendNode(&tree, second, grid, .{ .spacer = .{ .size = 10 } });
     try appendNode(&tree, grid, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(grid).?.style = .{
         .display = .grid,
         .size = .{
@@ -4099,7 +4179,7 @@ test "grid excludes absolute children from auto flow" {
 
 test "column reverse places source order from the main-end edge" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -4107,7 +4187,7 @@ test "column reverse places source order from the main-end edge" {
     try appendNode(&tree, first, column, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, second, column, .{ .spacer = .{ .size = 20 } });
     try appendNode(&tree, column, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(column).?.style.direction = .column_reverse;
     tree.node(column).?.style.size = .{
         .width = .{ .length = 30 },
@@ -4122,13 +4202,13 @@ test "column reverse places source order from the main-end edge" {
 
 test "display none hides directly constructed subtree" {
     var tree = WidgetTree.init(testing.allocator);
-    defer tree.nodes.deinit(testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
     try appendNode(&tree, child, root, .{ .label = .{ .text = "visible child" } });
     try appendNode(&tree, root, .root, .{ .column = .{} });
-    wireChildren(&tree);
+    try wireChildren(&tree);
     tree.node(root).?.style.display = .none;
 
     layout(&tree, .{ .width = 800, .height = 600 });

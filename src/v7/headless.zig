@@ -90,7 +90,7 @@ pub fn treeToJsonWith(
     try w.writeByte('[');
     for (tree.nodes.items, 0..) |*node, i| {
         if (i != 0) try w.writeByte(',');
-        try writeNode(w, tree, node, options);
+        try writeNode(allocator, w, tree, node, options);
     }
     try w.writeByte(']');
     return out.toOwnedSlice();
@@ -276,24 +276,24 @@ const NodeView = struct {
 const RectView = struct { x: f32, y: f32, w: f32, h: f32 };
 
 fn writeNode(
+    allocator: std.mem.Allocator,
     w: *std.Io.Writer,
     tree: *const WidgetTree,
     node: *const WidgetNode,
     options: TreeJsonOptions,
 ) !void {
-    // WidgetNode.children holds a fixed [32]Id slot array (widget.zig cap);
-    // project it to a plain u32 slice for the view.
-    var child_ids: [32]u32 = undefined;
-    var child_count: usize = 0;
-    for (node.children.items[0..node.children.len]) |cid| {
-        child_ids[child_count] = cid.index();
-        child_count += 1;
-    }
-
     const is_container = switch (node.kind) {
         .column, .row => true,
         else => false,
     };
+    const child_ids: ?[]u32 = if (is_container) child_ids: {
+        const ids = try allocator.alloc(u32, node.children.items.len);
+        for (node.children.items, ids) |child_id, *id| {
+            id.* = child_id.index();
+        }
+        break :child_ids ids;
+    } else null;
+    defer if (child_ids) |ids| allocator.free(ids);
     const abs_rect = if (options.include_absolute)
         rectView(widget.absoluteRect(tree, node.id))
     else
@@ -309,7 +309,7 @@ fn writeNode(
         .rect = .{ .x = node.rect.x, .y = node.rect.y, .w = node.rect.w, .h = node.rect.h },
         .abs_rect = abs_rect,
         .vis_rect = vis_rect,
-        .children = if (is_container) child_ids[0..child_count] else null,
+        .children = child_ids,
         .gap = switch (node.kind) {
             .column => |c| c.gap,
             .row => |r| r.gap,
@@ -629,7 +629,7 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
         // Sibling overlap (within each container). Strictly-ordered pairs
         // (cid before oid in the children array): each overlap is reported
         // once, not once per ordering.
-        const kids = n.children.items[0..n.children.len];
+        const kids = n.children.items;
         for (kids, 0..) |cid, ci| {
             const child = findNodeConst(tree, cid) orelse continue;
             if (child.rect.w <= 0 or child.rect.h <= 0) continue;
@@ -832,7 +832,7 @@ fn num(v: std.json.Value) !f64 {
 
 test "treeToJson: label text with quotes and backslashes round-trips" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const col: Id = @enumFromInt(2);
     const label_text = "say \"hi\" \\ yo\nnext\tline";
@@ -847,8 +847,7 @@ test "treeToJson: label text with quotes and backslashes round-trips" {
         .parent = .root,
     });
     // Wire the container's children after the appends (post-order).
-    tree.node(col).?.children.items[0] = @enumFromInt(1);
-    tree.node(col).?.children.len = 1;
+    try tree.appendChild(col, @enumFromInt(1));
 
     const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
@@ -874,7 +873,7 @@ test "treeToJson: label text with quotes and backslashes round-trips" {
 
 test "treeToJson: kind-specific fields appear only for their kinds" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var vol: f32 = 0.5;
     const row_id: Id = @enumFromInt(3);
@@ -901,11 +900,9 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
         .kind = .{ .column = .{ .gap = 5 } },
         .parent = .root,
     });
-    tree.node(row_id).?.children.items[0] = @enumFromInt(1);
-    tree.node(row_id).?.children.items[1] = @enumFromInt(2);
-    tree.node(row_id).?.children.len = 2;
-    tree.node(col_id).?.children.items[0] = row_id;
-    tree.node(col_id).?.children.len = 1;
+    try tree.appendChild(row_id, @enumFromInt(1));
+    try tree.appendChild(row_id, @enumFromInt(2));
+    try tree.appendChild(col_id, row_id);
 
     const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
@@ -950,9 +947,45 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     try std.testing.expect(col_node.get("label") == null);
 }
 
+test "treeToJsonWith: more than 32 child ids serialize in append order" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_count: usize = 33;
+    const parent: Id = @enumFromInt(@as(u32, @intCast(child_count + 1)));
+    for (0..child_count) |child_index| {
+        const child: Id = @enumFromInt(@as(u32, @intCast(child_index + 1)));
+        try tree.nodes.append(std.testing.allocator, .{
+            .id = child,
+            .kind = .{ .spacer = .{} },
+            .parent = parent,
+        });
+    }
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = parent,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+    });
+    for (0..child_count) |child_index| {
+        const child: Id = @enumFromInt(@as(u32, @intCast(child_index + 1)));
+        try tree.appendChild(parent, child);
+    }
+
+    const json = try treeToJsonWith(std.testing.allocator, &tree, .{});
+    defer std.testing.allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const children = parsed.value.array.items[child_count].object.get("children").?.array;
+    try std.testing.expectEqual(child_count, children.items.len);
+    for (children.items, 0..) |child, child_index| {
+        try std.testing.expectEqual(@as(i64, @intCast(child_index + 1)), child.integer);
+    }
+}
+
 test "treeToJson: empty tree serializes as []" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
@@ -992,7 +1025,7 @@ test "eventFromJson: every event shape parses and round-trips its fields" {
 
 test "renderAscii: label text, button fill, slider thumb, hover border" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var vol: f32 = 0.5;
     const label_id: Id = @enumFromInt(1);
@@ -1039,7 +1072,7 @@ test "renderAscii: label text, button fill, slider thumb, hover border" {
 
 test "renderAscii: empty tree yields an empty map" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const map = try renderAscii(std.testing.allocator, &tree, null);
     defer std.testing.allocator.free(map);
@@ -1048,7 +1081,7 @@ test "renderAscii: empty tree yields an empty map" {
 
 test "verifyLayout: clean tree reports OK" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const col: Id = @enumFromInt(10);
     const a: Id = @enumFromInt(11);
@@ -1080,7 +1113,7 @@ test "verifyLayout: clean tree reports OK" {
 
 test "verifyLayout: overlap, escape, and out-of-range value are reported" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var vol: f32 = 5; // out of [0, 1]
     const col: Id = @enumFromInt(20);
@@ -1112,10 +1145,9 @@ test "verifyLayout: overlap, escape, and out-of-range value are reported" {
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
     });
-    tree.node(col).?.children.items[0] = a;
-    tree.node(col).?.children.items[1] = b;
-    tree.node(col).?.children.items[2] = s;
-    tree.node(col).?.children.len = 3;
+    try tree.appendChild(col, a);
+    try tree.appendChild(col, b);
+    try tree.appendChild(col, s);
 
     const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
@@ -1127,7 +1159,7 @@ test "verifyLayout: overlap, escape, and out-of-range value are reported" {
 
 test "layoutFingerprint: deterministic, rects only" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = @enumFromInt(1),
@@ -1164,7 +1196,7 @@ const fakeMeasure = struct {
 
 test "verifyLayout: bounded ellipsis and clip text do not report overflow" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = @enumFromInt(1),
@@ -1190,7 +1222,7 @@ test "verifyLayout: bounded ellipsis and clip text do not report overflow" {
 
 test "verifyLayout: overlapping text boxes are reported, adjacent are not" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // Two labels whose text boxes (absolute content boxes) collide: A's
     // box spans [0, 52], B at x 20 spans [20, 72] — the interior overlap
@@ -1215,7 +1247,7 @@ test "verifyLayout: overlapping text boxes are reported, adjacent are not" {
 
 test "verifyLayout: text boxes that merely touch are not an overlap" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // A's text box ends at x 52; B starts at x 52 — touching edges are
     // not an interior intersection.
@@ -1239,7 +1271,7 @@ test "verifyLayout: text boxes that merely touch are not an overlap" {
 
 test "treeToJson: rect values round-trip exactly" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const rect: Rect = .{ .x = 12.5, .y = -3.25, .w = 100, .h = 200.75 };
     try tree.nodes.append(std.testing.allocator, .{
@@ -1264,7 +1296,7 @@ test "treeToJson: rect values round-trip exactly" {
 
 test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const parent: Id = @enumFromInt(1);
     const child: Id = @enumFromInt(2);
@@ -1284,8 +1316,7 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
             .padding = .{ .left = 4, .top = 5 },
         },
     });
-    tree.node(parent).?.children.items[0] = child;
-    tree.node(parent).?.children.len = 1;
+    try tree.appendChild(parent, child);
 
     const compact = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(compact);
@@ -1330,7 +1361,7 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
 
 test "renderAscii: nested node renders at its absolute position" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // Root column with padding; button nested at a relative offset. Its
     // absolute origin = col (0,0) + padding (8,8) + rect (5,5) = (13,13).
@@ -1350,8 +1381,7 @@ test "renderAscii: nested node renders at its absolute position" {
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
         .style = .{ .padding = .{ .left = 8, .top = 8 } },
     });
-    tree.node(col).?.children.items[0] = btn;
-    tree.node(col).?.children.len = 1;
+    try tree.appendChild(col, btn);
 
     const map = try renderAscii(std.testing.allocator, &tree, null);
     defer std.testing.allocator.free(map);
@@ -1368,7 +1398,7 @@ test "renderAscii: nested node renders at its absolute position" {
 
 test "verifyLayout: nested tree with padding and border verifies OK" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // Column with border+padding; button fills the content box exactly
     // (content w = 100-4-2-8-6 = 80, h = 60-1-3-8-7 = 41).
@@ -1391,8 +1421,7 @@ test "verifyLayout: nested tree with padding and border verifies OK" {
             .padding = .{ .top = 8, .right = 6, .bottom = 7, .left = 8 },
         },
     });
-    tree.node(col).?.children.items[0] = btn;
-    tree.node(col).?.children.len = 1;
+    try tree.appendChild(col, btn);
 
     const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
@@ -1401,7 +1430,7 @@ test "verifyLayout: nested tree with padding and border verifies OK" {
 
 test "verifyLayout: child outside the parent's content box is flagged" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // Child sits inside the border box (x+w = 95 <= 100) but past the
     // content box (content w = 100-8-8 = 84): the content box constrains.
@@ -1421,8 +1450,7 @@ test "verifyLayout: child outside the parent's content box is flagged" {
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
         .style = .{ .padding = .{ .left = 8, .right = 8 } },
     });
-    tree.node(col).?.children.items[0] = child;
-    tree.node(col).?.children.len = 1;
+    try tree.appendChild(col, child);
 
     const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
@@ -1432,7 +1460,7 @@ test "verifyLayout: child outside the parent's content box is flagged" {
 
 test "verifyLayout: negative box sides are reported" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = @enumFromInt(1),
@@ -1514,7 +1542,7 @@ test "eventFromJson: malformed lines return errors, never panic" {
 
 test "verifyLayout: text-overlap pass handles more than 64 text nodes" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // 70 labels in a non-overlapping column: previously the fixed [64]
     // TextBox array asserted (panicked) past 64 text-bearing nodes.
@@ -1535,7 +1563,7 @@ test "verifyLayout: text-overlap pass handles more than 64 text nodes" {
 
 test "verifyLayout: root-level sibling overlap and surface bounds are flagged" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // Two overlapping root-level labels (previously never checked — the
     // root pseudo-container has no node to iterate children of).
@@ -1568,9 +1596,9 @@ test "verifyLayout: root-level sibling overlap and surface bounds are flagged" {
 
 test "layoutFingerprint: identical rects with different Style sides differ" {
     var tree_a = WidgetTree.init(std.testing.allocator);
-    defer tree_a.nodes.deinit(std.testing.allocator);
+    defer tree_a.deinit();
     var tree_b = WidgetTree.init(std.testing.allocator);
-    defer tree_b.nodes.deinit(std.testing.allocator);
+    defer tree_b.deinit();
 
     // Same ids, kinds, and rects — only the padding differs. The old
     // fingerprint (rects only) produced identical bytes for both.
@@ -1603,9 +1631,9 @@ test "layoutFingerprint: identical rects with different Style sides differ" {
 
 test "layoutFingerprint: paint-only fields (layer) are excluded" {
     var tree_a = WidgetTree.init(std.testing.allocator);
-    defer tree_a.nodes.deinit(std.testing.allocator);
+    defer tree_a.deinit();
     var tree_b = WidgetTree.init(std.testing.allocator);
-    defer tree_b.nodes.deinit(std.testing.allocator);
+    defer tree_b.deinit();
 
     // Same ids, kinds, and rects — only PaintStyle.layer differs (a
     // paint-only field, like shadow/gradient/clip/texture). The golden LAYOUT
@@ -1636,7 +1664,7 @@ test "layoutFingerprint: paint-only fields (layer) are excluded" {
 
 test "renderAscii: hover on a sub-2px node draws no border and does not panic" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     // h = 1 < map_px (2): the hover border's inner edge offset
     // (r.y + r.h - map_px) would be negative and @intFromFloat would
@@ -1658,7 +1686,7 @@ test "verifyLayout: DrawCtx ellipsized button verifies its label child once" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const button = try ctx.button(.{
@@ -1698,7 +1726,7 @@ test "verifyLayout: DrawCtx ellipsized button verifies its label child once" {
 
 test "verifyLayout: slider text fit uses visual_label" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     var value: f32 = 0.5;
     try tree.nodes.append(std.testing.allocator, .{

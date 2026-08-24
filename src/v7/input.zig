@@ -71,7 +71,7 @@ fn contains(rect: Rect, pos: [2]f32) bool {
 
 test "hitTest: point inside a leaf inside a container returns the leaf" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const column_id: Id = @enumFromInt(1);
     const label_id: Id = @enumFromInt(2);
@@ -89,6 +89,7 @@ test "hitTest: point inside a leaf inside a container returns the leaf" {
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
     });
+    try tree.appendChild(column_id, label_id);
 
     // Inside the label (hence inside the column too): deepest hit wins.
     try std.testing.expectEqual(label_id, hitTest(&tree, .{ 15, 12 }).?);
@@ -96,7 +97,7 @@ test "hitTest: point inside a leaf inside a container returns the leaf" {
 
 test "hitTest: point in container but outside all children hits the container" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const column_id: Id = @enumFromInt(1);
     const label_id: Id = @enumFromInt(2);
@@ -113,6 +114,7 @@ test "hitTest: point in container but outside all children hits the container" {
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
     });
+    try tree.appendChild(column_id, label_id);
 
     // In the column, not in the label (label spans x 10..30, y 10..20).
     try std.testing.expectEqual(column_id, hitTest(&tree, .{ 5, 50 }).?);
@@ -120,7 +122,7 @@ test "hitTest: point in container but outside all children hits the container" {
 
 test "hitTest: point outside everything returns null" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const column_id: Id = @enumFromInt(1);
     const label_id: Id = @enumFromInt(2);
@@ -137,6 +139,7 @@ test "hitTest: point outside everything returns null" {
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
     });
+    try tree.appendChild(column_id, label_id);
 
     try std.testing.expectEqual(@as(?Id, null), hitTest(&tree, .{ 150, 150 }));
     try std.testing.expectEqual(@as(?Id, null), hitTest(&tree, .{ -1, -1 }));
@@ -145,7 +148,7 @@ test "hitTest: point outside everything returns null" {
 test "hitButton: returns button id over a button, null over a label" {
     // Same point over a button: its id comes back.
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const button_id: Id = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
@@ -159,7 +162,7 @@ test "hitButton: returns button id over a button, null over a label" {
 
     // Same point, same rect, but the node is a label: no button hit.
     var tree2 = WidgetTree.init(std.testing.allocator);
-    defer tree2.nodes.deinit(std.testing.allocator);
+    defer tree2.deinit();
 
     const label_id: Id = @enumFromInt(2);
     try tree2.nodes.append(std.testing.allocator, .{
@@ -174,7 +177,7 @@ test "hitButton: returns button id over a button, null over a label" {
 
 test "hitButton: button inside a column hits the button, not the column" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const button_id: Id = @enumFromInt(1);
     const column_id: Id = @enumFromInt(2);
@@ -191,6 +194,7 @@ test "hitButton: button inside a column hits the button, not the column" {
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
     });
+    try tree.appendChild(column_id, button_id);
 
     // Point inside the button: both hit tests return the button, never the
     // enclosing column.
@@ -200,7 +204,7 @@ test "hitButton: button inside a column hits the button, not the column" {
 
 test "hitTest: rect edges inclusive at x/y, exclusive at x+w/y+h" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const id: Id = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
@@ -221,7 +225,7 @@ test "hitTest: rect edges inclusive at x/y, exclusive at x+w/y+h" {
 
 test "hitTest: resolves absolute rect through parent padding + border" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const column_id: Id = @enumFromInt(1);
     const label_id: Id = @enumFromInt(2);
@@ -245,6 +249,7 @@ test "hitTest: resolves absolute rect through parent padding + border" {
             .border = .{ .left = 2, .top = 1 },
         },
     });
+    try tree.appendChild(column_id, label_id);
 
     // Label's absolute border box: column content origin (8+2, 8+1) plus its
     // own relative rect (0,0) = (10, 9). Exactly on that origin: hit.
@@ -259,7 +264,7 @@ test "hitTest: resolves absolute rect through parent padding + border" {
 
 test "hitTest: zero-size rect never hits" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const id: Id = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
@@ -275,7 +280,7 @@ test "hitTest: zero-size rect never hits" {
 }
 test "hitTest: clipped child outside parent clip returns null" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const parent_id: Id = @enumFromInt(1);
     const child_id: Id = @enumFromInt(2);
@@ -292,6 +297,7 @@ test "hitTest: clipped child outside parent clip returns null" {
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
         .paint = .{ .clip = true },
     });
+    try tree.appendChild(parent_id, child_id);
 
     // The child's visual border box contains this point, but the parent's
     // clip border box does not.
@@ -300,7 +306,7 @@ test "hitTest: clipped child outside parent clip returns null" {
 
 test "hitButton: clipped child outside parent clip returns null" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const parent_id: Id = @enumFromInt(1);
     const button_id: Id = @enumFromInt(2);
@@ -317,6 +323,7 @@ test "hitButton: clipped child outside parent clip returns null" {
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
         .paint = .{ .clip = true },
     });
+    try tree.appendChild(parent_id, button_id);
 
     try std.testing.expectEqual(@as(?Id, null), hitButton(&tree, .{ 25, 10 }));
 }

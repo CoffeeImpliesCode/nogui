@@ -133,7 +133,7 @@ test "root component defaults scope only the root draw" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
     var root_component: Root = .{};
     const erased = Component.make(Root, &root_component);

@@ -350,7 +350,7 @@ test "SpotifyApp draws without error in DrawCtx" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     var app: SpotifyApp = .{};
@@ -390,7 +390,7 @@ fn verifySpotifyLayout(surface: widget.Size, expect_center_priority: bool) !void
     defer arena.deinit();
     defer measure_cpu.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{
         .tree = &tree,
         .arena = arena.allocator(),
@@ -416,7 +416,7 @@ fn verifySpotifyLayout(surface: widget.Size, expect_center_priority: bool) !void
     for (tree.nodes.items) |*node| {
         switch (node.kind) {
             .row => {
-                if (node.shared_columns != null and node.children.len == 3) {
+                if (node.shared_columns != null and node.children.items.len == 3) {
                     workspace_row = node;
                     break;
                 }
@@ -453,7 +453,7 @@ test "Spotify compact generated sidebar labels use the final button width" {
     defer arena.deinit();
     defer measure_cpu.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{
         .tree = &tree,
         .arena = arena.allocator(),
@@ -489,7 +489,7 @@ test "Spotify seek slider keeps legacy minimum on its parent axis" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{
         .tree = &tree,
         .arena = arena.allocator(),
@@ -524,7 +524,7 @@ test "SpotifyApp draw selects shell from surface" {
     var desktop_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer desktop_arena.deinit();
     var desktop_tree = WidgetTree.init(desktop_arena.allocator());
-    defer desktop_tree.nodes.deinit(desktop_arena.allocator());
+    defer desktop_tree.deinit();
     var desktop_ctx: DrawCtx = .{
         .tree = &desktop_tree,
         .arena = desktop_arena.allocator(),
@@ -535,7 +535,7 @@ test "SpotifyApp draw selects shell from surface" {
     var medium_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer medium_arena.deinit();
     var medium_tree = WidgetTree.init(medium_arena.allocator());
-    defer medium_tree.nodes.deinit(medium_arena.allocator());
+    defer medium_tree.deinit();
     var medium_ctx: DrawCtx = .{
         .tree = &medium_tree,
         .arena = medium_arena.allocator(),
@@ -555,7 +555,7 @@ test "SpotifyApp generated album label stays inside its button at 1100x1160" {
     defer arena.deinit();
     defer measure_cpu.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{
         .tree = &tree,
         .arena = arena.allocator(),
@@ -682,7 +682,7 @@ test "SpotifyApp local tracks share rendered order and report unavailable playba
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
-    defer tree.nodes.deinit(arena.allocator());
+    defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
     try empty_app.draw(&ctx);
 

@@ -1018,14 +1018,14 @@ pub const TodoApp = struct {
 var test_arena: ?std.heap.ArenaAllocator = null;
 
 fn buildTree(app: *TodoApp) !WidgetTree {
-    if (test_arena) |*a| a.deinit();
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    errdefer arena.deinit();
+    freeTree();
+    test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    errdefer freeTree();
+    const arena = if (test_arena) |*a| a else unreachable;
     const alloc = arena.allocator();
     var tree = WidgetTree.init(alloc); // mutable: DrawCtx takes *WidgetTree
     var ctx: DrawCtx = .{ .tree = &tree, .arena = alloc };
     try app.draw(&ctx);
-    test_arena = arena;
     return tree;
 }
 

@@ -28,13 +28,6 @@ fn appendNode(tree: *WidgetTree, id: Id, parent: Id, layout_style: Style) !void 
     try tree.nodes.append(tree.allocator, node);
 }
 
-fn wireChild(tree: *WidgetTree, parent: Id, child: Id) void {
-    const parent_node = tree.node(parent).?;
-    std.debug.assert(parent_node.children.len < parent_node.children.items.len);
-    parent_node.children.items[parent_node.children.len] = child;
-    parent_node.children.len += 1;
-}
-
 fn expectRect(expected: Rect, actual: Rect) !void {
     try std.testing.expectApproxEqAbs(expected.x, actual.x, rect_tolerance);
     try std.testing.expectApproxEqAbs(expected.y, actual.y, rect_tolerance);
@@ -52,7 +45,7 @@ fn expectAbsolute(tree: *const WidgetTree, id: Id, expected: Rect) !void {
 
 test "test_fixtures/block/block_basic.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -71,8 +64,8 @@ test "test_fixtures/block/block_basic.html" {
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 50 }, .height = .auto },
     });
-    wireChild(&tree, root, first);
-    wireChild(&tree, root, second);
+    try tree.appendChild(root, first);
+    try tree.appendChild(root, second);
 
     flex.layout(&tree, .{ .width = 50, .height = 30 });
 
@@ -83,7 +76,7 @@ test "test_fixtures/block/block_basic.html" {
 
 test "test_fixtures/block/block_padding_border_fixed_size.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -107,8 +100,8 @@ test "test_fixtures/block/block_padding_border_fixed_size.html" {
         .padding = .{ .top = 1, .right = 3, .bottom = 5, .left = 7 },
         .border = .{ .top = 2, .right = 4, .bottom = 6, .left = 8 },
     });
-    wireChild(&tree, root, first);
-    wireChild(&tree, root, second);
+    try tree.appendChild(root, first);
+    try tree.appendChild(root, second);
 
     flex.layout(&tree, .{ .width = 50, .height = 50 });
 
@@ -121,7 +114,7 @@ test "test_fixtures/block/block_padding_border_fixed_size.html" {
 
 test "test_fixtures/block/block_inset_fixed.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -163,9 +156,9 @@ test "test_fixtures/block/block_inset_fixed.html" {
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 50 }, .height = .auto },
     });
-    wireChild(&tree, root, first);
-    wireChild(&tree, root, second);
-    wireChild(&tree, root, third);
+    try tree.appendChild(root, first);
+    try tree.appendChild(root, second);
+    try tree.appendChild(root, third);
 
     flex.layout(&tree, .{ .width = 50, .height = 30 });
 
@@ -177,7 +170,7 @@ test "test_fixtures/block/block_inset_fixed.html" {
 
 test "test_fixtures/block/block_item_max_width.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const first: Id = @enumFromInt(1);
     const second: Id = @enumFromInt(2);
@@ -201,8 +194,8 @@ test "test_fixtures/block/block_item_max_width.html" {
             .height = .{ .length = 200 },
         },
     });
-    wireChild(&tree, root, first);
-    wireChild(&tree, root, second);
+    try tree.appendChild(root, first);
+    try tree.appendChild(root, second);
 
     flex.layout(&tree, .{ .width = 200, .height = 200 });
 
@@ -213,7 +206,7 @@ test "test_fixtures/block/block_item_max_width.html" {
 
 test "test_fixtures/block/block_item_min_width_overrides_max_width.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -232,7 +225,7 @@ test "test_fixtures/block/block_item_min_width_overrides_max_width.html" {
             .height = .{ .length = 100 },
         },
     });
-    wireChild(&tree, root, child);
+    try tree.appendChild(root, child);
 
     flex.layout(&tree, .{ .width = 100, .height = 100 });
 
@@ -242,7 +235,7 @@ test "test_fixtures/block/block_item_min_width_overrides_max_width.html" {
 
 test "test_fixtures/block/block_absolute_layout_no_size.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -259,7 +252,7 @@ test "test_fixtures/block/block_absolute_layout_no_size.html" {
             .height = .{ .length = 100 },
         },
     });
-    wireChild(&tree, root, child);
+    try tree.appendChild(root, child);
 
     flex.layout(&tree, .{ .width = 100, .height = 100 });
 
@@ -269,7 +262,7 @@ test "test_fixtures/block/block_absolute_layout_no_size.html" {
 
 test "test_fixtures/block/block_absolute_layout_width_height_start_top.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -297,7 +290,7 @@ test "test_fixtures/block/block_absolute_layout_width_height_start_top.html" {
             .height = .{ .length = 100 },
         },
     });
-    wireChild(&tree, root, child);
+    try tree.appendChild(root, child);
 
     flex.layout(&tree, .{ .width = 100, .height = 100 });
 
@@ -307,7 +300,7 @@ test "test_fixtures/block/block_absolute_layout_width_height_start_top.html" {
 
 test "test_fixtures/block/block_absolute_layout_width_height_end_bottom.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -335,7 +328,7 @@ test "test_fixtures/block/block_absolute_layout_width_height_end_bottom.html" {
             .height = .{ .length = 100 },
         },
     });
-    wireChild(&tree, root, child);
+    try tree.appendChild(root, child);
 
     flex.layout(&tree, .{ .width = 100, .height = 100 });
 
@@ -345,7 +338,7 @@ test "test_fixtures/block/block_absolute_layout_width_height_end_bottom.html" {
 
 test "test_fixtures/block/block_absolute_layout_start_top_end_bottom.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -369,7 +362,7 @@ test "test_fixtures/block/block_absolute_layout_start_top_end_bottom.html" {
             .height = .{ .length = 100 },
         },
     });
-    wireChild(&tree, root, child);
+    try tree.appendChild(root, child);
 
     flex.layout(&tree, .{ .width = 100, .height = 100 });
 
@@ -379,7 +372,7 @@ test "test_fixtures/block/block_absolute_layout_start_top_end_bottom.html" {
 
 test "test_fixtures/block/block_absolute_layout_percentage_bottom_based_on_parent_height.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const top: Id = @enumFromInt(1);
     const bottom: Id = @enumFromInt(2);
@@ -436,9 +429,9 @@ test "test_fixtures/block/block_absolute_layout_percentage_bottom_based_on_paren
             .height = .{ .length = 200 },
         },
     });
-    wireChild(&tree, root, top);
-    wireChild(&tree, root, bottom);
-    wireChild(&tree, root, stretched);
+    try tree.appendChild(root, top);
+    try tree.appendChild(root, bottom);
+    try tree.appendChild(root, stretched);
 
     flex.layout(&tree, .{ .width = 100, .height = 200 });
     // The current upstream fixture sets width: 10px on the third child; only
@@ -452,7 +445,7 @@ test "test_fixtures/block/block_absolute_layout_percentage_bottom_based_on_paren
 
 test "test_fixtures/block/block_absolute_child_with_margin_x.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const left: Id = @enumFromInt(1);
     const right: Id = @enumFromInt(2);
@@ -489,9 +482,9 @@ test "test_fixtures/block/block_absolute_child_with_margin_x.html" {
             .height = .{ .length = 37 },
         },
     });
-    wireChild(&tree, root, left);
-    wireChild(&tree, root, right);
-    wireChild(&tree, root, both);
+    try tree.appendChild(root, left);
+    try tree.appendChild(root, right);
+    try tree.appendChild(root, both);
 
     flex.layout(&tree, .{ .width = 20, .height = 37 });
     try expectRelative(&tree, root, .{ .x = 0, .y = 0, .w = 20, .h = 37 });
@@ -502,7 +495,7 @@ test "test_fixtures/block/block_absolute_child_with_margin_x.html" {
 
 test "test_fixtures/block/block_absolute_child_with_margin_y.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const top: Id = @enumFromInt(1);
     const bottom: Id = @enumFromInt(2);
@@ -539,9 +532,9 @@ test "test_fixtures/block/block_absolute_child_with_margin_y.html" {
             .height = .{ .length = 37 },
         },
     });
-    wireChild(&tree, root, top);
-    wireChild(&tree, root, bottom);
-    wireChild(&tree, root, both);
+    try tree.appendChild(root, top);
+    try tree.appendChild(root, bottom);
+    try tree.appendChild(root, both);
 
     flex.layout(&tree, .{ .width = 20, .height = 37 });
 
@@ -553,7 +546,7 @@ test "test_fixtures/block/block_absolute_child_with_margin_y.html" {
 
 test "test_fixtures/block/block_absolute_layout_within_border.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const start: Id = @enumFromInt(1);
     const end: Id = @enumFromInt(2);
@@ -625,10 +618,10 @@ test "test_fixtures/block/block_absolute_layout_within_border.html" {
         .border = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 },
         .padding = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 },
     });
-    wireChild(&tree, root, start);
-    wireChild(&tree, root, end);
-    wireChild(&tree, root, start_margin);
-    wireChild(&tree, root, end_margin);
+    try tree.appendChild(root, start);
+    try tree.appendChild(root, end);
+    try tree.appendChild(root, start_margin);
+    try tree.appendChild(root, end_margin);
 
     flex.layout(&tree, .{ .width = 100, .height = 100 });
 
@@ -645,7 +638,7 @@ test "test_fixtures/block/block_absolute_layout_within_border.html" {
 
 test "test_fixtures/block/block_absolute_child_with_max_height.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const inner: Id = @enumFromInt(1);
     const absolute: Id = @enumFromInt(2);
@@ -679,8 +672,8 @@ test "test_fixtures/block/block_absolute_child_with_max_height.html" {
             .height = .{ .length = 200 },
         },
     });
-    wireChild(&tree, absolute, inner);
-    wireChild(&tree, root, absolute);
+    try tree.appendChild(absolute, inner);
+    try tree.appendChild(root, absolute);
 
     flex.layout(&tree, .{ .width = 100, .height = 200 });
 
@@ -693,7 +686,7 @@ test "test_fixtures/block/block_absolute_child_with_max_height.html" {
 
 test "test_fixtures/block/block_absolute_aspect_ratio_fill_width.html" {
     var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.nodes.deinit(std.testing.allocator);
+    defer tree.deinit();
 
     const child: Id = @enumFromInt(1);
     const root: Id = @enumFromInt(2);
@@ -718,7 +711,7 @@ test "test_fixtures/block/block_absolute_aspect_ratio_fill_width.html" {
             .height = .{ .length = 300 },
         },
     });
-    wireChild(&tree, root, child);
+    try tree.appendChild(root, child);
 
     flex.layout(&tree, .{ .width = 400, .height = 300 });
 
