@@ -394,7 +394,7 @@ fn layoutPreparedContainerUnchecked(
         try applyRelativeInsets(
             child,
             content_width,
-            content_height_fixed,
+            0,
         );
         flow_y = try addFinite(
             try addFinite(static_y, child_height),
@@ -670,7 +670,7 @@ fn layoutAbsoluteChildren(
             .border = child_edges.border,
             .padding = child_edges.padding,
         };
-        const margins = try resolveMargins(child_style, content_width);
+        var margins = try resolveMargins(child_style, content_width);
         var intrinsic = try intrinsicContentSize(child, child_edges, measure);
         const left = try resolveInset(child_style.inset.left, content_width);
         const right = try resolveInset(child_style.inset.right, content_width);
@@ -736,6 +736,17 @@ fn layoutAbsoluteChildren(
                 auto_height_border,
             );
         }
+        try resolveAbsoluteAutoMargins(
+            child_style,
+            content_width,
+            content_height,
+            child_size,
+            left,
+            right,
+            top,
+            bottom,
+            &margins,
+        );
         const horizontal_insets_auto = left == null and right == null;
         const child_x = if (horizontal_insets_auto)
             if (direction == .ltr)
@@ -986,6 +997,74 @@ fn resolveNormalAutoMargins(
     const share = free_space / @as(f32, @floatFromInt(auto_count));
     if (left_auto) margins.left = share;
     if (right_auto) margins.right = share;
+}
+
+fn resolveAbsoluteAutoMargins(
+    input_style: style.Style,
+    content_width: f32,
+    content_height: f32,
+    child_size: sizing.ResolvedSize,
+    left: ?f32,
+    right: ?f32,
+    top: ?f32,
+    bottom: ?f32,
+    margins: *style.Sides,
+) sizing.Error!void {
+    try resolveAbsoluteAutoMarginAxis(
+        isAutoMargin(input_style.margin_inset.left) and left != null,
+        isAutoMargin(input_style.margin_inset.right) and right != null,
+        content_width,
+        child_size.width,
+        left,
+        right,
+        &margins.left,
+        &margins.right,
+    );
+    try resolveAbsoluteAutoMarginAxis(
+        isAutoMargin(input_style.margin_inset.top) and top != null,
+        isAutoMargin(input_style.margin_inset.bottom) and bottom != null,
+        content_height,
+        child_size.height,
+        top,
+        bottom,
+        &margins.top,
+        &margins.bottom,
+    );
+}
+
+fn resolveAbsoluteAutoMarginAxis(
+    start_auto: bool,
+    end_auto: bool,
+    available: f32,
+    border_size: f32,
+    start_inset: ?f32,
+    end_inset: ?f32,
+    start_margin: *f32,
+    end_margin: *f32,
+) sizing.Error!void {
+    const auto_count: u8 = @as(u8, @intFromBool(start_auto)) +
+        @as(u8, @intFromBool(end_auto));
+    if (auto_count == 0) return;
+    const free_space = @max(
+        0,
+        try subtractFinite(
+            try subtractFinite(
+                try subtractFinite(
+                    try subtractFinite(
+                        available,
+                        start_inset orelse 0,
+                    ),
+                    end_inset orelse 0,
+                ),
+                border_size,
+            ),
+            start_margin.*,
+        ),
+        end_margin.*,
+    );
+    const share = free_space / @as(f32, @floatFromInt(auto_count));
+    if (start_auto) start_margin.* = share;
+    if (end_auto) end_margin.* = share;
 }
 
 fn applyRelativeInsets(

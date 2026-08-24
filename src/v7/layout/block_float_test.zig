@@ -1006,6 +1006,154 @@ test "absolute paired insets reserve child margins" {
     try expectRelative(&tree, absolute_id, .{ .x = 15, .y = 7, .w = 65, .h = 35 });
 }
 
+test "absolute paired horizontal insets split fixed-width auto margins" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .auto,
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+        .inset = .{
+            .top = .{ .length = 4 },
+            .right = .{ .length = 10 },
+            .bottom = .auto,
+            .left = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 50), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 40, .y = 4, .w = 20, .h = 10 });
+}
+
+test "absolute paired vertical insets split fixed-height auto margins" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 10 }, .height = .{ .length = 20 } },
+        .margin_inset = .{
+            .top = .auto,
+            .right = .{ .length = 0 },
+            .bottom = .auto,
+            .left = .{ .length = 0 },
+        },
+        .inset = .{
+            .top = .{ .length = 10 },
+            .right = .auto,
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 5 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 60 }, .height = .{ .length = 100 } },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(60, 100), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 5, .y = 40, .w = 10, .h = 20 });
+}
+
+test "absolute paired insets leave auto margins zero for auto width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .{ .length = 8 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .auto,
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+        .inset = .{
+            .top = .{ .length = 4 },
+            .right = .{ .length = 15 },
+            .bottom = .auto,
+            .left = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 30 } },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 30), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 10, .y = 4, .w = 75, .h = 8 });
+}
+
+test "absolute auto margin stays zero without its corresponding inset" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+        .inset = .{
+            .top = .{ .length = 4 },
+            .right = .auto,
+            .bottom = .auto,
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 30 } },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 30), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 4, .w = 20, .h = 10 });
+}
+
 test "float margins reserve clear and flow extent" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -1228,6 +1376,47 @@ test "prepared pass applies margins and relative insets without shifting later f
     try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 60 });
     try expectRelative(&tree, relative_id, .{ .x = 13, .y = 7, .w = 20, .h = 10 });
     try expectRelative(&tree, following_id, .{ .x = 3, .y = 21, .w = 15, .h = 8 });
+}
+
+test "relative percentage insets use container width and zero height basis" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const relative_id: Id = @enumFromInt(1);
+    const following_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, relative_id, root_id, .{
+        .display = .block,
+        .position = .relative,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .inset = .{
+            .top = .{ .percent = 0.5 },
+            .right = .auto,
+            .bottom = .auto,
+            .left = .{ .percent = 0.1 },
+        },
+    });
+    try appendNode(&tree, following_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 15 }, .height = .{ .length = 8 } },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 60 } },
+    });
+    try tree.appendChild(root_id, relative_id);
+    try tree.appendChild(root_id, following_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 60), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 60 });
+    try expectRelative(&tree, relative_id, .{ .x = 10, .y = 0, .w = 20, .h = 10 });
+    try expectRelative(&tree, following_id, .{ .x = 0, .y = 10, .w = 15, .h = 8 });
 }
 
 test "prepared pass centers fixed-width block with horizontal auto margins" {
