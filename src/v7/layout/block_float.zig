@@ -1092,25 +1092,38 @@ fn resolveChildSize(
     };
 
     if (candidate.width == null) {
-        candidate.width = if (auto_width_border) |width|
-            try borderToSizingValue(width, edges.horizontal, input_style.box_sizing)
-        else
-            try contentToSizingValue(
-                intrinsic.width,
+        if (auto_width_border) |width| {
+            candidate.width = try borderToSizingValue(
+                width,
                 edges.horizontal,
                 input_style.box_sizing,
             );
+        }
     }
-    candidate = try sizing.applyAspectRatio(normalized_style, candidate);
     if (candidate.height == null) {
-        candidate.height = if (auto_height_border) |height|
-            try borderToSizingValue(height, edges.vertical, input_style.box_sizing)
-        else
-            try contentToSizingValue(
-                intrinsic.height,
+        if (auto_height_border) |height| {
+            candidate.height = try borderToSizingValue(
+                height,
                 edges.vertical,
                 input_style.box_sizing,
             );
+        }
+    }
+    candidate = try sizing.applyAspectRatio(normalized_style, candidate);
+    if (candidate.width == null) {
+        candidate.width = try contentToSizingValue(
+            intrinsic.width,
+            edges.horizontal,
+            input_style.box_sizing,
+        );
+    }
+    candidate = try sizing.applyAspectRatio(normalized_style, candidate);
+    if (candidate.height == null) {
+        candidate.height = try contentToSizingValue(
+            intrinsic.height,
+            edges.vertical,
+            input_style.box_sizing,
+        );
     }
 
     const resolved = try sizing.clampSize(

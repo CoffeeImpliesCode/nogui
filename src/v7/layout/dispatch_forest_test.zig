@@ -484,6 +484,38 @@ test "forest absolute paired auto width drives aspect-ratio height" {
     try expectRect(&tree, root_id, .{ .x = 10, .y = 0, .w = 80, .h = 40 });
 }
 
+test "forest absolute leaf derives width from paired vertical insets and aspect ratio" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const leaf_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    var leaf_style = autoStyle(.block);
+    leaf_style.position = .absolute;
+    leaf_style.aspect_ratio = 3;
+    leaf_style.inset = .{
+        .top = .{ .percent = 0.3 },
+        .right = .auto,
+        .bottom = .{ .percent = 0.5 },
+        .left = .auto,
+    };
+    try appendNode(&tree, leaf_id, root_id, leaf_style, .{ .spacer = .{} });
+    try appendNode(
+        &tree,
+        root_id,
+        .root,
+        fixedStyle(.block, 400, 300),
+        .{ .column = .{} },
+    );
+    try tree.appendChild(root_id, leaf_id);
+
+    try layout(&tree, .{ .width = 400, .height = 300 });
+
+    try expectRect(&tree, root_id, .{ .x = 0, .y = 0, .w = 400, .h = 300 });
+    try expectRect(&tree, leaf_id, .{ .x = 0, .y = 90, .w = 180, .h = 60 });
+}
+
 test "forest absolute inset and margin overflow returns InvalidStyle" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
