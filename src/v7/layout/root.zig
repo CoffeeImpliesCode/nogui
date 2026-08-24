@@ -1,6 +1,7 @@
 const std = @import("std");
 const Id = @import("../id.zig").Id;
 const block_float = @import("block_float.zig");
+const dispatch = @import("dispatch.zig");
 const modular_flex = @import("flex.zig");
 const modular_grid = @import("grid.zig");
 const flex = @import("../flex.zig");
@@ -251,6 +252,13 @@ fn eligibleGridRootIndex(tree: *const widget.WidgetTree) ?usize {
 }
 
 pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
+    if (dispatch.eligibleMixedFixedTree(tree)) {
+        return dispatch.layoutTree(tree, .{
+            .allocator = options.allocator,
+            .available = options.available,
+            .measure = options.measure,
+        });
+    }
     try validateAvailable(options.available);
 
     if (eligibleBlockRootIndex(tree)) |root_index| {

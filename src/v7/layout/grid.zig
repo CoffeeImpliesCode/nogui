@@ -1,14 +1,16 @@
 const std = @import("std");
 const Id = @import("../id.zig").Id;
+const layout_context = @import("context.zig");
 const sizing = @import("sizing.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
-pub const MeasureFn = *const fn ([]const u8, f32, u8) widget.Size;
+pub const MeasureFn = layout_context.MeasureFn;
 pub const Options = struct {
     allocator: std.mem.Allocator,
     available: widget.Size,
     measure: ?MeasureFn,
+    context: ?*layout_context.LayoutContext = null,
 };
 
 const Error = sizing.Error;
@@ -81,8 +83,20 @@ pub fn layoutContainer(tree: *widget.WidgetTree, container_id: Id, options: Opti
     defer path.deinit(options.allocator);
     try validateSubtree(options.allocator, tree, index, null, tree.nodes.items.len + 1, &path);
     try markHidden(tree, index, false, tree.nodes.items.len + 1);
+    try layoutPreparedContainer(tree, container_id, options, null);
+}
+
+/// Lay out a validated, already-prepared subtree without repeating validation
+/// or hidden-state classification.
+pub fn layoutPreparedContainer(
+    tree: *widget.WidgetTree,
+    container_id: Id,
+    options: Options,
+    forced_border: ?widget.Size,
+) Error!void {
+    const index = tree.nodeIndex(container_id) orelse return error.InvalidStyle;
     if (tree.nodes.items[index].layout_hidden) return;
-    try layoutGridNode(tree, index, options.available, null, options, tree.nodes.items.len + 1);
+    try layoutGridNode(tree, index, options.available, forced_border, options, tree.nodes.items.len + 1);
 }
 
 fn validateTreeInput(tree: *const widget.WidgetTree, root_index: usize) Error!void {
@@ -318,6 +332,7 @@ fn measureNode(
     containing: widget.Size,
     options: Options,
     depth: usize,
+    parent_display: ?style.Display,
 ) Error!Natural {
     if (depth == 0 or index >= tree.nodes.items.len) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
@@ -331,6 +346,29 @@ fn measureNode(
     var intrinsic: widget.Size = .{ .width = 0, .height = 0 };
     if (node.children.items.len == 0) {
         intrinsic = try measureLeaf(node, options.measure);
+    } else if (options.context) |context| {
+        if (parent_display) |display| {
+            if (node.style.display != display) {
+                const measured = try context.measure_node(
+                    context,
+                    tree,
+                    node,
+                    .{
+                        .available = containing,
+                        .percentage_basis = .{
+                            .width = containing.width,
+                            .height = containing.height,
+                        },
+                    },
+                );
+                return .{
+                    .content = measured.content,
+                    .border = measured.border,
+                };
+            }
+        }
+        if (node.style.display != .grid) return error.InvalidStyle;
+        intrinsic = try measureGridContent(tree, index, containing, options, depth - 1);
     } else {
         if (node.style.display != .grid) return error.InvalidStyle;
         intrinsic = try measureGridContent(tree, index, containing, options, depth - 1);
@@ -355,7 +393,14 @@ fn measureGridContent(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position == .absolute) continue;
-        const natural = try measureNode(tree, child_index, containing, options, depth);
+        const natural = try measureNode(
+            tree,
+            child_index,
+            containing,
+            options,
+            depth,
+            node.style.display,
+        );
         child_count += 1;
         max_width = @max(max_width, natural.border.width + try marginHorizontal(child.style, containing.width));
         max_height = @max(max_height, natural.border.height + try marginVertical(child.style, containing.width));
@@ -450,7 +495,14 @@ fn layoutGridNode(
     const node = &tree.nodes.items[index];
     if (node.layout_hidden or node.style.display == .none) return;
     if (node.style.display != .grid) return error.InvalidStyle;
-    const natural = try measureNode(tree, index, containing, options, depth - 1);
+    const natural = try measureNode(
+        tree,
+        index,
+        containing,
+        options,
+        depth - 1,
+        null,
+    );
     const edges = try resolveEdges(node.style, containing.width);
     const border = forced_border orelse try usedSize(node.style, containing, natural.content, edges, containing);
     try checkSize(border);
@@ -675,6 +727,27 @@ fn layoutGridNode(
         try checkRect(child.rect);
         child.natural_main = child_size.width;
         if (child.children.items.len != 0) {
+            if (options.context) |context| {
+                if (child.style.display != .grid) {
+                    try context.layout_node(
+                        context,
+                        tree,
+                        child,
+                        .{
+                            .available = content,
+                            .percentage_basis = .{
+                                .width = content.width,
+                                .height = content.height,
+                            },
+                            .forced_border = .{
+                                .width = child.rect.w,
+                                .height = child.rect.h,
+                            },
+                        },
+                    );
+                    continue;
+                }
+            }
             try layoutGridNode(tree, item.index, content, child_size, options, depth - 1);
         }
     }
@@ -695,7 +768,14 @@ fn collectItems(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position == .absolute) continue;
-        const natural = try measureNode(tree, child_index, content, options, depth);
+        const natural = try measureNode(
+            tree,
+            child_index,
+            content,
+            options,
+            depth,
+            container.style.display,
+        );
         const margins = try resolveMargins(child.style, content.width);
         const row_line = gridLineFor(child.style, .rows);
         const column_line = gridLineFor(child.style, .columns);
@@ -1253,7 +1333,14 @@ fn placeAbsolute(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position != .absolute) continue;
-        const natural = try measureNode(tree, child_index, content, options, depth);
+        const natural = try measureNode(
+            tree,
+            child_index,
+            content,
+            options,
+            depth,
+            container.style.display,
+        );
         const edges = try resolveEdges(child.style, content.width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
         const margins = try resolveMargins(child.style, content.width);
@@ -1303,7 +1390,30 @@ fn placeAbsolute(
         child.rect = .{ .x = x, .y = y, .w = child_size.width, .h = child_size.height };
         try checkRect(child.rect);
         child.natural_main = child_size.width;
-        if (child.children.items.len != 0) try layoutGridNode(tree, child_index, content, child_size, options, depth);
+        if (child.children.items.len != 0) {
+            if (options.context) |context| {
+                if (child.style.display != .grid) {
+                    try context.layout_node(
+                        context,
+                        tree,
+                        child,
+                        .{
+                            .available = content,
+                            .percentage_basis = .{
+                                .width = content.width,
+                                .height = content.height,
+                            },
+                            .forced_border = .{
+                                .width = child.rect.w,
+                                .height = child.rect.h,
+                            },
+                        },
+                    );
+                    continue;
+                }
+            }
+            try layoutGridNode(tree, child_index, content, child_size, options, depth);
+        }
     }
 }
 

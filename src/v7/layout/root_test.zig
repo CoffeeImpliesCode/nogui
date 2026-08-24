@@ -554,6 +554,73 @@ test "layoutTree dispatches an eligible grid root through modular grid" {
     );
 }
 
+test "layoutTree dispatches a mixed fixed tree through the public facade" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const leaf_id: Id = @enumFromInt(1);
+    const flex_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try tree.appendNode(.{
+        .id = leaf_id,
+        .kind = .{ .spacer = .{} },
+        .parent = flex_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 12 },
+                .height = .{ .length = 8 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = flex_id,
+        .kind = .{ .row = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 40 },
+                .height = .{ .length = 20 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 80 },
+                .height = .{ .length = 30 },
+            },
+        },
+    });
+    try tree.appendChild(flex_id, leaf_id);
+    try tree.appendChild(root_id, flex_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 80, .height = 30 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 40, .h = 20 },
+        tree.node(flex_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 12, .h = 8 },
+        tree.node(leaf_id).?.rect,
+    );
+}
+
 test "layoutTree rejects non-finite available width" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();

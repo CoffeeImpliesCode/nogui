@@ -1,11 +1,17 @@
 const std = @import("std");
 const Id = @import("../id.zig").Id;
+const layout_context = @import("context.zig");
 const sizing = @import("sizing.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
-pub const MeasureFn = *const fn ([]const u8, f32, u8) widget.Size;
-pub const Options = struct { allocator: std.mem.Allocator, available: widget.Size, measure: ?MeasureFn };
+pub const MeasureFn = layout_context.MeasureFn;
+pub const Options = struct {
+    allocator: std.mem.Allocator,
+    available: widget.Size,
+    measure: ?MeasureFn,
+    context: ?*layout_context.LayoutContext = null,
+};
 
 pub fn layoutContainer(tree: *widget.WidgetTree, container_id: Id, options: Options) sizing.Error!void {
     if (!std.math.isFinite(options.available.width)) return error.InvalidStyle;
@@ -14,6 +20,19 @@ pub fn layoutContainer(tree: *widget.WidgetTree, container_id: Id, options: Opti
     if (container_id == .root) return error.InvalidStyle;
     try validateTree(tree, index, null, tree.nodes.items.len);
     try markHidden(tree, index, false, tree.nodes.items.len);
+    try layoutPreparedContainer(tree, container_id, options, null);
+}
+
+/// Lay out a validated, already-prepared subtree without repeating validation
+/// or hidden-state classification. The dispatcher uses this entry for mixed
+/// children so each engine keeps ownership of its own geometry.
+pub fn layoutPreparedContainer(
+    tree: *widget.WidgetTree,
+    container_id: Id,
+    options: Options,
+    forced_border: ?widget.Size,
+) sizing.Error!void {
+    const index = tree.nodeIndex(container_id) orelse return error.InvalidStyle;
     if (tree.nodes.items[index].layout_hidden) return;
 
     var cache: std.ArrayList(Natural) = .empty;
@@ -31,16 +50,23 @@ pub fn layoutContainer(tree: *widget.WidgetTree, container_id: Id, options: Opti
         options,
         cache.items,
         tree.nodes.items.len,
+        null,
     );
     const edges = try resolveEdges(tree.nodes.items[index].style, options.available.width);
-    const size = try usedSize(
+    const size = forced_border orelse try usedSize(
         tree.nodes.items[index].style,
         options.available,
         intrinsic.content,
         edges,
         options.available,
     );
-    tree.nodes.items[index].rect = .{ .w = size.width, .h = size.height };
+    const origin = tree.nodes.items[index].rect;
+    tree.nodes.items[index].rect = .{
+        .x = origin.x,
+        .y = origin.y,
+        .w = size.width,
+        .h = size.height,
+    };
     try layoutFlex(
         tree,
         index,
@@ -186,6 +212,7 @@ fn measureNode(
     options: Options,
     cache: []Natural,
     depth: usize,
+    parent_display: ?style.Display,
 ) sizing.Error!Natural {
     if (depth == 0) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
@@ -197,6 +224,38 @@ fn measureNode(
     var content: widget.Size = .{ .width = 0, .height = 0 };
     if (node.children.items.len == 0) {
         content = try measureLeaf(node, options.measure);
+    } else if (options.context) |context| {
+        if (parent_display) |display| {
+            if (node.style.display != display) {
+                const measured = try context.measure_node(
+                    context,
+                    tree,
+                    node,
+                    .{
+                        .available = containing,
+                        .percentage_basis = .{
+                            .width = containing.width,
+                            .height = containing.height,
+                        },
+                    },
+                );
+                cache[index] = .{
+                    .content = measured.content,
+                    .border = measured.border,
+                };
+                return cache[index];
+            }
+        }
+        if (node.style.display != .flex) return error.InvalidStyle;
+        content = try measureContainerContent(
+            tree,
+            index,
+            containing,
+            edges,
+            options,
+            cache,
+            depth - 1,
+        );
     } else {
         if (node.style.display != .flex) return error.InvalidStyle;
         content = try measureContainerContent(
@@ -336,6 +395,7 @@ fn measureContainerContent(
             options,
             cache,
             depth,
+            node.style.display,
         );
         const margins = try resolveMargins(child.style, available.width);
         const outer_main = try add(
@@ -450,6 +510,27 @@ fn layoutFlex(
     for (items.items) |item| {
         const child = &tree.nodes.items[item.index];
         if (child.children.items.len == 0) continue;
+        if (options.context) |context| {
+            if (child.style.display != .flex) {
+                try context.layout_node(
+                    context,
+                    tree,
+                    child,
+                    .{
+                        .available = content,
+                        .percentage_basis = .{
+                            .width = content.width,
+                            .height = content.height,
+                        },
+                        .forced_border = .{
+                            .width = child.rect.w,
+                            .height = child.rect.h,
+                        },
+                    },
+                );
+                continue;
+            }
+        }
         try layoutFlex(
             tree,
             item.index,
@@ -485,6 +566,7 @@ fn collectItems(
             options,
             cache,
             depth,
+            container.style.display,
         );
         const edges = try resolveEdges(child.style, content.width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
@@ -889,7 +971,15 @@ fn placeAbsolute(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position != .absolute) continue;
-        const natural = try measureNode(tree, child_index, content, options, cache, depth);
+        const natural = try measureNode(
+            tree,
+            child_index,
+            content,
+            options,
+            cache,
+            depth,
+            container.style.display,
+        );
         const edges = try resolveEdges(child.style, content.width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
         const size = try usedSize(child.style, content, natural.content, edges, null);
@@ -913,6 +1003,27 @@ fn placeAbsolute(
         child.rect = .{ .x = x, .y = y, .w = size.width, .h = size.height };
         try checkRect(child.rect);
         if (child.children.items.len != 0) {
+            if (options.context) |context| {
+                if (child.style.display != .flex) {
+                    try context.layout_node(
+                        context,
+                        tree,
+                        child,
+                        .{
+                            .available = content,
+                            .percentage_basis = .{
+                                .width = content.width,
+                                .height = content.height,
+                            },
+                            .forced_border = .{
+                                .width = child.rect.w,
+                                .height = child.rect.h,
+                            },
+                        },
+                    );
+                    continue;
+                }
+            }
             try layoutFlex(tree, child_index, content, size, options, cache, depth);
         }
     }

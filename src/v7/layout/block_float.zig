@@ -1,6 +1,6 @@
 const std = @import("std");
 const Id = @import("../id.zig").Id;
-const flex = @import("../flex.zig");
+const layout_context = @import("context.zig");
 const style = @import("../style.zig");
 const sizing = @import("sizing.zig");
 const widget = @import("../widget.zig");
@@ -71,12 +71,14 @@ pub const LayoutPass = struct {
         try classifyHiddenLayout(tree);
         return .{ .tree = tree };
     }
-
+    pub fn prepared(tree: *widget.WidgetTree) LayoutPass {
+        return .{ .tree = tree };
+    }
     pub fn layoutContainer(
         self: *const LayoutPass,
         container_id: Id,
         context: sizing.SizingContext,
-        measure: ?flex.MeasureFn,
+        measure: ?layout_context.MeasureFn,
     ) sizing.Error!void {
         _ = try layoutPreparedContainerUnchecked(
             self.tree,
@@ -84,7 +86,31 @@ pub const LayoutPass = struct {
             context,
             measure,
             null,
+            null,
             true,
+            null,
+        );
+    }
+
+    /// Lay out a validated, already-prepared subtree through the mixed-layout
+    /// callback bridge.
+    pub fn layoutPreparedContainer(
+        self: *const LayoutPass,
+        container_id: Id,
+        context: sizing.SizingContext,
+        measure: ?layout_context.MeasureFn,
+        layout_ctx: ?*layout_context.LayoutContext,
+        forced_border: ?widget.Size,
+    ) sizing.Error!void {
+        _ = try layoutPreparedContainerUnchecked(
+            self.tree,
+            container_id,
+            context,
+            measure,
+            if (forced_border) |border| border.width else null,
+            if (forced_border) |border| border.height else null,
+            forced_border == null,
+            layout_ctx,
         );
     }
 };
@@ -94,7 +120,7 @@ pub fn layoutContainer(
     tree: *widget.WidgetTree,
     container_id: Id,
     context: sizing.SizingContext,
-    measure: ?flex.MeasureFn,
+    measure: ?layout_context.MeasureFn,
 ) sizing.Error!void {
     try validateContext(context);
     const pass = try LayoutPass.init(tree);
@@ -104,7 +130,9 @@ pub fn layoutContainer(
         context,
         measure,
         null,
+        null,
         true,
+        null,
     );
 }
 
@@ -113,9 +141,11 @@ fn layoutPreparedContainerUnchecked(
     tree: *widget.WidgetTree,
     container_id: Id,
     context: sizing.SizingContext,
-    measure: ?flex.MeasureFn,
+    measure: ?layout_context.MeasureFn,
+    forced_border_width: ?f32,
     forced_border_height: ?f32,
     is_layout_root: bool,
+    layout_ctx: ?*layout_context.LayoutContext,
 ) sizing.Error!MarginCollapseResult {
     const container_index = tree.nodeIndex(container_id) orelse return error.InvalidStyle;
     if (tree.nodes.items[container_index].layout_hidden) return .{};
@@ -137,7 +167,10 @@ fn layoutPreparedContainerUnchecked(
         context,
         container_edges,
     );
-    const container_width = initial_size.border_width;
+    const container_width = if (forced_border_width) |width|
+        try finite(width)
+    else
+        initial_size.border_width;
     const content_width = @max(0, container_width - container_edges.horizontal);
     const forced_height = if (forced_border_height) |height| try finite(height) else null;
     const content_height_fixed = if (forced_height) |height|
@@ -206,7 +239,14 @@ fn layoutPreparedContainerUnchecked(
             child_style,
             child_context.percentage_basis.width,
         );
-        var intrinsic = try intrinsicContentSize(child, child_edges, measure);
+        var intrinsic = try intrinsicContentSizeWithContext(
+            tree,
+            child,
+            child_edges,
+            measure,
+            layout_ctx,
+            child_context,
+        );
         const clear_y = try clearBottom(
             tree,
             child_ids,
@@ -251,9 +291,17 @@ fn layoutPreparedContainerUnchecked(
                 child_width,
                 measure,
                 null,
+                layout_ctx,
             );
             if (nested_result != null) {
-                intrinsic = try intrinsicContentSize(child, child_edges, measure);
+                intrinsic = try intrinsicContentSizeWithContext(
+                    tree,
+                    child,
+                    child_edges,
+                    measure,
+                    layout_ctx,
+                    child_context,
+                );
                 child_size = try resolveChildSize(
                     child_style,
                     child_context,
@@ -291,6 +339,7 @@ fn layoutPreparedContainerUnchecked(
                 .w = child_width,
                 .h = child_height,
             };
+            try layoutMixedChild(tree, child, layout_ctx, child_context);
             float_ceiling = @max(float_ceiling, placement.y);
             float_bottom = @max(
                 float_bottom,
@@ -315,9 +364,17 @@ fn layoutPreparedContainerUnchecked(
                 child_width,
                 measure,
                 null,
+                layout_ctx,
             );
             if (nested_result != null) {
-                intrinsic = try intrinsicContentSize(child, child_edges, measure);
+                intrinsic = try intrinsicContentSizeWithContext(
+                    tree,
+                    child,
+                    child_edges,
+                    measure,
+                    layout_ctx,
+                    child_context,
+                );
                 child_size = try resolveChildSize(
                     child_style,
                     child_context,
@@ -448,9 +505,17 @@ fn layoutPreparedContainerUnchecked(
                 child_width,
                 measure,
                 null,
+                layout_ctx,
             );
             if (nested_result) |result| {
-                intrinsic = try intrinsicContentSize(child, child_edges, measure);
+                intrinsic = try intrinsicContentSizeWithContext(
+                    tree,
+                    child,
+                    child_edges,
+                    measure,
+                    layout_ctx,
+                    child_context,
+                );
                 child_size = try resolveChildSize(
                     child_style,
                     child_context,
@@ -501,6 +566,7 @@ fn layoutPreparedContainerUnchecked(
             content_width,
             0,
         );
+        try layoutMixedChild(tree, child, layout_ctx, child_context);
         if (top_collapse_open and !child_establishes_bfc and clear_y <= flow_y) {
             first_child_top = first_child_top.collapse(child_top_margin);
             if (child_collapses_through) {
@@ -554,6 +620,7 @@ fn layoutPreparedContainerUnchecked(
         content_height,
         container_style.writing_direction,
         measure,
+        layout_ctx,
     );
     try writeScrollOffset(
         tree,
@@ -577,8 +644,9 @@ fn layoutNestedBlockAtWidth(
     child_id: Id,
     parent_context: sizing.SizingContext,
     used_width: f32,
-    measure: ?flex.MeasureFn,
+    measure: ?layout_context.MeasureFn,
     forced_border_height: ?f32,
+    layout_ctx: ?*layout_context.LayoutContext,
 ) sizing.Error!?MarginCollapseResult {
     const child = tree.node(child_id) orelse return error.InvalidStyle;
     if (child.children.items.len == 0) return null;
@@ -593,8 +661,10 @@ fn layoutNestedBlockAtWidth(
         child_id,
         nested_context,
         measure,
+        null,
         forced_border_height,
         false,
+        layout_ctx,
     );
     return result;
 }
@@ -782,7 +852,8 @@ fn layoutAbsoluteChildren(
     content_width: f32,
     content_height: f32,
     direction: style.Direction,
-    measure: ?flex.MeasureFn,
+    measure: ?layout_context.MeasureFn,
+    layout_ctx: ?*layout_context.LayoutContext,
 ) sizing.Error!void {
     const absolute_context: sizing.SizingContext = .{
         .available = .{
@@ -807,7 +878,14 @@ fn layoutAbsoluteChildren(
             .padding = child_edges.padding,
         };
         var margins = try resolveMargins(child_style, content_width);
-        var intrinsic = try intrinsicContentSize(child, child_edges, measure);
+        var intrinsic = try intrinsicContentSizeWithContext(
+            tree,
+            child,
+            child_edges,
+            measure,
+            layout_ctx,
+            absolute_context,
+        );
         const left = try resolveInset(child_style.inset.left, content_width);
         const right = try resolveInset(child_style.inset.right, content_width);
         const top = try resolveInset(child_style.inset.top, content_height);
@@ -861,8 +939,16 @@ fn layoutAbsoluteChildren(
             child_size.width,
             measure,
             auto_height_border,
+            layout_ctx,
         )) |_| {
-            intrinsic = try intrinsicContentSize(child, child_edges, measure);
+            intrinsic = try intrinsicContentSizeWithContext(
+                tree,
+                child,
+                child_edges,
+                measure,
+                layout_ctx,
+                absolute_context,
+            );
             child_size = try resolveChildSize(
                 child_style,
                 absolute_context,
@@ -931,6 +1017,7 @@ fn layoutAbsoluteChildren(
             .w = child_size.width,
             .h = child_size.height,
         };
+        try layoutMixedChild(tree, child, layout_ctx, absolute_context);
     }
 }
 
@@ -1258,10 +1345,74 @@ fn legacyCompatibleEdge(value: style.LengthPercentage, legacy: f32) style.Length
     };
 }
 
+fn requestFromSizingContext(
+    input: sizing.SizingContext,
+    forced_border: ?widget.Size,
+) sizing.Error!layout_context.Request {
+    const width = switch (input.available.width) {
+        .definite => |value| try finite(value),
+        .min_content, .max_content => return error.InvalidStyle,
+    };
+    const height = switch (input.available.height) {
+        .definite => |value| try finite(value),
+        .min_content, .max_content => return error.InvalidStyle,
+    };
+    return .{
+        .available = .{ .width = width, .height = height },
+        .percentage_basis = input.percentage_basis,
+        .forced_border = forced_border,
+    };
+}
+
+fn intrinsicContentSizeWithContext(
+    tree: *widget.WidgetTree,
+    node: *const widget.WidgetNode,
+    edges: BoxEdges,
+    measure: ?layout_context.MeasureFn,
+    layout_ctx: ?*layout_context.LayoutContext,
+    containing: sizing.SizingContext,
+) sizing.Error!widget.Size {
+    if (layout_ctx) |context| {
+        if (node.children.items.len != 0 and
+            node.style.display != .block and
+            node.style.display != .flow_root)
+        {
+            const measured = try context.measure_node(
+                context,
+                tree,
+                node,
+                try requestFromSizingContext(containing, null),
+            );
+            return measured.content;
+        }
+    }
+    return intrinsicContentSize(node, edges, measure);
+}
+
+fn layoutMixedChild(
+    tree: *widget.WidgetTree,
+    child: *widget.WidgetNode,
+    layout_ctx: ?*layout_context.LayoutContext,
+    containing: sizing.SizingContext,
+) sizing.Error!void {
+    const context = layout_ctx orelse return;
+    if (child.children.items.len == 0) return;
+    if (child.style.display == .block or child.style.display == .flow_root) return;
+    try context.layout_node(
+        context,
+        tree,
+        child,
+        try requestFromSizingContext(
+            containing,
+            .{ .width = child.rect.w, .height = child.rect.h },
+        ),
+    );
+}
+
 fn intrinsicContentSize(
     node: *const widget.WidgetNode,
     edges: BoxEdges,
-    measure: ?flex.MeasureFn,
+    measure: ?layout_context.MeasureFn,
 ) sizing.Error!widget.Size {
     const measured: widget.Size = switch (node.kind) {
         .label => |label| if (measure) |measure_text|
