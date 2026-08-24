@@ -11,6 +11,8 @@ pub const Options = struct {
     available: widget.Size,
     measure: ?MeasureFn,
     context: ?*layout_context.LayoutContext = null,
+    intrinsic_width: bool = false,
+    intrinsic_height: bool = false,
 };
 
 pub fn layoutContainer(tree: *widget.WidgetTree, container_id: Id, options: Options) sizing.Error!void {
@@ -76,6 +78,49 @@ pub fn layoutPreparedContainer(
         cache.items,
         tree.nodes.items.len,
     );
+}
+/// Measure a flex container's natural content and border size without placing it.
+///
+/// The caller owns the final used border rectangle and must invoke the layout
+/// callback separately after it has resolved that rectangle.
+pub fn measureNatural(
+    tree: *widget.WidgetTree,
+    node: *const widget.WidgetNode,
+    request: layout_context.Request,
+    context: *layout_context.LayoutContext,
+) sizing.Error!layout_context.Measured {
+    const index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
+    if (&tree.nodes.items[index] != node) return error.InvalidStyle;
+    try layout_context.validateNaturalRequest(tree, node, request);
+
+    var cache: std.ArrayList(Natural) = .empty;
+    defer cache.deinit(context.allocator);
+    cache.resize(context.allocator, tree.nodes.items.len) catch return error.InvalidStyle;
+    for (cache.items) |*entry| entry.* = .{
+        .content = .{ .width = 0, .height = 0 },
+        .border = .{ .width = 0, .height = 0 },
+    };
+
+    const natural = try measureNode(
+        tree,
+        index,
+        request.available,
+        .{
+            .allocator = context.allocator,
+            .available = request.available,
+            .measure = context.measure,
+            .context = context,
+            .intrinsic_width = request.intrinsic_width,
+            .intrinsic_height = request.intrinsic_height,
+        },
+        cache.items,
+        tree.nodes.items.len,
+        null,
+    );
+    return .{
+        .content = natural.content,
+        .border = natural.border,
+    };
 }
 
 const Edges = struct {
@@ -376,6 +421,14 @@ fn measureContainerContent(
     const available_main = axisMain(axes, available);
     const main_gap = try gapMain(node, axes);
     const cross_gap = try gapCross(node, axes);
+    const auto_main = dimensionAuto(if (axes.horizontal)
+        node.style.size.width
+    else
+        node.style.size.height);
+    const intrinsic_main = if (axes.horizontal)
+        options.intrinsic_width
+    else
+        options.intrinsic_height;
     var line_main: f32 = 0;
     var line_cross: f32 = 0;
     var total_main: f32 = 0;
@@ -414,7 +467,7 @@ fn measureContainerContent(
             outer_main
         else
             try add(try add(line_main, main_gap), outer_main);
-        if (effectiveWrap(node.style) != .nowrap and
+        if (!intrinsic_main and effectiveWrap(node.style) != .nowrap and
             line_items != 0 and candidate > available_main)
         {
             total_main = @max(total_main, line_main);
@@ -435,12 +488,8 @@ fn measureContainerContent(
         if (line_count != 0) total_cross = try add(total_cross, cross_gap);
         total_cross = try add(total_cross, line_cross);
     }
-    const auto_main = dimensionAuto(if (axes.horizontal)
-        node.style.size.width
-    else
-        node.style.size.height);
     const content_main = if (effectiveWrap(node.style) != .nowrap and auto_main)
-        @min(unwrapped_main, available_main)
+        if (intrinsic_main) unwrapped_main else @min(unwrapped_main, available_main)
     else
         total_main;
     return fromAxes(axes, content_main, total_cross);

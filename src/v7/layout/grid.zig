@@ -98,6 +98,38 @@ pub fn layoutPreparedContainer(
     if (tree.nodes.items[index].layout_hidden) return;
     try layoutGridNode(tree, index, options.available, forced_border, options, tree.nodes.items.len + 1);
 }
+/// Measure a grid container's natural content and border size without placing it.
+///
+/// The caller owns the final used border rectangle and must invoke the layout
+/// callback separately after it has resolved that rectangle.
+pub fn measureNatural(
+    tree: *widget.WidgetTree,
+    node: *const widget.WidgetNode,
+    request: layout_context.Request,
+    context: *layout_context.LayoutContext,
+) Error!layout_context.Measured {
+    const index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
+    if (&tree.nodes.items[index] != node) return error.InvalidStyle;
+    try layout_context.validateNaturalRequest(tree, node, request);
+
+    const natural = try measureNode(
+        tree,
+        index,
+        request.available,
+        .{
+            .allocator = context.allocator,
+            .available = request.available,
+            .measure = context.measure,
+            .context = context,
+        },
+        tree.nodes.items.len,
+        null,
+    );
+    return .{
+        .content = natural.content,
+        .border = natural.border,
+    };
+}
 
 fn validateTreeInput(tree: *const widget.WidgetTree, root_index: usize) Error!void {
     if (root_index >= tree.nodes.items.len) return error.InvalidStyle;

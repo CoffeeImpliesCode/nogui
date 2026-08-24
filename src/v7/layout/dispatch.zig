@@ -57,7 +57,7 @@ pub fn eligibleMixedFixedTree(tree: *const widget.WidgetTree) bool {
     const root_index = rootIndex(tree) orelse return false;
     if (tree.nodes.items[root_index].style.display == .none) return false;
     if (!hasDefaultSurfacePlacement(&tree.nodes.items[root_index])) return false;
-    if (!isConcreteTree(tree, root_index, tree.nodes.items.len + 1)) return false;
+    if (!isConcreteTree(tree, root_index, tree.nodes.items.len + 1, true)) return false;
     return hasMixedDisplay(tree, root_index, tree.nodes.items.len + 1);
 }
 
@@ -67,6 +67,22 @@ fn measureNodeCallback(
     node: *const widget.WidgetNode,
     request: context.Request,
 ) LayoutError!context.Measured {
+    if (node.children.items.len != 0 and needsNaturalMeasurement(node)) {
+        return switch (node.style.display) {
+            .block, .flow_root => block_float.measureNatural(
+                tree,
+                node,
+                request,
+                self,
+            ),
+            .flex => flex.measureNatural(tree, node, request, self),
+            .grid => grid.measureNatural(tree, node, request, self),
+            .none => .{
+                .content = .{ .width = 0, .height = 0 },
+                .border = .{ .width = 0, .height = 0 },
+            },
+        };
+    }
     return measureNode(
         tree,
         node,
@@ -74,6 +90,18 @@ fn measureNodeCallback(
         tree.nodes.items.len + 1,
         self.measure,
     );
+}
+
+fn needsNaturalMeasurement(node: *const widget.WidgetNode) bool {
+    return isIntrinsicDimension(node.style.size.width) or
+        isIntrinsicDimension(node.style.size.height);
+}
+
+fn isIntrinsicDimension(value: style.Dimension) bool {
+    return switch (value) {
+        .auto, .min_content, .max_content => true,
+        .length, .percent => false,
+    };
 }
 
 fn layoutNodeCallback(
@@ -415,13 +443,22 @@ fn isAutomaticInset(value: style.LengthPercentageAuto) bool {
     };
 }
 
-fn isConcreteTree(tree: *const widget.WidgetTree, index: usize, depth: usize) bool {
+fn isConcreteTree(
+    tree: *const widget.WidgetTree,
+    index: usize,
+    depth: usize,
+    is_root: bool,
+) bool {
     if (depth == 0 or index >= tree.nodes.items.len) return false;
     const node = &tree.nodes.items[index];
     if (node.scroll != null) return false;
     if (node.style.display != .none and node.children.items.len != 0) {
-        if (!isConcreteDimension(node.style.size.width)) return false;
-        if (!isConcreteDimension(node.style.size.height)) return false;
+        if (is_root and
+            (!isConcreteDimension(node.style.size.width) or
+                !isConcreteDimension(node.style.size.height)))
+        {
+            return false;
+        }
         switch (node.kind) {
             .row, .column => {},
             else => return false,
@@ -429,7 +466,7 @@ fn isConcreteTree(tree: *const widget.WidgetTree, index: usize, depth: usize) bo
     }
     for (node.children.items) |child_id| {
         const child_index = tree.nodeIndex(child_id) orelse return false;
-        if (!isConcreteTree(tree, child_index, depth - 1)) return false;
+        if (!isConcreteTree(tree, child_index, depth - 1, false)) return false;
     }
     return true;
 }

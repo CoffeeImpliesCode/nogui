@@ -13,6 +13,10 @@ const BoxEdges = struct {
     horizontal: f32,
     vertical: f32,
 };
+const Natural = struct {
+    content: widget.Size,
+    border: widget.Size,
+};
 
 const Slot = struct {
     left: f32,
@@ -109,11 +113,227 @@ pub const LayoutPass = struct {
             measure,
             if (forced_border) |border| border.width else null,
             if (forced_border) |border| border.height else null,
+
             forced_border == null,
             layout_ctx,
         );
     }
 };
+/// Measure a block container's natural content and border size without placing it.
+///
+/// Auto widths remain content-driven during the query. The parent layout
+/// engine owns any later used-width override and final placement.
+pub fn measureNatural(
+    tree: *widget.WidgetTree,
+    node: *const widget.WidgetNode,
+    request: layout_context.Request,
+    context: *layout_context.LayoutContext,
+) sizing.Error!layout_context.Measured {
+    const index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
+    if (&tree.nodes.items[index] != node) return error.InvalidStyle;
+    try layout_context.validateNaturalRequest(tree, node, request);
+    const containing: widget.Size = request.available;
+    const natural = try measureNaturalNode(
+        tree,
+        index,
+        containing,
+        request.percentage_basis,
+        context,
+        tree.nodes.items.len,
+    );
+    return .{
+        .content = natural.content,
+        .border = natural.border,
+    };
+}
+
+fn measureNaturalNode(
+    tree: *widget.WidgetTree,
+    index: usize,
+    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
+    context: *layout_context.LayoutContext,
+    depth: usize,
+) sizing.Error!Natural {
+    if (depth == 0 or index >= tree.nodes.items.len) return error.InvalidStyle;
+    const node = &tree.nodes.items[index];
+    if (node.layout_hidden or node.style.display == .none) return .{
+        .content = .{ .width = 0, .height = 0 },
+        .border = .{ .width = 0, .height = 0 },
+    };
+
+    const basis: style.Size(?f32) = .{
+        .width = percentage_basis.width orelse containing.width,
+        .height = percentage_basis.height orelse containing.height,
+    };
+    const edges = try resolveBoxEdges(node.style, basis.width);
+    const content = if (node.children.items.len == 0)
+        try measureNaturalLeaf(node, context.measure)
+    else switch (node.style.display) {
+        .block, .flow_root => try measureNaturalBlockContent(
+            tree,
+            index,
+            containing,
+            basis,
+            edges,
+            context,
+            depth - 1,
+        ),
+        .flex, .grid => return error.InvalidStyle,
+        .none => unreachable,
+    };
+    const sizing_context: sizing.SizingContext = .{
+        .available = .{
+            .width = .{ .definite = containing.width },
+            .height = .{ .definite = containing.height },
+        },
+        .percentage_basis = basis,
+    };
+    const resolved = try resolveChildSize(
+        node.style,
+        sizing_context,
+        content,
+        edges,
+        null,
+        null,
+    );
+    return .{
+        .content = content,
+        .border = .{ .width = resolved.width, .height = resolved.height },
+    };
+}
+
+fn measureNaturalBlockContent(
+    tree: *widget.WidgetTree,
+    index: usize,
+    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
+    edges: BoxEdges,
+    context: *layout_context.LayoutContext,
+    depth: usize,
+) sizing.Error!widget.Size {
+    if (depth == 0) return error.InvalidStyle;
+    const node = &tree.nodes.items[index];
+    const sizing_context: sizing.SizingContext = .{
+        .available = .{
+            .width = .{ .definite = containing.width },
+            .height = .{ .definite = containing.height },
+        },
+        .percentage_basis = percentage_basis,
+    };
+    const box_model = try sizing.resolveBoxModel(
+        styleForSizing(node.style),
+        sizing_context,
+    );
+    const border_width = box_model.border_box.width orelse containing.width;
+    const content_width = @max(0, try subtractFinite(border_width, edges.horizontal));
+    const child_containing: widget.Size = .{
+        .width = content_width,
+        .height = containing.height,
+    };
+    const child_basis: style.Size(?f32) = .{
+        .width = @as(?f32, content_width),
+        .height = percentage_basis.height,
+    };
+    var content_height: f32 = 0;
+    var content_width_natural: f32 = 0;
+    for (node.children.items) |child_id| {
+        const child = tree.nodeConst(child_id) orelse return error.InvalidStyle;
+        if (child.layout_hidden or child.style.position == .absolute) continue;
+        const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
+        const natural = if (child.children.items.len == 0 or
+            child.style.display == .block or
+            child.style.display == .flow_root)
+        blk: {
+            break :blk try measureNaturalNode(
+                tree,
+                child_index,
+                child_containing,
+                child_basis,
+                context,
+                depth,
+            );
+        } else switch (child.style.display) {
+            .flex, .grid => blk: {
+                const measured = try context.measure_node(
+                    context,
+                    tree,
+                    child,
+                    .{
+                        .available = child_containing,
+                        .percentage_basis = child_basis,
+                    },
+                );
+                break :blk Natural{
+                    .content = measured.content,
+                    .border = measured.border,
+                };
+            },
+            .none => Natural{
+                .content = .{ .width = 0, .height = 0 },
+                .border = .{ .width = 0, .height = 0 },
+            },
+            .block, .flow_root => unreachable,
+        };
+        const margins = try resolveMargins(child.style, content_width);
+        content_width_natural = @max(
+            content_width_natural,
+            try addFinite(
+                try addFinite(natural.border.width, margins.left),
+                margins.right,
+            ),
+        );
+        content_height = try addFinite(
+            content_height,
+            try addFinite(
+                try addFinite(natural.border.height, margins.top),
+                margins.bottom,
+            ),
+        );
+    }
+    return .{
+        .width = content_width_natural,
+        .height = content_height,
+    };
+}
+
+fn measureNaturalLeaf(
+    node: *const widget.WidgetNode,
+    measure: ?layout_context.MeasureFn,
+) sizing.Error!widget.Size {
+    var result: widget.Size = switch (node.kind) {
+        .label => |label| if (measure) |callback|
+            callback(label.text, node.font_size, node.font_id)
+        else blk: {
+            const font_size = try finite(node.font_size);
+            if (font_size < 0) return error.InvalidStyle;
+            const scale: f32 = if (font_size > 0) font_size / 20 else 1;
+            const length: f32 = @floatFromInt(@min(label.text.len, 1 << 24));
+            break :blk .{ .width = length * 10 * scale, .height = 20 * scale };
+        },
+        .spacer => |spacer| .{ .width = spacer.size, .height = spacer.size },
+        .button => |button| .{
+            .width = if (button.visual_label) |text|
+                if (text.len == 0) 100 else @floatFromInt(text.len * 10 + 16)
+            else
+                100,
+            .height = 32,
+        },
+        .slider => .{ .width = 100, .height = widget.slider_rail_height },
+        .row, .column => .{ .width = 0, .height = 0 },
+    };
+    result.width = try finite(result.width);
+    result.height = try finite(result.height);
+    if (result.width < 0 or result.height < 0) return error.InvalidStyle;
+    if (node.text_max_width) |maximum| {
+        if (node.text_overflow != .visible) {
+            const maximum_width = try finite(maximum);
+            if (maximum_width < 0) return error.InvalidStyle;
+            result.width = @min(result.width, maximum_width);
+        }
+    }
+    return result;
+}
 
 /// Layout one container through a fresh pass for direct one-container callers.
 pub fn layoutContainer(
@@ -1353,14 +1573,19 @@ fn requestFromSizingContext(
         .definite => |value| try finite(value),
         .min_content, .max_content => return error.InvalidStyle,
     };
+    const intrinsic_height = switch (input.available.height) {
+        .definite => false,
+        .min_content, .max_content => true,
+    };
     const height = switch (input.available.height) {
         .definite => |value| try finite(value),
-        .min_content, .max_content => return error.InvalidStyle,
+        .min_content, .max_content => 0,
     };
     return .{
         .available = .{ .width = width, .height = height },
         .percentage_basis = input.percentage_basis,
         .forced_border = forced_border,
+        .intrinsic_height = intrinsic_height,
     };
 }
 
