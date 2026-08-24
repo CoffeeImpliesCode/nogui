@@ -56,6 +56,12 @@ pub const ExplicitOverride = style.ExplicitOverride;
 /// meaningful (a parent offset change does not invalidate child rects).
 pub const Rect = struct { x: f32 = 0, y: f32 = 0, w: f32 = 0, h: f32 = 0 };
 
+/// Border and padding resolved against the layout pass's containing basis.
+pub const ResolvedBoxEdges = struct {
+    border: Sides,
+    padding: Sides,
+};
+
 /// Available / required space.
 pub const Size = struct { width: f32, height: f32 };
 
@@ -222,6 +228,11 @@ pub const WidgetNode = struct {
     resolved_constraints: ResolvedConstraints = .{},
     resolved_aspect_ratio: ?f32 = null,
     resolved_overflow: OverflowAxes = .{ .width = .visible, .height = .visible },
+    /// Border and padding resolved against the layout pass's containing basis.
+    resolved_box_edges: ?ResolvedBoxEdges = null,
+    /// True when the current block layout pass hides this node through itself or
+    /// an ancestor. Recomputed at every direct block layout entry.
+    layout_hidden: bool = false,
     /// Resolved typed layout values. This is the canonical flex/style view.
     style: Style = .{},
     /// Resolved typed paint values. This is the canonical paint view.
@@ -400,6 +411,91 @@ pub const WidgetTree = struct {
     }
 };
 
+fn resolveGeometryEdge(
+    typed: LengthPercentage,
+    legacy: f32,
+    border_box_width: f32,
+) f32 {
+    return switch (typed) {
+        .length => |value| if (value == 0 and legacy != 0) legacy else value,
+        .percent => |fraction| border_box_width * fraction,
+    };
+}
+
+fn geometryBoxEdges(node: *const WidgetNode, border_box_width: f32) ResolvedBoxEdges {
+    if (node.resolved_box_edges) |edges| return edges;
+    return .{
+        .border = .{
+            .top = resolveGeometryEdge(
+                node.style.border_inset.top,
+                node.style.border.top,
+                border_box_width,
+            ),
+            .right = resolveGeometryEdge(
+                node.style.border_inset.right,
+                node.style.border.right,
+                border_box_width,
+            ),
+            .bottom = resolveGeometryEdge(
+                node.style.border_inset.bottom,
+                node.style.border.bottom,
+                border_box_width,
+            ),
+            .left = resolveGeometryEdge(
+                node.style.border_inset.left,
+                node.style.border.left,
+                border_box_width,
+            ),
+        },
+        .padding = .{
+            .top = resolveGeometryEdge(
+                node.style.padding_inset.top,
+                node.style.padding.top,
+                border_box_width,
+            ),
+            .right = resolveGeometryEdge(
+                node.style.padding_inset.right,
+                node.style.padding.right,
+                border_box_width,
+            ),
+            .bottom = resolveGeometryEdge(
+                node.style.padding_inset.bottom,
+                node.style.padding.bottom,
+                border_box_width,
+            ),
+            .left = resolveGeometryEdge(
+                node.style.padding_inset.left,
+                node.style.padding.left,
+                border_box_width,
+            ),
+        },
+    };
+}
+
+fn contentBoxRect(border_rect: Rect, node: *const WidgetNode) Rect {
+    const edges = geometryBoxEdges(node, border_rect.w);
+    return .{
+        .x = border_rect.x + edges.border.left + edges.padding.left,
+        .y = border_rect.y + edges.border.top + edges.padding.top,
+        .w = @max(
+            0,
+            border_rect.w -
+                edges.border.left -
+                edges.border.right -
+                edges.padding.left -
+                edges.padding.right,
+        ),
+        .h = @max(
+            0,
+            border_rect.h -
+                edges.border.top -
+                edges.border.bottom -
+                edges.padding.top -
+                edges.padding.bottom,
+        ),
+    };
+}
+
 /// Resolve a node's absolute border-box origin by walking parents: each
 /// ancestor contributes its own (relative) offset plus the step into its
 /// CONTENT box (border + padding). The surface origin is (0,0).
@@ -412,8 +508,9 @@ pub fn absoluteBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
         ox += n.rect.x;
         oy += n.rect.y;
         const parent = tree.nodeConst(n.parent) orelse break;
-        ox += parent.style.border.left + parent.style.padding.left;
-        oy += parent.style.border.top + parent.style.padding.top;
+        const edges = geometryBoxEdges(parent, parent.rect.w);
+        ox += edges.border.left + edges.padding.left;
+        oy += edges.border.top + edges.padding.top;
         cur = n.parent;
     }
     return .{ ox, oy };
@@ -437,8 +534,9 @@ pub fn visualBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
         ox += n.rect.x;
         oy += n.rect.y;
         const parent = tree.nodeConst(n.parent) orelse break;
-        ox += parent.style.border.left + parent.style.padding.left;
-        oy += parent.style.border.top + parent.style.padding.top;
+        const edges = geometryBoxEdges(parent, parent.rect.w);
+        ox += edges.border.left + edges.padding.left;
+        oy += edges.border.top + edges.padding.top;
         if (parent.scroll) |scroll| {
             ox -= scroll.state.offset[0];
             oy -= scroll.state.offset[1];
@@ -457,23 +555,9 @@ pub fn visualBorderRect(tree: *const WidgetTree, id: Id) Rect {
 
 /// Visual content box of a node, after ancestor scroll offsets are applied.
 pub fn visualContentRect(tree: *const WidgetTree, id: Id) Rect {
-    const r = visualBorderRect(tree, id);
-    const n = tree.nodeConst(id) orelse return r;
-    const resolved_style = n.style;
-    return .{
-        .x = r.x + resolved_style.border.left + resolved_style.padding.left,
-        .y = r.y + resolved_style.border.top + resolved_style.padding.top,
-        .w = @max(
-            0,
-            r.w - resolved_style.border.left - resolved_style.border.right -
-                resolved_style.padding.left - resolved_style.padding.right,
-        ),
-        .h = @max(
-            0,
-            r.h - resolved_style.border.top - resolved_style.border.bottom -
-                resolved_style.padding.top - resolved_style.padding.bottom,
-        ),
-    };
+    const border_rect = visualBorderRect(tree, id);
+    const node = tree.nodeConst(id) orelse return border_rect;
+    return contentBoxRect(border_rect, node);
 }
 
 /// Return whether a point is inside every clipped ancestor of a node.
@@ -495,22 +579,9 @@ fn rectContainsPoint(rect: Rect, pos: [2]f32) bool {
 /// Absolute CONTENT box of a node: the absolute border box inset by the
 /// node's own border + padding. Where children live and text draws.
 pub fn contentRect(tree: *const WidgetTree, id: Id) Rect {
-    const r = absoluteRect(tree, id);
-    const resolved_style = tree.nodeConst(id).?.style;
-    return .{
-        .x = r.x + resolved_style.border.left + resolved_style.padding.left,
-        .y = r.y + resolved_style.border.top + resolved_style.padding.top,
-        .w = @max(
-            0,
-            r.w - resolved_style.border.left - resolved_style.border.right -
-                resolved_style.padding.left - resolved_style.padding.right,
-        ),
-        .h = @max(
-            0,
-            r.h - resolved_style.border.top - resolved_style.border.bottom -
-                resolved_style.padding.top - resolved_style.padding.bottom,
-        ),
-    };
+    const border_rect = absoluteRect(tree, id);
+    const node = tree.nodeConst(id).?;
+    return contentBoxRect(border_rect, node);
 }
 
 test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
@@ -658,6 +729,146 @@ test "absoluteRect: walks parent content boxes through border+padding" {
     // border (4,1,2,3).
     const rc = contentRect(&tree, row);
     try std.testing.expectEqual(Rect{ .x = 18 + 4, .y = 18 + 1, .w = 100 - 6, .h = 40 - 4 }, rc);
+}
+
+test "absoluteRect: typed zero edges override inherited legacy content origin" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const parent_id: Id = @enumFromInt(2);
+    const inherited_style = Style.resolve(.{}, .{
+        .border = .{ .top = 2, .left = 13 },
+        .padding = .{ .top = 3, .left = 17 },
+    });
+    const resolved_parent_style = Style.resolve(inherited_style, .{
+        .border_inset = .{
+            .top = .{ .length = 2 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+        .padding_inset = .{
+            .top = .{ .length = 3 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+    });
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = parent_id,
+        .rect = .{ .x = 4, .y = 6, .w = 20, .h = 10 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = parent_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
+        .style = resolved_parent_style,
+    });
+    try tree.appendChild(parent_id, child_id);
+
+    // The typed left border and padding are explicitly zero. The inherited
+    // legacy mirrors still contain 13 and 17 and must not shift the child.
+    try std.testing.expectEqual(
+        Rect{ .x = 14, .y = 31, .w = 20, .h = 10 },
+        absoluteRect(&tree, child_id),
+    );
+}
+
+test "geometry: typed percentage parent edges define child absolute and visual origin" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const parent_id: Id = @enumFromInt(2);
+    const parent_style: Style = .{
+        .display = .block,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 40 },
+        },
+        .border_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 5 },
+        },
+        .padding_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .percent = 0.25 },
+        },
+    };
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = parent_id,
+        .rect = .{ .x = 0, .y = 0, .w = 20, .h = 10 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = parent_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
+        .style = parent_style,
+    });
+    try tree.appendChild(parent_id, child_id);
+
+    const content_origin_x: f32 = 5 + 100 * 0.25;
+    const expected: Rect = .{ .x = content_origin_x, .y = 0, .w = 20, .h = 10 };
+    try std.testing.expectEqual(@as(f32, 0), tree.nodeConst(child_id).?.rect.x);
+    try std.testing.expectEqual(expected, absoluteRect(&tree, child_id));
+    try std.testing.expectEqual(expected, visualContentRect(&tree, child_id));
+}
+
+test "geometry: stored resolved percentage edges retain containing basis" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const parent_id: Id = @enumFromInt(2);
+    const containing_width: f32 = 200;
+    const parent_width: f32 = 100;
+    const padding_fraction: f32 = 0.10;
+    const resolved_padding_left = containing_width * padding_fraction;
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = parent_id,
+        .rect = .{ .w = 20, .h = 10 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = parent_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .w = parent_width, .h = 40 },
+        .style = .{
+            .display = .block,
+            .padding_inset = .{
+                .top = .{ .length = 0 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .percent = padding_fraction },
+            },
+        },
+        .resolved_box_edges = .{
+            .border = .{},
+            .padding = .{ .left = resolved_padding_left },
+        },
+    });
+    try tree.appendChild(parent_id, child_id);
+
+    // Recomputing 10% from the 100px border box would incorrectly yield 10px.
+    const expected_origin = [2]f32{ 20, 0 };
+    try std.testing.expectEqual(expected_origin, absoluteBorderOrigin(&tree, child_id));
+    try std.testing.expectEqual(expected_origin, visualBorderOrigin(&tree, child_id));
 }
 
 test "absoluteRect: root-level node is relative to the surface (0,0)" {

@@ -486,6 +486,25 @@ pub fn lengthPercentageAutoFrom(value: anytype) LengthPercentageAuto {
     };
 }
 
+fn syncLegacyFixedSides(legacy: *Sides, typed: *const LengthPercentageRect) void {
+    switch (typed.top) {
+        .length => |value| legacy.top = value,
+        .percent => {},
+    }
+    switch (typed.right) {
+        .length => |value| legacy.right = value,
+        .percent => {},
+    }
+    switch (typed.bottom) {
+        .length => |value| legacy.bottom = value,
+        .percent => {},
+    }
+    switch (typed.left) {
+        .length => |value| legacy.left = value,
+        .percent => {},
+    }
+}
+
 /// Distinguishes an unspecified override from an explicit texture removal.
 pub const TextureOverride = union(enum) {
     unspecified,
@@ -694,8 +713,14 @@ pub const Style = struct {
             .clear => result.aspect_ratio = null,
         }
         if (local.margin_inset) |value| result.margin_inset = value;
-        if (local.border_inset) |value| result.border_inset = value;
-        if (local.padding_inset) |value| result.padding_inset = value;
+        if (local.border_inset) |value| {
+            result.border_inset = value;
+            syncLegacyFixedSides(&result.border, &value);
+        }
+        if (local.padding_inset) |value| {
+            result.padding_inset = value;
+            syncLegacyFixedSides(&result.padding, &value);
+        }
         if (std.meta.activeTag(result.flex_basis) == .auto and result.basis > 0) {
             result.flex_basis = .{ .length = result.basis };
         }

@@ -113,6 +113,7 @@ test {
     _ = @import("taffy_grid_conformance.zig");
     _ = @import("layout/sizing_test.zig");
     _ = @import("layout/root_test.zig");
+    _ = @import("layout/block_float_test.zig");
 }
 
 test "canonical module exports App and DrawCtx" {
