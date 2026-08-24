@@ -110,7 +110,7 @@ pub fn runAll(
     allocator: std.mem.Allocator,
     filter: ?[]const u8,
 ) FixtureError!FixtureSummary {
-    return runFiltered(allocator, filter, null);
+    return runFiltered(allocator, filter, null, 0, null);
 }
 
 pub fn runVariant(
@@ -118,13 +118,22 @@ pub fn runVariant(
     id: []const u8,
     variant: []const u8,
 ) FixtureError!FixtureSummary {
-    return runFiltered(allocator, id, variant);
+    return runFiltered(allocator, id, variant, 0, null);
+}
+pub fn runRange(
+    allocator: std.mem.Allocator,
+    start: usize,
+    count: usize,
+) FixtureError!FixtureSummary {
+    return runFiltered(allocator, null, null, start, count);
 }
 
 fn runFiltered(
     allocator: std.mem.Allocator,
     filter: ?[]const u8,
     variant: ?[]const u8,
+    start: usize,
+    count: ?usize,
 ) FixtureError!FixtureSummary {
     var io_impl = std.Io.Threaded.init(allocator, .{});
     defer io_impl.deinit();
@@ -160,15 +169,27 @@ fn runFiltered(
 
     try validateCorpus(parsed_corpus.value, parsed_manifest.value);
     try validateSelection(parsed_corpus.value.cases, parsed_manifest.value.selection);
+    if (count) |maximum| {
+        if (maximum == 0) return .{};
+    }
 
     var summary: FixtureSummary = .{};
     var found = false;
+    var matched: usize = 0;
     for (parsed_corpus.value.cases) |fixture_case| {
         if (!matchesFilter(fixture_case, filter) or
             !matchesVariant(fixture_case, variant))
         {
             continue;
         }
+        if (matched < start) {
+            matched += 1;
+            continue;
+        }
+        if (count) |maximum| {
+            if (summary.passed + summary.failed + summary.unsupported >= maximum) break;
+        }
+        matched += 1;
         found = true;
 
         const passed = runCase(allocator, fixture_case) catch |case_error| {
