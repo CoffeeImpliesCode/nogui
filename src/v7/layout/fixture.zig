@@ -381,7 +381,11 @@ const TreeBuilder = struct {
         const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
         const fixture_node = self.fixture_case.nodes[index];
         const expected = self.fixture_case.expected[index];
-        const node_style = try fixtureStyle(&self.result.resources, fixture_node);
+        const node_style = try fixtureStyle(
+            &self.result.resources,
+            fixture_node,
+            self.fixture_case.variant,
+        );
         const kind = try fixtureKind(fixture_node, node_style);
         const scroll = try fixtureScrollSpec(&self.result.resources, index, expected);
 
@@ -837,12 +841,32 @@ fn fixtureKind(fixture_node: Node, node_style: style.Style) CaseError!widget.Wid
     return .{ .column = .{} };
 }
 
-fn fixtureStyle(resources: *FixtureResources, fixture_node: Node) CaseError!style.Style {
+fn variantBoxSizing(variant: []const u8) CaseError!style.BoxSizing {
+    if (std.mem.eql(u8, variant, "border_box_ltr") or
+        std.mem.eql(u8, variant, "border_box_rtl"))
+    {
+        return .border_box;
+    }
+    if (std.mem.eql(u8, variant, "content_box_ltr") or
+        std.mem.eql(u8, variant, "content_box_rtl"))
+    {
+        return .content_box;
+    }
+    return error.InvalidFixture;
+}
+
+fn fixtureStyle(
+    resources: *FixtureResources,
+    fixture_node: Node,
+    variant: []const u8,
+) CaseError!style.Style {
     if (fixture_node.writing_mode) |writing_mode| {
         if (!std.mem.eql(u8, writing_mode, "horizontal-tb")) return error.Unsupported;
     }
 
-    var result: style.Style = .{};
+    var result: style.Style = .{
+        .box_sizing = try variantBoxSizing(variant),
+    };
     try applyDirection(&result, fixture_node.style.direction);
     setBorder(&result, .top, try pixelsF32(fixture_node.style.border_top));
     setBorder(&result, .right, try pixelsF32(fixture_node.style.border_right));
@@ -861,13 +885,27 @@ fn fixtureStyle(resources: *FixtureResources, fixture_node: Node) CaseError!styl
         if (hasTextBreakOpportunity(text)) return error.Unsupported;
         const intrinsic = ahemMeasure(text, 0, 0);
         if (dimensionAuto(result.size.width)) {
-            result.size.width = .{ .length = intrinsic.width };
+            result.size.width = .{ .length = textSizingValue(
+                intrinsic.width,
+                result.border.left + result.border.right + result.padding.left + result.padding.right,
+                result.box_sizing,
+            ) };
         }
         if (dimensionAuto(result.size.height)) {
-            result.size.height = .{ .length = intrinsic.height };
+            result.size.height = .{ .length = textSizingValue(
+                intrinsic.height,
+                result.border.top + result.border.bottom + result.padding.top + result.padding.bottom,
+                result.box_sizing,
+            ) };
         }
     }
     return result;
+}
+fn textSizingValue(intrinsic: f32, edges: f32, box_sizing: style.BoxSizing) f32 {
+    return switch (box_sizing) {
+        .content_box => intrinsic,
+        .border_box => intrinsic + edges,
+    };
 }
 
 fn applyFixtureAttributes(
@@ -1339,12 +1377,66 @@ test "fixture unmapped style syntax stays unsupported" {
         .border_bottom = "0px",
         .border_left = "0px",
     };
-    try std.testing.expectError(error.Unsupported, fixtureStyle(&fixture_tree.resources, .{
+    try std.testing.expectError(error.Unsupported, fixtureStyle(
+        &fixture_tree.resources,
+        .{
+            .kind = "div",
+            .writing_mode = "vertical-rl",
+            .child_count = 0,
+            .style = legacy,
+        },
+        "border_box_ltr",
+    ));
+}
+test "fixture variants supply generated box sizing defaults" {
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "0px",
+        .border_right = "0px",
+        .border_bottom = "0px",
+        .border_left = "0px",
+    };
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+    const node: Node = .{
         .kind = "div",
-        .writing_mode = "vertical-rl",
         .child_count = 0,
         .style = legacy,
-    }));
+    };
+    try std.testing.expectEqual(
+        style.BoxSizing.border_box,
+        (try fixtureStyle(&fixture_tree.resources, node, "border_box_ltr")).box_sizing,
+    );
+    try std.testing.expectEqual(
+        style.BoxSizing.content_box,
+        (try fixtureStyle(&fixture_tree.resources, node, "content_box_rtl")).box_sizing,
+    );
+}
+
+test "fixture text sizing honors generated box sizing defaults" {
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "2px",
+        .border_right = "4px",
+        .border_bottom = "6px",
+        .border_left = "8px",
+    };
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+    const node: Node = .{
+        .kind = "text",
+        .text = "HHHH",
+        .child_count = 0,
+        .style = legacy,
+    };
+    try std.testing.expect(std.meta.eql(
+        @as(style.Dimension, .{ .length = 52 }),
+        (try fixtureStyle(&fixture_tree.resources, node, "border_box_ltr")).size.width,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.Dimension, .{ .length = 40 }),
+        (try fixtureStyle(&fixture_tree.resources, node, "content_box_ltr")).size.width,
+    ));
 }
 
 test "fixture grid templates parse all supported track classes" {

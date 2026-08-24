@@ -337,6 +337,96 @@ test "forest absolute auto root keeps its natural width without paired insets" {
     try expectRect(&tree, root_id, .{ .x = 0, .y = 4, .w = 20, .h = 10 });
 }
 
+test "forest absolute auto-width column flex shrinks to widest intrinsic child" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const nested_leaf_id: Id = @enumFromInt(3);
+    const third_id: Id = @enumFromInt(4);
+    const absolute_id: Id = @enumFromInt(5);
+    const root_id: Id = @enumFromInt(6);
+
+    try appendNode(
+        &tree,
+        first_id,
+        absolute_id,
+        fixedStyle(.block, 200, 10),
+        .{ .spacer = .{} },
+    );
+
+    var second_style = autoStyle(.block);
+    second_style.size.width = .{ .percent = 1 };
+    second_style.size.height = .{ .length = 10 };
+    try appendNode(
+        &tree,
+        second_id,
+        absolute_id,
+        second_style,
+        .{ .spacer = .{} },
+    );
+
+    try appendNode(
+        &tree,
+        nested_leaf_id,
+        third_id,
+        fixedStyle(.block, 10, 10),
+        .{ .spacer = .{} },
+    );
+
+    var third_style = autoStyle(.flex);
+    third_style.size.width = .{ .percent = 1 };
+    third_style.size.height = .{ .length = 10 };
+    try appendNode(
+        &tree,
+        third_id,
+        absolute_id,
+        third_style,
+        .{ .column = .{} },
+    );
+
+    var absolute_style = autoStyle(.flex);
+    absolute_style.position = .absolute;
+    absolute_style.direction = .column;
+    absolute_style.inset = .{
+        .top = .{ .length = 40 },
+        .right = .auto,
+        .bottom = .auto,
+        .left = .{ .length = 50 },
+    };
+    try appendNode(
+        &tree,
+        absolute_id,
+        root_id,
+        absolute_style,
+        .{ .column = .{} },
+    );
+
+    try appendNode(
+        &tree,
+        root_id,
+        .root,
+        fixedStyle(.block, 300, 110),
+        .{ .column = .{} },
+    );
+
+    try tree.appendChild(third_id, nested_leaf_id);
+    try tree.appendChild(absolute_id, first_id);
+    try tree.appendChild(absolute_id, second_id);
+    try tree.appendChild(absolute_id, third_id);
+    try tree.appendChild(root_id, absolute_id);
+
+    try layout(&tree, .{ .width = 300, .height = 110 });
+
+    try expectRect(&tree, root_id, .{ .x = 0, .y = 0, .w = 300, .h = 110 });
+    try expectRect(&tree, absolute_id, .{ .x = 50, .y = 40, .w = 200, .h = 30 });
+    try expectRect(&tree, first_id, .{ .x = 0, .y = 0, .w = 200, .h = 10 });
+    try expectRect(&tree, second_id, .{ .x = 0, .y = 10, .w = 200, .h = 10 });
+    try expectRect(&tree, third_id, .{ .x = 0, .y = 20, .w = 200, .h = 10 });
+    try expectRect(&tree, nested_leaf_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
+}
+
 test "forest absolute paired insets clamp auto and concrete widths" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();

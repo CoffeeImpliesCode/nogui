@@ -491,6 +491,7 @@ fn layoutPreparedContainerUnchecked(
             measure,
             layout_ctx,
             child_context,
+            false,
         );
         const clear_y = try clearBottom(
             tree,
@@ -546,6 +547,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     child_context,
+                    false,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -619,6 +621,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     child_context,
+                    false,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -760,6 +763,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     child_context,
+                    false,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -834,6 +838,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     mixed_child_context,
+                    false,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -1177,14 +1182,6 @@ fn layoutAbsoluteChildren(
             .padding = child_edges.padding,
         };
         var margins = try resolveMargins(child_style, content_width);
-        var intrinsic = try intrinsicContentSizeWithContext(
-            tree,
-            child,
-            child_edges,
-            measure,
-            layout_ctx,
-            absolute_context,
-        );
         const left = try resolveInset(child_style.inset.left, content_width);
         const right = try resolveInset(child_style.inset.right, content_width);
         const top = try resolveInset(child_style.inset.top, content_height);
@@ -1223,6 +1220,17 @@ fn layoutAbsoluteChildren(
             )
         else
             null;
+        const intrinsic_width =
+            child_style.size.width == .auto and auto_width_border == null;
+        var intrinsic = try intrinsicContentSizeWithContext(
+            tree,
+            child,
+            child_edges,
+            measure,
+            layout_ctx,
+            absolute_context,
+            intrinsic_width,
+        );
         var child_size = try resolveChildSize(
             child_style,
             absolute_context,
@@ -1247,6 +1255,7 @@ fn layoutAbsoluteChildren(
                 measure,
                 layout_ctx,
                 absolute_context,
+                intrinsic_width,
             );
             child_size = try resolveChildSize(
                 child_style,
@@ -1647,6 +1656,7 @@ fn legacyCompatibleEdge(value: style.LengthPercentage, legacy: f32) style.Length
 fn requestFromSizingContext(
     input: sizing.SizingContext,
     forced_border: ?widget.Size,
+    intrinsic_width: bool,
 ) sizing.Error!layout_context.Request {
     const width = switch (input.available.width) {
         .definite => |value| try finite(value),
@@ -1664,6 +1674,7 @@ fn requestFromSizingContext(
         .available = .{ .width = width, .height = height },
         .percentage_basis = input.percentage_basis,
         .forced_border = forced_border,
+        .intrinsic_width = intrinsic_width,
         .intrinsic_height = intrinsic_height,
     };
 }
@@ -1675,6 +1686,7 @@ fn intrinsicContentSizeWithContext(
     measure: ?layout_context.MeasureFn,
     layout_ctx: ?*layout_context.LayoutContext,
     containing: sizing.SizingContext,
+    intrinsic_width: bool,
 ) sizing.Error!widget.Size {
     if (layout_ctx) |context| {
         if (node.children.items.len != 0 and
@@ -1685,7 +1697,7 @@ fn intrinsicContentSizeWithContext(
                 context,
                 tree,
                 node,
-                try requestFromSizingContext(containing, null),
+                try requestFromSizingContext(containing, null, intrinsic_width),
             );
             return measured.content;
         }
@@ -1709,6 +1721,7 @@ fn layoutMixedChild(
         try requestFromSizingContext(
             containing,
             .{ .width = child.rect.w, .height = child.rect.h },
+            false,
         ),
     );
 }
