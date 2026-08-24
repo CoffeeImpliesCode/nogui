@@ -31,7 +31,7 @@ pub const FixtureError = error{
     InvalidFixture,
 } || std.mem.Allocator.Error;
 
-const CaseError = FixtureError || error{Unsupported};
+const CaseError = FixtureError || error{ Unsupported, LayoutFailed };
 
 const Corpus = struct {
     schema: u32,
@@ -110,6 +110,22 @@ pub fn runAll(
     allocator: std.mem.Allocator,
     filter: ?[]const u8,
 ) FixtureError!FixtureSummary {
+    return runFiltered(allocator, filter, null);
+}
+
+pub fn runVariant(
+    allocator: std.mem.Allocator,
+    id: []const u8,
+    variant: []const u8,
+) FixtureError!FixtureSummary {
+    return runFiltered(allocator, id, variant);
+}
+
+fn runFiltered(
+    allocator: std.mem.Allocator,
+    filter: ?[]const u8,
+    variant: ?[]const u8,
+) FixtureError!FixtureSummary {
     var io_impl = std.Io.Threaded.init(allocator, .{});
     defer io_impl.deinit();
     const io = io_impl.io();
@@ -148,13 +164,21 @@ pub fn runAll(
     var summary: FixtureSummary = .{};
     var found = false;
     for (parsed_corpus.value.cases) |fixture_case| {
-        if (!matchesFilter(fixture_case, filter)) continue;
+        if (!matchesFilter(fixture_case, filter) or
+            !matchesVariant(fixture_case, variant))
+        {
+            continue;
+        }
         found = true;
 
         const passed = runCase(allocator, fixture_case) catch |case_error| {
             switch (case_error) {
                 error.Unsupported => {
                     summary.unsupported += 1;
+                    continue;
+                },
+                error.LayoutFailed => {
+                    summary.failed += 1;
                     continue;
                 },
                 error.InvalidFixture => return error.InvalidFixture,
@@ -664,7 +688,7 @@ fn runCase(allocator: std.mem.Allocator, fixture_case: Case) CaseError!bool {
         .measure = ahemMeasure,
     }) catch |layout_error| {
         if (layout_error == error.OutOfMemory) return error.OutOfMemory;
-        return error.InvalidFixture;
+        return error.LayoutFailed;
     };
     return compareFixtureTree(fixture_case, &fixture_tree);
 }
@@ -2399,6 +2423,11 @@ fn matchesFilter(fixture_case: Case, filter: ?[]const u8) bool {
     const selected = filter orelse return true;
     if (std.mem.eql(u8, fixture_case.id, selected)) return true;
     return std.mem.eql(u8, fixture_case.source, selected);
+}
+
+fn matchesVariant(fixture_case: Case, variant: ?[]const u8) bool {
+    const selected = variant orelse return true;
+    return std.mem.eql(u8, fixture_case.variant, selected);
 }
 
 fn scalarMatchesRounded(actual: f64, expected: f64, use_rounding: bool) bool {
