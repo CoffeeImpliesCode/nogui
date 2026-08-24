@@ -102,6 +102,7 @@ pub const callback = @import("callback.zig");
 pub const drawcmd = @import("drawcmd.zig");
 pub const event = @import("event.zig");
 pub const flex = @import("flex.zig");
+pub const layout = @import("layout/root.zig");
 pub const input = @import("input.zig");
 pub const widget = @import("widget.zig");
 pub const runtime = @import("runtime.zig");
@@ -110,7 +111,8 @@ test {
     _ = @import("taffy_block_conformance.zig");
     _ = @import("taffy_flex_conformance.zig");
     _ = @import("taffy_grid_conformance.zig");
-    std.testing.refAllDecls(@This());
+    _ = @import("layout/sizing_test.zig");
+    _ = @import("layout/root_test.zig");
 }
 
 test "canonical module exports App and DrawCtx" {

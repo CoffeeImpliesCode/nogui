@@ -25,6 +25,7 @@ const Size = @import("widget.zig").Size;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
 const ScrollState = @import("widget.zig").ScrollState;
 const flex = @import("flex.zig");
+const layout = @import("layout/root.zig");
 const Event = @import("event.zig").Event;
 const KeyEvent = @import("event.zig").KeyEvent;
 const WidgetNode = @import("widget.zig").WidgetNode;
@@ -544,6 +545,7 @@ pub const App = struct {
 
         if (@hasField(T, "frame_count")) root.frame_count = frame_number;
         const surface = self.surface;
+        try layout.validateAvailable(surface);
 
         const arena_alloc = self.arenas[build_idx].allocator();
         const tree = try arena_alloc.create(WidgetTree);
@@ -585,7 +587,7 @@ pub const App = struct {
         // pointer register() stored, so click dispatch targets it too.
         try root_component.vtable.draw(root, &ctx);
 
-        flex.layoutWith(tree, surface, self.measure);
+        try layout.layoutTree(tree, .{ .allocator = arena_alloc, .available = surface, .measure = self.measure });
         defer self.unmountStaleGpuComponents();
         if (gpu_frame) |active_gpu_frame| {
             try self.dispatchGpuFrame(active_gpu_frame);
@@ -676,6 +678,33 @@ pub const App = struct {
 };
 
 // --- tests ---------------------------------------------------------------
+
+test "App: frame rejects a NaN surface width before root draw" {
+    const Root = struct {
+        const Self = @This();
+        draw_count: usize = 0,
+
+        pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+            self.draw_count += 1;
+            _ = ctx;
+        }
+    };
+
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+
+    var root: Root = .{};
+    _ = try app.register(Root, &root);
+
+    try std.testing.expectError(
+        error.InvalidStyle,
+        app.frame(Root, &root, 1, .{
+            .width = std.math.nan(f32),
+            .height = 600,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), root.draw_count);
+}
 
 /// Minimal counter component: a label that reflects `count` plus an
 /// Increment button. Mirrors the §10 demo shape (minus the slider).
