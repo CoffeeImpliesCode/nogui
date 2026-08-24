@@ -156,7 +156,7 @@ fn layoutPreparedContainerUnchecked(
             .border = child_edges.border,
             .padding = child_edges.padding,
         };
-        const margins = try resolveMargins(
+        var margins = try resolveMargins(
             child_style,
             child_context.percentage_basis.width,
         );
@@ -252,6 +252,12 @@ fn layoutPreparedContainerUnchecked(
             continue;
         }
 
+        try resolveNormalAutoMargins(
+            child_style,
+            content_width,
+            child_width,
+            &margins,
+        );
         var child_x = inlineStartX(
             container_style.writing_direction,
             content_width,
@@ -947,6 +953,39 @@ fn resolveMargin(
             break :blk try finite(checked_fraction * try finite(basis));
         },
     };
+}
+
+fn isAutoMargin(value: style.LengthPercentageAuto) bool {
+    return switch (value) {
+        .auto => true,
+        else => false,
+    };
+}
+
+fn resolveNormalAutoMargins(
+    input_style: style.Style,
+    content_width: f32,
+    border_width: f32,
+    margins: *style.Sides,
+) sizing.Error!void {
+    const left_auto = isAutoMargin(input_style.margin_inset.left);
+    const right_auto = isAutoMargin(input_style.margin_inset.right);
+    const auto_count: u8 = @as(u8, @intFromBool(left_auto)) +
+        @as(u8, @intFromBool(right_auto));
+    if (auto_count == 0) return;
+    const free_space = @max(
+        0,
+        try subtractFinite(
+            try subtractFinite(
+                try subtractFinite(content_width, border_width),
+                margins.left,
+            ),
+            margins.right,
+        ),
+    );
+    const share = free_space / @as(f32, @floatFromInt(auto_count));
+    if (left_auto) margins.left = share;
+    if (right_auto) margins.right = share;
 }
 
 fn applyRelativeInsets(

@@ -1230,6 +1230,135 @@ test "prepared pass applies margins and relative insets without shifting later f
     try expectRelative(&tree, following_id, .{ .x = 3, .y = 21, .w = 15, .h = 8 });
 }
 
+test "prepared pass centers fixed-width block with horizontal auto margins" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .auto,
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 30 } },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 30), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 30 });
+    try expectRelative(&tree, child_id, .{ .x = 40, .y = 0, .w = 20, .h = 10 });
+}
+
+test "prepared pass gives one auto margin all remaining inline space" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 30 } },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 30), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 30 });
+    try expectRelative(&tree, child_id, .{ .x = 80, .y = 0, .w = 20, .h = 10 });
+}
+
+test "prepared pass uses physical auto-margin coordinates under rtl" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .auto,
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .writing_direction = .rtl,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 30 } },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 30), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 30 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
+}
+
+test "prepared pass gives auto-width block no auto-margin expansion" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .auto,
+            .right = .auto,
+            .bottom = .auto,
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 30 } },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 30), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 30 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 100, .h = 10 });
+}
+
 test "prepared pass updates scroll limits after recursive child geometry" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
