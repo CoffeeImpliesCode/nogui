@@ -621,6 +621,133 @@ test "layoutTree dispatches a mixed fixed tree through the public facade" {
     );
 }
 
+test "layoutTree dispatches an eligible multi-root forest through the facade" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_leaf_id: Id = @enumFromInt(1);
+    const first_flex_id: Id = @enumFromInt(2);
+    const first_root_id: Id = @enumFromInt(3);
+    const second_leaf_id: Id = @enumFromInt(4);
+    const second_flex_id: Id = @enumFromInt(5);
+    const second_root_id: Id = @enumFromInt(6);
+    for ([_]struct {
+        id: Id,
+        parent: Id,
+        kind: widget.WidgetKind,
+        node_style: style.Style,
+    }{
+        .{
+            .id = first_leaf_id,
+            .parent = first_flex_id,
+            .kind = .{ .spacer = .{} },
+            .node_style = .{
+                .display = .block,
+                .box_sizing = .border_box,
+                .size = .{
+                    .width = .{ .length = 12 },
+                    .height = .{ .length = 8 },
+                },
+            },
+        },
+        .{
+            .id = first_flex_id,
+            .parent = first_root_id,
+            .kind = .{ .row = .{} },
+            .node_style = .{
+                .display = .flex,
+                .direction = .row,
+                .@"align" = .start,
+                .box_sizing = .border_box,
+                .size = .{
+                    .width = .{ .length = 40 },
+                    .height = .{ .length = 10 },
+                },
+            },
+        },
+        .{
+            .id = first_root_id,
+            .parent = .root,
+            .kind = .{ .column = .{} },
+            .node_style = .{
+                .display = .flow_root,
+                .box_sizing = .border_box,
+                .size = .{
+                    .width = .{ .length = 100 },
+                    .height = .{ .length = 20 },
+                },
+            },
+        },
+        .{
+            .id = second_leaf_id,
+            .parent = second_flex_id,
+            .kind = .{ .spacer = .{} },
+            .node_style = .{
+                .display = .block,
+                .box_sizing = .border_box,
+                .size = .{
+                    .width = .{ .length = 12 },
+                    .height = .{ .length = 8 },
+                },
+            },
+        },
+        .{
+            .id = second_flex_id,
+            .parent = second_root_id,
+            .kind = .{ .row = .{} },
+            .node_style = .{
+                .display = .flex,
+                .direction = .row,
+                .@"align" = .start,
+                .box_sizing = .border_box,
+                .size = .{
+                    .width = .{ .length = 40 },
+                    .height = .{ .length = 10 },
+                },
+            },
+        },
+        .{
+            .id = second_root_id,
+            .parent = .root,
+            .kind = .{ .column = .{} },
+            .node_style = .{
+                .display = .flow_root,
+                .box_sizing = .border_box,
+                .size = .{
+                    .width = .{ .length = 100 },
+                    .height = .{ .length = 20 },
+                },
+            },
+        },
+    }) |entry| {
+        try tree.appendNode(.{
+            .id = entry.id,
+            .kind = entry.kind,
+            .parent = entry.parent,
+            .style = entry.node_style,
+        });
+    }
+    try tree.appendChild(first_flex_id, first_leaf_id);
+    try tree.appendChild(first_root_id, first_flex_id);
+    try tree.appendChild(second_flex_id, second_leaf_id);
+    try tree.appendChild(second_root_id, second_flex_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 100, .h = 20 },
+        tree.node(first_root_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 20, .w = 100, .h = 20 },
+        tree.node(second_root_id).?.rect,
+    );
+}
+
 test "layoutTree dispatches a mixed auto-height block root" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();

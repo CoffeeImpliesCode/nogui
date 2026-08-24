@@ -252,7 +252,7 @@ fn eligibleGridRootIndex(tree: *const widget.WidgetTree) ?usize {
 }
 
 pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
-    if (dispatch.eligibleMixedFixedTree(tree)) {
+    if (dispatch.eligibleMixedForest(tree)) {
         return dispatch.layoutTree(tree, .{
             .allocator = options.allocator,
             .available = options.available,

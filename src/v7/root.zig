@@ -121,6 +121,7 @@ test {
     _ = @import("layout/dispatch_test.zig");
     _ = @import("layout/dispatch_auto_test.zig");
     _ = @import("layout/dispatch_root_auto_test.zig");
+    _ = @import("layout/dispatch_forest_test.zig");
 }
 
 test "canonical module exports App and DrawCtx" {

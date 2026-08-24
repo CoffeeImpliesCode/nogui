@@ -153,7 +153,7 @@ test "dispatcher stretches an auto-sized grid root and keeps natural height" {
     try expectRect(&tree, second_id, .{ .x = 0, .y = 10, .w = 40, .h = 5 });
 }
 
-test "dispatcher preserves concrete mixed flex root axes" {
+test "dispatcher preserves concrete root height and stretches root pseudo width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -184,7 +184,7 @@ test "dispatcher preserves concrete mixed flex root axes" {
 
     try layoutDispatch(&tree, .{ .width = 120, .height = 80 });
 
-    try expectRect(&tree, root_id, .{ .x = 0, .y = 0, .w = 90, .h = 30 });
+    try expectRect(&tree, root_id, .{ .x = 0, .y = 0, .w = 120, .h = 30 });
     try expectRect(&tree, grid_id, .{ .x = 0, .y = 0, .w = 24, .h = 10 });
     try expectRect(&tree, leaf_id, .{ .x = 0, .y = 0, .w = 24, .h = 10 });
 }

@@ -23,22 +23,30 @@ pub fn validateNaturalRequest(
     node: *const widget.WidgetNode,
     request: Request,
 ) LayoutError!void {
-    try validateConcrete(request.available.width);
-    try validateConcrete(request.available.height);
+    const dependencies = percentageDependencies(
+        tree,
+        node,
+        tree.nodes.items.len + 1,
+        null,
+    );
     if (request.percentage_basis.width) |basis| {
         try validateConcrete(basis);
-        if (!request.intrinsic_width and basis != request.available.width) {
+        if (basis != request.available.width and
+            (!request.intrinsic_width or dependencies.width))
+        {
             return error.InvalidStyle;
         }
-    } else if (hasPercentageDependency(tree, node, tree.nodes.items.len + 1)) {
+    } else if (dependencies.width) {
         return error.InvalidStyle;
     }
     if (request.percentage_basis.height) |basis| {
         try validateConcrete(basis);
-        if (!request.intrinsic_height and basis != request.available.height) {
+        if (basis != request.available.height and
+            (!request.intrinsic_height or dependencies.height))
+        {
             return error.InvalidStyle;
         }
-    } else if (hasPercentageDependency(tree, node, tree.nodes.items.len + 1)) {
+    } else if (dependencies.height) {
         return error.InvalidStyle;
     }
 }
@@ -47,39 +55,66 @@ fn validateConcrete(value: f32) LayoutError!void {
     if (!std.math.isFinite(value) or value < 0) return error.InvalidStyle;
 }
 
-fn hasPercentageDependency(
+const PercentageDependencies = struct {
+    width: bool = false,
+    height: bool = false,
+
+    fn combine(left: PercentageDependencies, right: PercentageDependencies) PercentageDependencies {
+        return .{
+            .width = left.width or right.width,
+            .height = left.height or right.height,
+        };
+    }
+};
+
+fn percentageDependencies(
     tree: *const widget.WidgetTree,
     node: *const widget.WidgetNode,
     depth: usize,
-) bool {
-    if (depth == 0) return true;
+    parent_direction: ?style.FlexDirection,
+) PercentageDependencies {
+    if (depth == 0) return .{ .width = true, .height = true };
+    if (node.layout_hidden or node.style.display == .none) return .{};
     const input = node.style;
-    if (isPercentDimension(input.size.width) or
-        isPercentDimension(input.size.height) or
-        isPercentDimension(input.min_size.width) or
-        isPercentDimension(input.min_size.height) or
-        isPercentDimension(input.max_size.width) or
-        isPercentDimension(input.max_size.height) or
-        isPercentDimension(input.flex_basis))
-    {
-        return true;
-    }
-    if (isPercentRect(input.border_inset) or isPercentRect(input.padding_inset)) return true;
-    if (isPercentAutoRect(input.inset) or isPercentAutoRect(input.margin_inset)) return true;
-    if (isPercentTrack(input.grid_auto_columns) or isPercentTrack(input.grid_auto_rows)) {
-        return true;
+    var result: PercentageDependencies = .{
+        .width = isPercentDimension(input.size.width) or
+            isPercentDimension(input.min_size.width) or
+            isPercentDimension(input.max_size.width) or
+            isPercentRectWidth(input.border_inset) or
+            isPercentRectWidth(input.padding_inset) or
+            isPercentInsetsWidth(input.margin_inset) or
+            isPercentTrack(input.grid_auto_columns),
+        .height = isPercentDimension(input.size.height) or
+            isPercentDimension(input.min_size.height) or
+            isPercentDimension(input.max_size.height) or
+            isPercentTrack(input.grid_auto_rows),
+    };
+    if (isPercentDimension(input.flex_basis)) {
+        if (parent_direction) |direction| {
+            if (style.directionIsColumn(direction)) {
+                result.height = true;
+            } else {
+                result.width = true;
+            }
+        }
     }
     for (input.grid_template_columns) |track| {
-        if (isPercentTrack(track)) return true;
+        if (isPercentTrack(track)) result.width = true;
     }
     for (input.grid_template_rows) |track| {
-        if (isPercentTrack(track)) return true;
+        if (isPercentTrack(track)) result.height = true;
     }
+    const child_parent_direction: ?style.FlexDirection = if (input.display == .flex)
+        input.direction
+    else
+        null;
     for (node.children.items) |child_id| {
-        const child = tree.nodeConst(child_id) orelse return true;
-        if (hasPercentageDependency(tree, child, depth - 1)) return true;
+        const child = tree.nodeConst(child_id) orelse return .{ .width = true, .height = true };
+        result = result.combine(
+            percentageDependencies(tree, child, depth - 1, child_parent_direction),
+        );
     }
-    return false;
+    return result;
 }
 
 fn isPercentDimension(value: style.Dimension) bool {
@@ -89,18 +124,26 @@ fn isPercentDimension(value: style.Dimension) bool {
     };
 }
 
-fn isPercentRect(value: style.LengthPercentageRect) bool {
+fn isPercentRectWidth(value: style.LengthPercentageRect) bool {
     return isPercentLength(value.top) or
         isPercentLength(value.right) or
         isPercentLength(value.bottom) or
         isPercentLength(value.left);
 }
 
-fn isPercentAutoRect(value: style.Insets) bool {
+fn isPercentInsetsWidth(value: style.Insets) bool {
     return isPercentAuto(value.top) or
         isPercentAuto(value.right) or
         isPercentAuto(value.bottom) or
         isPercentAuto(value.left);
+}
+
+fn isPercentInsetsHorizontal(value: style.Insets) bool {
+    return isPercentAuto(value.left) or isPercentAuto(value.right);
+}
+
+fn isPercentInsetsHeight(value: style.Insets) bool {
+    return isPercentAuto(value.top) or isPercentAuto(value.bottom);
 }
 
 fn isPercentLength(value: style.LengthPercentage) bool {

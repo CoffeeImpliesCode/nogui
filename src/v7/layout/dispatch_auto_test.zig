@@ -149,6 +149,31 @@ test "auto-height block preserves intrinsic main size of wrapped column flex" {
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
     try expectRelative(&tree, second_id, .{ .x = 0, .y = 20, .w = 20, .h = 20 });
 }
+
+test "mixed natural measurement allows width percentage with intrinsic height" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const leaf_id: Id = @enumFromInt(1);
+    const flex_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, leaf_id, flex_id, fixedStyle(.block, 10, 10), .{ .spacer = .{} });
+    var flex_style = autoStyle(.flex);
+    flex_style.direction = .row;
+    flex_style.@"align" = .start;
+    flex_style.size.width = .{ .percent = 0.5 };
+    try appendNode(&tree, flex_id, root_id, flex_style, .{ .row = .{} });
+    var root_style = fixedStyle(.flow_root, 100, 40);
+    root_style.size.height = .auto;
+    try appendNode(&tree, root_id, .root, root_style, .{ .column = .{} });
+    try tree.appendChild(flex_id, leaf_id);
+    try tree.appendChild(root_id, flex_id);
+
+    try layout(&tree, .{ .width = 100, .height = 40 });
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 10 });
+    try expectRelative(&tree, flex_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+}
 test "fixed flex root uses auto grid tracks and gap as natural size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
