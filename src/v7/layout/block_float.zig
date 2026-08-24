@@ -31,6 +31,29 @@ const ContainerInitialSize = struct {
     border_height: ?f32,
 };
 
+const CollapsibleMarginSet = struct {
+    positive: f32 = 0,
+    negative: f32 = 0,
+
+    fn fromMargin(margin: f32) CollapsibleMarginSet {
+        return if (margin >= 0)
+            .{ .positive = margin }
+        else
+            .{ .negative = margin };
+    }
+
+    fn collapse(self: CollapsibleMarginSet, other: CollapsibleMarginSet) CollapsibleMarginSet {
+        return .{
+            .positive = @max(self.positive, other.positive),
+            .negative = @min(self.negative, other.negative),
+        };
+    }
+
+    fn resolve(self: CollapsibleMarginSet) f32 {
+        return self.positive + self.negative;
+    }
+};
+
 /// A prepared block-layout pass for one widget tree.
 ///
 /// Initialization classifies hidden layout once. Every container call then uses
@@ -137,6 +160,7 @@ fn layoutPreparedContainerUnchecked(
     var in_flow_bottom: f32 = 0;
     var float_bottom: f32 = 0;
     var float_ceiling: f32 = 0;
+    var pending_bottom: ?CollapsibleMarginSet = null;
 
     for (child_ids, 0..) |child_id, child_index| {
         const child = tree.node(child_id) orelse return error.InvalidStyle;
@@ -249,6 +273,7 @@ fn layoutPreparedContainerUnchecked(
                 float_bottom,
                 try addFinite(placement.y, float_height),
             );
+            pending_bottom = null;
             continue;
         }
 
@@ -263,7 +288,15 @@ fn layoutPreparedContainerUnchecked(
             content_width,
             child_width,
         );
-        var child_y = try addFinite(start_y, margins.top);
+        const top_margin = CollapsibleMarginSet.fromMargin(margins.top);
+        const vertical_margin = if (clear_y <= flow_y)
+            if (pending_bottom) |bottom_margin|
+                bottom_margin.collapse(top_margin).resolve()
+            else
+                top_margin.resolve()
+        else
+            top_margin.resolve();
+        var child_y = try addFinite(start_y, vertical_margin);
         if (container_style.writing_direction == .ltr) {
             child_x = try addFinite(child_x, margins.left);
         } else {
@@ -396,18 +429,20 @@ fn layoutPreparedContainerUnchecked(
             content_width,
             0,
         );
-        flow_y = try addFinite(
-            try addFinite(static_y, child_height),
-            margins.bottom,
-        );
+        flow_y = try addFinite(static_y, child_height);
+        pending_bottom = CollapsibleMarginSet.fromMargin(margins.bottom);
         in_flow_bottom = @max(in_flow_bottom, flow_y);
     }
 
     const content_height = content_height_fixed orelse blk: {
+        const normal_bottom = try addFinite(
+            in_flow_bottom,
+            if (pending_bottom) |bottom_margin| bottom_margin.resolve() else 0,
+        );
         const auto_content_height = if (container_establishes_bfc)
-            @max(in_flow_bottom, float_bottom)
+            @max(normal_bottom, float_bottom)
         else
-            in_flow_bottom;
+            normal_bottom;
         const final_border_height = try resolveContainerAutoHeight(
             container_style,
             context,
