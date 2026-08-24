@@ -554,8 +554,29 @@ test "fixture text wrap detection is explicit" {
 
 fn applyAttribute(result: *style.Style, name: []const u8, value: []const u8) CaseError!void {
     if (std.mem.eql(u8, name, "direction")) return applyDirection(result, value);
+    if (std.mem.eql(u8, name, "writing-mode")) {
+        if (std.mem.eql(u8, value, "horizontal-tb")) return;
+        return error.Unsupported;
+    }
     if (std.mem.eql(u8, name, "display")) return applyDisplay(result, value);
     if (std.mem.eql(u8, name, "box-sizing")) return applyBoxSizing(result, value);
+    if (std.mem.eql(u8, name, "flex-direction")) return applyFlexDirection(result, value);
+    if (std.mem.eql(u8, name, "flex-wrap")) return applyFlexWrap(result, value);
+    if (std.mem.eql(u8, name, "flex-grow")) return applyFlexGrow(result, value);
+    if (std.mem.eql(u8, name, "flex-shrink")) return applyFlexShrink(result, value);
+    if (std.mem.eql(u8, name, "flex-basis")) return applyFlexBasis(result, value);
+    if (std.mem.eql(u8, name, "gap")) return applyGap(result, value);
+    if (std.mem.eql(u8, name, "column-gap")) return applyColumnGap(result, value);
+    if (std.mem.eql(u8, name, "row-gap")) return applyRowGap(result, value);
+    if (std.mem.eql(u8, name, "justify-content")) return applyJustifyContent(result, value);
+    if (std.mem.eql(u8, name, "align-items")) return applyAlignItems(result, value);
+    if (std.mem.eql(u8, name, "align-self")) return applyAlignSelf(result, value);
+    if (std.mem.eql(u8, name, "align-content")) return applyAlignContent(result, value);
+    if (std.mem.eql(u8, name, "aspect-ratio")) return applyAspectRatio(result, value);
+    if (std.mem.eql(u8, name, "overflow-x")) return applyOverflowAxis(&result.overflow.width, value);
+    if (std.mem.eql(u8, name, "overflow-y")) return applyOverflowAxis(&result.overflow.height, value);
+    if (std.mem.eql(u8, name, "float")) return applyFloat(result, value);
+    if (std.mem.eql(u8, name, "clear")) return applyClear(result, value);
     if (std.mem.eql(u8, name, "width")) return setDimension(&result.size.width, try parseDimension(value));
     if (std.mem.eql(u8, name, "height")) return setDimension(&result.size.height, try parseDimension(value));
     if (std.mem.eql(u8, name, "min-width")) return setDimension(&result.min_size.width, try parseDimension(value));
@@ -580,6 +601,313 @@ fn applyAttribute(result: *style.Style, name: []const u8, value: []const u8) Cas
     if (std.mem.eql(u8, name, "border-bottom")) return setBorder(result, .bottom, try parseNonnegativeLength(value));
     if (std.mem.eql(u8, name, "border-left")) return setBorder(result, .left, try parseNonnegativeLength(value));
     return error.Unsupported;
+}
+
+test "fixture flex direction and wrap attributes map represented values" {
+    const direction_cases = [_]struct {
+        value: []const u8,
+        expected: style.FlexDirection,
+    }{
+        .{ .value = "row", .expected = .row },
+        .{ .value = "row-reverse", .expected = .row_reverse },
+        .{ .value = "column", .expected = .column },
+        .{ .value = "column-reverse", .expected = .column_reverse },
+    };
+    for (direction_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "flex-direction", case.value);
+        try std.testing.expectEqual(case.expected, result.direction);
+    }
+
+    const wrap_cases = [_]struct {
+        value: []const u8,
+        expected: style.FlexWrap,
+    }{
+        .{ .value = "nowrap", .expected = .nowrap },
+        .{ .value = "wrap", .expected = .wrap },
+        .{ .value = "wrap-reverse", .expected = .wrap_reverse },
+    };
+    for (wrap_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "flex-wrap", case.value);
+        try std.testing.expectEqual(case.expected, result.wrap);
+        try std.testing.expectEqual(case.expected, result.flex_wrap);
+    }
+}
+
+test "fixture flex item attributes map typed and legacy fields" {
+    var result: style.Style = .{};
+    try applyAttribute(&result, "flex-grow", "2.5");
+    try applyAttribute(&result, "flex-shrink", "0.5");
+    try std.testing.expectEqual(@as(f32, 2.5), result.grow);
+    try std.testing.expectEqual(@as(f32, 0.5), result.shrink);
+
+    try applyAttribute(&result, "flex-basis", "12px");
+    try std.testing.expectEqual(@as(f32, 12), result.basis);
+    try std.testing.expectEqual(style.Dimension{ .length = 12 }, result.flex_basis);
+
+    try applyAttribute(&result, "flex-basis", "25%");
+    try std.testing.expectEqual(@as(f32, 0), result.basis);
+    try std.testing.expectEqual(style.Dimension{ .percent = 0.25 }, result.flex_basis);
+
+    try applyAttribute(&result, "flex-basis", "min-content");
+    try std.testing.expectEqual(@as(f32, 0), result.basis);
+    try std.testing.expectEqual(@as(style.Dimension, .min_content), result.flex_basis);
+
+    try applyAttribute(&result, "flex-basis", "auto");
+    try std.testing.expectEqual(@as(f32, 0), result.basis);
+    try std.testing.expectEqual(@as(style.Dimension, .auto), result.flex_basis);
+}
+
+test "fixture gap attributes keep generic and axis fields coherent" {
+    var result: style.Style = .{};
+    try applyAttribute(&result, "gap", "4px");
+    try std.testing.expectEqual(@as(f32, 4), result.gap);
+    try std.testing.expectEqual(@as(f32, 4), result.column_gap);
+    try std.testing.expectEqual(@as(f32, 4), result.row_gap);
+
+    try applyAttribute(&result, "column-gap", "0");
+    try std.testing.expectEqual(@as(f32, 0), result.gap);
+    try std.testing.expectEqual(@as(f32, 0), result.column_gap);
+    try std.testing.expectEqual(@as(f32, 4), result.row_gap);
+
+    try applyAttribute(&result, "row-gap", "6px");
+    try std.testing.expectEqual(@as(f32, 0), result.gap);
+    try std.testing.expectEqual(@as(f32, 0), result.column_gap);
+    try std.testing.expectEqual(@as(f32, 6), result.row_gap);
+
+    var reordered: style.Style = .{};
+    try applyAttribute(&reordered, "row-gap", "3px");
+    try applyAttribute(&reordered, "column-gap", "2px");
+    try applyAttribute(&reordered, "gap", "1px");
+    try std.testing.expectEqual(@as(f32, 1), reordered.gap);
+    try std.testing.expectEqual(@as(f32, 1), reordered.column_gap);
+    try std.testing.expectEqual(@as(f32, 1), reordered.row_gap);
+}
+
+test "fixture justify content maps represented values and flex aliases" {
+    const cases = [_]struct {
+        value: []const u8,
+        expected: style.Justify,
+    }{
+        .{ .value = "start", .expected = .start },
+        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "center", .expected = .center },
+        .{ .value = "end", .expected = .end },
+        .{ .value = "flex-end", .expected = .end },
+        .{ .value = "space-between", .expected = .space_between },
+        .{ .value = "space-around", .expected = .space_around },
+        .{ .value = "space-evenly", .expected = .space_evenly },
+    };
+    for (cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "justify-content", case.value);
+        try std.testing.expectEqual(case.expected, result.justify);
+    }
+}
+
+test "fixture alignment attributes map only represented values" {
+    const item_cases = [_]struct {
+        value: []const u8,
+        expected: style.Align,
+    }{
+        .{ .value = "stretch", .expected = .stretch },
+        .{ .value = "start", .expected = .start },
+        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "center", .expected = .center },
+        .{ .value = "end", .expected = .end },
+        .{ .value = "flex-end", .expected = .end },
+    };
+    for (item_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "align-items", case.value);
+        try std.testing.expectEqual(case.expected, result.@"align");
+    }
+
+    const self_cases = [_]struct {
+        value: []const u8,
+        expected: style.AlignSelf,
+    }{
+        .{ .value = "auto", .expected = .auto },
+        .{ .value = "stretch", .expected = .stretch },
+        .{ .value = "start", .expected = .start },
+        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "center", .expected = .center },
+        .{ .value = "end", .expected = .end },
+        .{ .value = "flex-end", .expected = .end },
+    };
+    for (self_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "align-self", case.value);
+        try std.testing.expectEqual(case.expected, result.align_self);
+    }
+
+    const content_cases = [_]struct {
+        value: []const u8,
+        expected: style.AlignContent,
+    }{
+        .{ .value = "stretch", .expected = .stretch },
+        .{ .value = "start", .expected = .start },
+        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "center", .expected = .center },
+        .{ .value = "end", .expected = .end },
+        .{ .value = "flex-end", .expected = .end },
+        .{ .value = "space-between", .expected = .space_between },
+        .{ .value = "space-around", .expected = .space_around },
+    };
+    for (content_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "align-content", case.value);
+        try std.testing.expectEqual(case.expected, result.align_content);
+    }
+}
+
+test "fixture unsupported alignment values stay explicit" {
+    const cases = [_]struct {
+        name: []const u8,
+        value: []const u8,
+    }{
+        .{ .name = "align-items", .value = "baseline" },
+        .{ .name = "align-self", .value = "safe center" },
+        .{ .name = "align-content", .value = "unsafe center" },
+        .{ .name = "align-content", .value = "space-evenly" },
+        .{ .name = "justify-content", .value = "baseline" },
+        .{ .name = "column-gap", .value = "normal" },
+        .{ .name = "flex-basis", .value = "content" },
+        .{ .name = "aspect-ratio", .value = "1 / 2" },
+    };
+    for (cases) |case| {
+        var result: style.Style = .{};
+        try std.testing.expectError(
+            error.Unsupported,
+            applyAttribute(&result, case.name, case.value),
+        );
+    }
+}
+
+test "fixture aspect ratio and overflow axes map represented values" {
+    var result: style.Style = .{};
+    try applyAttribute(&result, "aspect-ratio", "1.5");
+    try std.testing.expectEqual(@as(?f32, 1.5), result.aspect_ratio);
+    try applyAttribute(&result, "aspect-ratio", "auto");
+    try std.testing.expectEqual(@as(?f32, null), result.aspect_ratio);
+
+    const overflow_cases = [_]struct {
+        value: []const u8,
+        expected: style.Overflow,
+    }{
+        .{ .value = "visible", .expected = .visible },
+        .{ .value = "hidden", .expected = .hidden },
+        .{ .value = "clip", .expected = .clip },
+        .{ .value = "scroll", .expected = .scroll },
+        .{ .value = "auto", .expected = .auto },
+    };
+    for (overflow_cases) |case| {
+        var axes: style.Style = .{};
+        try applyAttribute(&axes, "overflow-x", case.value);
+        try applyAttribute(&axes, "overflow-y", case.value);
+        try std.testing.expectEqual(case.expected, axes.overflow.width);
+        try std.testing.expectEqual(case.expected, axes.overflow.height);
+    }
+}
+
+test "fixture float and clear map represented values" {
+    const float_cases = [_]struct {
+        value: []const u8,
+        expected: style.Float,
+    }{
+        .{ .value = "none", .expected = .none },
+        .{ .value = "left", .expected = .left },
+        .{ .value = "right", .expected = .right },
+        .{ .value = "inline-start", .expected = .inline_start },
+        .{ .value = "inline-end", .expected = .inline_end },
+    };
+    for (float_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "float", case.value);
+        try std.testing.expectEqual(case.expected, result.float);
+    }
+
+    const clear_cases = [_]struct {
+        value: []const u8,
+        expected: style.Clear,
+    }{
+        .{ .value = "none", .expected = .none },
+        .{ .value = "left", .expected = .left },
+        .{ .value = "right", .expected = .right },
+        .{ .value = "both", .expected = .both },
+        .{ .value = "inline-start", .expected = .inline_start },
+        .{ .value = "inline-end", .expected = .inline_end },
+    };
+    for (clear_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "clear", case.value);
+        try std.testing.expectEqual(case.expected, result.clear);
+    }
+}
+
+test "fixture numeric style values reject malformed and nonfinite input" {
+    const cases = [_]struct {
+        name: []const u8,
+        value: []const u8,
+    }{
+        .{ .name = "flex-grow", .value = "nan" },
+        .{ .name = "flex-shrink", .value = "-1" },
+        .{ .name = "flex-basis", .value = "12pxjunk" },
+        .{ .name = "column-gap", .value = "-1px" },
+        .{ .name = "row-gap", .value = "inf" },
+        .{ .name = "aspect-ratio", .value = "0" },
+        .{ .name = "aspect-ratio", .value = "-1" },
+        .{ .name = "aspect-ratio", .value = "nan" },
+    };
+    for (cases) |case| {
+        var result: style.Style = .{};
+        try std.testing.expectError(
+            error.InvalidFixture,
+            applyAttribute(&result, case.name, case.value),
+        );
+    }
+}
+
+test "fixture accepts duplicated horizontal writing mode" {
+    var result: style.Style = .{};
+    try applyAttribute(&result, "writing-mode", "horizontal-tb");
+}
+
+test "fixture unmapped style syntax stays unsupported" {
+    const cases = [_]struct {
+        name: []const u8,
+        value: []const u8,
+    }{
+        .{ .name = "scrollbar-width", .value = "auto" },
+        .{ .name = "text-align", .value = "left" },
+        .{
+            .name = "grid-template-columns",
+            .value = "[content-start] 1fr [content-end]",
+        },
+        .{ .name = "writing-mode", .value = "vertical-rl" },
+    };
+    for (cases) |case| {
+        var result: style.Style = .{};
+        try std.testing.expectError(
+            error.Unsupported,
+            applyAttribute(&result, case.name, case.value),
+        );
+    }
+
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "0px",
+        .border_right = "0px",
+        .border_bottom = "0px",
+        .border_left = "0px",
+    };
+    try std.testing.expectError(error.Unsupported, fixtureStyle(.{
+        .kind = "div",
+        .writing_mode = "vertical-rl",
+        .child_count = 0,
+        .style = legacy,
+    }));
 }
 
 fn applyDirection(result: *style.Style, value: []const u8) CaseError!void {
@@ -622,6 +950,217 @@ fn applyPosition(result: *style.Style, value: []const u8) CaseError!void {
         .absolute
     else
         return error.Unsupported;
+}
+
+fn applyFlexDirection(result: *style.Style, value: []const u8) CaseError!void {
+    result.direction = if (std.mem.eql(u8, value, "row"))
+        .row
+    else if (std.mem.eql(u8, value, "row-reverse"))
+        .row_reverse
+    else if (std.mem.eql(u8, value, "column"))
+        .column
+    else if (std.mem.eql(u8, value, "column-reverse"))
+        .column_reverse
+    else
+        return error.Unsupported;
+}
+
+fn applyFlexWrap(result: *style.Style, value: []const u8) CaseError!void {
+    const wrap: style.FlexWrap = if (std.mem.eql(u8, value, "nowrap"))
+        .nowrap
+    else if (std.mem.eql(u8, value, "wrap"))
+        .wrap
+    else if (std.mem.eql(u8, value, "wrap-reverse"))
+        .wrap_reverse
+    else
+        return error.Unsupported;
+    result.wrap = wrap;
+    result.flex_wrap = wrap;
+}
+
+fn applyFlexGrow(result: *style.Style, value: []const u8) CaseError!void {
+    const grow = try parseNumber(value);
+    if (grow < 0) return error.InvalidFixture;
+    result.grow = grow;
+}
+
+fn applyFlexShrink(result: *style.Style, value: []const u8) CaseError!void {
+    const shrink = try parseNumber(value);
+    if (shrink < 0) return error.InvalidFixture;
+    result.shrink = shrink;
+}
+
+fn applyFlexBasis(result: *style.Style, value: []const u8) CaseError!void {
+    if (std.mem.eql(u8, value, "content") or
+        std.mem.eql(u8, value, "fit-content") or
+        std.mem.startsWith(u8, value, "fit-content("))
+    {
+        return error.Unsupported;
+    }
+    const basis = try parseDimension(value);
+    result.flex_basis = basis;
+    result.basis = switch (basis) {
+        .length => |number| number,
+        .auto, .percent, .min_content, .max_content => 0,
+    };
+}
+
+fn applyGap(result: *style.Style, value: []const u8) CaseError!void {
+    const gap = try parseGap(value);
+    result.gap = gap;
+    result.column_gap = gap;
+    result.row_gap = gap;
+}
+
+fn applyColumnGap(result: *style.Style, value: []const u8) CaseError!void {
+    result.gap = 0;
+    result.column_gap = try parseGap(value);
+}
+
+fn applyRowGap(result: *style.Style, value: []const u8) CaseError!void {
+    result.gap = 0;
+    result.row_gap = try parseGap(value);
+}
+
+fn applyJustifyContent(result: *style.Style, value: []const u8) CaseError!void {
+    result.justify = if (std.mem.eql(u8, value, "start") or
+        std.mem.eql(u8, value, "flex-start"))
+        .start
+    else if (std.mem.eql(u8, value, "center"))
+        .center
+    else if (std.mem.eql(u8, value, "end") or
+        std.mem.eql(u8, value, "flex-end"))
+        .end
+    else if (std.mem.eql(u8, value, "space-between"))
+        .space_between
+    else if (std.mem.eql(u8, value, "space-around"))
+        .space_around
+    else if (std.mem.eql(u8, value, "space-evenly"))
+        .space_evenly
+    else
+        return error.Unsupported;
+}
+
+fn applyAlignItems(result: *style.Style, value: []const u8) CaseError!void {
+    result.@"align" = try parseAlign(value);
+}
+
+fn applyAlignSelf(result: *style.Style, value: []const u8) CaseError!void {
+    result.align_self = if (std.mem.eql(u8, value, "auto"))
+        .auto
+    else switch (try parseAlign(value)) {
+        .stretch => .stretch,
+        .start => .start,
+        .center => .center,
+        .end => .end,
+    };
+}
+
+fn applyAlignContent(result: *style.Style, value: []const u8) CaseError!void {
+    result.align_content = if (std.mem.eql(u8, value, "stretch"))
+        .stretch
+    else if (std.mem.eql(u8, value, "start") or
+        std.mem.eql(u8, value, "flex-start"))
+        .start
+    else if (std.mem.eql(u8, value, "center"))
+        .center
+    else if (std.mem.eql(u8, value, "end") or
+        std.mem.eql(u8, value, "flex-end"))
+        .end
+    else if (std.mem.eql(u8, value, "space-between"))
+        .space_between
+    else if (std.mem.eql(u8, value, "space-around"))
+        .space_around
+    else
+        return error.Unsupported;
+}
+
+fn applyAspectRatio(result: *style.Style, value: []const u8) CaseError!void {
+    if (std.mem.eql(u8, value, "auto")) {
+        result.aspect_ratio = null;
+        return;
+    }
+    if (std.mem.indexOf(u8, value, "/") != null or
+        std.mem.indexOfAny(u8, value, " \t\n\r") != null)
+    {
+        return error.Unsupported;
+    }
+    const ratio = try parseNumber(value);
+    if (ratio <= 0) return error.InvalidFixture;
+    result.aspect_ratio = ratio;
+}
+
+fn applyOverflowAxis(target: *style.Overflow, value: []const u8) CaseError!void {
+    target.* = if (std.mem.eql(u8, value, "visible"))
+        .visible
+    else if (std.mem.eql(u8, value, "hidden"))
+        .hidden
+    else if (std.mem.eql(u8, value, "clip"))
+        .clip
+    else if (std.mem.eql(u8, value, "scroll"))
+        .scroll
+    else if (std.mem.eql(u8, value, "auto"))
+        .auto
+    else
+        return error.Unsupported;
+}
+
+fn applyFloat(result: *style.Style, value: []const u8) CaseError!void {
+    result.float = if (std.mem.eql(u8, value, "none"))
+        .none
+    else if (std.mem.eql(u8, value, "left"))
+        .left
+    else if (std.mem.eql(u8, value, "right"))
+        .right
+    else if (std.mem.eql(u8, value, "inline-start"))
+        .inline_start
+    else if (std.mem.eql(u8, value, "inline-end"))
+        .inline_end
+    else
+        return error.Unsupported;
+}
+
+fn applyClear(result: *style.Style, value: []const u8) CaseError!void {
+    result.clear = if (std.mem.eql(u8, value, "none"))
+        .none
+    else if (std.mem.eql(u8, value, "left"))
+        .left
+    else if (std.mem.eql(u8, value, "right"))
+        .right
+    else if (std.mem.eql(u8, value, "both"))
+        .both
+    else if (std.mem.eql(u8, value, "inline-start"))
+        .inline_start
+    else if (std.mem.eql(u8, value, "inline-end"))
+        .inline_end
+    else
+        return error.Unsupported;
+}
+
+fn parseAlign(value: []const u8) CaseError!style.Align {
+    return if (std.mem.eql(u8, value, "stretch"))
+        .stretch
+    else if (std.mem.eql(u8, value, "start") or
+        std.mem.eql(u8, value, "flex-start"))
+        .start
+    else if (std.mem.eql(u8, value, "center"))
+        .center
+    else if (std.mem.eql(u8, value, "end") or
+        std.mem.eql(u8, value, "flex-end"))
+        .end
+    else
+        error.Unsupported;
+}
+
+fn parseGap(value: []const u8) CaseError!f32 {
+    if (std.mem.eql(u8, value, "normal")) return error.Unsupported;
+    if (std.mem.endsWith(u8, value, "%")) {
+        const percentage = try parseNumber(value[0 .. value.len - 1]);
+        if (percentage < 0) return error.InvalidFixture;
+        return error.Unsupported;
+    }
+    if (std.mem.indexOfAny(u8, value, " \t\n\r") != null) return error.Unsupported;
+    return parseNonnegativeLength(value);
 }
 
 fn setDimension(target: *style.Dimension, value: style.Dimension) void {
