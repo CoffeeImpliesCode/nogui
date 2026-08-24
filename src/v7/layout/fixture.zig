@@ -264,9 +264,36 @@ fn validateCaseRecord(fixture_case: Case, sources: []const ManifestSource) Fixtu
 const FixtureResources = struct {
     allocator: std.mem.Allocator,
     grid_track_allocations: std.ArrayList([]const style.GridTrack) = .empty,
+    scroll_state_allocations: std.ArrayList(*widget.ScrollState) = .empty,
+    scroll_states_by_source: []?*widget.ScrollState,
 
-    fn init(allocator: std.mem.Allocator) FixtureResources {
-        return .{ .allocator = allocator };
+    fn init(allocator: std.mem.Allocator, source_count: usize) FixtureError!FixtureResources {
+        const scroll_states_by_source = try allocator.alloc(?*widget.ScrollState, source_count);
+        errdefer allocator.free(scroll_states_by_source);
+        for (scroll_states_by_source) |*state| state.* = null;
+        return .{
+            .allocator = allocator,
+            .scroll_states_by_source = scroll_states_by_source,
+        };
+    }
+
+    fn createScrollState(
+        self: *FixtureResources,
+        source_index: usize,
+    ) CaseError!*widget.ScrollState {
+        if (source_index >= self.scroll_states_by_source.len) {
+            return error.InvalidFixture;
+        }
+        if (self.scroll_states_by_source[source_index] != null) {
+            return error.InvalidFixture;
+        }
+
+        const state = try self.allocator.create(widget.ScrollState);
+        errdefer self.allocator.destroy(state);
+        state.* = .{};
+        try self.scroll_state_allocations.append(self.allocator, state);
+        self.scroll_states_by_source[source_index] = state;
+        return state;
     }
 
     fn deinit(self: *FixtureResources) void {
@@ -274,6 +301,11 @@ const FixtureResources = struct {
             self.allocator.free(tracks);
         }
         self.grid_track_allocations.deinit(self.allocator);
+        for (self.scroll_state_allocations.items) |state| {
+            self.allocator.destroy(state);
+        }
+        self.scroll_state_allocations.deinit(self.allocator);
+        self.allocator.free(self.scroll_states_by_source);
         self.* = undefined;
     }
 };
@@ -287,10 +319,12 @@ const FixtureTree = struct {
         const source_ids = try allocator.alloc(Id, node_count);
         errdefer allocator.free(source_ids);
         for (source_ids) |*id| id.* = .root;
+        var resources = try FixtureResources.init(allocator, node_count);
+        errdefer resources.deinit();
         return .{
             .tree = widget.WidgetTree.init(allocator),
             .source_ids = source_ids,
-            .resources = FixtureResources.init(allocator),
+            .resources = resources,
         };
     }
 
@@ -319,10 +353,13 @@ const TreeBuilder = struct {
         const index = self.source_index;
         self.source_index += 1;
         if (index >= std.math.maxInt(u32)) return error.InvalidFixture;
+        if (index >= self.fixture_case.expected.len) return error.InvalidFixture;
         const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
         const fixture_node = self.fixture_case.nodes[index];
+        const expected = self.fixture_case.expected[index];
         const node_style = try fixtureStyle(&self.result.resources, fixture_node);
         const kind = try fixtureKind(fixture_node, node_style);
+        const scroll = try fixtureScrollSpec(&self.result.resources, index, expected);
 
         var children: std.ArrayList(Id) = .empty;
         defer children.deinit(self.allocator);
@@ -335,6 +372,7 @@ const TreeBuilder = struct {
             .kind = kind,
             .parent = parent,
             .style = node_style,
+            .scroll = scroll,
         });
         for (children.items) |child_id| {
             try self.result.tree.appendChild(id, child_id);
@@ -343,6 +381,25 @@ const TreeBuilder = struct {
         return id;
     }
 };
+
+fn fixtureScrollSpec(
+    resources: *FixtureResources,
+    source_index: usize,
+    expected: Rect,
+) CaseError!?widget.ScrollSpec {
+    const axis = expectedScrollAxis(expected) orelse return null;
+    const state = try resources.createScrollState(source_index);
+    return .{ .state = state, .axis = axis };
+}
+
+fn expectedScrollAxis(expected: Rect) ?widget.ScrollAxis {
+    const has_width = expected.scroll_width != null;
+    const has_height = expected.scroll_height != null;
+    if (!has_width and !has_height) return null;
+    if (has_width and has_height) return .both;
+    if (has_width) return .horizontal;
+    return .vertical;
+}
 
 test "fixture builder converts preorder nodes to a linked postorder tree" {
     const legacy: LegacyStyle = .{
@@ -386,6 +443,200 @@ test "fixture builder converts preorder nodes to a linked postorder tree" {
     try std.testing.expectEqual(@as(usize, 1), root.children.items.len);
     try std.testing.expectEqual(child_id, root.children.items[0]);
     try std.testing.expectEqual(root_id, fixture_tree.tree.nodeConst(child_id).?.parent);
+}
+
+test "fixture scroll state allocations remain stable independently" {
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 41);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    const stable_state = try fixture_tree.resources.createScrollState(0);
+    stable_state.max_offset = .{ 3, 5 };
+    for (1..fixture_tree.resources.scroll_states_by_source.len) |source_index| {
+        _ = try fixture_tree.resources.createScrollState(source_index);
+    }
+
+    try std.testing.expectEqual(
+        fixture_tree.resources.scroll_states_by_source.len,
+        fixture_tree.resources.scroll_state_allocations.items.len,
+    );
+    try std.testing.expectEqual(
+        stable_state,
+        fixture_tree.resources.scroll_states_by_source[0].?,
+    );
+    try std.testing.expectEqual(
+        stable_state,
+        fixture_tree.resources.scroll_state_allocations.items[0],
+    );
+    try std.testing.expectEqual(@as(f32, 3), stable_state.max_offset[0]);
+    try std.testing.expectEqual(@as(f32, 5), stable_state.max_offset[1]);
+    for (fixture_tree.resources.scroll_state_allocations.items[1..]) |allocation| {
+        try std.testing.expect(allocation != stable_state);
+    }
+}
+
+test "fixture builder attaches expected scroll axes without incidental state" {
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "0px",
+        .border_right = "0px",
+        .border_bottom = "0px",
+        .border_left = "0px",
+    };
+    const nodes = [_]Node{
+        .{ .kind = "div", .child_count = 3, .style = legacy },
+        .{ .kind = "div", .child_count = 0, .style = legacy },
+        .{ .kind = "div", .child_count = 0, .style = legacy },
+        .{ .kind = "div", .child_count = 0, .style = legacy },
+    };
+    const expected = [_]Rect{
+        .{
+            .x = 0,
+            .y = 0,
+            .width = 0,
+            .height = 0,
+            .scroll_width = 11,
+            .scroll_height = 13,
+        },
+        .{ .x = 0, .y = 0, .width = 0, .height = 0, .scroll_width = 17 },
+        .{ .x = 0, .y = 0, .width = 0, .height = 0, .scroll_height = 19 },
+        .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    };
+    const fixture_case: Case = .{
+        .id = "test",
+        .source = "test_fixtures/test.html",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .variant = "border_box_ltr",
+        .grid_feature = false,
+        .use_rounding = true,
+        .viewport = .{ .width = 100, .height = 100 },
+        .nodes = &nodes,
+        .expected = &expected,
+    };
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, nodes.len);
+    defer fixture_tree.deinit(std.testing.allocator);
+    var builder: TreeBuilder = .{
+        .allocator = std.testing.allocator,
+        .fixture_case = fixture_case,
+        .result = &fixture_tree,
+    };
+    _ = try builder.buildRoot();
+
+    const expected_axes = [_]?widget.ScrollAxis{
+        .both,
+        .horizontal,
+        .vertical,
+        null,
+    };
+    for (expected_axes, 0..) |expected_axis, source_index| {
+        const node = fixture_tree.tree.nodeConst(fixture_tree.source_ids[source_index]).?;
+        const owned_state = fixture_tree.resources.scroll_states_by_source[source_index];
+        if (expected_axis) |axis| {
+            const scroll = node.scroll.?;
+            try std.testing.expectEqual(axis, scroll.axis);
+            try std.testing.expectEqual(owned_state.?, scroll.state);
+        } else {
+            try std.testing.expect(node.scroll == null);
+            try std.testing.expect(owned_state == null);
+        }
+    }
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        fixture_tree.resources.scroll_state_allocations.items.len,
+    );
+}
+
+test "fixture expected scroll offsets remain validated inputs" {
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "0px",
+        .border_right = "0px",
+        .border_bottom = "0px",
+        .border_left = "0px",
+    };
+    const nodes = [_]Node{
+        .{ .kind = "div", .child_count = 0, .style = legacy },
+    };
+    var expected = [_]Rect{
+        .{
+            .x = 0,
+            .y = 0,
+            .width = 0,
+            .height = 0,
+            .scroll_width = 0,
+            .scroll_height = 0,
+        },
+    };
+    const fixture_case: Case = .{
+        .id = "test",
+        .source = "test_fixtures/test.html",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .variant = "border_box_ltr",
+        .grid_feature = false,
+        .use_rounding = true,
+        .viewport = .{ .width = 100, .height = 100 },
+        .nodes = &nodes,
+        .expected = &expected,
+    };
+
+    try validateFixtureInputs(fixture_case);
+    expected[0].scroll_width = -1;
+    try std.testing.expectError(error.InvalidFixture, validateFixtureInputs(fixture_case));
+    expected[0].scroll_width = 0;
+    expected[0].scroll_height = std.math.inf(f64);
+    try std.testing.expectError(error.InvalidFixture, validateFixtureInputs(fixture_case));
+}
+
+test "fixture comparison requires matching optional scroll max offsets" {
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "0px",
+        .border_right = "0px",
+        .border_bottom = "0px",
+        .border_left = "0px",
+    };
+    const nodes = [_]Node{
+        .{ .kind = "div", .child_count = 0, .style = legacy },
+    };
+    var expected = [_]Rect{
+        .{ .x = 0, .y = 0, .width = 0, .height = 0, .scroll_width = 7 },
+    };
+    const fixture_case: Case = .{
+        .id = "test",
+        .source = "test_fixtures/test.html",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .variant = "border_box_ltr",
+        .grid_feature = false,
+        .use_rounding = true,
+        .viewport = .{ .width = 100, .height = 100 },
+        .nodes = &nodes,
+        .expected = &expected,
+    };
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, nodes.len);
+    defer fixture_tree.deinit(std.testing.allocator);
+    var builder: TreeBuilder = .{
+        .allocator = std.testing.allocator,
+        .fixture_case = fixture_case,
+        .result = &fixture_tree,
+    };
+    _ = try builder.buildRoot();
+
+    const state = fixture_tree.resources.scroll_states_by_source[0].?;
+    state.max_offset = .{ 7, 99 };
+    try std.testing.expect(try compareFixtureTree(fixture_case, &fixture_tree));
+
+    expected[0].scroll_height = 99;
+    try std.testing.expect(!try compareFixtureTree(fixture_case, &fixture_tree));
+    expected[0].scroll_height = null;
+    expected[0].scroll_width = null;
+    try std.testing.expect(!try compareFixtureTree(fixture_case, &fixture_tree));
+    expected[0].scroll_width = 7;
+    state.max_offset[0] = 8;
+    try std.testing.expect(!try compareFixtureTree(fixture_case, &fixture_tree));
+
+    state.max_offset[0] = 7;
+    fixture_tree.resources.scroll_states_by_source[0] = null;
+    fixture_tree.tree.node(fixture_tree.source_ids[0]).?.scroll = null;
+    try std.testing.expect(!try compareFixtureTree(fixture_case, &fixture_tree));
 }
 
 const Side = enum { top, right, bottom, left };
@@ -450,9 +701,6 @@ fn validateFixtureInputs(fixture_case: Case) CaseError!void {
     _ = try finiteF32(fixture_case.viewport.height);
     for (fixture_case.expected) |expected| {
         try validateExpectedRect(expected);
-        if (expected.scroll_width != null or expected.scroll_height != null) {
-            return error.Unsupported;
-        }
     }
 }
 
@@ -475,12 +723,19 @@ fn compareFixtureNode(
     if (source_index.* >= fixture_case.nodes.len) return error.InvalidFixture;
     const index = source_index.*;
     source_index.* += 1;
+    if (index >= fixture_case.expected.len) return error.InvalidFixture;
+    if (index >= fixture_tree.resources.scroll_states_by_source.len) {
+        return error.InvalidFixture;
+    }
     const expected = fixture_case.expected[index];
     const expected_absolute: Rect = .{
         .x = expected_parent.x + expected.x,
         .y = expected_parent.y + expected.y,
         .width = expected.width,
         .height = expected.height,
+    };
+    const node = fixture_tree.tree.nodeConst(fixture_tree.source_ids[index]) orelse {
+        return error.InvalidFixture;
     };
     const actual_rect = widget.absoluteRect(
         &fixture_tree.tree,
@@ -494,12 +749,52 @@ fn compareFixtureNode(
     };
     if (!rectMatchesRounded(actual, expected_absolute, fixture_case.use_rounding)) return false;
 
+    const attached_state: ?*widget.ScrollState = if (node.scroll) |scroll|
+        scroll.state
+    else
+        null;
+    if (attached_state != fixture_tree.resources.scroll_states_by_source[index]) {
+        return error.InvalidFixture;
+    }
+    if (!scrollMatchesRounded(
+        node.scroll,
+        expected,
+        fixture_case.use_rounding,
+    )) return false;
+
     for (0..fixture_case.nodes[index].child_count) |_| {
         if (!try compareFixtureNode(
             fixture_case,
             fixture_tree,
             source_index,
             expected_absolute,
+        )) return false;
+    }
+    return true;
+}
+
+fn scrollMatchesRounded(
+    actual_scroll: ?widget.ScrollSpec,
+    expected: Rect,
+    use_rounding: bool,
+) bool {
+    const expected_axis = expectedScrollAxis(expected);
+    const scroll = actual_scroll orelse return expected_axis == null;
+    const axis = expected_axis orelse return false;
+    if (scroll.axis != axis) return false;
+
+    if (expected.scroll_width) |scroll_width| {
+        if (!scalarMatchesRounded(
+            @floatCast(scroll.state.max_offset[0]),
+            scroll_width,
+            use_rounding,
+        )) return false;
+    }
+    if (expected.scroll_height) |scroll_height| {
+        if (!scalarMatchesRounded(
+            @floatCast(scroll.state.max_offset[1]),
+            scroll_height,
+            use_rounding,
         )) return false;
     }
     return true;
@@ -2106,23 +2401,17 @@ fn matchesFilter(fixture_case: Case, filter: ?[]const u8) bool {
     return std.mem.eql(u8, fixture_case.source, selected);
 }
 
+fn scalarMatchesRounded(actual: f64, expected: f64, use_rounding: bool) bool {
+    const compared_actual = if (use_rounding) @round(actual) else actual;
+    const compared_expected = if (use_rounding) @round(expected) else expected;
+    return @abs(compared_actual - compared_expected) < comparison_tolerance;
+}
+
 fn rectMatchesRounded(actual: Rect, expected: Rect, use_rounding: bool) bool {
-    const compared_actual = if (use_rounding) Rect{
-        .x = @round(actual.x),
-        .y = @round(actual.y),
-        .width = @round(actual.width),
-        .height = @round(actual.height),
-    } else actual;
-    const compared_expected = if (use_rounding) Rect{
-        .x = @round(expected.x),
-        .y = @round(expected.y),
-        .width = @round(expected.width),
-        .height = @round(expected.height),
-    } else expected;
-    if (@abs(compared_actual.x - compared_expected.x) >= comparison_tolerance) return false;
-    if (@abs(compared_actual.y - compared_expected.y) >= comparison_tolerance) return false;
-    if (@abs(compared_actual.width - compared_expected.width) >= comparison_tolerance) return false;
-    return @abs(compared_actual.height - compared_expected.height) < comparison_tolerance;
+    if (!scalarMatchesRounded(actual.x, expected.x, use_rounding)) return false;
+    if (!scalarMatchesRounded(actual.y, expected.y, use_rounding)) return false;
+    if (!scalarMatchesRounded(actual.width, expected.width, use_rounding)) return false;
+    return scalarMatchesRounded(actual.height, expected.height, use_rounding);
 }
 
 fn validSha256(value: []const u8) bool {
