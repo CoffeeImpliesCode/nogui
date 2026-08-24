@@ -1,6 +1,7 @@
 const std = @import("std");
 const Id = @import("../id.zig").Id;
 const block_float = @import("block_float.zig");
+const modular_flex = @import("flex.zig");
 const flex = @import("../flex.zig");
 const sizing = @import("sizing.zig");
 const style = @import("../style.zig");
@@ -132,6 +133,64 @@ fn eligibleBlockRootIndex(tree: *const widget.WidgetTree) ?usize {
     return index;
 }
 
+fn eligibleFlexSubtree(
+    tree: *const widget.WidgetTree,
+    node_id: Id,
+    expected_parent: Id,
+    depth: usize,
+) bool {
+    if (depth == 0) return false;
+    const node = tree.nodeConst(node_id) orelse return false;
+    if (node.parent != expected_parent or node.scroll != null) return false;
+    if (node.style.display == .none) {
+        for (node.children.items, 0..) |child_id, child_index| {
+            for (node.children.items[0..child_index]) |prior_id| {
+                if (child_id == prior_id) return false;
+            }
+            if (!eligibleFlexSubtree(tree, child_id, node.id, depth - 1)) return false;
+        }
+        return true;
+    }
+    if (node.children.items.len == 0) return true;
+    if (node.style.display != .flex) return false;
+    switch (node.kind) {
+        .row, .column => {},
+        else => return false,
+    }
+    for (node.children.items, 0..) |child_id, child_index| {
+        for (node.children.items[0..child_index]) |prior_id| {
+            if (child_id == prior_id) return false;
+        }
+        if (!eligibleFlexSubtree(tree, child_id, node.id, depth - 1)) return false;
+    }
+    return true;
+}
+
+fn eligibleFlexRootIndex(tree: *const widget.WidgetTree) ?usize {
+    var root_index: ?usize = null;
+    for (tree.nodes.items, 0..) |node, node_index| {
+        if (node.parent != .root) continue;
+        if (root_index != null) return null;
+        if (!hasDefaultSurfacePlacement(&node) or node.scroll != null) return null;
+        if (node.style.display != .flex) return null;
+        if (!isConcreteBlockFloatDimension(node.style.size.width) or
+            !isConcreteBlockFloatDimension(node.style.size.height))
+        {
+            return null;
+        }
+        switch (node.kind) {
+            .row, .column => {},
+            else => return null,
+        }
+        root_index = node_index;
+    }
+    const index = root_index orelse return null;
+    if (!eligibleFlexSubtree(tree, tree.nodes.items[index].id, .root, tree.nodes.items.len)) {
+        return null;
+    }
+    return index;
+}
+
 pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
     try validateAvailable(options.available);
 
@@ -151,6 +210,15 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
             },
             options.measure,
         );
+    }
+
+    if (eligibleFlexRootIndex(tree)) |root_index| {
+        const measure: ?modular_flex.MeasureFn = options.measure;
+        return modular_flex.layoutContainer(tree, tree.nodes.items[root_index].id, .{
+            .allocator = options.allocator,
+            .available = options.available,
+            .measure = measure,
+        });
     }
 
     flex.layoutWith(tree, options.available, options.measure);

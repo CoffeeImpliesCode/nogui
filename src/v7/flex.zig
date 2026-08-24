@@ -642,6 +642,14 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
             .space_between => if (flow_count > 1) {
                 extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count - 1));
             },
+            .space_around => if (flow_count > 0) {
+                extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count));
+                main_offset = extra_gap / 2;
+            },
+            .space_evenly => if (flow_count > 0) {
+                extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count + 1));
+                main_offset = extra_gap;
+            },
         }
 
         var main_pos = main_offset;
@@ -1031,6 +1039,14 @@ fn layoutAdvancedFlexContainer(
             .end => main_offset = main_free,
             .space_between => if (line.flow_count > 1) {
                 extra_gap = main_free / @as(f32, @floatFromInt(line.flow_count - 1));
+            },
+            .space_around => if (line.flow_count > 0) {
+                extra_gap = main_free / @as(f32, @floatFromInt(line.flow_count));
+                main_offset = extra_gap / 2;
+            },
+            .space_evenly => if (line.flow_count > 0) {
+                extra_gap = main_free / @as(f32, @floatFromInt(line.flow_count + 1));
+                main_offset = extra_gap;
             },
         }
 
@@ -1785,6 +1801,14 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         .space_between => if (flow_count > 1) {
             extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count - 1));
         },
+        .space_around => if (flow_count > 0) {
+            extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count));
+            main_offset = extra_gap / 2;
+        },
+        .space_evenly => if (flow_count > 0) {
+            extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count + 1));
+            main_offset = extra_gap;
+        },
     }
 
     var main_pos = main_offset;
@@ -2165,6 +2189,14 @@ fn gridContentOffset(
         .space_between => .{
             .offset = 0,
             .extra_gap = if (count > 1) free / @as(f32, @floatFromInt(count - 1)) else 0,
+        },
+        .space_around => .{
+            .offset = free / @as(f32, @floatFromInt(count * 2)),
+            .extra_gap = free / @as(f32, @floatFromInt(count)),
+        },
+        .space_evenly => .{
+            .offset = free / @as(f32, @floatFromInt(count + 1)),
+            .extra_gap = free / @as(f32, @floatFromInt(count + 1)),
         },
     };
 }

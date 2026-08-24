@@ -22,7 +22,7 @@ pub const Position = enum { relative, absolute };
 
 pub const FlexDirection = enum { column, row, column_reverse, row_reverse };
 pub const FlexWrap = enum { nowrap, wrap, wrap_reverse };
-pub const Justify = enum { start, center, end, space_between };
+pub const Justify = enum { start, center, end, space_between, space_around, space_evenly };
 pub const Align = enum {
     stretch,
     start,

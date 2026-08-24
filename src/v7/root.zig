@@ -114,6 +114,7 @@ test {
     _ = @import("layout/sizing_test.zig");
     _ = @import("layout/root_test.zig");
     _ = @import("layout/block_float_test.zig");
+    _ = @import("layout/flex_test.zig");
 }
 
 test "canonical module exports App and DrawCtx" {

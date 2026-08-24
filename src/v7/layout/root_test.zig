@@ -356,6 +356,134 @@ test "layoutTree preserves legacy root flex-item growth" {
     try std.testing.expectEqual(@as(f32, 100), tree.node(root_id).?.rect.h);
 }
 
+test "layoutTree dispatches an eligible flex root through modular flex" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try tree.appendNode(.{
+        .id = first_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = second_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .justify = .space_evenly,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 20 },
+            },
+        },
+    });
+    try tree.appendChild(root_id, first_id);
+    try tree.appendChild(root_id, second_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 20 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 20, .y = 0, .w = 20, .h = 10 },
+        tree.node(first_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 60, .y = 0, .w = 20, .h = 10 },
+        tree.node(second_id).?.rect,
+    );
+}
+
+test "layoutTree falls back for a hidden unsupported grid subtree" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const leaf_id: Id = @enumFromInt(1);
+    const grid_id: Id = @enumFromInt(2);
+    const hidden_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+    try tree.appendNode(.{
+        .id = leaf_id,
+        .kind = .{ .label = .{ .text = "hidden" } },
+        .parent = grid_id,
+        .style = .{ .display = .block },
+    });
+    try tree.appendNode(.{
+        .id = grid_id,
+        .kind = .{ .column = .{} },
+        .parent = hidden_id,
+        .style = .{ .display = .grid },
+    });
+    try tree.appendNode(.{
+        .id = hidden_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{ .display = .none },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 20 },
+            },
+        },
+    });
+    try tree.appendChild(grid_id, leaf_id);
+    try tree.appendChild(hidden_id, grid_id);
+    try tree.appendChild(root_id, hidden_id);
+
+    tree.node(hidden_id).?.rect = .{ .x = 1, .y = 2, .w = 30, .h = 40 };
+    tree.node(grid_id).?.rect = .{ .x = 3, .y = 4, .w = 20, .h = 10 };
+    tree.node(leaf_id).?.rect = .{ .x = 5, .y = 6, .w = 10, .h = 8 };
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 20 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(widget.Rect{}, tree.node(hidden_id).?.rect);
+    try std.testing.expectEqual(widget.Rect{}, tree.node(grid_id).?.rect);
+    try std.testing.expectEqual(widget.Rect{}, tree.node(leaf_id).?.rect);
+}
+
 test "layoutTree rejects non-finite available width" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
