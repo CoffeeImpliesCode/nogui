@@ -1,5 +1,10 @@
 const std = @import("std");
 
+const Id = @import("../id.zig").Id;
+const layout = @import("root.zig");
+const style = @import("../style.zig");
+const widget = @import("../widget.zig");
+
 const cases_path = "testdata/taffy-v0.13.0/normalized/cases.json";
 const manifest_path = "testdata/taffy-v0.13.0/MANIFEST.json";
 
@@ -11,19 +16,22 @@ const canonical_source = "test_fixtures/" ++ canonical_id;
 const canonical_source_sha256 =
     "f4befcf21719a21b30a7afb2d34ff23f208a0051094d610b6011369f9a9adc55";
 const source_prefix = "test_fixtures/";
-const ahem_glyph_width: f64 = 10.0;
-const ahem_line_height: f64 = 10.0;
+const ahem_glyph_width: f32 = 10.0;
+const ahem_line_height: f32 = 10.0;
 const comparison_tolerance: f64 = 0.1;
 
 pub const FixtureSummary = struct {
     passed: usize = 0,
     failed: usize = 0,
+    unsupported: usize = 0,
 };
 
 pub const FixtureError = error{
     FixtureNotFound,
     InvalidFixture,
 } || std.mem.Allocator.Error;
+
+const CaseError = FixtureError || error{Unsupported};
 
 const Corpus = struct {
     schema: u32,
@@ -52,10 +60,13 @@ const Node = struct {
     text: ?[]const u8 = null,
     writing_mode: ?[]const u8 = null,
     child_count: usize,
-    style: LeafStyle,
+    attributes: ?std.json.Value = null,
+    style: LegacyStyle,
 };
 
-const LeafStyle = struct {
+/// Compatibility data retained because it is part of normalized schema 1.
+/// Layout input comes only from `attributes`.
+const LegacyStyle = struct {
     direction: []const u8,
     border_top: []const u8,
     border_right: []const u8,
@@ -140,8 +151,18 @@ pub fn runAll(
         if (!matchesFilter(fixture_case, filter)) continue;
         found = true;
 
-        const actual = try layoutLeaf(fixture_case);
-        if (rectMatches(actual, fixture_case.expected[0])) {
+        const passed = runCase(allocator, fixture_case) catch |case_error| {
+            switch (case_error) {
+                error.Unsupported => {
+                    summary.unsupported += 1;
+                    continue;
+                },
+                error.InvalidFixture => return error.InvalidFixture,
+                error.OutOfMemory => return error.OutOfMemory,
+                error.FixtureNotFound => unreachable,
+            }
+        };
+        if (passed) {
             summary.passed += 1;
         } else {
             summary.failed += 1;
@@ -240,51 +261,531 @@ fn validateCaseRecord(fixture_case: Case, sources: []const ManifestSource) Fixtu
     }
 }
 
-fn layoutLeaf(fixture_case: Case) FixtureError!Rect {
-    if (!std.mem.eql(u8, fixture_case.id, canonical_id)) return error.InvalidFixture;
-    if (!std.mem.eql(u8, fixture_case.source, canonical_source)) return error.InvalidFixture;
-    if (!std.mem.eql(u8, fixture_case.variant, "border_box_ltr")) {
-        return error.InvalidFixture;
+const FixtureTree = struct {
+    tree: widget.WidgetTree,
+    source_ids: []Id,
+
+    fn init(allocator: std.mem.Allocator, node_count: usize) CaseError!FixtureTree {
+        const source_ids = try allocator.alloc(Id, node_count);
+        for (source_ids) |*id| id.* = .root;
+        return .{
+            .tree = widget.WidgetTree.init(allocator),
+            .source_ids = source_ids,
+        };
     }
-    if (fixture_case.grid_feature) return error.InvalidFixture;
-    if (!fixture_case.use_rounding) return error.InvalidFixture;
-    if (fixture_case.viewport.width != 800.0) return error.InvalidFixture;
-    if (fixture_case.viewport.height != 600.0) return error.InvalidFixture;
-    if (fixture_case.nodes.len != 1) return error.InvalidFixture;
-    if (fixture_case.expected.len != 1) return error.InvalidFixture;
 
-    const node = fixture_case.nodes[0];
-    if (!std.mem.eql(u8, node.kind, "text")) return error.InvalidFixture;
-    if (node.child_count != 0) return error.InvalidFixture;
-    const text = node.text orelse return error.InvalidFixture;
-    if (!std.mem.eql(u8, text, "HHHH")) return error.InvalidFixture;
-    if (!std.mem.eql(u8, node.style.direction, "ltr")) return error.InvalidFixture;
+    fn deinit(self: *FixtureTree, allocator: std.mem.Allocator) void {
+        self.tree.deinit();
+        allocator.free(self.source_ids);
+        self.* = undefined;
+    }
+};
 
-    const border_top = try parsePixels(node.style.border_top);
-    const border_right = try parsePixels(node.style.border_right);
-    const border_bottom = try parsePixels(node.style.border_bottom);
-    const border_left = try parsePixels(node.style.border_left);
-    if (border_top != 2.0) return error.InvalidFixture;
-    if (border_right != 4.0) return error.InvalidFixture;
-    if (border_bottom != 6.0) return error.InvalidFixture;
-    if (border_left != 8.0) return error.InvalidFixture;
+const TreeBuilder = struct {
+    allocator: std.mem.Allocator,
+    fixture_case: Case,
+    result: *FixtureTree,
+    source_index: usize = 0,
 
-    try validateExpectedRect(fixture_case.expected[0]);
+    fn buildRoot(self: *TreeBuilder) CaseError!Id {
+        const root_id = try self.buildNode(.root);
+        if (self.source_index != self.fixture_case.nodes.len) return error.InvalidFixture;
+        return root_id;
+    }
 
-    const content_width = @as(f64, @floatFromInt(text.len)) * ahem_glyph_width;
-    var rect: Rect = .{
-        .x = 0.0,
-        .y = 0.0,
-        .width = border_left + content_width + border_right,
-        .height = border_top + ahem_line_height + border_bottom,
+    fn buildNode(self: *TreeBuilder, parent: Id) CaseError!Id {
+        if (self.source_index >= self.fixture_case.nodes.len) return error.InvalidFixture;
+        const index = self.source_index;
+        self.source_index += 1;
+        if (index >= std.math.maxInt(u32)) return error.InvalidFixture;
+        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const fixture_node = self.fixture_case.nodes[index];
+        const node_style = try fixtureStyle(fixture_node);
+        const kind = try fixtureKind(fixture_node, node_style);
+
+        var children: std.ArrayList(Id) = .empty;
+        defer children.deinit(self.allocator);
+        for (0..fixture_node.child_count) |_| {
+            try children.append(self.allocator, try self.buildNode(id));
+        }
+
+        try self.result.tree.appendNode(.{
+            .id = id,
+            .kind = kind,
+            .parent = parent,
+            .style = node_style,
+        });
+        for (children.items) |child_id| {
+            try self.result.tree.appendChild(id, child_id);
+        }
+        self.result.source_ids[index] = id;
+        return id;
+    }
+};
+
+test "fixture builder converts preorder nodes to a linked postorder tree" {
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "0px",
+        .border_right = "0px",
+        .border_bottom = "0px",
+        .border_left = "0px",
     };
-    if (fixture_case.use_rounding) {
-        rect.x = @round(rect.x);
-        rect.y = @round(rect.y);
-        rect.width = @round(rect.width);
-        rect.height = @round(rect.height);
+    const nodes = [_]Node{
+        .{ .kind = "div", .child_count = 1, .style = legacy },
+        .{ .kind = "text", .text = "H", .child_count = 0, .style = legacy },
+    };
+    const expected = [_]Rect{
+        .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+        .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    };
+    const fixture_case: Case = .{
+        .id = "test",
+        .source = "test_fixtures/test.html",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .variant = "border_box_ltr",
+        .grid_feature = false,
+        .use_rounding = true,
+        .viewport = .{ .width = 100, .height = 100 },
+        .nodes = &nodes,
+        .expected = &expected,
+    };
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, nodes.len);
+    defer fixture_tree.deinit(std.testing.allocator);
+    var builder: TreeBuilder = .{
+        .allocator = std.testing.allocator,
+        .fixture_case = fixture_case,
+        .result = &fixture_tree,
+    };
+    const root_id = try builder.buildRoot();
+    const child_id = fixture_tree.source_ids[1];
+    try std.testing.expect(fixture_tree.tree.nodeIndex(child_id).? <
+        fixture_tree.tree.nodeIndex(root_id).?);
+    const root = fixture_tree.tree.nodeConst(root_id).?;
+    try std.testing.expectEqual(@as(usize, 1), root.children.items.len);
+    try std.testing.expectEqual(child_id, root.children.items[0]);
+    try std.testing.expectEqual(root_id, fixture_tree.tree.nodeConst(child_id).?.parent);
+}
+
+const Side = enum { top, right, bottom, left };
+
+fn runCase(allocator: std.mem.Allocator, fixture_case: Case) CaseError!bool {
+    try validateFixtureInputs(fixture_case);
+    var fixture_tree = try FixtureTree.init(allocator, fixture_case.nodes.len);
+    defer fixture_tree.deinit(allocator);
+
+    var builder: TreeBuilder = .{
+        .allocator = allocator,
+        .fixture_case = fixture_case,
+        .result = &fixture_tree,
+    };
+    const fixture_root = try builder.buildRoot();
+
+    const available: widget.Size = .{
+        .width = try finiteF32(fixture_case.viewport.width),
+        .height = try finiteF32(fixture_case.viewport.height),
+    };
+    try appendFixtureSurface(&fixture_tree.tree, fixture_root, available);
+    layout.layoutTree(&fixture_tree.tree, .{
+        .allocator = allocator,
+        .available = available,
+        .measure = ahemMeasure,
+    }) catch |layout_error| {
+        if (layout_error == error.OutOfMemory) return error.OutOfMemory;
+        return error.InvalidFixture;
+    };
+    return compareFixtureTree(fixture_case, &fixture_tree);
+}
+
+fn appendFixtureSurface(
+    tree: *widget.WidgetTree,
+    fixture_root: Id,
+    available: widget.Size,
+) CaseError!void {
+    if (tree.nodes.items.len >= std.math.maxInt(u32)) return error.InvalidFixture;
+    const surface_id: Id = @enumFromInt(@as(u32, @intCast(tree.nodes.items.len + 1)));
+    const root = tree.node(fixture_root) orelse return error.InvalidFixture;
+    root.parent = surface_id;
+    try tree.appendNode(.{
+        .id = surface_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = available.width },
+                .height = .{ .length = available.height },
+            },
+        },
+    });
+    try tree.appendChild(surface_id, fixture_root);
+}
+
+fn validateFixtureInputs(fixture_case: Case) CaseError!void {
+    _ = try finiteF32(fixture_case.viewport.width);
+    _ = try finiteF32(fixture_case.viewport.height);
+    for (fixture_case.expected) |expected| {
+        try validateExpectedRect(expected);
+        if (expected.scroll_width != null or expected.scroll_height != null) {
+            return error.Unsupported;
+        }
     }
-    return rect;
+}
+
+fn compareFixtureTree(fixture_case: Case, fixture_tree: *const FixtureTree) CaseError!bool {
+    var source_index: usize = 0;
+    return compareFixtureNode(
+        fixture_case,
+        fixture_tree,
+        &source_index,
+        .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    );
+}
+
+fn compareFixtureNode(
+    fixture_case: Case,
+    fixture_tree: *const FixtureTree,
+    source_index: *usize,
+    expected_parent: Rect,
+) CaseError!bool {
+    if (source_index.* >= fixture_case.nodes.len) return error.InvalidFixture;
+    const index = source_index.*;
+    source_index.* += 1;
+    const expected = fixture_case.expected[index];
+    const expected_absolute: Rect = .{
+        .x = expected_parent.x + expected.x,
+        .y = expected_parent.y + expected.y,
+        .width = expected.width,
+        .height = expected.height,
+    };
+    const actual_rect = widget.absoluteRect(
+        &fixture_tree.tree,
+        fixture_tree.source_ids[index],
+    );
+    const actual: Rect = .{
+        .x = @floatCast(actual_rect.x),
+        .y = @floatCast(actual_rect.y),
+        .width = @floatCast(actual_rect.w),
+        .height = @floatCast(actual_rect.h),
+    };
+    if (!rectMatchesRounded(actual, expected_absolute, fixture_case.use_rounding)) return false;
+
+    for (0..fixture_case.nodes[index].child_count) |_| {
+        if (!try compareFixtureNode(
+            fixture_case,
+            fixture_tree,
+            source_index,
+            expected_absolute,
+        )) return false;
+    }
+    return true;
+}
+
+fn fixtureKind(fixture_node: Node, node_style: style.Style) CaseError!widget.WidgetKind {
+    if (std.mem.eql(u8, fixture_node.kind, "text")) {
+        if (fixture_node.child_count != 0) return error.InvalidFixture;
+        return .{ .label = .{ .text = fixture_node.text orelse "" } };
+    }
+    if (!std.mem.eql(u8, fixture_node.kind, "div")) return error.Unsupported;
+    if (fixture_node.child_count == 0) return .{ .spacer = .{} };
+    if (node_style.display == .flex and !style.directionIsColumn(node_style.direction)) {
+        return .{ .row = .{} };
+    }
+    return .{ .column = .{} };
+}
+
+fn fixtureStyle(fixture_node: Node) CaseError!style.Style {
+    if (fixture_node.writing_mode) |writing_mode| {
+        if (!std.mem.eql(u8, writing_mode, "horizontal-tb")) return error.Unsupported;
+    }
+
+    var result: style.Style = .{};
+    try applyDirection(&result, fixture_node.style.direction);
+    setBorder(&result, .top, try pixelsF32(fixture_node.style.border_top));
+    setBorder(&result, .right, try pixelsF32(fixture_node.style.border_right));
+    setBorder(&result, .bottom, try pixelsF32(fixture_node.style.border_bottom));
+    setBorder(&result, .left, try pixelsF32(fixture_node.style.border_left));
+
+    if (fixture_node.attributes) |attributes| {
+        const object = switch (attributes) {
+            .object => |value| value,
+            else => return error.InvalidFixture,
+        };
+        var iterator = object.iterator();
+        while (iterator.next()) |entry| {
+            const value = try jsonString(entry.value_ptr.*);
+            try applyAttribute(&result, entry.key_ptr.*, value);
+        }
+    }
+    if (std.mem.eql(u8, fixture_node.kind, "text")) {
+        const text = fixture_node.text orelse "";
+        if (hasTextBreakOpportunity(text)) return error.Unsupported;
+        const intrinsic = ahemMeasure(text, 0, 0);
+        if (dimensionAuto(result.size.width)) {
+            result.size.width = .{ .length = intrinsic.width };
+        }
+        if (dimensionAuto(result.size.height)) {
+            result.size.height = .{ .length = intrinsic.height };
+        }
+    }
+    return result;
+}
+
+fn dimensionAuto(value: style.Dimension) bool {
+    return switch (value) {
+        .auto => true,
+        .length, .percent, .min_content, .max_content => false,
+    };
+}
+
+fn hasTextBreakOpportunity(text: []const u8) bool {
+    return std.mem.indexOfAny(u8, text, " \t\n\r") != null or
+        std.mem.indexOf(u8, text, "\xE2\x80\x8B") != null;
+}
+
+test "fixture text wrap detection is explicit" {
+    try std.testing.expect(!hasTextBreakOpportunity("HHHH"));
+    try std.testing.expect(hasTextBreakOpportunity("H H"));
+    try std.testing.expect(hasTextBreakOpportunity("H\xE2\x80\x8BH"));
+}
+
+fn applyAttribute(result: *style.Style, name: []const u8, value: []const u8) CaseError!void {
+    if (std.mem.eql(u8, name, "direction")) return applyDirection(result, value);
+    if (std.mem.eql(u8, name, "display")) return applyDisplay(result, value);
+    if (std.mem.eql(u8, name, "box-sizing")) return applyBoxSizing(result, value);
+    if (std.mem.eql(u8, name, "width")) return setDimension(&result.size.width, try parseDimension(value));
+    if (std.mem.eql(u8, name, "height")) return setDimension(&result.size.height, try parseDimension(value));
+    if (std.mem.eql(u8, name, "min-width")) return setDimension(&result.min_size.width, try parseDimension(value));
+    if (std.mem.eql(u8, name, "min-height")) return setDimension(&result.min_size.height, try parseDimension(value));
+    if (std.mem.eql(u8, name, "max-width")) return setDimension(&result.max_size.width, try parseDimension(value));
+    if (std.mem.eql(u8, name, "max-height")) return setDimension(&result.max_size.height, try parseDimension(value));
+    if (std.mem.eql(u8, name, "position")) return applyPosition(result, value);
+    if (std.mem.eql(u8, name, "top")) return setInset(&result.inset.top, try parseInset(value));
+    if (std.mem.eql(u8, name, "right")) return setInset(&result.inset.right, try parseInset(value));
+    if (std.mem.eql(u8, name, "bottom")) return setInset(&result.inset.bottom, try parseInset(value));
+    if (std.mem.eql(u8, name, "left")) return setInset(&result.inset.left, try parseInset(value));
+    if (std.mem.eql(u8, name, "margin-top")) return setMargin(result, .top, try parseInset(value));
+    if (std.mem.eql(u8, name, "margin-right")) return setMargin(result, .right, try parseInset(value));
+    if (std.mem.eql(u8, name, "margin-bottom")) return setMargin(result, .bottom, try parseInset(value));
+    if (std.mem.eql(u8, name, "margin-left")) return setMargin(result, .left, try parseInset(value));
+    if (std.mem.eql(u8, name, "padding-top")) return setPadding(result, .top, try parseLengthPercentage(value));
+    if (std.mem.eql(u8, name, "padding-right")) return setPadding(result, .right, try parseLengthPercentage(value));
+    if (std.mem.eql(u8, name, "padding-bottom")) return setPadding(result, .bottom, try parseLengthPercentage(value));
+    if (std.mem.eql(u8, name, "padding-left")) return setPadding(result, .left, try parseLengthPercentage(value));
+    if (std.mem.eql(u8, name, "border-top")) return setBorder(result, .top, try parseNonnegativeLength(value));
+    if (std.mem.eql(u8, name, "border-right")) return setBorder(result, .right, try parseNonnegativeLength(value));
+    if (std.mem.eql(u8, name, "border-bottom")) return setBorder(result, .bottom, try parseNonnegativeLength(value));
+    if (std.mem.eql(u8, name, "border-left")) return setBorder(result, .left, try parseNonnegativeLength(value));
+    return error.Unsupported;
+}
+
+fn applyDirection(result: *style.Style, value: []const u8) CaseError!void {
+    result.writing_direction = if (std.mem.eql(u8, value, "ltr"))
+        .ltr
+    else if (std.mem.eql(u8, value, "rtl"))
+        .rtl
+    else
+        return error.Unsupported;
+}
+
+fn applyDisplay(result: *style.Style, value: []const u8) CaseError!void {
+    result.display = if (std.mem.eql(u8, value, "block"))
+        .block
+    else if (std.mem.eql(u8, value, "flex"))
+        .flex
+    else if (std.mem.eql(u8, value, "grid"))
+        .grid
+    else if (std.mem.eql(u8, value, "flow-root"))
+        .flow_root
+    else if (std.mem.eql(u8, value, "none"))
+        .none
+    else
+        return error.Unsupported;
+}
+
+fn applyBoxSizing(result: *style.Style, value: []const u8) CaseError!void {
+    result.box_sizing = if (std.mem.eql(u8, value, "border-box"))
+        .border_box
+    else if (std.mem.eql(u8, value, "content-box"))
+        .content_box
+    else
+        return error.Unsupported;
+}
+
+fn applyPosition(result: *style.Style, value: []const u8) CaseError!void {
+    result.position = if (std.mem.eql(u8, value, "relative"))
+        .relative
+    else if (std.mem.eql(u8, value, "absolute"))
+        .absolute
+    else
+        return error.Unsupported;
+}
+
+fn setDimension(target: *style.Dimension, value: style.Dimension) void {
+    target.* = value;
+}
+
+fn setInset(target: *style.LengthPercentageAuto, value: style.LengthPercentageAuto) void {
+    target.* = value;
+}
+
+fn setMargin(result: *style.Style, side: Side, value: style.LengthPercentageAuto) void {
+    switch (side) {
+        .top => result.margin_inset.top = value,
+        .right => result.margin_inset.right = value,
+        .bottom => result.margin_inset.bottom = value,
+        .left => result.margin_inset.left = value,
+    }
+    const fixed: f32 = switch (value) {
+        .length => |number| number,
+        .auto, .percent => 0,
+    };
+    switch (side) {
+        .top => result.margin.top = fixed,
+        .right => result.margin.right = fixed,
+        .bottom => result.margin.bottom = fixed,
+        .left => result.margin.left = fixed,
+    }
+}
+
+fn setPadding(result: *style.Style, side: Side, value: style.LengthPercentage) void {
+    switch (side) {
+        .top => result.padding_inset.top = value,
+        .right => result.padding_inset.right = value,
+        .bottom => result.padding_inset.bottom = value,
+        .left => result.padding_inset.left = value,
+    }
+    const fixed: f32 = switch (value) {
+        .length => |number| number,
+        .percent => 0,
+    };
+    switch (side) {
+        .top => result.padding.top = fixed,
+        .right => result.padding.right = fixed,
+        .bottom => result.padding.bottom = fixed,
+        .left => result.padding.left = fixed,
+    }
+}
+
+fn setBorder(result: *style.Style, side: Side, value: f32) void {
+    switch (side) {
+        .top => {
+            result.border.top = value;
+            result.border_inset.top = .{ .length = value };
+        },
+        .right => {
+            result.border.right = value;
+            result.border_inset.right = .{ .length = value };
+        },
+        .bottom => {
+            result.border.bottom = value;
+            result.border_inset.bottom = .{ .length = value };
+        },
+        .left => {
+            result.border.left = value;
+            result.border_inset.left = .{ .length = value };
+        },
+    }
+}
+
+fn parseDimension(value: []const u8) CaseError!style.Dimension {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "min-content")) return .min_content;
+    if (std.mem.eql(u8, value, "max-content")) return .max_content;
+    if (std.mem.endsWith(u8, value, "%")) {
+        const fraction = try parseNumber(value[0 .. value.len - 1]);
+        if (fraction < 0) return error.InvalidFixture;
+        return .{ .percent = fraction / 100 };
+    }
+    return .{ .length = try parseNonnegativeLength(value) };
+}
+
+fn parseInset(value: []const u8) CaseError!style.LengthPercentageAuto {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.endsWith(u8, value, "%")) {
+        return .{ .percent = try parseNumber(value[0 .. value.len - 1]) / 100 };
+    }
+    return .{ .length = try parseNumberWithOptionalPixels(value) };
+}
+
+fn parseLengthPercentage(value: []const u8) CaseError!style.LengthPercentage {
+    if (std.mem.endsWith(u8, value, "%")) {
+        const fraction = try parseNumber(value[0 .. value.len - 1]);
+        if (fraction < 0) return error.InvalidFixture;
+        return .{ .percent = fraction / 100 };
+    }
+    return .{ .length = try parseNonnegativeLength(value) };
+}
+
+fn parseNonnegativeLength(value: []const u8) CaseError!f32 {
+    const number = try parseNumberWithOptionalPixels(value);
+    if (number < 0) return error.InvalidFixture;
+    return number;
+}
+
+fn parseNumberWithOptionalPixels(value: []const u8) CaseError!f32 {
+    const number = if (std.mem.endsWith(u8, value, "px"))
+        try parseNumber(value[0 .. value.len - 2])
+    else
+        try parseNumber(value);
+    return number;
+}
+
+fn parseNumber(value: []const u8) CaseError!f32 {
+    if (value.len == 0) return error.InvalidFixture;
+    const number = std.fmt.parseFloat(f32, value) catch return error.InvalidFixture;
+    if (!std.math.isFinite(number)) return error.InvalidFixture;
+    return number;
+}
+
+fn jsonString(value: std.json.Value) CaseError![]const u8 {
+    return switch (value) {
+        .string => |string| string,
+        else => error.InvalidFixture,
+    };
+}
+
+fn pixelsF32(value: []const u8) CaseError!f32 {
+    const parsed = try parsePixels(value);
+    const result: f32 = @floatCast(parsed);
+    if (!std.math.isFinite(result)) return error.InvalidFixture;
+    return result;
+}
+
+fn finiteF32(value: f64) CaseError!f32 {
+    if (!std.math.isFinite(value) or value < 0) return error.InvalidFixture;
+    const result: f32 = @floatCast(value);
+    if (!std.math.isFinite(result) or result < 0) return error.InvalidFixture;
+    return result;
+}
+
+fn ahemMeasure(text: []const u8, _: f32, _: u8) widget.Size {
+    var line_width: f32 = 0;
+    var maximum_width: f32 = 0;
+    var line_count: f32 = 1;
+    var index: usize = 0;
+    while (index < text.len) {
+        if (std.mem.startsWith(u8, text[index..], "\xE2\x80\x8B")) {
+            index += 3;
+            continue;
+        }
+        const byte = text[index];
+        if (byte == '\n') {
+            maximum_width = @max(maximum_width, line_width);
+            line_width = 0;
+            line_count += 1;
+        } else if ((byte & 0b1100_0000) != 0b1000_0000) {
+            line_width += ahem_glyph_width;
+        }
+        index += 1;
+    }
+    return .{
+        .width = @max(maximum_width, line_width),
+        .height = line_count * ahem_line_height,
+    };
 }
 
 fn parsePixels(value: []const u8) FixtureError!f64 {
@@ -322,11 +823,23 @@ fn matchesFilter(fixture_case: Case, filter: ?[]const u8) bool {
     return std.mem.eql(u8, fixture_case.source, selected);
 }
 
-fn rectMatches(actual: Rect, expected: Rect) bool {
-    if (@abs(actual.x - expected.x) >= comparison_tolerance) return false;
-    if (@abs(actual.y - expected.y) >= comparison_tolerance) return false;
-    if (@abs(actual.width - expected.width) >= comparison_tolerance) return false;
-    return @abs(actual.height - expected.height) < comparison_tolerance;
+fn rectMatchesRounded(actual: Rect, expected: Rect, use_rounding: bool) bool {
+    const compared_actual = if (use_rounding) Rect{
+        .x = @round(actual.x),
+        .y = @round(actual.y),
+        .width = @round(actual.width),
+        .height = @round(actual.height),
+    } else actual;
+    const compared_expected = if (use_rounding) Rect{
+        .x = @round(expected.x),
+        .y = @round(expected.y),
+        .width = @round(expected.width),
+        .height = @round(expected.height),
+    } else expected;
+    if (@abs(compared_actual.x - compared_expected.x) >= comparison_tolerance) return false;
+    if (@abs(compared_actual.y - compared_expected.y) >= comparison_tolerance) return false;
+    if (@abs(compared_actual.width - compared_expected.width) >= comparison_tolerance) return false;
+    return @abs(compared_actual.height - compared_expected.height) < comparison_tolerance;
 }
 
 fn validSha256(value: []const u8) bool {

@@ -9,4 +9,5 @@ test "runs the pinned leaf fixture" {
 
     try std.testing.expectEqual(@as(usize, 1), result.passed);
     try std.testing.expectEqual(@as(usize, 0), result.failed);
+    try std.testing.expectEqual(@as(usize, 0), result.unsupported);
 }

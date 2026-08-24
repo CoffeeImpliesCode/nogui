@@ -17,6 +17,13 @@
           "kind": "text",
           "text": "HHHH",
           "child_count": 0,
+          "attributes": {
+            "border-bottom": "6px",
+            "border-left": "8px",
+            "border-right": "4px",
+            "border-top": "2px",
+            "direction": "ltr"
+          },
           "style": {
             "direction": "ltr",
             "border_top": "2px",

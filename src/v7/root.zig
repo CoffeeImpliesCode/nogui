@@ -130,6 +130,7 @@ test {
     _ = @import("layout/dispatch_grid_remeasure_test.zig");
     _ = @import("layout/dispatch_flex_remeasure_test.zig");
     _ = @import("layout/dispatch_block_remeasure_test.zig");
+    _ = @import("layout/fixture_test.zig");
 }
 
 test "canonical module exports App and DrawCtx" {
