@@ -243,7 +243,10 @@ fn measureNaturalBlockContent(
         const child_request: layout_context.Request = .{
             .available = child_available,
             .percentage_basis = .{
-                .width = if (width_definite) @as(?f32, child_available.width) else null,
+                .width = if (width_definite)
+                    @as(?f32, child_available.width)
+                else
+                    request.percentage_basis.width,
                 .height = if (height_definite) @as(?f32, child_available.height) else null,
             },
             .intrinsic_width = !width_definite and dimensionAuto(child.style.size.width),
@@ -1235,7 +1238,9 @@ fn layoutAbsoluteChildren(
             null;
         const intrinsic_width =
             child_style.size.width == .auto and auto_width_border == null;
-        var intrinsic = try intrinsicContentSizeWithContext(
+        const intrinsic_height =
+            child_style.size.height == .auto and auto_height_border == null;
+        const intrinsic = try intrinsicContentSizeWithContextAndAxes(
             tree,
             child,
             child_edges,
@@ -1243,6 +1248,7 @@ fn layoutAbsoluteChildren(
             layout_ctx,
             absolute_context,
             intrinsic_width,
+            intrinsic_height,
         );
         var child_size = try resolveChildSize(
             child_style,
@@ -1252,32 +1258,20 @@ fn layoutAbsoluteChildren(
             auto_width_border,
             auto_height_border,
         );
+        const used_width = child_size.width;
         if (try layoutNestedBlockAtWidth(
             tree,
             child_id,
             absolute_context,
-            child_size.width,
+            used_width,
             measure,
-            auto_height_border,
+            if (auto_height_border != null) child_size.height else null,
             layout_ctx,
         )) |_| {
-            intrinsic = try intrinsicContentSizeWithContext(
-                tree,
-                child,
-                child_edges,
-                measure,
-                layout_ctx,
-                absolute_context,
-                intrinsic_width,
-            );
-            child_size = try resolveChildSize(
-                child_style,
-                absolute_context,
-                intrinsic,
-                child_edges,
-                auto_width_border,
-                auto_height_border,
-            );
+            child_size = .{
+                .width = child.rect.w,
+                .height = child.rect.h,
+            };
         }
         try resolveAbsoluteAutoMargins(
             child_style,
@@ -1670,12 +1664,13 @@ fn requestFromSizingContext(
     input: sizing.SizingContext,
     forced_border: ?widget.Size,
     intrinsic_width: bool,
+    intrinsic_height_override: ?bool,
 ) sizing.Error!layout_context.Request {
     const width = switch (input.available.width) {
         .definite => |value| try finite(value),
         .min_content, .max_content => return error.InvalidStyle,
     };
-    const intrinsic_height = switch (input.available.height) {
+    const intrinsic_height = if (intrinsic_height_override) |value| value else switch (input.available.height) {
         .definite => false,
         .min_content, .max_content => true,
     };
@@ -1692,6 +1687,24 @@ fn requestFromSizingContext(
     };
 }
 
+fn rejectPureBlockMixedMeasure(
+    _: *layout_context.LayoutContext,
+    _: *widget.WidgetTree,
+    _: *const widget.WidgetNode,
+    _: layout_context.Request,
+) layout_context.LayoutError!layout_context.Measured {
+    return error.InvalidStyle;
+}
+
+fn rejectPureBlockMixedLayout(
+    _: *layout_context.LayoutContext,
+    _: *widget.WidgetTree,
+    _: *widget.WidgetNode,
+    _: layout_context.Request,
+) layout_context.LayoutError!void {
+    return error.InvalidStyle;
+}
+
 fn intrinsicContentSizeWithContext(
     tree: *widget.WidgetTree,
     node: *const widget.WidgetNode,
@@ -1701,21 +1714,95 @@ fn intrinsicContentSizeWithContext(
     containing: sizing.SizingContext,
     intrinsic_width: bool,
 ) sizing.Error!widget.Size {
-    if (layout_ctx) |context| {
-        if (node.children.items.len != 0 and
-            node.style.display != .block and
-            node.style.display != .flow_root)
-        {
-            const measured = try context.measure_node(
-                context,
+    return intrinsicContentSizeWithContextAndAxes(
+        tree,
+        node,
+        edges,
+        measure,
+        layout_ctx,
+        containing,
+        intrinsic_width,
+        null,
+    );
+}
+
+fn intrinsicContentSizeWithContextAndAxes(
+    tree: *widget.WidgetTree,
+    node: *const widget.WidgetNode,
+    edges: BoxEdges,
+    measure: ?layout_context.MeasureFn,
+    layout_ctx: ?*layout_context.LayoutContext,
+    containing: sizing.SizingContext,
+    intrinsic_width: bool,
+    intrinsic_height_override: ?bool,
+) sizing.Error!widget.Size {
+    if (node.children.items.len != 0) {
+        const block_container =
+            node.style.display == .block or node.style.display == .flow_root;
+        if (block_container and intrinsic_width) {
+            const request = try requestFromSizingContext(
+                containing,
+                null,
+                true,
+                intrinsic_height_override,
+            );
+            return measureNaturalBlockRequest(
                 tree,
                 node,
-                try requestFromSizingContext(containing, null, intrinsic_width),
+                measure,
+                layout_ctx,
+                request,
             );
-            return measured.content;
+        }
+        if (!block_container) {
+            if (layout_ctx) |context| {
+                const measured = try context.measure_node(
+                    context,
+                    tree,
+                    node,
+                    try requestFromSizingContext(
+                        containing,
+                        null,
+                        intrinsic_width,
+                        null,
+                    ),
+                );
+                return measured.content;
+            }
         }
     }
     return intrinsicContentSize(node, edges, measure);
+}
+
+fn measureNaturalBlockRequest(
+    tree: *widget.WidgetTree,
+    node: *const widget.WidgetNode,
+    measure: ?layout_context.MeasureFn,
+    layout_ctx: ?*layout_context.LayoutContext,
+    request: layout_context.Request,
+) sizing.Error!widget.Size {
+    if (layout_ctx) |context| {
+        const measured = try context.measure_node(
+            context,
+            tree,
+            node,
+            request,
+        );
+        return measured.content;
+    }
+    var pure_context: layout_context.LayoutContext = .{
+        .allocator = tree.allocator,
+        .measure = measure,
+        .measure_node = rejectPureBlockMixedMeasure,
+        .layout_node = rejectPureBlockMixedLayout,
+    };
+    const measured = try measureNatural(
+        tree,
+        node,
+        request,
+        &pure_context,
+    );
+    return measured.content;
 }
 
 fn layoutMixedChild(
@@ -1735,6 +1822,7 @@ fn layoutMixedChild(
             containing,
             .{ .width = child.rect.w, .height = child.rect.h },
             false,
+            null,
         ),
     );
 }

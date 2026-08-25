@@ -1034,6 +1034,169 @@ test "absolute nested block resolves descendants before auto height" {
     try expectRelative(&tree, descendant_id, .{ .x = 0, .y = 0, .w = 20, .h = 15 });
 }
 
+test "absolute auto size measures child before max height and bottom placement" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const absolute_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, child_id, absolute_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 150 } },
+    });
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .max_size = .{ .width = .auto, .height = .{ .length = 100 } },
+        .inset = .{
+            .top = .auto,
+            .right = .auto,
+            .bottom = .{ .length = 20 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 200 } },
+    });
+    try tree.appendChild(absolute_id, child_id);
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 200), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 80, .w = 100, .h = 100 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 100, .h = 150 });
+}
+
+test "absolute paired vertical insets clamp auto height before nested layout" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const absolute_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, child_id, absolute_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 150 } },
+    });
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .max_size = .{ .width = .auto, .height = .{ .length = 100 } },
+        .inset = .{
+            .top = .{ .length = 10 },
+            .right = .auto,
+            .bottom = .{ .length = 10 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 200 } },
+    });
+    try tree.appendChild(absolute_id, child_id);
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(200, 200), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 200, .h = 200 });
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 10, .w = 100, .h = 100 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 100, .h = 150 });
+}
+
+test "absolute max-width clamp remeasures percentage child aspect-ratio height" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const descendant_id: Id = @enumFromInt(1);
+    const absolute_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, descendant_id, absolute_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .percent = 1 }, .height = .auto },
+        .aspect_ratio = 1,
+    });
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .max_size = .{ .width = .{ .length = 100 }, .height = .auto },
+        .inset = .{
+            .top = .auto,
+            .right = .auto,
+            .bottom = .{ .length = 20 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 300 } },
+    });
+    try tree.appendChild(absolute_id, descendant_id);
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(200, 300), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 180, .w = 100, .h = 100 });
+    try expectRelative(&tree, descendant_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+}
+
+test "absolute specified width max-width clamp remeasures percentage child aspect-ratio height" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const descendant_id: Id = @enumFromInt(1);
+    const absolute_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    try appendNode(&tree, descendant_id, absolute_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .percent = 1 }, .height = .auto },
+        .aspect_ratio = 1,
+    });
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 200 }, .height = .auto },
+        .max_size = .{ .width = .{ .length = 100 }, .height = .auto },
+        .inset = .{
+            .top = .auto,
+            .right = .auto,
+            .bottom = .{ .length = 20 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 300 } },
+    });
+    try tree.appendChild(absolute_id, descendant_id);
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(200, 300), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 180, .w = 100, .h = 100 });
+    try expectRelative(&tree, descendant_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+}
+
 test "absolute paired insets reserve child margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
