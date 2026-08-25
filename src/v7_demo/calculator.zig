@@ -98,24 +98,30 @@ pub const CalculatorApp = struct {
             .justify = .center,
             .@"align" = .center,
         };
-        // Shared visual default for every key; number/operator variants
-        // override their colors locally but keep the same corner shape.
         pub const default_paint: PaintStyle = .{
+            .border_color = c_border_strong,
             .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+            .fill = c_key,
+            .gradient = srgbToOklab(c_key),
         };
 
         pub fn draw(self: *Keypad, ctx: *DrawCtx) !void {
             _ = self;
             for (0..5) |row_index| {
                 const key_index_start = row_index * 4;
-                _ = try ctx.row(.{});
+                _ = try ctx.row(.{
+                    .border_color = .{ 0, 0, 0, 1 },
+                    .radius = .{},
+                    .fill = .{ 0, 0, 0, 0 },
+                    .gradient = .{ 0, 0, 0, 0 },
+                });
                 defer ctx.pop();
 
                 for (
                     key_specs[key_index_start .. key_index_start + 4],
                     key_index_start..,
                 ) |key, key_index| {
-                    const fill = if (key.accent) c_accent else c_key;
+                    const fill = if (key.accent) c_accent else default_paint.fill;
                     _ = try ctx.button(.{
                         .label = key.label,
                         .on_click_with_data = nogui.bind(Keypad.onKey, key_index),
@@ -124,9 +130,9 @@ pub const CalculatorApp = struct {
                         .grow = 1,
                         .basis = 44,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-                        .border_color = if (key.accent) c_accent else c_border_strong,
+                        .border_color = if (key.accent) c_accent else default_paint.border_color,
                         .fill = fill,
-                        .gradient = srgbToOklab(fill),
+                        .gradient = if (key.accent) srgbToOklab(c_accent) else default_paint.gradient,
                     });
                 }
             }
