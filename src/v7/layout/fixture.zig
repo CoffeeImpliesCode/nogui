@@ -5,8 +5,8 @@ const layout = @import("root.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
-const cases_path = "~/.cache/taffy-v0.13.0-normalized/normalized/cases.json";
-const manifest_path = "~/.cache/taffy-v0.13.0-normalized/MANIFEST.json";
+const cases_path = "testdata/taffy-v0.13.0/normalized/cases.json";
+const manifest_path = "testdata/taffy-v0.13.0/MANIFEST.json";
 
 const pinned_commit = "45a56299d366ddb383e593a1f0372158d00e8530";
 const pinned_repository = "https://github.com/DioxusLabs/taffy";
