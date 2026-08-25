@@ -282,3 +282,135 @@ test "cross-axis aspect-ratio transfers cross constraints into main size" {
 
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 120, .h = 60 }, tree.node(item).?.rect);
 }
+
+test "flex-grow with max-width clamping and iterative redistribution" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const id1: Id = @enumFromInt(2);
+    const id2: Id = @enumFromInt(3);
+    const id3: Id = @enumFromInt(4);
+
+    try appendNode(&tree, id1, row, .{ .label = .{ .text = "a" } });
+    try appendNode(&tree, id2, row, .{ .label = .{ .text = "b" } });
+    try appendNode(&tree, id3, row, .{ .label = .{ .text = "c" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 500 }, .height = .{ .length = 50 } };
+    for ([_]Id{ id1, id2, id3 }) |id| {
+        tree.node(id).?.style.size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } };
+        tree.node(id).?.style.grow = 1;
+        tree.node(id).?.style.shrink = 0;
+    }
+    tree.node(id1).?.style.max_size = .{ .width = .{ .length = 130 }, .height = .auto };
+
+    flex.layout(&tree, .{ .width = 500, .height = 50 });
+
+    // Free space = 500 - 300 = 200.
+    // id1 clamps to 130 (takes 30px). Remaining free space = 170.
+    // id2 and id3 take 85px each -> 185px each.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 130, .h = 50 }, tree.node(id1).?.rect);
+    try testing.expectEqual(Rect{ .x = 130, .y = 0, .w = 185, .h = 50 }, tree.node(id2).?.rect);
+    try testing.expectEqual(Rect{ .x = 315, .y = 0, .w = 185, .h = 50 }, tree.node(id3).?.rect);
+}
+
+test "flex-shrink with min-width clamping and iterative redistribution" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const id1: Id = @enumFromInt(2);
+    const id2: Id = @enumFromInt(3);
+    const id3: Id = @enumFromInt(4);
+
+    try appendNode(&tree, id1, row, .{ .label = .{ .text = "a" } });
+    try appendNode(&tree, id2, row, .{ .label = .{ .text = "b" } });
+    try appendNode(&tree, id3, row, .{ .label = .{ .text = "c" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 200 }, .height = .{ .length = 50 } };
+    for ([_]Id{ id1, id2, id3 }) |id| {
+        tree.node(id).?.style.size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } };
+        tree.node(id).?.style.grow = 0;
+        tree.node(id).?.style.shrink = 1;
+    }
+    tree.node(id1).?.style.min_size = .{ .width = .{ .length = 80 }, .height = .auto };
+
+    flex.layout(&tree, .{ .width = 200, .height = 50 });
+
+    // Overflow = 300 - 200 = 100.
+    // id1 clamps to min 80 (shrinks by 20px). Remaining overflow = 80.
+    // id2 and id3 shrink by 40px each -> 60px each.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 80, .h = 50 }, tree.node(id1).?.rect);
+    try testing.expectEqual(Rect{ .x = 80, .y = 0, .w = 60, .h = 50 }, tree.node(id2).?.rect);
+    try testing.expectEqual(Rect{ .x = 140, .y = 0, .w = 60, .h = 50 }, tree.node(id3).?.rect);
+}
+
+test "justify-content space-between accurately deducts margins and gaps" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const id1: Id = @enumFromInt(2);
+    const id2: Id = @enumFromInt(3);
+
+    try appendNode(&tree, id1, row, .{ .label = .{ .text = "a" } });
+    try appendNode(&tree, id2, row, .{ .label = .{ .text = "b" } });
+    try appendNode(&tree, row, .root, .{ .row = .{ .gap = 10 } });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 400 }, .height = .{ .length = 50 } };
+    tree.node(row).?.style.justify = .space_between;
+
+    tree.node(id1).?.style.size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } };
+    tree.node(id1).?.style.margin = .{ .right = 20 };
+    tree.node(id1).?.style.grow = 0;
+    tree.node(id1).?.style.shrink = 0;
+
+    tree.node(id2).?.style.size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } };
+    tree.node(id2).?.style.margin = .{ .left = 30 };
+    tree.node(id2).?.style.grow = 0;
+    tree.node(id2).?.style.shrink = 0;
+
+    flex.layout(&tree, .{ .width = 400, .height = 50 });
+
+    // Consumed width = 100 + 20 (m1.right) + 10 (gap) + 30 (m2.left) + 100 = 260.
+    // Free space = 400 - 260 = 140.
+    // Extra gap = 140.
+    // id1 is at x = 0, w = 100.
+    // id2 is at x = 100 + 20 + 10 + 140 + 30 = 300, w = 100.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 50 }, tree.node(id1).?.rect);
+    try testing.expectEqual(Rect{ .x = 300, .y = 0, .w = 100, .h = 50 }, tree.node(id2).?.rect);
+}
+
+test "aspect-ratio propagates cross-axis min/max constraints to main axis" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, row, .{ .label = .{ .text = "aspect" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    // Row has definite height = 60, align = .stretch.
+    // Item has aspect_ratio = 2.0, max_height = 40.
+    // Stretched cross height 60 is clamped by max_height 40.
+    // Transferred main width = 40 * 2.0 = 80.
+    tree.node(row).?.style.size = .{ .width = .{ .length = 300 }, .height = .{ .length = 60 } };
+    tree.node(row).?.style.@"align" = .stretch;
+
+    tree.node(item).?.style.size = .{ .width = .auto, .height = .auto };
+    tree.node(item).?.style.max_size = .{ .width = .auto, .height = .{ .length = 40 } };
+    tree.node(item).?.style.aspect_ratio = 2.0;
+    tree.node(item).?.style.grow = 0;
+    tree.node(item).?.style.shrink = 0;
+
+    flex.layout(&tree, .{ .width = 300, .height = 60 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 80, .h = 40 }, tree.node(item).?.rect);
+}

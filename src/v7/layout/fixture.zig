@@ -1256,7 +1256,7 @@ test "fixture unsupported alignment values stay explicit" {
         name: []const u8,
         value: []const u8,
     }{
-        .{ .name = "align-items", .value = "baseline" },
+        .{ .name = "align-items", .value = "safe center" },
         .{ .name = "align-self", .value = "safe center" },
         .{ .name = "align-content", .value = "unsafe center" },
         .{ .name = "justify-content", .value = "baseline" },
@@ -1600,6 +1600,76 @@ test "fixture grid auto tracks and flow map represented values" {
     }
 }
 
+test "fixture grid templates parse repeat and fit-content patterns" {
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    var result: style.Style = .{};
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-columns",
+        "repeat(4, 50px)",
+    );
+    const expected_repeat4 = [_]style.GridTrack{
+        .{ .fixed = 50 },
+        .{ .fixed = 50 },
+        .{ .fixed = 50 },
+        .{ .fixed = 50 },
+    };
+    try std.testing.expectEqual(expected_repeat4.len, result.grid_template_columns.len);
+    for (expected_repeat4, result.grid_template_columns) |expected, actual| {
+        try std.testing.expect(std.meta.eql(expected, actual));
+    }
+
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-columns",
+        "10px repeat(2, 1fr 2fr) 20px",
+    );
+    const expected_mixed = [_]style.GridTrack{
+        .{ .fixed = 10 },
+        .{ .fr = 1 },
+        .{ .fr = 2 },
+        .{ .fr = 1 },
+        .{ .fr = 2 },
+        .{ .fixed = 20 },
+    };
+    try std.testing.expectEqual(expected_mixed.len, result.grid_template_columns.len);
+    for (expected_mixed, result.grid_template_columns) |expected, actual| {
+        try std.testing.expect(std.meta.eql(expected, actual));
+    }
+
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-rows",
+        "fit-content(20px) repeat(2, minmax(10px, 1fr)) fit-content(30px)",
+    );
+    const expected_rows = [_]style.GridTrack{
+        .{ .fit_content = 20 },
+        .{ .minmax = .{ .min = .{ .fixed = 10 }, .max = .{ .fr = 1 } } },
+        .{ .minmax = .{ .min = .{ .fixed = 10 }, .max = .{ .fr = 1 } } },
+        .{ .fit_content = 30 },
+    };
+    try std.testing.expectEqual(expected_rows.len, result.grid_template_rows.len);
+    for (expected_rows, result.grid_template_rows) |expected, actual| {
+        try std.testing.expect(std.meta.eql(expected, actual));
+    }
+
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-auto-columns",
+        "fit-content(50px)",
+    );
+    try std.testing.expect(std.meta.eql(
+        @as(style.GridTrack, .{ .fit_content = 50 }),
+        result.grid_auto_columns,
+    ));
+}
+
 test "fixture grid placements parse lines and positive spans" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
@@ -1641,6 +1711,11 @@ test "fixture grid placements parse lines and positive spans" {
         result.grid_row,
     ));
 
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "grid-row-end", "span 1024");
+    try std.testing.expect(std.meta.eql(
+        @as(style.GridPlacement, .{ .span = 1024 }),
+        result.grid_row_end,
+    ));
     try applyAttributeWithResources(&fixture_tree.resources, &result, "grid-row-end", "span 255");
     try std.testing.expect(std.meta.eql(
         @as(style.GridPlacement, .{ .span = 255 }),
@@ -1682,7 +1757,7 @@ test "fixture grid placements parse lines and positive spans" {
             &fixture_tree.resources,
             &result,
             "grid-column-end",
-            "span 256",
+            "span 1025",
         ),
     );
     try std.testing.expectError(
@@ -1746,10 +1821,10 @@ test "fixture grid alignment and gaps populate grid fields" {
         name: []const u8,
         value: []const u8,
     }{
-        .{ .name = "justify-items", .value = "baseline" },
+        .{ .name = "justify-items", .value = "safe center" },
         .{ .name = "align-items", .value = "safe center" },
         .{ .name = "justify-self", .value = "safe center" },
-        .{ .name = "align-self", .value = "baseline" },
+        .{ .name = "align-self", .value = "safe center" },
         .{ .name = "justify-content", .value = "safe center" },
     };
     for (unsupported) |case| {
@@ -1773,13 +1848,13 @@ test "fixture grid representation gaps stay explicitly unsupported" {
         name: []const u8,
         value: []const u8,
     }{
-        .{ .name = "grid-template-columns", .value = "repeat(2, 1fr)" },
-        .{ .name = "grid-template-rows", .value = "fit-content(20px)" },
+        .{ .name = "grid-template-columns", .value = "repeat(auto-fill, 1fr)" },
+        .{ .name = "grid-template-rows", .value = "repeat(auto-fit, 20px)" },
         .{ .name = "grid-template-columns", .value = "[content] 1fr" },
         .{ .name = "grid-template-rows", .value = "subgrid" },
         .{ .name = "grid-template-areas", .value = "\"main main\"" },
         .{ .name = "grid-auto-columns", .value = "10px 1fr" },
-        .{ .name = "grid-auto-rows", .value = "fit-content(10px)" },
+        .{ .name = "grid-auto-rows", .value = "minmax(10px, 1fr) 20px" },
     };
     for (unsupported) |case| {
         var result: style.Style = .{};
@@ -2074,6 +2149,8 @@ fn parseAlign(value: []const u8) CaseError!style.Align {
     else if (std.mem.eql(u8, value, "end") or
         std.mem.eql(u8, value, "flex-end"))
         .end
+    else if (std.mem.eql(u8, value, "baseline"))
+        .baseline
     else
         error.Unsupported;
 }
@@ -2085,7 +2162,64 @@ fn parseAlignSelf(value: []const u8) CaseError!style.AlignSelf {
         .start => .start,
         .center => .center,
         .end => .end,
+        .baseline => .baseline,
     };
+}
+
+const RepeatSpec = struct {
+    count: usize,
+    body: []const u8,
+};
+
+fn parseRepeatHeader(token: []const u8) CaseError!RepeatSpec {
+    if (!std.mem.endsWith(u8, token, ")")) return error.Unsupported;
+    const inner = token[7 .. token.len - 1];
+    var comma: ?usize = null;
+    var depth: usize = 0;
+    for (inner, 0..) |character, index| {
+        if (character == '(') {
+            depth += 1;
+        } else if (character == ')') {
+            if (depth == 0) return error.InvalidFixture;
+            depth -= 1;
+        } else if (character == ',' and depth == 0) {
+            if (comma != null) return error.InvalidFixture;
+            comma = index;
+            break;
+        }
+    }
+    if (depth != 0) return error.InvalidFixture;
+    const split = comma orelse return error.InvalidFixture;
+    const count_str = std.mem.trim(u8, inner[0..split], " \t\n\r");
+    if (count_str.len == 0) return error.InvalidFixture;
+    const count = std.fmt.parseInt(usize, count_str, 10) catch {
+        if (std.mem.eql(u8, count_str, "auto-fill") or std.mem.eql(u8, count_str, "auto-fit")) {
+            return error.Unsupported;
+        }
+        return error.InvalidFixture;
+    };
+    if (count == 0) return error.InvalidFixture;
+    if (count > 1024) return error.Unsupported;
+    const body = std.mem.trim(u8, inner[split + 1 ..], " \t\n\r");
+    if (body.len == 0) return error.InvalidFixture;
+    return .{ .count = count, .body = body };
+}
+
+fn countRepeatTracks(token: []const u8) CaseError!usize {
+    const repeat_spec = try parseRepeatHeader(token);
+    var cursor: usize = 0;
+    var inner_count: usize = 0;
+    while (try nextGridTrackToken(repeat_spec.body, &cursor)) |inner_token| {
+        if (std.mem.startsWith(u8, inner_token, "repeat(")) {
+            return error.Unsupported;
+        }
+        _ = try parseGridTrackToken(inner_token);
+        inner_count += 1;
+    }
+    if (inner_count == 0) return error.InvalidFixture;
+    const total = std.math.mul(usize, repeat_spec.count, inner_count) catch return error.Unsupported;
+    if (total > 1024) return error.Unsupported;
+    return total;
 }
 
 fn parseGridTemplate(
@@ -2098,8 +2232,21 @@ fn parseGridTemplate(
 
     var cursor: usize = 0;
     var index: usize = 0;
-    while (try nextGridTrackToken(value, &cursor)) |token| : (index += 1) {
-        owned[index] = try parseGridTrackToken(token);
+    while (try nextGridTrackToken(value, &cursor)) |token| {
+        if (std.mem.startsWith(u8, token, "repeat(")) {
+            const repeat_spec = try parseRepeatHeader(token);
+            var rep_i: usize = 0;
+            while (rep_i < repeat_spec.count) : (rep_i += 1) {
+                var inner_cursor: usize = 0;
+                while (try nextGridTrackToken(repeat_spec.body, &inner_cursor)) |inner_token| {
+                    owned[index] = try parseGridTrackToken(inner_token);
+                    index += 1;
+                }
+            }
+        } else {
+            owned[index] = try parseGridTrackToken(token);
+            index += 1;
+        }
     }
     std.debug.assert(index == count);
     try resources.grid_track_allocations.append(resources.allocator, owned);
@@ -2110,8 +2257,12 @@ fn countGridTracks(value: []const u8) CaseError!usize {
     var cursor: usize = 0;
     var count: usize = 0;
     while (try nextGridTrackToken(value, &cursor)) |token| {
-        _ = token;
-        count += 1;
+        if (std.mem.startsWith(u8, token, "repeat(")) {
+            count += try countRepeatTracks(token);
+        } else {
+            _ = try parseGridTrackToken(token);
+            count += 1;
+        }
     }
     if (count == 0) return error.InvalidFixture;
     return count;
@@ -2170,10 +2321,11 @@ fn parseSingleGridTrack(value: []const u8) CaseError!style.GridTrack {
 
 fn parseGridTrackToken(token: []const u8) CaseError!style.GridTrack {
     if (token.len == 0) return error.InvalidFixture;
-    if (token[0] == '[' or std.mem.startsWith(u8, token, "repeat(") or
-        std.mem.startsWith(u8, token, "fit-content("))
-    {
+    if (token[0] == '[' or std.mem.startsWith(u8, token, "repeat(")) {
         return error.Unsupported;
+    }
+    if (std.mem.startsWith(u8, token, "fit-content(")) {
+        return .{ .fit_content = try parseGridFitContent(token) };
     }
     if (std.mem.startsWith(u8, token, "minmax(")) {
         return .{ .minmax = try parseGridMinMax(token) };
@@ -2207,6 +2359,23 @@ fn parseGridTrackToken(token: []const u8) CaseError!style.GridTrack {
         if (number == 0) return .{ .fixed = 0 };
     }
     return error.Unsupported;
+}
+fn parseGridFitContent(token: []const u8) CaseError!f32 {
+    if (!std.mem.endsWith(u8, token, ")")) return error.Unsupported;
+    const body = std.mem.trim(u8, token[12 .. token.len - 1], " \t\n\r");
+    if (body.len == 0) return error.InvalidFixture;
+    if (std.mem.endsWith(u8, body, "px")) {
+        return parseGridNonnegativeNumber(body[0 .. body.len - 2]);
+    }
+    if (std.mem.endsWith(u8, body, "%")) {
+        const pct_str = body[0 .. body.len - 1];
+        const num = std.fmt.parseFloat(f32, pct_str) catch return error.InvalidFixture;
+        if (num < 0) return error.InvalidFixture;
+        return error.Unsupported;
+    }
+    const number = std.fmt.parseFloat(f32, body) catch return error.InvalidFixture;
+    if (number < 0) return error.InvalidFixture;
+    return number;
 }
 
 fn parseGridNonnegativeNumber(value: []const u8) CaseError!f32 {
@@ -2259,6 +2428,9 @@ fn parseGridBreadth(value: []const u8) CaseError!style.GridTrackBreadth {
     if (std.mem.eql(u8, value, "auto")) return .auto;
     if (std.mem.eql(u8, value, "min-content")) return .min_content;
     if (std.mem.eql(u8, value, "max-content")) return .max_content;
+    if (std.mem.startsWith(u8, value, "fit-content(")) {
+        return .{ .fit_content = try parseGridFitContent(value) };
+    }
     if (std.mem.endsWith(u8, value, "fr")) {
         return .{ .fr = try parseGridNonnegativeNumber(
             value[0 .. value.len - 2],
@@ -2314,7 +2486,7 @@ fn parseGridPlacement(value: []const u8) CaseError!style.GridPlacement {
             return error.InvalidFixture;
         };
         if (parsed_span <= 0) return error.InvalidFixture;
-        if (parsed_span > std.math.maxInt(u8)) return error.Unsupported;
+        if (parsed_span > 1024) return error.Unsupported;
         return .{ .span = @intCast(parsed_span) };
     }
     if (std.mem.indexOfAny(u8, trimmed, " \t\n\r") != null) {

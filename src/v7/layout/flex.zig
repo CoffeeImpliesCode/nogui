@@ -1099,7 +1099,7 @@ fn placeItems(
             const align_offset = if (item.cross_start_auto or item.cross_end_auto)
                 0
             else switch (alignment) {
-                .stretch, .start => 0,
+                .stretch, .start, .baseline => 0,
                 .center => cross_free / 2,
                 .end => cross_free,
             };
@@ -1600,6 +1600,7 @@ fn alignValue(self: style.AlignSelf, parent: style.Align) style.Align {
         .start => .start,
         .center => .center,
         .end => .end,
+        .baseline => .baseline,
     };
 }
 

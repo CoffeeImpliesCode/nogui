@@ -34,6 +34,7 @@ pub const Alignment = enum {
     end,
     safe_center,
     unsafe_center,
+    baseline,
 };
 
 pub const CalcError = error{

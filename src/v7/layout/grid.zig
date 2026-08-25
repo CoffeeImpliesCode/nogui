@@ -262,6 +262,9 @@ fn validateTrack(track: style.GridTrack) Error!void {
         .percent => |value| {
             _ = try finiteNonNegative(value);
         },
+        .fit_content => |value| {
+            _ = try finiteNonNegative(value);
+        },
         .auto, .min_content, .max_content => {},
         .fr => |value| {
             _ = try finiteNonNegative(value);
@@ -283,6 +286,9 @@ fn validateBreadth(breadth: style.GridTrackBreadth) Error!void {
             _ = try finiteNonNegative(value);
         },
         .percent => |value| {
+            _ = try finiteNonNegative(value);
+        },
+        .fit_content => |value| {
             _ = try finiteNonNegative(value);
         },
         .auto, .min_content, .max_content => {},
@@ -737,8 +743,14 @@ fn layoutGridNode(
         for (rows.items[item.row.start..@min(rows.items.len, item.row.end)]) |track| {
             area_height = try add(area_height, track.size);
         }
-        if (col_span > 1) area_width = try add(area_width, column_gap * @as(f32, @floatFromInt(col_span - 1)));
-        if (row_span > 1) area_height = try add(area_height, row_gap * @as(f32, @floatFromInt(row_span - 1)));
+        if (col_span > 1) {
+            const span_f: f32 = @floatFromInt(col_span - 1);
+            area_width = try add(area_width, (column_gap + justify_distribution.extra_gap) * span_f);
+        }
+        if (row_span > 1) {
+            const span_f: f32 = @floatFromInt(row_span - 1);
+            area_height = try add(area_height, (row_gap + align_distribution.extra_gap) * span_f);
+        }
         var resolved_natural = item.natural;
         if (child.children.items.len != 0) {
             if (options.context) |context| {
@@ -848,11 +860,32 @@ fn layoutGridNode(
                 alignOffset(justify_self, free_width),
             ),
         );
+        var y_offset: f32 = 0;
+        if (align_self == .baseline) {
+            var max_ascent: f32 = 0;
+            for (items.items) |other| {
+                if (other.row.start == item.row.start) {
+                    const other_child = &tree.nodes.items[other.index];
+                    const other_align = alignValue(other_child.style.grid_align_self, align_items);
+                    if (other_align == .baseline) {
+                        const other_edges = try resolveEdges(other_child.style, content.width);
+                        const other_baseline = nodeFirstBaseline(tree, other.index, other.natural.border, other_edges);
+                        const other_ascent = other.margins.value.top + other_baseline;
+                        max_ascent = @max(max_ascent, other_ascent);
+                    }
+                }
+            }
+            const my_baseline = nodeFirstBaseline(tree, item.index, child_size, child_edges);
+            const my_ascent = margins.value.top + my_baseline;
+            y_offset = @max(0, max_ascent - my_ascent);
+        } else {
+            y_offset = alignOffset(align_self, free_height);
+        }
         const logical_y = try add(
             row_offsets.items[item.row.start],
             try add(
                 margins.value.top,
-                alignOffset(align_self, free_height),
+                y_offset,
             ),
         );
         child.rect = .{
@@ -1329,57 +1362,153 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
 }
 
 fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!void {
-    var used = try trackTotal(tracks, gap);
-    var free = @max(0, try finite(content_size - used));
+    const total_gaps = if (tracks.len > 1) gap * @as(f32, @floatFromInt(tracks.len - 1)) else 0;
 
     var bounded_capacity: f32 = 0;
+    var non_fr_used: f32 = total_gaps;
     for (tracks) |track| {
-        if (trackFraction(track.spec) != 0) continue;
-        if (try trackMaximum(track.spec, content_size)) |maximum| {
-            bounded_capacity = try add(bounded_capacity, @max(0, maximum - track.size));
+        if (trackFraction(track.spec) == 0) {
+            non_fr_used = try add(non_fr_used, track.size);
+            if (try trackMaximum(track.spec, content_size)) |maximum| {
+                bounded_capacity = try add(bounded_capacity, @max(0, maximum - track.size));
+            }
         }
     }
-    if (bounded_capacity > 0 and free > 0) {
+
+    const initial_free = @max(0, try finite(content_size - non_fr_used));
+    if (bounded_capacity > 0 and initial_free > 0) {
         for (tracks) |*track| {
             if (trackFraction(track.spec) != 0) continue;
             if (try trackMaximum(track.spec, content_size)) |maximum| {
                 const capacity = @max(0, maximum - track.size);
                 if (capacity > 0) {
-                    track.size = try add(track.size, @min(capacity, free * capacity / bounded_capacity));
+                    track.size = try add(track.size, @min(capacity, initial_free * capacity / bounded_capacity));
                 }
             }
         }
-        used = try trackTotal(tracks, gap);
-        free = @max(0, try finite(content_size - used));
     }
 
-    var fr_total: f32 = 0;
-    for (tracks) |track| fr_total = try add(fr_total, trackFraction(track.spec));
-    if (fr_total > 0) {
-        if (free > 0) {
-            for (tracks) |*track| {
-                const weight = trackFraction(track.spec);
-                if (weight > 0) {
-                    track.size = free * weight / fr_total;
-                    const minimum = try trackMinimum(track.spec, content_size);
-                    track.size = @max(track.size, minimum);
-                    if (try trackMaximum(track.spec, content_size)) |maximum| track.size = @min(track.size, maximum);
-                }
-            }
-        } else {
-            for (tracks) |*track| {
-                const weight = trackFraction(track.spec);
-                if (weight > 0) {
-                    track.size = try trackMinimum(track.spec, content_size);
-                }
-            }
-        }
-    }
+    non_fr_used = total_gaps;
     for (tracks) |*track| {
         if (trackFraction(track.spec) == 0) {
-            if (try trackMaximum(track.spec, content_size)) |maximum| track.size = @min(track.size, maximum);
+            if (try trackMaximum(track.spec, content_size)) |maximum| {
+                track.size = @min(track.size, maximum);
+            }
+            track.size = try nonNegative(track.size);
+            non_fr_used = try add(non_fr_used, track.size);
         }
-        track.size = try nonNegative(track.size);
+    }
+
+    var free_space = @max(0, try finite(content_size - non_fr_used));
+    var frozen = [_]bool{false} ** 1024;
+    if (tracks.len > 1024) return error.InvalidStyle;
+
+    while (true) {
+        var unfrozen_fr_sum: f32 = 0;
+        var unfrozen_fr_count: usize = 0;
+        for (tracks, 0..) |track, i| {
+            const fr = trackFraction(track.spec);
+            if (fr > 0 and !frozen[i]) {
+                unfrozen_fr_sum = try add(unfrozen_fr_sum, fr);
+                unfrozen_fr_count += 1;
+            }
+        }
+
+        if (unfrozen_fr_count == 0 or free_space <= 0 or unfrozen_fr_sum <= 0) {
+            for (tracks, 0..) |*track, i| {
+                const fr = trackFraction(track.spec);
+                if (fr > 0 and !frozen[i]) {
+                    track.size = try trackMinimum(track.spec, content_size);
+                    if (try trackMaximum(track.spec, content_size)) |maximum| {
+                        track.size = @min(track.size, maximum);
+                    }
+                    track.size = try nonNegative(track.size);
+                }
+            }
+            break;
+        }
+
+        var newly_frozen = false;
+        for (tracks, 0..) |*track, i| {
+            const fr = trackFraction(track.spec);
+            if (fr > 0 and !frozen[i]) {
+                const hypothetical_size = free_space * fr / unfrozen_fr_sum;
+                if (try trackMaximum(track.spec, content_size)) |maximum| {
+                    if (hypothetical_size > maximum) {
+                        frozen[i] = true;
+                        newly_frozen = true;
+                        track.size = maximum;
+                        free_space = @max(0, free_space - maximum);
+                    }
+                }
+            }
+        }
+
+        if (newly_frozen) {
+            continue;
+        }
+
+        for (tracks, 0..) |*track, i| {
+            const fr = trackFraction(track.spec);
+            if (fr > 0 and !frozen[i]) {
+                track.size = free_space * fr / unfrozen_fr_sum;
+                const minimum = try trackMinimum(track.spec, content_size);
+                track.size = @max(track.size, minimum);
+                if (try trackMaximum(track.spec, content_size)) |maximum| {
+                    track.size = @min(track.size, maximum);
+                }
+                track.size = try nonNegative(track.size);
+            }
+        }
+        break;
+    }
+}
+
+fn nodeFirstBaseline(
+    tree: *const widget.WidgetTree,
+    child_index: usize,
+    child_size: widget.Size,
+    child_edges: Edges,
+) f32 {
+    const node = &tree.nodes.items[child_index];
+    switch (node.kind) {
+        .label => {
+            const font_size = if (node.font_size > 0) node.font_size else 16.0;
+            const ascent = font_size * 0.8;
+            return child_edges.border.top + child_edges.padding.top + ascent;
+        },
+        .button => |button| {
+            if (button.visual_label != null) {
+                const font_size = if (node.font_size > 0) node.font_size else 16.0;
+                const ascent = font_size * 0.8;
+                return child_edges.border.top + child_edges.padding.top + ascent;
+            }
+            return child_size.height;
+        },
+        else => {
+            if (node.children.items.len > 0) {
+                for (node.children.items) |grandchild_id| {
+                    if (tree.nodeIndex(grandchild_id)) |grandchild_index| {
+                        const grandchild = &tree.nodes.items[grandchild_index];
+                        if (grandchild.layout_hidden or grandchild.style.position == .absolute) continue;
+                        const grandchild_edges = resolveEdges(grandchild.style, child_size.width) catch Edges{
+                            .border = .{},
+                            .padding = .{},
+                            .horizontal = 0,
+                            .vertical = 0,
+                        };
+                        const grandchild_baseline = nodeFirstBaseline(
+                            tree,
+                            grandchild_index,
+                            .{ .width = grandchild.rect.w, .height = grandchild.rect.h },
+                            grandchild_edges,
+                        );
+                        return grandchild.rect.y + grandchild_baseline;
+                    }
+                }
+            }
+            return child_size.height;
+        },
     }
 }
 
@@ -1407,7 +1536,7 @@ fn trackMinimum(track: style.GridTrack, basis: ?f32) Error!f32 {
             const percentage_basis = basis orelse return error.InvalidStyle;
             break :blk finiteNonNegative(try finite(fraction * percentage_basis));
         },
-        .auto, .min_content, .max_content, .fr => 0,
+        .auto, .min_content, .max_content, .fr, .fit_content => 0,
         .minmax => |value| breadthMinimum(value.min, basis),
     };
 }
@@ -1419,13 +1548,14 @@ fn breadthMinimum(breadth: style.GridTrackBreadth, basis: ?f32) Error!f32 {
             const percentage_basis = basis orelse return error.InvalidStyle;
             break :blk finiteNonNegative(try finite(fraction * percentage_basis));
         },
-        .auto, .min_content, .max_content, .fr => 0,
+        .auto, .min_content, .max_content, .fr, .fit_content => 0,
     };
 }
 
 fn trackMaximum(track: style.GridTrack, basis: ?f32) Error!?f32 {
     return switch (track) {
         .fixed => |value| value,
+        .fit_content => |value| try finiteNonNegative(value),
         .percent => |fraction| blk: {
             const percentage_basis = basis orelse return error.InvalidStyle;
             break :blk fraction * percentage_basis;
@@ -1438,6 +1568,7 @@ fn trackMaximum(track: style.GridTrack, basis: ?f32) Error!?f32 {
 fn breadthMaximum(breadth: style.GridTrackBreadth, basis: ?f32) Error!?f32 {
     return switch (breadth) {
         .fixed => |value| value,
+        .fit_content => |value| try finiteNonNegative(value),
         .percent => |fraction| blk: {
             const percentage_basis = basis orelse return error.InvalidStyle;
             break :blk fraction * percentage_basis;
@@ -1448,9 +1579,9 @@ fn breadthMaximum(breadth: style.GridTrackBreadth, basis: ?f32) Error!?f32 {
 
 fn trackAllowsIntrinsic(track: style.GridTrack) bool {
     return switch (track) {
-        .auto, .min_content, .max_content => true,
+        .auto, .min_content, .max_content, .fit_content => true,
         .minmax => |value| switch (value.min) {
-            .auto, .min_content, .max_content, .fixed, .percent => true,
+            .auto, .min_content, .max_content, .fixed, .percent, .fit_content => true,
             .fr => false,
         },
         .fixed, .percent, .fr => false,
@@ -1459,10 +1590,10 @@ fn trackAllowsIntrinsic(track: style.GridTrack) bool {
 
 fn trackCanStretch(track: style.GridTrack) bool {
     return switch (track) {
-        .auto, .min_content, .max_content => true,
+        .auto, .min_content, .max_content, .fit_content => true,
         .minmax => |value| switch (value.min) {
-            .auto, .min_content, .max_content => true,
-            .fixed, .percent, .fr => false,
+            .auto, .min_content, .max_content, .fixed, .percent, .fit_content => true,
+            .fr => false,
         },
         .fixed, .percent, .fr => false,
     };
@@ -1475,7 +1606,7 @@ fn trackFraction(track: style.GridTrack) f32 {
             .fr => |weight| weight,
             else => 0,
         },
-        .fixed, .percent, .auto, .min_content, .max_content => 0,
+        .fixed, .percent, .auto, .min_content, .max_content, .fit_content => 0,
     };
 }
 
@@ -1603,12 +1734,13 @@ fn alignValue(value: style.AlignSelf, fallback: style.Align) style.Align {
         .start => .start,
         .center => .center,
         .end => .end,
+        .baseline => .baseline,
     };
 }
 
 fn alignOffset(value: style.Align, free: f32) f32 {
     return switch (value) {
-        .stretch, .start => 0,
+        .stretch, .start, .baseline => 0,
         .center => free / 2,
         .end => free,
     };

@@ -156,14 +156,14 @@ fn isPercentTrack(value: style.GridTrack) bool {
     return switch (value) {
         .percent => true,
         .minmax => |bounds| isPercentBreadth(bounds.min) or isPercentBreadth(bounds.max),
-        .fixed, .auto, .min_content, .max_content, .fr => false,
+        .fixed, .auto, .min_content, .max_content, .fr, .fit_content => false,
     };
 }
 
 fn isPercentBreadth(value: style.GridTrackBreadth) bool {
     return switch (value) {
         .percent => true,
-        .fixed, .auto, .min_content, .max_content, .fr => false,
+        .fixed, .auto, .min_content, .max_content, .fr, .fit_content => false,
     };
 }
 

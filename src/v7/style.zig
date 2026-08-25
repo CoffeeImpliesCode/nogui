@@ -28,12 +28,13 @@ pub const Align = enum {
     start,
     center,
     end,
+    baseline,
 
     pub const safe_center: Alignment = .safe_center;
     pub const unsafe_center: Alignment = .unsafe_center;
 };
 pub const AlignContent = enum { stretch, start, center, end, space_between, space_around, space_evenly };
-pub const AlignSelf = enum { auto, stretch, start, center, end };
+pub const AlignSelf = enum { auto, stretch, start, center, end, baseline };
 pub const BoxSizing = enum { content_box, border_box };
 
 /// One non-recursive grid track bound. Percentages are fractions in 0..1.
@@ -44,6 +45,7 @@ pub const GridTrackBreadth = union(enum) {
     min_content,
     max_content,
     fr: f32,
+    fit_content: f32,
 };
 
 pub const GridMinMax = struct {
@@ -59,6 +61,7 @@ pub const GridTrack = union(enum) {
     min_content,
     max_content,
     fr: f32,
+    fit_content: f32,
     minmax: GridMinMax,
 
     pub fn fraction(weight: f32) GridTrack {
@@ -70,7 +73,7 @@ pub const GridTrack = union(enum) {
 pub const GridPlacement = union(enum) {
     auto,
     line: i16,
-    span: u8,
+    span: u16,
 };
 
 pub const GridLine = struct {

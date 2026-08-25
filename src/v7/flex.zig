@@ -212,21 +212,48 @@ fn resolvedFlexBasis(
 }
 
 fn clampMain(node: *const WidgetNode, direction: Direction, value: f32) f32 {
-    const clamped = if (directionIsColumn(direction))
+    const is_col = directionIsColumn(direction);
+    var clamped = if (is_col)
         node.resolved_style.clampHeight(value)
     else
         node.resolved_style.clampWidth(value);
-    return if (resolvedMainMinimum(node, direction)) |minimum|
-        @max(clamped, minimum)
-    else
-        clamped;
+    if (resolvedMainMinimum(node, direction)) |minimum| {
+        clamped = @max(clamped, minimum);
+    }
+    if (node.style.aspect_ratio) |ratio| {
+        if (ratio > 0) {
+            const constraints = node.resolved_constraints;
+            if (is_col) {
+                if (constraints.min_width) |mw| clamped = @max(clamped, mw / ratio);
+                if (constraints.max_width) |mw| clamped = @min(clamped, mw / ratio);
+            } else {
+                if (constraints.min_height) |mh| clamped = @max(clamped, mh * ratio);
+                if (constraints.max_height) |mh| clamped = @min(clamped, mh * ratio);
+            }
+        }
+    }
+    return clamped;
 }
 
 fn clampCross(node: *const WidgetNode, direction: Direction, value: f32) f32 {
-    return if (directionIsColumn(direction))
+    const is_col = directionIsColumn(direction);
+    var clamped = if (is_col)
         node.resolved_style.clampWidth(value)
     else
         node.resolved_style.clampHeight(value);
+    if (node.style.aspect_ratio) |ratio| {
+        if (ratio > 0) {
+            const constraints = node.resolved_constraints;
+            if (is_col) {
+                if (constraints.min_height) |mh| clamped = @max(clamped, mh * ratio);
+                if (constraints.max_height) |mh| clamped = @min(clamped, mh * ratio);
+            } else {
+                if (constraints.min_width) |mw| clamped = @max(clamped, mw / ratio);
+                if (constraints.max_width) |mw| clamped = @min(clamped, mw / ratio);
+            }
+        }
+    }
+    return clamped;
 }
 
 const MarginValue = struct {
@@ -331,6 +358,7 @@ fn alignSelfAsAlign(value: style.AlignSelf, parent_align: style.Align) style.Ali
         .start => .start,
         .center => .center,
         .end => .end,
+        .baseline => .baseline,
     };
 }
 fn resolvedFlexItemMain(
@@ -397,7 +425,9 @@ fn resolvedFlexItemMain(
                 if (cross_size == null and item_align == .stretch and containing_cross != null) {
                     const m = child.style.margin;
                     const cross_margins = if (main_is_column) m.left + m.right else m.top + m.bottom;
-                    cross_size = @max(0, containing_cross.? - cross_margins);
+                    cross_size = clampCross(child, direction, @max(0, containing_cross.? - cross_margins));
+                } else if (cross_size) |cs| {
+                    cross_size = clampCross(child, direction, cs);
                 }
                 if (cross_size) |cs| {
                     base = if (main_is_column) cs / ratio else cs * ratio;
@@ -508,7 +538,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 natural;
             const free = @max(0, extent - size - margin_lead - margin_trail);
             const pos: f32 = switch (@"align") {
-                .stretch, .start => margin_lead,
+                .stretch, .start, .baseline => margin_lead,
                 .center => margin_lead + free / 2,
                 .end => margin_lead + free,
             };
@@ -623,21 +653,46 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         const grew = free > 0 and total_grow > 0;
         const shrank = free < 0 and total_shrink > 0;
         if (grew) {
-            for (0..count) |i| {
-                const child = tree.node(p.children.items[i]) orelse continue;
-                if (isHidden(tree, child) or child.style.position == .absolute) continue;
-                if (child.style.grow > 0) mains[i] += free * child.style.grow / total_grow;
+            var frozen = tree.allocator.alloc(bool, count) catch @panic("layout scratch allocation failed");
+            defer tree.allocator.free(frozen);
+            @memset(frozen, false);
+            for (0..count) |_| {
+                var total_unfrozen_grow: f32 = 0;
+                for (0..count) |i| {
+                    if (frozen[i]) continue;
+                    const child = tree.node(p.children.items[i]) orelse continue;
+                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
+                    if (child.style.grow > 0) total_unfrozen_grow += child.style.grow;
+                }
+                if (total_unfrozen_grow <= 0) break;
+
+                var fitted: f32 = 0;
+                for (0..count) |i| {
+                    const child = tree.node(p.children.items[i]) orelse continue;
+                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
+                    const m = child.style.margin;
+                    fitted += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
+                }
+                if (flow_count > 1) fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
+                const remaining_free = container_content_main - fitted;
+                if (remaining_free <= 0) break;
+
+                var any_frozen = false;
+                for (0..count) |i| {
+                    const child = tree.node(p.children.items[i]) orelse continue;
+                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
+                    if (frozen[i] or child.style.grow <= 0) continue;
+                    const target = mains[i] + remaining_free * child.style.grow / total_unfrozen_grow;
+                    const clamped = clampMain(child, dir, target);
+                    mains[i] = clamped;
+                    if (clamped != target) {
+                        frozen[i] = true;
+                        any_frozen = true;
+                    }
+                }
+                if (!any_frozen) break;
             }
         } else if (shrank) {
-            // Scaled flex-shrink (CSS flexbox §9.7) with a content floor:
-            // reduction_i = overflow × shrink_i × base_i / Σ(shrink × base)
-            // over the shrinkable items, never below the item's natural
-            // content main (natural_main — the canonical automatic minimum,
-            // §4.5, so shrink never crushes the text out of the box). An
-            // item that would clamp at its floor FREEZES there; the
-            // remaining overflow is redistributed over the unfrozen items
-            // until nothing new clamps.
-            var remaining = -free;
             var frozen = tree.allocator.alloc(bool, count) catch @panic("layout scratch allocation failed");
             defer tree.allocator.free(frozen);
             @memset(frozen, false);
@@ -650,24 +705,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                     if (child.style.shrink > 0) total_scaled += child.style.shrink * mains[i];
                 }
                 if (total_scaled <= 0) break;
-                var any_frozen = false;
-                for (0..count) |i| {
-                    const child = tree.node(p.children.items[i]) orelse continue;
-                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
-                    if (frozen[i] or child.style.shrink <= 0) continue;
-                    const base = mains[i];
-                    const target = base - remaining * child.style.shrink * base / total_scaled;
-                    const floor = resolvedMainFloor(child, dir, child.natural_main);
-                    const clamped = @max(floor, target);
-                    mains[i] = clamped;
-                    if (clamped != target) {
-                        frozen[i] = true;
-                        any_frozen = true;
-                    }
-                }
-                if (!any_frozen) break;
-                // Recompute the overflow left after the freeze: frozen items
-                // can no longer absorb any of it.
+
                 var fitted: f32 = 0;
                 for (0..count) |i| {
                     const child = tree.node(p.children.items[i]) orelse continue;
@@ -676,8 +714,25 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                     fitted += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
                 }
                 if (flow_count > 1) fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
-                remaining = @max(0, fitted - container_content_main);
-                if (remaining <= 0) break;
+                const remaining_overflow = fitted - container_content_main;
+                if (remaining_overflow <= 0) break;
+
+                var any_frozen = false;
+                for (0..count) |i| {
+                    const child = tree.node(p.children.items[i]) orelse continue;
+                    if (isHidden(tree, child) or child.style.position == .absolute) continue;
+                    if (frozen[i] or child.style.shrink <= 0) continue;
+                    const base = mains[i];
+                    const target = base - remaining_overflow * child.style.shrink * base / total_scaled;
+                    const floor = resolvedMainFloor(child, dir, child.natural_main);
+                    const clamped = @max(floor, clampMain(child, dir, target));
+                    mains[i] = clamped;
+                    if (clamped != target) {
+                        frozen[i] = true;
+                        any_frozen = true;
+                    }
+                }
+                if (!any_frozen) break;
             }
         }
         for (0..count) |i| {
@@ -687,29 +742,16 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         }
 
         // Justify distributes free space left after flex distribution.
-        // Recompute fitted extent after final min/max clamps only when a
-        // justify mode will consume it. Grow and shrink deliberately use
-        // content + free below, while start and non-positive free space do
-        // not consume a fitted extent. A lone space-between item has no gap.
-        const spread = flow_count > 0 and free > 0 and justify != .start;
-        const need_fitted = !grew and !shrank and spread and
-            (justify != .space_between or flow_count > 1);
         var final_fitted: f32 = 0;
-        if (need_fitted) {
-            for (0..count) |i| {
-                const child = tree.node(p.children.items[i]) orelse continue;
-                if (isHidden(tree, child) or child.style.position == .absolute) continue;
-                const m = child.style.margin;
-                final_fitted += mains[i] +
-                    (if (main_is_column) m.top + m.bottom else m.left + m.right);
-            }
-            if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
+        for (0..count) |i| {
+            const child = tree.node(p.children.items[i]) orelse continue;
+            if (isHidden(tree, child) or child.style.position == .absolute) continue;
+            const m = child.style.margin;
+            final_fitted += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
         }
-        const fitted = if (grew or shrank) content + free else final_fitted;
-        const free_for_justify = if (grew or shrank or spread)
-            @max(0, container_content_main - fitted)
-        else
-            0;
+        if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
+
+        const free_for_justify = @max(0, container_content_main - final_fitted);
         var main_offset: f32 = 0;
         var extra_gap: f32 = 0;
         switch (justify) {
@@ -728,7 +770,6 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 main_offset = extra_gap;
             },
         }
-
         var main_pos = main_offset;
         var flow_index: usize = 0;
         for (0..count) |i| {
@@ -772,22 +813,94 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         const free = available.height - content;
         const grew = free > 0 and total_grow > 0;
         const shrank = free < 0 and total_shrink > 0;
+        var root_count: usize = 0;
+        for (tree.nodes.items) |*n| {
+            if (n.parent == .root and !isHidden(tree, n) and n.style.position != .absolute) {
+                root_count += 1;
+            }
+        }
+        if (shrank) {
+            var remaining = -free;
+            for (0..root_count) |_| {
+                var total_scaled: f32 = 0;
+                for (tree.nodes.items) |*n| {
+                    if (n.parent != .root or isHidden(tree, n)) continue;
+                    if (n.style.position == .absolute) continue;
+                    const floor = resolvedMainFloor(n, .column, n.natural_main);
+                    if (n.style.shrink > 0 and n.rect.h > floor)
+                        total_scaled += n.style.shrink * n.rect.h;
+                }
+                if (total_scaled <= 0) break;
+                var changed = false;
+                for (tree.nodes.items) |*n| {
+                    if (n.style.position == .absolute) continue;
+                    if (n.parent != .root or isHidden(tree, n)) continue;
+                    const floor = resolvedMainFloor(n, .column, n.natural_main);
+                    if (n.style.shrink <= 0 or n.rect.h <= floor) continue;
+                    const base = n.rect.h;
+                    const target = base - remaining * n.style.shrink * base / total_scaled;
+                    const clamped = @max(floor, clampMain(n, .column, target));
+                    if (clamped != n.rect.h) {
+                        n.rect.h = clamped;
+                        changed = true;
+                    }
+                }
+                if (!changed) break;
+                var fitted: f32 = 0;
+                for (tree.nodes.items) |*n| {
+                    if (n.parent != .root or isHidden(tree, n)) continue;
+                    if (n.style.position == .absolute) continue;
+                    fitted += n.rect.h + n.style.margin.top + n.style.margin.bottom;
+                }
+                remaining = @max(0, fitted - available.height);
+                if (remaining <= 0) break;
+            }
+        } else if (grew) {
+            var remaining_free = free;
+            for (0..root_count) |_| {
+                var total_unfrozen_grow: f32 = 0;
+                for (tree.nodes.items) |*n| {
+                    if (n.parent != .root or isHidden(tree, n)) continue;
+                    if (n.style.position == .absolute) continue;
+                    const max_h = n.resolved_constraints.max_height;
+                    if (max_h == null or n.rect.h < max_h.?) {
+                        if (n.style.grow > 0) total_unfrozen_grow += n.style.grow;
+                    }
+                }
+                if (total_unfrozen_grow <= 0) break;
+                var changed = false;
+                for (tree.nodes.items) |*n| {
+                    if (n.parent != .root or isHidden(tree, n)) continue;
+                    if (n.style.position == .absolute) continue;
+                    const max_h = n.resolved_constraints.max_height;
+                    if (n.style.grow <= 0 or (max_h != null and n.rect.h >= max_h.?)) continue;
+                    const base = n.rect.h;
+                    const target = base + remaining_free * n.style.grow / total_unfrozen_grow;
+                    const clamped = clampMain(n, .column, target);
+                    if (clamped != n.rect.h) {
+                        n.rect.h = clamped;
+                        changed = true;
+                    }
+                }
+                if (!changed) break;
+                var fitted: f32 = 0;
+                for (tree.nodes.items) |*n| {
+                    if (n.parent != .root or isHidden(tree, n)) continue;
+                    if (n.style.position == .absolute) continue;
+                    fitted += n.rect.h + n.style.margin.top + n.style.margin.bottom;
+                }
+                remaining_free = @max(0, available.height - fitted);
+                if (remaining_free <= 0) break;
+            }
+        }
         var y: f32 = 0;
         for (tree.nodes.items) |*n| {
             if (n.parent != .root or isHidden(tree, n)) continue;
             if (n.style.position == .absolute) continue;
             const m = n.style.margin;
-            var main = n.rect.h;
-            if (grew and n.style.grow > 0) {
-                main += free * n.style.grow / total_grow;
-            } else if (shrank and n.style.shrink > 0) {
-                const floor = resolvedMainFloor(n, .column, n.natural_main);
-                main = @max(floor, main - (-free) * n.style.shrink / total_shrink);
-            }
-            main = clampMain(n, .column, main);
-            n.rect.h = main;
+            n.rect.h = clampMain(n, .column, n.rect.h);
             n.rect.y = y + m.top;
-            y += main + m.top + m.bottom;
+            y += n.rect.h + m.top + m.bottom;
             finalizeMain(tree, n.id, available);
         }
     }
@@ -1156,7 +1269,7 @@ fn layoutAdvancedFlexContainer(
             var cross_item_offset = cross_lead;
             if (auto_cross_count == 0) {
                 cross_item_offset = switch (item_align) {
-                    .stretch, .start => cross_lead,
+                    .stretch, .start, .baseline => cross_lead,
                     .center => cross_lead + cross_item_free / 2,
                     .end => cross_lead + cross_item_free,
                 };
@@ -1766,22 +1879,50 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     const grew = free > 0 and total_grow > 0;
     const shrank = free < 0 and total_shrink > 0;
     if (grew) {
-        for (0..count) |i| {
-            const child = tree.node(node.children.items[i]) orelse continue;
-            if (isHidden(tree, child) or child.style.position == .absolute) continue;
-            if (child.style.grow > 0) mains[i] += free * child.style.grow / total_grow;
-        }
-    } else if (shrank) {
-        // Scaled flex-shrink (CSS flexbox §9.7) with a content floor:
-        // reduction_i = overflow × shrink_i × base_i / Σ(shrink × base) over
-        // the shrinkable items, never below the item's natural content main
-        // (the canonical automatic minimum, §4.5). An item that would clamp
-        // at its floor FREEZES there; the remaining overflow is
-        // redistributed over the unfrozen items until nothing new clamps.
-        var remaining = -free;
         var frozen = tree.allocator.alloc(bool, count) catch @panic("layout scratch allocation failed");
         defer tree.allocator.free(frozen);
         @memset(frozen, false);
+        for (0..count) |_| {
+            var total_unfrozen_grow: f32 = 0;
+            for (0..count) |i| {
+                if (frozen[i]) continue;
+                const child = tree.node(node.children.items[i]) orelse continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
+                if (child.style.grow > 0) total_unfrozen_grow += child.style.grow;
+            }
+            if (total_unfrozen_grow <= 0) break;
+
+            var fitted: f32 = 0;
+            for (0..count) |i| {
+                const child = tree.node(node.children.items[i]) orelse continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
+                const cm = child.style.margin;
+                fitted += mains[i] + (if (directionIsColumn(dir)) cm.top + cm.bottom else cm.left + cm.right);
+            }
+            if (flow_count > 1) fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
+            const remaining_free = (avail_main - inset_main) - fitted;
+            if (remaining_free <= 0) break;
+
+            var any_frozen = false;
+            for (0..count) |i| {
+                const child = tree.node(node.children.items[i]) orelse continue;
+                if (isHidden(tree, child) or child.style.position == .absolute) continue;
+                if (frozen[i] or child.style.grow <= 0) continue;
+                const target = mains[i] + remaining_free * child.style.grow / total_unfrozen_grow;
+                const clamped = clampMain(child, dir, target);
+                mains[i] = clamped;
+                if (clamped != target) {
+                    frozen[i] = true;
+                    any_frozen = true;
+                }
+            }
+            if (!any_frozen) break;
+        }
+    } else if (shrank) {
+        var frozen = tree.allocator.alloc(bool, count) catch @panic("layout scratch allocation failed");
+        defer tree.allocator.free(frozen);
+        @memset(frozen, false);
+        var remaining = -free;
         for (0..count) |_| {
             var total_scaled: f32 = 0;
             for (0..count) |i| {
@@ -1799,7 +1940,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
                 const base = mains[i];
                 const target = base - remaining * child.style.shrink * base / total_scaled;
                 const floor = resolvedMainFloor(child, dir, child.natural_main);
-                const clamped = @max(floor, target);
+                const clamped = @max(floor, clampMain(child, dir, target));
                 mains[i] = clamped;
                 if (clamped != target) {
                     frozen[i] = true;
@@ -1807,14 +1948,12 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
                 }
             }
             if (!any_frozen) break;
-            // Recompute the overflow left after the freeze: frozen items can
-            // no longer absorb any of it.
             var fitted: f32 = 0;
             for (0..count) |i| {
                 const child = tree.node(node.children.items[i]) orelse continue;
                 if (isHidden(tree, child) or child.style.position == .absolute) continue;
-                const m = child.style.margin;
-                fitted += mains[i] + (if (directionIsColumn(dir)) m.top + m.bottom else m.left + m.right);
+                const cm = child.style.margin;
+                fitted += mains[i] + (if (directionIsColumn(dir)) cm.top + cm.bottom else cm.left + cm.right);
             }
             if (flow_count > 1) fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
             remaining = @max(0, fitted - (avail_main - inset_main));
@@ -1827,22 +1966,20 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         if (isHidden(tree, child) or child.style.position == .absolute) continue;
         mains[i] = clampMain(child, dir, mains[i]);
     }
-    // The container takes the available main size when space was distributed
-    // (grow, shrink) or when justify spreads children across it; otherwise
-    // it hugs its content (children's margin boxes + gaps) plus its own
+
+    var final_fitted: f32 = 0;
+    for (0..count) |i| {
+        const child = tree.node(node.children.items[i]) orelse continue;
+        if (isHidden(tree, child) or child.style.position == .absolute) continue;
+        const cm = child.style.margin;
+        final_fitted += mains[i] + (if (directionIsColumn(dir)) cm.top + cm.bottom else cm.left + cm.right);
+    }
+    if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
+
     const spread = flow_count > 0 and free > 0 and justify != .start;
-    const container_main: f32 = if (grew or shrank or spread) avail_main else content + inset_main;
-    // Border-box cross: a ROOT-LEVEL stretch fills the available cross; a
-    // NESTED stretch hugs its content (largest child cross + its own border
-    // + padding) — the parent's final cross is unknown bottom-up, and the
-    // top-down finalizeCross pass re-stretches it against that. Non-stretch
-    // always hugs.
+    const container_main: f32 = if (grew or shrank or spread) avail_main else final_fitted + inset_main;
+
     const container_cross: f32 = if (cross == .stretch and root_level) avail_cross else max_cross + inset_cross;
-    // The cross extent children are placed within: the container's OWN
-    // CONTENT box cross (container_cross minus its border + padding).
-    // Root-level containers may fill the available cross under stretch, but
-    // with align = center/end the container hugs its content — centering
-    // against the AVAILABLE cross would float children outside the box.
     const place_cross: f32 = @max(0, container_cross - inset_cross);
 
     if (directionIsColumn(dir)) {
@@ -1853,12 +1990,8 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         node.rect.h = container_cross;
     }
 
-    // Free space remaining for justify, after grow/shrink filled the
-    // container. Children live in the content box, so the free extent is the
-    // content box main minus their fitted margin-box extent.
-    const fitted = content + (if (grew or shrank) free else 0);
     const free_for_justify = if (grew or shrank or spread)
-        @max(0, container_main - inset_main - fitted)
+        @max(0, container_main - inset_main - final_fitted)
     else
         0;
     var main_offset: f32 = 0;
@@ -1879,7 +2012,6 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
             main_offset = extra_gap;
         },
     }
-
     var main_pos = main_offset;
     var flow_index: usize = 0;
     for (0..count) |i| {
@@ -1898,7 +2030,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         // Cross position per align, within the content-box cross extent.
         var cross_pos: f32 = 0;
         switch (cross) {
-            .stretch, .start => {},
+            .stretch, .start, .baseline => {},
             .center => cross_pos = (place_cross - child_cross) / 2,
             .end => cross_pos = place_cross - child_cross,
         }
@@ -2062,7 +2194,7 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
                 if (n.style.shrink <= 0 or n.rect.h <= floor) continue;
                 const base = n.rect.h;
                 const target = base - remaining * n.style.shrink * base / total_scaled;
-                const clamped = @max(floor, target);
+                const clamped = @max(floor, clampMain(n, .column, target));
                 if (clamped != n.rect.h) {
                     n.rect.h = clamped;
                     changed = true;
@@ -2078,6 +2210,48 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
             remaining = @max(0, fitted - available.height);
             if (remaining <= 0) break;
         }
+    } else if (grew) {
+        for (tree.nodes.items) |*n| {
+            if (n.style.position == .absolute) continue;
+            if (n.parent != .root or isHidden(tree, n)) continue;
+            n.rect.h = rootBasisMain(n, available.height);
+        }
+        var remaining_free = free;
+        for (0..root_count) |_| {
+            var total_unfrozen_grow: f32 = 0;
+            for (tree.nodes.items) |*n| {
+                if (n.parent != .root or isHidden(tree, n)) continue;
+                if (n.style.position == .absolute) continue;
+                const max_h = n.resolved_constraints.max_height;
+                if (max_h == null or n.rect.h < max_h.?) {
+                    if (n.style.grow > 0) total_unfrozen_grow += n.style.grow;
+                }
+            }
+            if (total_unfrozen_grow <= 0) break;
+            var changed = false;
+            for (tree.nodes.items) |*n| {
+                if (n.parent != .root or isHidden(tree, n)) continue;
+                if (n.style.position == .absolute) continue;
+                const max_h = n.resolved_constraints.max_height;
+                if (n.style.grow <= 0 or (max_h != null and n.rect.h >= max_h.?)) continue;
+                const base = n.rect.h;
+                const target = base + remaining_free * n.style.grow / total_unfrozen_grow;
+                const clamped = clampMain(n, .column, target);
+                if (clamped != n.rect.h) {
+                    n.rect.h = clamped;
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+            var fitted: f32 = 0;
+            for (tree.nodes.items) |*n| {
+                if (n.parent != .root or isHidden(tree, n)) continue;
+                if (n.style.position == .absolute) continue;
+                fitted += n.rect.h + n.style.margin.top + n.style.margin.bottom;
+            }
+            remaining_free = @max(0, available.height - fitted);
+            if (remaining_free <= 0) break;
+        }
     }
 
     var y: f32 = 0;
@@ -2085,13 +2259,8 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
         if (n.parent != .root or isHidden(tree, n)) continue;
         if (n.style.position == .absolute) continue;
         const m = n.style.margin;
-        // After the shrink pass rect.h already holds the basis-applied (and
-        // shrunk) main; otherwise derive it from the untouched natural.
-        var main = if (shrank) n.rect.h else rootBasisMain(n, available.height);
-        if (grew and n.style.grow > 0) {
-            main += free * n.style.grow / total_grow;
-        }
-        // Root align = stretch: fill the available width minus cross margins.
+        var main = if (shrank or grew) n.rect.h else rootBasisMain(n, available.height);
+        main = clampMain(n, .column, main);
         n.rect.w = @max(0, available.width - m.left - m.right);
         n.rect.h = main;
         n.rect.x = m.left;
@@ -2108,7 +2277,7 @@ fn gridTrackMin(track: GridTrack, containing: ?f32) f32 {
     return switch (track) {
         .fixed => |value| @max(0, value),
         .percent => |fraction| if (containing) |size| @max(0, size * fraction) else 0,
-        .auto, .min_content, .max_content, .fr => 0,
+        .auto, .min_content, .max_content, .fr, .fit_content => 0,
         .minmax => |value| gridBreadthMin(value.min, containing),
     };
 }
@@ -2117,7 +2286,7 @@ fn gridBreadthMin(breadth: GridTrackBreadth, containing: ?f32) f32 {
     return switch (breadth) {
         .fixed => |value| @max(0, value),
         .percent => |fraction| if (containing) |size| @max(0, size * fraction) else 0,
-        .auto, .min_content, .max_content, .fr => 0,
+        .auto, .min_content, .max_content, .fr, .fit_content => 0,
     };
 }
 
@@ -2134,9 +2303,9 @@ fn gridTrackFr(track: GridTrack) f32 {
 
 fn gridTrackAllowsIntrinsic(track: GridTrack) bool {
     return switch (track) {
-        .auto, .min_content, .max_content => true,
+        .auto, .min_content, .max_content, .fit_content => true,
         .minmax => |value| switch (value.min) {
-            .auto, .min_content, .max_content => true,
+            .auto, .min_content, .max_content, .fit_content => true,
             else => false,
         },
         else => false,
@@ -2147,9 +2316,11 @@ fn gridTrackMax(track: GridTrack, containing: ?f32) ?f32 {
     return switch (track) {
         .fixed => |value| @max(0, value),
         .percent => |fraction| if (containing) |size| @max(0, size * fraction) else null,
+        .fit_content => |limit| @max(0, limit),
         .auto, .min_content, .max_content, .fr => null,
         .minmax => |value| switch (value.max) {
             .fixed => |size| @max(0, size),
+            .fit_content => |limit| @max(0, limit),
             .percent => |fraction| if (containing) |size| @max(0, size * fraction) else null,
             .auto, .min_content, .max_content, .fr => null,
         },
@@ -2236,6 +2407,7 @@ fn gridAlign(value: style.AlignSelf, fallback: style.Align) style.Align {
         .start => .start,
         .center => .center,
         .end => .end,
+        .baseline => .baseline,
     };
 }
 
@@ -2735,12 +2907,12 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
         const free_width = @max(0, area_width - child_width - margin.left - margin.right);
         const free_height = @max(0, area_height - child_height - margin.top - margin.bottom);
         const child_x = column_offsets[column_start[index]] + margin.left + switch (justify_self) {
-            .stretch, .start => 0,
+            .stretch, .start, .baseline => 0,
             .center => free_width / 2,
             .end => free_width,
         };
         const child_y = row_offsets[row_start[index]] + margin.top + switch (align_self) {
-            .stretch, .start => 0,
+            .stretch, .start, .baseline => 0,
             .center => free_height / 2,
             .end => free_height,
         };
