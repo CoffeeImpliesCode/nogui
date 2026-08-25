@@ -1000,3 +1000,75 @@ test "grid percentage tracks 50% 50% in definite container" {
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 100, .h = 60 });
     try expectRelative(&tree, second_id, .{ .x = 100, .y = 0, .w = 100, .h = 60 });
 }
+
+test "grid fr floor freeze respects track base before redistribution" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 1 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var first_style = leafStyle();
+    first_style.size = .{ .width = .{ .length = 60 }, .height = .{ .length = 20 } };
+    first_style.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first_style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_id, container_id, first_style, .{ .spacer = .{} });
+
+    try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
+    tree.node(second_id).?.style.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    tree.node(second_id).?.style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+
+    try appendContainer(&tree, container_id, .root, fixedContainer(200, 20, columns[0..], rows[0..]));
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 200, .height = 20 }, null);
+
+    // Track 1 base (min-content) = 60. Equal share is 100 >= 60, so no freeze:
+    // tracks stay 100/100 under floor-freeze CSS semantics.
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 60, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 100, .y = 0, .w = 100, .h = 20 });
+}
+
+test "grid minmax track clamps at max before fr track absorbs remainder" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    const columns = [_]style.GridTrack{
+        .{ .minmax = .{
+            .min = .{ .fixed = 30 },
+            .max = .{ .fixed = 100 },
+        } },
+        .{ .fr = 1 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var first_style = leafStyle();
+    first_style.size = .{ .width = .{ .length = 150 }, .height = .{ .length = 20 } };
+    first_style.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first_style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_id, container_id, first_style, .{ .spacer = .{} });
+
+    try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
+    tree.node(second_id).?.style.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    tree.node(second_id).?.style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+
+    try appendContainer(&tree, container_id, .root, fixedContainer(200, 20, columns[0..], rows[0..]));
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 200, .height = 20 }, null);
+
+    // Track 1 clamps at its 100 max despite 150 content. The 1fr track takes
+    // the remaining free space: 200 - 100 = 100.
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 150, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 100, .y = 0, .w = 100, .h = 20 });
+}

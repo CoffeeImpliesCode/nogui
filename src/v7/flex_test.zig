@@ -629,3 +629,84 @@ test "absolute positioned child in flex container placed relative to content box
     // (cross axis Y = (80 - 20) / 2 = 30, main axis X = 0 for justify.start):
     try testing.expectEqual(Rect{ .x = 0, .y = 30, .w = 60, .h = 20 }, tree.node(abs_aligned).?.rect);
 }
+
+test "column flex definite parent height resolves child percentage height" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const col: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, col, .{ .label = .{ .text = "item" } });
+    try appendNode(&tree, col, .root, .{ .column = .{} });
+    try wireChildren(&tree);
+
+    // Parent column: definite height 200. Child height 50% -> 100.
+    tree.node(col).?.style.size = .{ .width = .{ .length = 200 }, .height = .{ .length = 200 } };
+    tree.node(item).?.style.size = .{ .width = .{ .length = 50 }, .height = .{ .percent = 0.5 } };
+    tree.node(item).?.style.grow = 0;
+    tree.node(item).?.style.shrink = 0;
+
+    flex.layout(&tree, .{ .width = 400, .height = 400 });
+
+    try testing.expectEqual(@as(f32, 200), tree.node(col).?.rect.h);
+    try testing.expectEqual(@as(f32, 100), tree.node(item).?.rect.h);
+}
+
+test "row flex definite parent height resolves child percentage height" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, row, .{ .label = .{ .text = "item" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    // Parent row: definite height 100. Child height is CROSS axis; 50% -> 50.
+    tree.node(row).?.style.size = .{ .width = .{ .length = 200 }, .height = .{ .length = 100 } };
+    tree.node(item).?.style.size = .{ .width = .{ .length = 50 }, .height = .{ .percent = 0.5 } };
+    tree.node(item).?.style.grow = 0;
+    tree.node(item).?.style.shrink = 0;
+
+    flex.layout(&tree, .{ .width = 400, .height = 400 });
+
+    try testing.expectEqual(@as(f32, 100), tree.node(row).?.rect.h);
+    try testing.expectEqual(@as(f32, 50), tree.node(item).?.rect.h);
+}
+
+test "wrapped row with gap breaks lines including the gap cost" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const a: Id = @enumFromInt(2);
+    const b: Id = @enumFromInt(3);
+    const c: Id = @enumFromInt(4);
+
+    try appendNode(&tree, a, row, .{ .label = .{ .text = "a" } });
+    try appendNode(&tree, b, row, .{ .label = .{ .text = "b" } });
+    try appendNode(&tree, c, row, .{ .label = .{ .text = "c" } });
+    try appendNode(&tree, row, .root, .{ .row = .{ .gap = 10 } });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.wrap = .wrap;
+    tree.node(row).?.style.size.width = .{ .length = 100 };
+    tree.node(row).?.style.@"align" = .start;
+
+    // Three 40px-wide items in a 100px container with gap 10:
+    // line 1 fits 40 + 10 + 40 = 90; adding the third costs 90 + 10 + 40 = 140 > 100,
+    // so item c wraps to line 2 at y = 20 + 10 = 30.
+    for ([_]Id{ a, b, c }) |id| {
+        tree.node(id).?.style.size = .{ .width = .{ .length = 40 }, .height = .{ .length = 20 } };
+        tree.node(id).?.style.grow = 0;
+        tree.node(id).?.style.shrink = 0;
+    }
+
+    flex.layout(&tree, .{ .width = 400, .height = 400 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 20 }, tree.node(a).?.rect);
+    try testing.expectEqual(Rect{ .x = 50, .y = 0, .w = 40, .h = 20 }, tree.node(b).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 30, .w = 40, .h = 20 }, tree.node(c).?.rect);
+}

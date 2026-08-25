@@ -1382,6 +1382,9 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
             if (try trackMaximum(track.spec, basis)) |maximum| {
                 track.size = @min(track.size, maximum);
             }
+            if (track.spec == .minmax) {
+                track.size = @max(track.size, try breadthMinimum(track.spec.minmax.min, basis));
+            }
         }
         track.size = try nonNegative(track.size);
     }
@@ -1428,6 +1431,10 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
     var free_space = @max(0, try finite(content_size - non_fr_used));
     var frozen = [_]bool{false} ** 1024;
     if (tracks.len > 1024) return error.InvalidStyle;
+    var bases: [1024]f32 = undefined;
+    for (tracks, 0..) |track, i| {
+        bases[i] = track.size;
+    }
 
     while (true) {
         var unfrozen_fr_sum: f32 = 0;
@@ -1444,7 +1451,7 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
             for (tracks, 0..) |*track, i| {
                 const fr = trackFraction(track.spec);
                 if (fr > 0 and !frozen[i]) {
-                    track.size = try trackMinimum(track.spec, content_size);
+                    track.size = @max(try trackMinimum(track.spec, content_size), bases[i]);
                     if (try trackMaximum(track.spec, content_size)) |maximum| {
                         track.size = @min(track.size, maximum);
                     }
@@ -1459,7 +1466,12 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
             const fr = trackFraction(track.spec);
             if (fr > 0 and !frozen[i]) {
                 const hypothetical_size = free_space * fr / unfrozen_fr_sum;
-                if (try trackMaximum(track.spec, content_size)) |maximum| {
+                if (hypothetical_size < bases[i]) {
+                    frozen[i] = true;
+                    newly_frozen = true;
+                    track.size = bases[i];
+                    free_space = @max(0, free_space - bases[i]);
+                } else if (try trackMaximum(track.spec, content_size)) |maximum| {
                     if (hypothetical_size > maximum) {
                         frozen[i] = true;
                         newly_frozen = true;
@@ -1477,7 +1489,7 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
         for (tracks, 0..) |*track, i| {
             const fr = trackFraction(track.spec);
             if (fr > 0 and !frozen[i]) {
-                track.size = free_space * fr / unfrozen_fr_sum;
+                track.size = @max(free_space * fr / unfrozen_fr_sum, bases[i]);
                 const minimum = try trackMinimum(track.spec, content_size);
                 track.size = @max(track.size, minimum);
                 if (try trackMaximum(track.spec, content_size)) |maximum| {
@@ -1550,7 +1562,8 @@ fn resolveIndefiniteFlexibleTracks(tracks: []Track) Error!void {
     for (tracks) |*track| {
         const fr = trackFraction(track.spec);
         if (fr > 0) {
-            track.size = try nonNegative(try finite(fr * max_fr_unit));
+            const normalized = try finite(@max(track.size, fr * max_fr_unit));
+            track.size = try nonNegative(normalized);
         }
     }
 }

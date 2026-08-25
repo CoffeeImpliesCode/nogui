@@ -2876,3 +2876,62 @@ test "block: block child with width: fit-content clamped by containing block wid
     try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 200 });
     try expectRelative(&tree, block_id, .{ .x = 0, .y = 0, .w = 100, .h = 40 });
 }
+
+test "block: definite parent height resolves child percentage height" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 40 }, .height = .{ .percent = 0.5 } },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 100 } },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(200, 100), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 200, .h = 100 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 40, .h = 50 });
+}
+
+test "block: absolute percentage insets resolve against the containing box" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 10 }, .height = .{ .length = 10 } },
+        .inset = .{
+            .top = .{ .percent = 0.1 },
+            .right = .auto,
+            .bottom = .auto,
+            .left = .{ .percent = 0.25 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 200 }, .height = .{ .length = 100 } },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(200, 100), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 200, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = 50, .y = 10, .w = 10, .h = 10 });
+}
