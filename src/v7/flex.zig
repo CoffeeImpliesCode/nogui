@@ -333,6 +333,83 @@ fn alignSelfAsAlign(value: style.AlignSelf, parent_align: style.Align) style.Ali
         .end => .end,
     };
 }
+fn resolvedFlexItemMain(
+    child: *const WidgetNode,
+    direction: Direction,
+    containing_main: ?f32,
+    containing_cross: ?f32,
+    parent_align: Align,
+    natural_main: f32,
+) f32 {
+    const main_is_column = directionIsColumn(direction);
+    var base: ?f32 = null;
+
+    // 1. Explicit flex_basis check:
+    switch (child.style.flex_basis) {
+        .length => |val| {
+            base = val;
+            if (child.style.box_sizing == .content_box) {
+                base.? += if (main_is_column)
+                    child.style.border.top + child.style.border.bottom +
+                        child.style.padding.top + child.style.padding.bottom
+                else
+                    child.style.border.left + child.style.border.right +
+                        child.style.padding.left + child.style.padding.right;
+            }
+        },
+        .percent => |fraction| {
+            if (containing_main) |size| {
+                base = size * fraction;
+            }
+            // Indefinite containing_main: treated as auto per CSS Flexbox §9.2.
+        },
+        .min_content, .max_content => {
+            base = natural_main;
+        },
+        .auto => {
+            if (child.style.basis > 0) {
+                base = child.style.basis;
+                if (child.style.box_sizing == .content_box) {
+                    base.? += if (main_is_column)
+                        child.style.border.top + child.style.border.bottom +
+                            child.style.padding.top + child.style.padding.bottom
+                    else
+                        child.style.border.left + child.style.border.right +
+                            child.style.padding.left + child.style.padding.right;
+                }
+            }
+        },
+    }
+
+    // 2. If flex_basis was auto (or indefinite percent), fall back to size.width/size.height:
+    if (base == null) {
+        if (resolvedMainDimension(child, direction)) |dim| {
+            base = dim;
+        }
+    }
+
+    // 3. If main size is still auto, transfer cross-axis constraints via aspect-ratio:
+    if (base == null) {
+        if (child.style.aspect_ratio) |ratio| {
+            if (ratio > 0) {
+                const item_align = alignSelfAsAlign(child.style.align_self, parent_align);
+                var cross_size = resolvedCrossDimension(child, direction);
+                if (cross_size == null and item_align == .stretch and containing_cross != null) {
+                    const m = child.style.margin;
+                    const cross_margins = if (main_is_column) m.left + m.right else m.top + m.bottom;
+                    cross_size = @max(0, containing_cross.? - cross_margins);
+                }
+                if (cross_size) |cs| {
+                    base = if (main_is_column) cs / ratio else cs * ratio;
+                }
+            }
+        }
+    }
+
+    // 4. Fallback to intrinsic content size (natural_main):
+    const main = base orelse natural_main;
+    return clampMain(child, direction, main);
+}
 
 fn childHasAutoMargin(node: *const WidgetNode) bool {
     return switch (node.style.margin_inset.top) {
@@ -521,16 +598,16 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 parent_content,
                 .{ .width = child.rect.w, .height = child.rect.h },
             );
-            mains[i] = child.natural_main;
-            if (resolvedMainDimension(child, dir)) |dimension| {
-                mains[i] = clampMain(child, dir, dimension);
-            } else if (resolvedFlexBasis(
+            const parent_main = if (main_is_column) parent_content.height else parent_content.width;
+            const parent_cross = if (main_is_column) parent_content.width else parent_content.height;
+            mains[i] = resolvedFlexItemMain(
                 child,
-                if (main_is_column) parent_content.height else parent_content.width,
+                dir,
+                parent_main,
+                parent_cross,
+                p.style.@"align",
                 child.natural_main,
-            )) |basis| {
-                mains[i] = clampMain(child, dir, basis);
-            }
+            );
             // Main-axis margins: top+bottom in a column, left+right in a row.
             const m = child.style.margin;
             content += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
@@ -884,23 +961,14 @@ fn layoutAdvancedFlexContainer(
         const natural_main = child.natural_main;
         const natural_cross = if (main_is_column) child.rect.w else child.rect.h;
         child.resolveTypedStyle(content, .{ .width = child.rect.w, .height = child.rect.h });
-        var main = if (child.style.basis > 0)
-            child.style.basis
-        else if (resolvedMainDimension(child, direction)) |dimension|
-            dimension
-        else if (resolvedFlexBasis(child, available_main, natural_main)) |basis|
-            basis
-        else
-            natural_main;
-        if (child.style.basis > 0 and child.style.box_sizing == .content_box) {
-            main += if (main_is_column)
-                child.style.border.top + child.style.border.bottom +
-                    child.style.padding.top + child.style.padding.bottom
-            else
-                child.style.border.left + child.style.border.right +
-                    child.style.padding.left + child.style.padding.right;
-        }
-        main = clampMain(child, direction, main);
+        const main = resolvedFlexItemMain(
+            child,
+            direction,
+            available_main,
+            available_cross,
+            node.style.@"align",
+            natural_main,
+        );
         const cross = clampCross(
             child,
             direction,
@@ -927,7 +995,7 @@ fn layoutAdvancedFlexContainer(
         var line = &lines[line_count - 1];
         if (wrap != .nowrap and line.flow_count > 0 and
             lineFitted(line.*, item_mains, main_leads, main_trails, gap) +
-                gap + item_extent > available_main)
+                (if (line.flow_count > 0) gap else 0) + item_extent > available_main)
         {
             lines[line_count] = .{ .first_flow = flow_count, .flow_count = 0 };
             line_count += 1;
@@ -999,9 +1067,18 @@ fn layoutAdvancedFlexContainer(
                 line_gap += cross_free / @as(f32, @floatFromInt(line_count - 1));
                 cross_free = 0;
             },
-            .space_around => {
-                line_gap += cross_free / @as(f32, @floatFromInt(line_count));
-                line_offset = (line_gap - gap) / 2;
+            .space_around => if (line_count > 0) {
+                const total_space = cross_free + gap * @as(f32, @floatFromInt(line_count - 1));
+                const slot = total_space / @as(f32, @floatFromInt(line_count));
+                line_offset = slot / 2;
+                line_gap = slot;
+                cross_free = 0;
+            },
+            .space_evenly => if (line_count > 0) {
+                const total_space = cross_free + gap * @as(f32, @floatFromInt(line_count - 1));
+                const slot = total_space / @as(f32, @floatFromInt(line_count + 1));
+                line_offset = slot;
+                line_gap = slot;
                 cross_free = 0;
             },
         }
@@ -1647,22 +1724,14 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         child.resolveTypedStyle(null, .{ .width = child.rect.w, .height = child.rect.h });
         // Basis remains content-box under the legacy option. Typed sizes and
         // flex basis are resolved values and therefore use border-box extents.
-        var main = if (child.style.basis > 0)
-            child.style.basis
-        else if (resolvedMainDimension(child, dir)) |dimension|
-            dimension
-        else if (resolvedFlexBasis(child, null, natural)) |basis|
-            basis
-        else
-            natural;
-        if (child.style.basis > 0 and child.style.box_sizing == .content_box) {
-            const cb = child.style;
-            main += if (directionIsColumn(dir))
-                cb.border.top + cb.border.bottom + cb.padding.top + cb.padding.bottom
-            else
-                cb.border.left + cb.border.right + cb.padding.left + cb.padding.right;
-        }
-        main = clampMain(child, dir, main);
+        const main = resolvedFlexItemMain(
+            child,
+            dir,
+            null,
+            null,
+            node.style.@"align",
+            natural,
+        );
         mains[i] = main;
         const natural_cross = if (directionIsColumn(dir)) child.rect.w else child.rect.h;
         const child_cross = resolvedCrossDimension(child, dir) orelse natural_cross;
@@ -1918,20 +1987,14 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
 /// the node's own main-axis border + padding are added on top to form its
 /// border-box main (the root pseudo-container is a column: top + bottom).
 fn rootBasisMain(n: *const WidgetNode, containing_main: f32) f32 {
-    var main = n.style.basis;
-    if (n.style.basis > 0) {
-        if (n.style.box_sizing == .content_box) {
-            const b = n.style;
-            main += b.border.top + b.border.bottom + b.padding.top + b.padding.bottom;
-        }
-    } else if (resolvedFlexBasis(n, containing_main, n.natural_main)) |basis| {
-        main = basis;
-    } else if (n.resolved_dimensions.height) |height| {
-        main = height;
-    } else {
-        main = n.natural_main;
-    }
-    return clampMain(n, .column, main);
+    return resolvedFlexItemMain(
+        n,
+        .column,
+        containing_main,
+        null,
+        .stretch,
+        n.natural_main,
+    );
 }
 
 /// Place root-level nodes against `available` as a column: the root
@@ -2219,6 +2282,11 @@ fn gridAlignContentOffset(
         .space_around => .{
             .offset = free / @as(f32, @floatFromInt(count * 2)),
             .extra_gap = free / @as(f32, @floatFromInt(count)),
+            .stretch = 0,
+        },
+        .space_evenly => .{
+            .offset = free / @as(f32, @floatFromInt(count + 1)),
+            .extra_gap = free / @as(f32, @floatFromInt(count + 1)),
             .stretch = 0,
         },
         .stretch => .{
@@ -4247,4 +4315,125 @@ test "display none hides directly constructed subtree" {
 
     try testing.expectEqual(Rect{}, tree.node(root).?.rect);
     try testing.expectEqual(Rect{}, tree.node(child).?.rect);
+}
+
+test "flex-basis takes precedence over width and height" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item1: Id = @enumFromInt(2);
+    const col: Id = @enumFromInt(3);
+    const item2: Id = @enumFromInt(4);
+
+    try appendNode(&tree, item1, row, .{ .label = .{ .text = "item1" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try appendNode(&tree, item2, col, .{ .label = .{ .text = "item2" } });
+    try appendNode(&tree, col, .root, .{ .column = .{} });
+    try wireChildren(&tree);
+
+    tree.node(item1).?.style.size.width = .{ .length = 100 };
+    tree.node(item1).?.style.flex_basis = .{ .length = 40 };
+    tree.node(item1).?.style.grow = 0;
+    tree.node(item1).?.style.shrink = 0;
+
+    tree.node(item2).?.style.size.height = .{ .length = 80 };
+    tree.node(item2).?.style.flex_basis = .{ .length = 30 };
+    tree.node(item2).?.style.grow = 0;
+    tree.node(item2).?.style.shrink = 0;
+
+    layout(&tree, .{ .width = 400, .height = 400 });
+
+    try testing.expectEqual(@as(f32, 40), tree.node(item1).?.rect.w);
+    try testing.expectEqual(@as(f32, 30), tree.node(item2).?.rect.h);
+}
+
+test "multi-line flex align-content: space-evenly" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const id1: Id = @enumFromInt(2);
+    const id2: Id = @enumFromInt(3);
+
+    try appendNode(&tree, id1, row, .{ .label = .{ .text = "line1" } });
+    try appendNode(&tree, id2, row, .{ .label = .{ .text = "line2" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.wrap = .wrap;
+    tree.node(row).?.style.align_content = .space_evenly;
+    tree.node(row).?.style.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 100 },
+    };
+
+    for ([_]Id{ id1, id2 }) |id| {
+        tree.node(id).?.style.size = .{
+            .width = .{ .length = 60 },
+            .height = .{ .length = 20 },
+        };
+        tree.node(id).?.style.grow = 0;
+        tree.node(id).?.style.shrink = 0;
+    }
+
+    layout(&tree, .{ .width = 200, .height = 200 });
+
+    try testing.expectEqual(@as(f32, 20), tree.node(id1).?.rect.y);
+    try testing.expectEqual(@as(f32, 60), tree.node(id2).?.rect.y);
+}
+
+test "flex wrap gap deduction breaks lines accurately" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const id1: Id = @enumFromInt(2);
+    const id2: Id = @enumFromInt(3);
+
+    try appendNode(&tree, id1, row, .{ .label = .{ .text = "a" } });
+    try appendNode(&tree, id2, row, .{ .label = .{ .text = "b" } });
+    try appendNode(&tree, row, .root, .{ .row = .{ .gap = 10 } });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.wrap = .wrap;
+    tree.node(row).?.style.size.width = .{ .length = 100 };
+    tree.node(row).?.style.@"align" = .start;
+
+    tree.node(id1).?.style.size = .{ .width = .{ .length = 50 }, .height = .{ .length = 20 } };
+    tree.node(id1).?.style.grow = 0;
+    tree.node(id1).?.style.shrink = 0;
+
+    tree.node(id2).?.style.size = .{ .width = .{ .length = 45 }, .height = .{ .length = 20 } };
+    tree.node(id2).?.style.grow = 0;
+    tree.node(id2).?.style.shrink = 0;
+
+    layout(&tree, .{ .width = 100, .height = 200 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 50, .h = 20 }, tree.node(id1).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 30, .w = 45, .h = 20 }, tree.node(id2).?.rect);
+}
+
+test "cross-axis aspect-ratio transfers cross constraints into main size" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, row, .{ .label = .{ .text = "aspect" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 300 }, .height = .{ .length = 60 } };
+    tree.node(row).?.style.@"align" = .stretch;
+
+    tree.node(item).?.style.size = .{ .width = .auto, .height = .auto };
+    tree.node(item).?.style.aspect_ratio = 2.0;
+    tree.node(item).?.style.grow = 0;
+    tree.node(item).?.style.shrink = 0;
+
+    layout(&tree, .{ .width = 300, .height = 60 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 120, .h = 60 }, tree.node(item).?.rect);
 }

@@ -32,7 +32,7 @@ pub const Align = enum {
     pub const safe_center: Alignment = .safe_center;
     pub const unsafe_center: Alignment = .unsafe_center;
 };
-pub const AlignContent = enum { stretch, start, center, end, space_between, space_around };
+pub const AlignContent = enum { stretch, start, center, end, space_between, space_around, space_evenly };
 pub const AlignSelf = enum { auto, stretch, start, center, end };
 pub const BoxSizing = enum { content_box, border_box };
 
@@ -759,10 +759,21 @@ pub const Style = struct {
             .max_width = self.max_size.width.resolve(width_containing, intrinsic.width),
             .max_height = self.max_size.height.resolve(height_containing, intrinsic.height),
         };
+        var width = self.size.width.resolve(width_containing, intrinsic.width);
+        var height = self.size.height.resolve(height_containing, intrinsic.height);
+        if (self.aspect_ratio) |ratio| {
+            if (ratio > 0) {
+                if (width != null and height == null and self.size.height == .auto) {
+                    height = width.? / ratio;
+                } else if (height != null and width == null and self.size.width == .auto) {
+                    width = height.? * ratio;
+                }
+            }
+        }
         return .{
             .dimensions = .{
-                .width = self.size.width.resolve(width_containing, intrinsic.width),
-                .height = self.size.height.resolve(height_containing, intrinsic.height),
+                .width = width,
+                .height = height,
                 .flex_basis = flex_basis,
             },
             .constraints = constraints,

@@ -648,29 +648,33 @@ fn layoutPreparedContainerUnchecked(
             result.through
         else
             child_height == 0 and
-                child_style.size.height == .auto and
                 child_edges.vertical == 0 and
                 !child_establishes_bfc;
-        if (clear_y > flow_y) {
-            child_collapses_through = false;
-        }
-        const vertical_margin = if (top_collapse_open and
-            clear_y <= flow_y and
-            !child_establishes_bfc)
-            0
-        else if (clear_y <= flow_y)
-            if (pending_bottom) |bottom_margin|
-                bottom_margin.collapse(child_top_margin).resolve()
-            else
-                child_top_margin.resolve()
+
+        const hypothetical_margin = if (top_collapse_open and !child_establishes_bfc)
+            @as(f32, 0)
+        else if (pending_bottom) |bottom_margin|
+            bottom_margin.collapse(child_top_margin).resolve()
         else
             child_top_margin.resolve();
+        const hypothetical_y = try addFinite(flow_y, hypothetical_margin);
+        const has_clearance = (clear_y > 0) and (hypothetical_y < clear_y);
+
+        if (has_clearance) {
+            child_collapses_through = false;
+        }
+
+        const effective_start_y = if (has_clearance) clear_y else flow_y;
+        const vertical_margin = if (has_clearance)
+            child_top_margin.resolve()
+        else
+            hypothetical_margin;
         var child_x = inlineStartX(
             container_style.writing_direction,
             content_width,
             child_width,
         );
-        var child_y = try addFinite(start_y, vertical_margin);
+        var child_y = try addFinite(effective_start_y, vertical_margin);
         if (container_style.writing_direction == .ltr) {
             child_x = try addFinite(child_x, margins.left);
         } else {
@@ -695,7 +699,7 @@ fn layoutPreparedContainerUnchecked(
                     try addFinite(child_height, margins.top),
                     margins.bottom,
                 ),
-                start_y,
+                effective_start_y,
                 inline_side,
                 child_context.percentage_basis.width,
             );
@@ -735,7 +739,7 @@ fn layoutPreparedContainerUnchecked(
                             try addFinite(child_height, margins.top),
                             margins.bottom,
                         ),
-                        start_y,
+                        effective_start_y,
                         inline_side,
                         child_context.percentage_basis.width,
                     );
@@ -800,7 +804,7 @@ fn layoutPreparedContainerUnchecked(
                     try addFinite(child_height, margins.top),
                     margins.bottom,
                 ),
-                start_y,
+                effective_start_y,
                 inline_side,
                 child_context.percentage_basis.width,
             );
@@ -874,7 +878,7 @@ fn layoutPreparedContainerUnchecked(
             0,
         );
         try layoutMixedChild(tree, child, layout_ctx, mixed_child_context);
-        if (top_collapse_open and !child_establishes_bfc and clear_y <= flow_y) {
+        if (top_collapse_open and !child_establishes_bfc and !has_clearance) {
             first_child_top = first_child_top.collapse(child_top_margin);
             if (child_collapses_through) {
                 first_child_top = first_child_top.collapse(child_bottom_margin);
@@ -886,14 +890,21 @@ fn layoutPreparedContainerUnchecked(
         }
         all_in_flow_children_collapse_through = all_in_flow_children_collapse_through and
             child_collapses_through;
-        flow_y = try addFinite(static_y, child_height);
-        const child_pending_bottom = if (child_collapses_through)
-            child_top_margin.collapse(child_bottom_margin)
-        else
-            child_bottom_margin;
-        pending_bottom = child_pending_bottom;
-        last_child_bottom = child_pending_bottom;
-        in_flow_bottom = @max(in_flow_bottom, flow_y);
+
+        if (child_collapses_through) {
+            const child_self_collapsed = child_top_margin.collapse(child_bottom_margin);
+            const combined_bottom = if (pending_bottom) |prev|
+                prev.collapse(child_self_collapsed)
+            else
+                child_self_collapsed;
+            pending_bottom = combined_bottom;
+            last_child_bottom = combined_bottom;
+        } else {
+            flow_y = try addFinite(static_y, child_height);
+            pending_bottom = child_bottom_margin;
+            last_child_bottom = child_bottom_margin;
+            in_flow_bottom = @max(in_flow_bottom, flow_y);
+        }
     }
     const bottom_collapses = bottom_margin_collapses_with_children and
         last_child_bottom != null;

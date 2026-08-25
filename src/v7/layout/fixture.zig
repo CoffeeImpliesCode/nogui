@@ -1242,6 +1242,7 @@ test "fixture alignment attributes map only represented values" {
         .{ .value = "flex-end", .expected = .end },
         .{ .value = "space-between", .expected = .space_between },
         .{ .value = "space-around", .expected = .space_around },
+        .{ .value = "space-evenly", .expected = .space_evenly },
     };
     for (content_cases) |case| {
         var result: style.Style = .{};
@@ -1258,7 +1259,6 @@ test "fixture unsupported alignment values stay explicit" {
         .{ .name = "align-items", .value = "baseline" },
         .{ .name = "align-self", .value = "safe center" },
         .{ .name = "align-content", .value = "unsafe center" },
-        .{ .name = "align-content", .value = "space-evenly" },
         .{ .name = "justify-content", .value = "baseline" },
         .{ .name = "column-gap", .value = "normal" },
         .{ .name = "flex-basis", .value = "content" },
@@ -1720,6 +1720,9 @@ test "fixture grid alignment and gaps populate grid fields" {
     try std.testing.expectEqual(style.AlignContent.space_around, result.align_content);
     try std.testing.expectEqual(style.AlignContent.space_around, result.grid_align_content);
 
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "align-content", "space-evenly");
+    try std.testing.expectEqual(style.AlignContent.space_evenly, result.align_content);
+    try std.testing.expectEqual(style.AlignContent.space_evenly, result.grid_align_content);
     try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-items", "flex-start");
     try std.testing.expectEqual(style.Align.start, result.grid_justify_items);
     try applyAttributeWithResources(&fixture_tree.resources, &result, "align-items", "flex-end");
@@ -1747,7 +1750,6 @@ test "fixture grid alignment and gaps populate grid fields" {
         .{ .name = "align-items", .value = "safe center" },
         .{ .name = "justify-self", .value = "safe center" },
         .{ .name = "align-self", .value = "baseline" },
-        .{ .name = "align-content", .value = "space-evenly" },
         .{ .name = "justify-content", .value = "safe center" },
     };
     for (unsupported) |case| {
@@ -1992,6 +1994,8 @@ fn applyAlignContent(result: *style.Style, value: []const u8) CaseError!void {
         .space_between
     else if (std.mem.eql(u8, value, "space-around"))
         .space_around
+    else if (std.mem.eql(u8, value, "space-evenly"))
+        .space_evenly
     else
         return error.Unsupported;
     result.grid_align_content = result.align_content;

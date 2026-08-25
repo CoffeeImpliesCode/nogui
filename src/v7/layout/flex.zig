@@ -1018,6 +1018,10 @@ fn lineDistribution(
             extra = free / @as(f32, @floatFromInt(lines.len));
             offset = extra / 2;
         },
+        .space_evenly => {
+            extra = free / @as(f32, @floatFromInt(lines.len + 1));
+            offset = extra;
+        },
     }
     var cursor = try finite(offset);
     for (lines, 0..) |*line, line_index| {
