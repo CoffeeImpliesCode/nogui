@@ -170,6 +170,16 @@ pub fn build(b: *std.Build) void {
     const spotify_run_step = b.step("spotify", "Run the Spotify UI stress scene");
     spotify_run_step.dependOn(&spotify_run_cmd.step);
 
+    // The calculator demo: the small API-showcase component (buttons,
+    // labels, cards, click routing) in its own window.
+    const calculator_run_cmd = b.addRunArtifact(v7_demo);
+    calculator_run_cmd.addArgs(&.{"--calculator"});
+    calculator_run_cmd.step.dependOn(b.getInstallStep());
+    calculator_run_cmd.step.dependOn(&shader_updates.step);
+    if (b.args) |args| calculator_run_cmd.addArgs(args);
+    const calculator_run_step = b.step("calculator", "Run the calculator demo");
+    calculator_run_step.dependOn(&calculator_run_cmd.step);
+
     // ── Tests ────────────────────────────────
     const v7_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -270,6 +280,32 @@ pub fn build(b: *std.Build) void {
     }
     const run_v7_spotify_tests = b.addRunArtifact(v7_spotify_tests);
     test_step.dependOn(&run_v7_spotify_tests.step);
+
+    const v7_calculator_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7_demo/calculator.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
+                .{ .name = "nogui", .module = mod },
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
+            },
+        }),
+    });
+    v7_calculator_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_calculator_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    if (coverage) {
+        v7_calculator_tests.use_llvm = true;
+        v7_calculator_tests.root_module.fuzz = true;
+        v7_calculator_tests.root_module.link_libc = true;
+        if (cov_rt) |p| v7_calculator_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
+    const run_v7_calculator_tests = b.addRunArtifact(v7_calculator_tests);
+    test_step.dependOn(&run_v7_calculator_tests.step);
 
     const v7_svg_tests = b.addTest(.{
         .root_module = b.createModule(.{

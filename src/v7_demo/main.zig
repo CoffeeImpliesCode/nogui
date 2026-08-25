@@ -25,6 +25,7 @@ const nogui = @import("nogui");
 const Id = nogui.Id;
 const ui = @import("ui.zig");
 const spotify_ui = @import("spotify.zig");
+const calculator_ui = @import("calculator.zig");
 const local_library = @import("local_library.zig");
 const LocalTrack = @import("spotify_data.zig").LocalTrack;
 const window_backend = @import("window.zig");
@@ -56,6 +57,7 @@ pub fn main(init: std.process.Init) !void {
     defer app.deinit();
     var todo: ui.TodoApp = .{};
     var spotify: spotify_ui.SpotifyApp = .{};
+    var calc: calculator_ui.CalculatorApp = .{};
     var tiger: ui.TigerApp = .{}; // registered at the --tiger dispatch (the App holds ONE root)
     var strokes: ui.TestStrokesApp = .{}; // --strokes: the stroke test scene
 
@@ -65,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
     var spotify_mode = false; // --spotify: the Spotify layout stress scene
     var tiger_mode = false; // --tiger: the dedicated tiger showcase window
     var strokes_mode = false; // --strokes: the stroke test scene
+    var calc_mode = false; // --calculator: the calculator demo window
     var gpu_remount_smoke = false; // --gpu-remount-smoke: finite GPU lifecycle run
 
     var frames: ?u32 = null;
@@ -94,6 +97,8 @@ pub fn main(init: std.process.Init) !void {
             strokes_mode = true;
         } else if (std.mem.eql(u8, arg, "--window")) {
             window_mode = true;
+        } else if (std.mem.eql(u8, arg, "--calculator")) {
+            calc_mode = true;
         } else if (std.mem.eql(u8, arg, "--gpu-remount-smoke")) {
             gpu_remount_smoke = true;
         } else if (std.mem.eql(u8, arg, "--gpu-sort-verify")) {
@@ -147,6 +152,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (spotify_mode and !gpu_remount_smoke) {
         _ = try app.register(spotify_ui.SpotifyApp, &spotify);
+    } else if (calc_mode and !gpu_remount_smoke) {
+        _ = try app.register(calculator_ui.CalculatorApp, &calc);
     } else {
         // Keep the default root registered for specialized modes until they
         // replace it below. The simulator still dispatches TodoApp for those
@@ -206,6 +213,8 @@ pub fn main(init: std.process.Init) !void {
             };
             const out = (if (spotify_mode)
                 app.handle(spotify_ui.SpotifyApp, &spotify, ev)
+            else if (calc_mode)
+                app.handle(calculator_ui.CalculatorApp, &calc, ev)
             else
                 app.handle(ui.TodoApp, &todo, ev)) catch |err| {
                 std.log.err("sim line {d}: {s}", .{ line_no, @errorName(err) });
@@ -440,6 +449,58 @@ pub fn main(init: std.process.Init) !void {
             };
             return;
         }
+    }
+
+    if (calc_mode) {
+        if (frames) |n| {
+            window_backend.run(
+                calculator_ui.CalculatorApp,
+                &app,
+                &calc,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+                n,
+                null,
+            ) catch |e| {
+                std.log.err("run failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        if (shot_path) |p| {
+            window_backend.runShot(
+                calculator_ui.CalculatorApp,
+                &app,
+                &calc,
+                p,
+                shot_hover,
+                subpixel,
+                quad_debug,
+                bgr,
+                damp,
+                gpu_sort_verify,
+            ) catch |e| {
+                std.log.err("runShot failed: {s}", .{@errorName(e)});
+                return e;
+            };
+            return;
+        }
+        try window_backend.run(
+            calculator_ui.CalculatorApp,
+            &app,
+            &calc,
+            subpixel,
+            quad_debug,
+            bgr,
+            damp,
+            gpu_sort_verify,
+            null,
+            null,
+        );
+        return;
     }
 
     if (window_mode) {
