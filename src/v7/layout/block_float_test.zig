@@ -2767,3 +2767,112 @@ test "block: float margin clearance prevents margin collapsing with preceding co
     // root height: 110 + 40 = 150
     try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 200, .h = 150 });
 }
+
+test "block: block child with width: min-content sizes to child intrinsic content bounds rather than parent width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const inner_id: Id = @enumFromInt(1);
+    const block_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, inner_id, block_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 80 }, .height = .{ .length = 30 } },
+    });
+    try appendNode(&tree, block_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .min_content, .height = .auto },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 300 }, .height = .{ .length = 200 } },
+    });
+    try tree.appendChild(root_id, block_id);
+    try tree.appendChild(block_id, inner_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(300, 200), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 300, .h = 200 });
+    try expectRelative(&tree, block_id, .{ .x = 0, .y = 0, .w = 80, .h = 30 });
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 0, .w = 80, .h = 30 });
+}
+
+test "block: block child with width: max-content sizes to child intrinsic content bounds rather than parent width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_inner_id: Id = @enumFromInt(1);
+    const second_inner_id: Id = @enumFromInt(2);
+    const block_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+
+    try appendNode(&tree, first_inner_id, block_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 60 }, .height = .{ .length = 25 } },
+    });
+    try appendNode(&tree, second_inner_id, block_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 120 }, .height = .{ .length = 35 } },
+    });
+    try appendNode(&tree, block_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .max_content, .height = .auto },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 400 }, .height = .{ .length = 200 } },
+    });
+    try tree.appendChild(root_id, block_id);
+    try tree.appendChild(block_id, first_inner_id);
+    try tree.appendChild(block_id, second_inner_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(400, 200), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 400, .h = 200 });
+    try expectRelative(&tree, block_id, .{ .x = 0, .y = 0, .w = 120, .h = 60 });
+    try expectRelative(&tree, first_inner_id, .{ .x = 0, .y = 0, .w = 60, .h = 25 });
+    try expectRelative(&tree, second_inner_id, .{ .x = 0, .y = 25, .w = 120, .h = 35 });
+}
+
+test "block: block child with width: fit-content clamped by containing block width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const inner_id: Id = @enumFromInt(1);
+    const block_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, inner_id, block_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 150 }, .height = .{ .length = 40 } },
+    });
+    try appendNode(&tree, block_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .fit_content = null }, .height = .auto },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 200 } },
+    });
+    try tree.appendChild(root_id, block_id);
+    try tree.appendChild(block_id, inner_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 200), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 200 });
+    try expectRelative(&tree, block_id, .{ .x = 0, .y = 0, .w = 100, .h = 40 });
+}

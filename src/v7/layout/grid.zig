@@ -301,6 +301,9 @@ fn validateBreadth(breadth: style.GridTrackBreadth) Error!void {
 fn validateDimension(value: style.Dimension) Error!void {
     switch (value) {
         .auto, .min_content, .max_content => {},
+        .fit_content => |limit| if (limit) |v| {
+            _ = try finiteNonNegative(v);
+        },
         .length, .percent => |number| {
             _ = try finiteNonNegative(number);
         },
@@ -440,12 +443,12 @@ fn measureGridContent(
     const width_definite = switch (node.style.size.width) {
         .length => true,
         .percent => request.percentage_basis.width != null,
-        .auto, .min_content, .max_content => false,
+        .auto, .min_content, .max_content, .fit_content => false,
     };
     const height_definite = switch (node.style.size.height) {
         .length => true,
         .percent => request.percentage_basis.height != null,
-        .auto, .min_content, .max_content => false,
+        .auto, .min_content, .max_content, .fit_content => false,
     };
 
     var columns: std.ArrayList(Track) = .empty;
@@ -457,14 +460,14 @@ fn measureGridContent(
         &columns,
         node.style.grid_template_columns,
         node.style.grid_auto_columns,
-        child_available.width,
+        if (width_definite) child_available.width else null,
     );
     try initTracks(
         options.allocator,
         &rows,
         node.style.grid_template_rows,
         node.style.grid_auto_rows,
-        child_available.height,
+        if (height_definite) child_available.height else null,
     );
 
     var items: std.ArrayList(FlowItem) = .empty;
@@ -490,8 +493,8 @@ fn measureGridContent(
         node.style.grid_auto_flow,
         node.style.grid_auto_columns,
         node.style.grid_auto_rows,
-        child_available.width,
-        child_available.height,
+        if (width_definite) child_available.width else null,
+        if (height_definite) child_available.height else null,
         &occupied,
     );
 
@@ -507,7 +510,7 @@ fn measureGridContent(
             item.column.end,
             width_need,
             column_gap,
-            child_available.width,
+            if (width_definite) child_available.width else null,
         );
         try growTracks(
             rows.items,
@@ -515,7 +518,7 @@ fn measureGridContent(
             item.row.end,
             height_need,
             row_gap,
-            child_available.height,
+            if (height_definite) child_available.height else null,
         );
     }
 
@@ -544,7 +547,7 @@ fn naturalAxisDefinite(
 ) bool {
     return switch (dimension) {
         .length => true,
-        .min_content, .max_content => false,
+        .min_content, .max_content, .fit_content => false,
         .percent => percentage_basis != null,
         .auto => !intrinsic,
     };
@@ -663,9 +666,9 @@ fn layoutGridNode(
         &occupied,
     );
     const width_auto = node.style.size.width == .auto or node.style.size.width == .min_content or
-        node.style.size.width == .max_content;
+        node.style.size.width == .max_content or node.style.size.width == .fit_content;
     const height_auto = node.style.size.height == .auto or node.style.size.height == .min_content or
-        node.style.size.height == .max_content;
+        node.style.size.height == .max_content or node.style.size.height == .fit_content;
     const width_definite = forced_border != null or !width_auto;
     const height_definite = forced_border != null or !height_auto;
     try sizeTracks(options.allocator, &columns, &rows, items.items, content, node, width_definite, height_definite);
@@ -678,6 +681,11 @@ fn layoutGridNode(
     const row_gap = try gridGap(node.style, .rows);
     const column_total = try trackTotal(columns.items, column_gap);
     const row_total = try trackTotal(rows.items, row_gap);
+    var final_content_height = content.height;
+    if (height_auto and forced_border == null) {
+        final_content_height = row_total;
+        node.rect.h = try add(row_total, edges.vertical);
+    }
     const justify_content = effectiveJustifyContent(node.style);
     const align_content = effectiveAlignContent(node.style);
     const justify_distribution = try justifyContent(
@@ -685,7 +693,11 @@ fn layoutGridNode(
         @max(0, content.width - column_total),
         columns.items.len,
     );
-    const align_distribution = try alignContent(align_content, @max(0, content.height - row_total), rows.items.len);
+    const align_distribution = try alignContent(
+        align_content,
+        @max(0, final_content_height - row_total),
+        rows.items.len,
+    );
     try buildOffsets(
         options.allocator,
         &column_offsets,
@@ -922,9 +934,23 @@ fn layoutGridNode(
             try layoutGridNode(tree, item.index, content, child_size, options, depth - 1);
         }
     }
-    try placeAbsolute(tree, node, content, options, depth - 1);
+    try placeAbsolute(
+        tree,
+        node,
+        .{ .width = content.width, .height = final_content_height },
+        columns.items,
+        rows.items,
+        column_offsets.items,
+        row_offsets.items,
+        column_gap,
+        row_gap,
+        justify_distribution.extra_gap,
+        align_distribution.extra_gap,
+        options,
+        depth - 1,
+    );
 
-    updateScroll(tree, node, content, column_total, row_total);
+    updateScroll(tree, node, .{ .width = content.width, .height = final_content_height }, column_total, row_total);
 }
 
 fn collectItems(
@@ -1027,7 +1053,7 @@ fn initTracks(
     tracks: *std.ArrayList(Track),
     explicit: []const style.GridTrack,
     auto_track: style.GridTrack,
-    basis: f32,
+    basis: ?f32,
 ) Error!void {
     if (explicit.len == 0) {
         tracks.append(
@@ -1049,7 +1075,7 @@ fn ensureTracks(
     tracks: *std.ArrayList(Track),
     count: usize,
     auto_track: style.GridTrack,
-    basis: f32,
+    basis: ?f32,
 ) Error!void {
     while (tracks.items.len < count) {
         tracks.append(
@@ -1067,8 +1093,8 @@ fn placeItems(
     flow: style.GridAutoFlow,
     auto_column: style.GridTrack,
     auto_row: style.GridTrack,
-    column_basis: f32,
-    row_basis: f32,
+    column_basis: ?f32,
+    row_basis: ?f32,
     occupied: *std.AutoHashMapUnmanaged(Cell, void),
 ) Error!void {
     var cursor_row: usize = 0;
@@ -1230,7 +1256,7 @@ fn sizeTracks(
             item.column.end,
             width_need,
             column_gap,
-            content.width,
+            if (width_definite) content.width else null,
         );
         try growTracks(
             rows.items,
@@ -1238,7 +1264,7 @@ fn sizeTracks(
             item.row.end,
             height_need,
             row_gap,
-            content.height,
+            if (height_definite) content.height else null,
         );
     }
     if (width_definite) {
@@ -1254,7 +1280,7 @@ fn sizeTracks(
     }
 }
 
-fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, basis: f32) Error!void {
+fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, basis: ?f32) Error!void {
     if (start >= end or end > tracks.len) return error.InvalidStyle;
     const span = end - start;
     var current: f32 = 0;
@@ -1533,7 +1559,7 @@ fn trackMinimum(track: style.GridTrack, basis: ?f32) Error!f32 {
     return switch (track) {
         .fixed => |value| finiteNonNegative(value),
         .percent => |fraction| blk: {
-            const percentage_basis = basis orelse return error.InvalidStyle;
+            const percentage_basis = basis orelse return 0;
             break :blk finiteNonNegative(try finite(fraction * percentage_basis));
         },
         .auto, .min_content, .max_content, .fr, .fit_content => 0,
@@ -1545,7 +1571,7 @@ fn breadthMinimum(breadth: style.GridTrackBreadth, basis: ?f32) Error!f32 {
     return switch (breadth) {
         .fixed => |value| finiteNonNegative(value),
         .percent => |fraction| blk: {
-            const percentage_basis = basis orelse return error.InvalidStyle;
+            const percentage_basis = basis orelse return 0;
             break :blk finiteNonNegative(try finite(fraction * percentage_basis));
         },
         .auto, .min_content, .max_content, .fr, .fit_content => 0,
@@ -1557,7 +1583,7 @@ fn trackMaximum(track: style.GridTrack, basis: ?f32) Error!?f32 {
         .fixed => |value| value,
         .fit_content => |value| try finiteNonNegative(value),
         .percent => |fraction| blk: {
-            const percentage_basis = basis orelse return error.InvalidStyle;
+            const percentage_basis = basis orelse return null;
             break :blk fraction * percentage_basis;
         },
         .auto, .min_content, .max_content, .fr => null,
@@ -1570,7 +1596,7 @@ fn breadthMaximum(breadth: style.GridTrackBreadth, basis: ?f32) Error!?f32 {
         .fixed => |value| value,
         .fit_content => |value| try finiteNonNegative(value),
         .percent => |fraction| blk: {
-            const percentage_basis = basis orelse return error.InvalidStyle;
+            const percentage_basis = basis orelse return null;
             break :blk fraction * percentage_basis;
         },
         .auto, .min_content, .max_content, .fr => null,
@@ -1584,7 +1610,8 @@ fn trackAllowsIntrinsic(track: style.GridTrack) bool {
             .auto, .min_content, .max_content, .fixed, .percent, .fit_content => true,
             .fr => false,
         },
-        .fixed, .percent, .fr => false,
+        .percent => true,
+        .fixed, .fr => false,
     };
 }
 
@@ -1595,7 +1622,7 @@ fn trackCanStretch(track: style.GridTrack) bool {
             .auto, .min_content, .max_content, .fixed, .percent, .fit_content => true,
             .fr => false,
         },
-        .fixed, .percent, .fr => false,
+        .percent, .fixed, .fr => false,
     };
 }
 
@@ -1750,6 +1777,14 @@ fn placeAbsolute(
     tree: *widget.WidgetTree,
     container: *widget.WidgetNode,
     content: widget.Size,
+    columns: []const Track,
+    rows: []const Track,
+    column_offsets: []const f32,
+    row_offsets: []const f32,
+    column_gap: f32,
+    row_gap: f32,
+    column_extra_gap: f32,
+    row_extra_gap: f32,
     options: Options,
     depth: usize,
 ) Error!void {
@@ -1757,37 +1792,88 @@ fn placeAbsolute(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position != .absolute) continue;
+
+        const col_line = gridLineFor(child.style, .columns);
+        const col_placement = try placementFor(col_line, columns.len);
+        var area_x: f32 = 0;
+        var area_width: f32 = content.width;
+        if (col_placement.definite and columns.len > 0 and column_offsets.len > 0) {
+            const col_start = @min(col_placement.start, columns.len);
+            const col_end = @min(col_placement.end, columns.len);
+            if (col_start < column_offsets.len) {
+                area_x = column_offsets[col_start];
+                if (col_end > col_start) {
+                    var width: f32 = 0;
+                    for (columns[col_start..col_end]) |track| {
+                        width = try add(width, track.size);
+                    }
+                    if (col_end - col_start > 1) {
+                        const span_f: f32 = @floatFromInt(col_end - col_start - 1);
+                        width = try add(width, (column_gap + column_extra_gap) * span_f);
+                    }
+                    area_width = width;
+                } else {
+                    area_width = 0;
+                }
+            }
+        }
+
+        const row_line = gridLineFor(child.style, .rows);
+        const row_placement = try placementFor(row_line, rows.len);
+        var area_y: f32 = 0;
+        var area_height: f32 = content.height;
+        if (row_placement.definite and rows.len > 0 and row_offsets.len > 0) {
+            const row_start = @min(row_placement.start, rows.len);
+            const row_end = @min(row_placement.end, rows.len);
+            if (row_start < row_offsets.len) {
+                area_y = row_offsets[row_start];
+                if (row_end > row_start) {
+                    var height: f32 = 0;
+                    for (rows[row_start..row_end]) |track| {
+                        height = try add(height, track.size);
+                    }
+                    if (row_end - row_start > 1) {
+                        const span_f: f32 = @floatFromInt(row_end - row_start - 1);
+                        height = try add(height, (row_gap + row_extra_gap) * span_f);
+                    }
+                    area_height = height;
+                } else {
+                    area_height = 0;
+                }
+            }
+        }
+
         const natural = try measureNode(
             tree,
             child_index,
-            concreteRequest(content),
+            concreteRequest(.{ .width = area_width, .height = area_height }),
             options,
             depth,
             container.style.display,
         );
-        const edges = try resolveEdges(child.style, content.width);
+        const edges = try resolveEdges(child.style, area_width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
-        const margins = try resolveMargins(child.style, content.width);
+        const margins = try resolveMargins(child.style, area_width);
         var child_size = try usedSize(
             child.style,
-            .{ .width = content.width, .height = content.height },
+            .{ .width = area_width, .height = area_height },
             natural.content,
             edges,
             null,
         );
-        const left = try resolveInset(child.style.inset.left, content.width);
-        const right = try resolveInset(child.style.inset.right, content.width);
-        const top = try resolveInset(child.style.inset.top, content.height);
-        const bottom = try resolveInset(child.style.inset.bottom, content.height);
+        const left = try resolveInset(child.style.inset.left, area_width);
+        const right = try resolveInset(child.style.inset.right, area_width);
+        const top = try resolveInset(child.style.inset.top, area_height);
+        const bottom = try resolveInset(child.style.inset.bottom, area_height);
         if (dimensionAuto(child.style.size.width) and left != null and right != null) {
             child_size.width = try clampAxisSize(
                 child.style,
                 .horizontal,
                 @max(
                     0,
-                    content.width - left.? - right.? - margins.value.left - margins.value.right,
+                    area_width - left.? - right.? - margins.value.left - margins.value.right,
                 ),
-                .{ .width = content.width, .height = content.height },
+                .{ .width = area_width, .height = area_height },
                 natural.content,
                 edges,
             );
@@ -1798,25 +1884,25 @@ fn placeAbsolute(
                 .vertical,
                 @max(
                     0,
-                    content.height - top.? - bottom.? - margins.value.top - margins.value.bottom,
+                    area_height - top.? - bottom.? - margins.value.top - margins.value.bottom,
                 ),
-                .{ .width = content.width, .height = content.height },
+                .{ .width = area_width, .height = area_height },
                 natural.content,
                 edges,
             );
         }
         const x = if (left) |value|
-            try add(value, margins.value.left)
+            try add(area_x, try add(value, margins.value.left))
         else if (right) |value|
-            try finite(content.width - value - margins.value.right - child_size.width)
+            try finite(area_x + area_width - value - margins.value.right - child_size.width)
         else
-            margins.value.left;
+            try add(area_x, margins.value.left);
         const y = if (top) |value|
-            try add(value, margins.value.top)
+            try add(area_y, try add(value, margins.value.top))
         else if (bottom) |value|
-            try finite(content.height - value - margins.value.bottom - child_size.height)
+            try finite(area_y + area_height - value - margins.value.bottom - child_size.height)
         else
-            margins.value.top;
+            try add(area_y, margins.value.top);
         child.rect = .{ .x = x, .y = y, .w = child_size.width, .h = child_size.height };
         try checkRect(child.rect);
         child.natural_main = child_size.width;
@@ -1954,6 +2040,14 @@ fn resolveDimensionBorder(
     const value: ?f32 = switch (dimension) {
         .auto => null,
         .min_content, .max_content => try nonNegative(intrinsic),
+        .fit_content => |limit| blk: {
+            const non_neg_intrinsic = try nonNegative(intrinsic);
+            if (limit) |lim| {
+                const non_neg_limit = try finiteNonNegative(lim);
+                break :blk @min(non_neg_intrinsic, non_neg_limit);
+            }
+            break :blk non_neg_intrinsic;
+        },
         .length => |number| try finite(number),
         .percent => |fraction| blk: {
             const basis = percentage_basis orelse return error.InvalidStyle;

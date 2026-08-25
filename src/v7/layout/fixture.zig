@@ -5,8 +5,8 @@ const layout = @import("root.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
-const cases_path = "testdata/taffy-v0.13.0/normalized/cases.json";
-const manifest_path = "testdata/taffy-v0.13.0/MANIFEST.json";
+const cases_path = "~/.cache/taffy-v0.13.0-normalized/normalized/cases.json";
+const manifest_path = "~/.cache/taffy-v0.13.0-normalized/MANIFEST.json";
 
 const pinned_commit = "45a56299d366ddb383e593a1f0372158d00e8530";
 const pinned_repository = "https://github.com/DioxusLabs/taffy";
@@ -31,14 +31,14 @@ pub const FixtureError = error{
     InvalidFixture,
 } || std.mem.Allocator.Error;
 
-const CaseError = FixtureError || error{ Unsupported, LayoutFailed };
+pub const CaseError = FixtureError || error{ Unsupported, LayoutFailed };
 
-const Corpus = struct {
+pub const Corpus = struct {
     schema: u32,
     cases: []const Case,
 };
 
-const Case = struct {
+pub const Case = struct {
     id: []const u8,
     source: []const u8,
     source_sha256: []const u8,
@@ -690,7 +690,7 @@ test "fixture comparison requires matching optional scroll max offsets" {
 
 const Side = enum { top, right, bottom, left };
 
-fn runCase(allocator: std.mem.Allocator, fixture_case: Case) CaseError!bool {
+pub fn runCase(allocator: std.mem.Allocator, fixture_case: Case) CaseError!bool {
     try validateFixtureInputs(fixture_case);
     var fixture_tree = try FixtureTree.init(allocator, fixture_case.nodes.len);
     defer fixture_tree.deinit(allocator);
@@ -936,7 +936,7 @@ fn applyFixtureAttributes(
 ) CaseError!void {
     var iterator = attributes.iterator();
     while (iterator.next()) |entry| {
-        if (isAxisGapAttribute(entry.key_ptr.*)) continue;
+        if (isGridTemplateAttribute(entry.key_ptr.*)) continue;
         try applyAttributeWithResources(
             resources,
             result,
@@ -947,7 +947,7 @@ fn applyFixtureAttributes(
 
     iterator = attributes.iterator();
     while (iterator.next()) |entry| {
-        if (!isAxisGapAttribute(entry.key_ptr.*)) continue;
+        if (!isGridTemplateAttribute(entry.key_ptr.*)) continue;
         try applyAttributeWithResources(
             resources,
             result,
@@ -957,6 +957,10 @@ fn applyFixtureAttributes(
     }
 }
 
+fn isGridTemplateAttribute(name: []const u8) bool {
+    return std.mem.eql(u8, name, "grid-template-columns") or std.mem.eql(u8, name, "grid-template-rows");
+}
+
 fn isAxisGapAttribute(name: []const u8) bool {
     return std.mem.eql(u8, name, "column-gap") or std.mem.eql(u8, name, "row-gap");
 }
@@ -964,7 +968,7 @@ fn isAxisGapAttribute(name: []const u8) bool {
 fn dimensionAuto(value: style.Dimension) bool {
     return switch (value) {
         .auto => true,
-        .length, .percent, .min_content, .max_content => false,
+        .length, .percent, .min_content, .max_content, .fit_content => false,
     };
 }
 
@@ -1014,12 +1018,44 @@ fn applyAttributeWithResources(
     if (std.mem.eql(u8, name, "justify-self")) return applyJustifySelf(result, value);
     if (std.mem.eql(u8, name, "grid-template-columns")) {
         const owner = resources orelse return error.InvalidFixture;
-        result.grid_template_columns = try parseGridTemplate(owner, value);
+        const width_avail: ?f32 = switch (result.size.width) {
+            .length => |w| switch (result.box_sizing) {
+                .content_box => w,
+                .border_box => @max(
+                    0,
+                    w - result.border.left - result.border.right - result.padding.left - result.padding.right,
+                ),
+            },
+            else => null,
+        };
+        const gap = if (result.grid_column_gap != 0)
+            result.grid_column_gap
+        else if (result.column_gap != 0)
+            result.column_gap
+        else
+            result.gap;
+        result.grid_template_columns = try parseGridTemplate(owner, value, width_avail, gap);
         return;
     }
     if (std.mem.eql(u8, name, "grid-template-rows")) {
         const owner = resources orelse return error.InvalidFixture;
-        result.grid_template_rows = try parseGridTemplate(owner, value);
+        const height_avail: ?f32 = switch (result.size.height) {
+            .length => |h| switch (result.box_sizing) {
+                .content_box => h,
+                .border_box => @max(
+                    0,
+                    h - result.border.top - result.border.bottom - result.padding.top - result.padding.bottom,
+                ),
+            },
+            else => null,
+        };
+        const gap = if (result.grid_row_gap != 0)
+            result.grid_row_gap
+        else if (result.row_gap != 0)
+            result.row_gap
+        else
+            result.gap;
+        result.grid_template_rows = try parseGridTemplate(owner, value, height_avail, gap);
         return;
     }
     if (std.mem.eql(u8, name, "grid-auto-columns")) {
@@ -1142,6 +1178,17 @@ test "fixture flex item attributes map typed and legacy fields" {
     try std.testing.expectEqual(@as(f32, 0), result.basis);
     try std.testing.expectEqual(@as(style.Dimension, .min_content), result.flex_basis);
 
+    try applyAttribute(&result, "flex-basis", "max-content");
+    try std.testing.expectEqual(@as(f32, 0), result.basis);
+    try std.testing.expectEqual(@as(style.Dimension, .max_content), result.flex_basis);
+
+    try applyAttribute(&result, "flex-basis", "fit-content");
+    try std.testing.expectEqual(@as(f32, 0), result.basis);
+    try std.testing.expectEqual(style.Dimension{ .fit_content = null }, result.flex_basis);
+
+    try applyAttribute(&result, "width", "fit-content(40px)");
+    try std.testing.expectEqual(style.Dimension{ .fit_content = 40 }, result.size.width);
+
     try applyAttribute(&result, "flex-basis", "auto");
     try std.testing.expectEqual(@as(f32, 0), result.basis);
     try std.testing.expectEqual(@as(style.Dimension, .auto), result.flex_basis);
@@ -1261,7 +1308,6 @@ test "fixture unsupported alignment values stay explicit" {
         .{ .name = "align-content", .value = "unsafe center" },
         .{ .name = "justify-content", .value = "baseline" },
         .{ .name = "column-gap", .value = "normal" },
-        .{ .name = "flex-basis", .value = "content" },
         .{ .name = "aspect-ratio", .value = "1 / 2" },
     };
     for (cases) |case| {
@@ -1670,6 +1716,47 @@ test "fixture grid templates parse repeat and fit-content patterns" {
     ));
 }
 
+test "fixture grid templates parse auto-fit and auto-fill repeat patterns" {
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    var result: style.Style = .{};
+    result.size.width = .{ .length = 200 };
+    result.grid_column_gap = 10;
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-columns",
+        "repeat(auto-fit, 60px)",
+    );
+    const expected_fit = [_]style.GridTrack{
+        .{ .fixed = 60 },
+        .{ .fixed = 60 },
+        .{ .fixed = 60 },
+    };
+    try std.testing.expectEqual(expected_fit.len, result.grid_template_columns.len);
+    for (expected_fit, result.grid_template_columns) |expected, actual| {
+        try std.testing.expect(std.meta.eql(expected, actual));
+    }
+
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-columns",
+        "repeat(auto-fill, minmax(40px, 1fr))",
+    );
+    const expected_fill = [_]style.GridTrack{
+        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
+        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
+        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
+        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
+    };
+    try std.testing.expectEqual(expected_fill.len, result.grid_template_columns.len);
+    for (expected_fill, result.grid_template_columns) |expected, actual| {
+        try std.testing.expect(std.meta.eql(expected, actual));
+    }
+}
+
 test "fixture grid placements parse lines and positive spans" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
@@ -1848,8 +1935,6 @@ test "fixture grid representation gaps stay explicitly unsupported" {
         name: []const u8,
         value: []const u8,
     }{
-        .{ .name = "grid-template-columns", .value = "repeat(auto-fill, 1fr)" },
-        .{ .name = "grid-template-rows", .value = "repeat(auto-fit, 20px)" },
         .{ .name = "grid-template-columns", .value = "[content] 1fr" },
         .{ .name = "grid-template-rows", .value = "subgrid" },
         .{ .name = "grid-template-areas", .value = "\"main main\"" },
@@ -1979,17 +2064,16 @@ fn applyFlexShrink(result: *style.Style, value: []const u8) CaseError!void {
 }
 
 fn applyFlexBasis(result: *style.Style, value: []const u8) CaseError!void {
-    if (std.mem.eql(u8, value, "content") or
-        std.mem.eql(u8, value, "fit-content") or
-        std.mem.startsWith(u8, value, "fit-content("))
-    {
-        return error.Unsupported;
+    if (std.mem.eql(u8, value, "content")) {
+        result.flex_basis = .max_content;
+        result.basis = 0;
+        return;
     }
     const basis = try parseDimension(value);
     result.flex_basis = basis;
     result.basis = switch (basis) {
         .length => |number| number,
-        .auto, .percent, .min_content, .max_content => 0,
+        .auto, .percent, .min_content, .max_content, .fit_content => 0,
     };
 }
 
@@ -2171,7 +2255,29 @@ const RepeatSpec = struct {
     body: []const u8,
 };
 
-fn parseRepeatHeader(token: []const u8) CaseError!RepeatSpec {
+fn trackTokenEstimatedSize(token: []const u8, available_size: ?f32) f32 {
+    const track = parseGridTrackToken(token) catch return 0;
+    return switch (track) {
+        .fixed => |v| v,
+        .percent => |p| if (available_size) |avail| p * avail else 0,
+        .fit_content => |v| v,
+        .minmax => |mm| switch (mm.min) {
+            .fixed => |v| v,
+            .percent => |p| if (available_size) |avail| p * avail else 0,
+            .fit_content => |v| v,
+            .auto, .min_content, .max_content => switch (mm.max) {
+                .fixed => |v| v,
+                .percent => |p| if (available_size) |avail| p * avail else 0,
+                .fit_content => |v| v,
+                .auto, .min_content, .max_content, .fr => 0,
+            },
+            .fr => 0,
+        },
+        .auto, .min_content, .max_content, .fr => 0,
+    };
+}
+
+fn parseRepeatHeader(token: []const u8, available_size: ?f32, gap: f32) CaseError!RepeatSpec {
     if (!std.mem.endsWith(u8, token, ")")) return error.Unsupported;
     const inner = token[7 .. token.len - 1];
     var comma: ?usize = null;
@@ -2192,21 +2298,42 @@ fn parseRepeatHeader(token: []const u8) CaseError!RepeatSpec {
     const split = comma orelse return error.InvalidFixture;
     const count_str = std.mem.trim(u8, inner[0..split], " \t\n\r");
     if (count_str.len == 0) return error.InvalidFixture;
-    const count = std.fmt.parseInt(usize, count_str, 10) catch {
-        if (std.mem.eql(u8, count_str, "auto-fill") or std.mem.eql(u8, count_str, "auto-fit")) {
-            return error.Unsupported;
+    const body = std.mem.trim(u8, inner[split + 1 ..], " \t\n\r");
+    if (body.len == 0) return error.InvalidFixture;
+
+    if (std.mem.eql(u8, count_str, "auto-fill") or std.mem.eql(u8, count_str, "auto-fit")) {
+        var cursor: usize = 0;
+        var pattern_size: f32 = 0;
+        var inner_count: usize = 0;
+        while (try nextGridTrackToken(body, &cursor)) |inner_token| {
+            if (std.mem.startsWith(u8, inner_token, "repeat(")) {
+                return error.Unsupported;
+            }
+            pattern_size += trackTokenEstimatedSize(inner_token, available_size);
+            inner_count += 1;
         }
+        if (inner_count == 0) return error.InvalidFixture;
+        const count: usize = if (available_size) |avail| blk: {
+            if (avail > 0 and (pattern_size + gap) > 0) {
+                const raw = @floor((avail + gap) / (pattern_size + gap));
+                break :blk @max(@as(usize, 1), @as(usize, @intFromFloat(raw)));
+            }
+            break :blk 1;
+        } else 1;
+        if (count > 1024) return error.Unsupported;
+        return .{ .count = count, .body = body };
+    }
+
+    const count = std.fmt.parseInt(usize, count_str, 10) catch {
         return error.InvalidFixture;
     };
     if (count == 0) return error.InvalidFixture;
     if (count > 1024) return error.Unsupported;
-    const body = std.mem.trim(u8, inner[split + 1 ..], " \t\n\r");
-    if (body.len == 0) return error.InvalidFixture;
     return .{ .count = count, .body = body };
 }
 
-fn countRepeatTracks(token: []const u8) CaseError!usize {
-    const repeat_spec = try parseRepeatHeader(token);
+fn countRepeatTracks(token: []const u8, available_size: ?f32, gap: f32) CaseError!usize {
+    const repeat_spec = try parseRepeatHeader(token, available_size, gap);
     var cursor: usize = 0;
     var inner_count: usize = 0;
     while (try nextGridTrackToken(repeat_spec.body, &cursor)) |inner_token| {
@@ -2225,8 +2352,10 @@ fn countRepeatTracks(token: []const u8) CaseError!usize {
 fn parseGridTemplate(
     resources: *FixtureResources,
     value: []const u8,
+    available_size: ?f32,
+    gap: f32,
 ) CaseError![]const style.GridTrack {
-    const count = try countGridTracks(value);
+    const count = try countGridTracks(value, available_size, gap);
     const owned = try resources.allocator.alloc(style.GridTrack, count);
     errdefer resources.allocator.free(owned);
 
@@ -2234,7 +2363,7 @@ fn parseGridTemplate(
     var index: usize = 0;
     while (try nextGridTrackToken(value, &cursor)) |token| {
         if (std.mem.startsWith(u8, token, "repeat(")) {
-            const repeat_spec = try parseRepeatHeader(token);
+            const repeat_spec = try parseRepeatHeader(token, available_size, gap);
             var rep_i: usize = 0;
             while (rep_i < repeat_spec.count) : (rep_i += 1) {
                 var inner_cursor: usize = 0;
@@ -2253,12 +2382,12 @@ fn parseGridTemplate(
     return owned;
 }
 
-fn countGridTracks(value: []const u8) CaseError!usize {
+fn countGridTracks(value: []const u8, available_size: ?f32, gap: f32) CaseError!usize {
     var cursor: usize = 0;
     var count: usize = 0;
     while (try nextGridTrackToken(value, &cursor)) |token| {
         if (std.mem.startsWith(u8, token, "repeat(")) {
-            count += try countRepeatTracks(token);
+            count += try countRepeatTracks(token, available_size, gap);
         } else {
             _ = try parseGridTrackToken(token);
             count += 1;
@@ -2596,6 +2725,13 @@ fn parseDimension(value: []const u8) CaseError!style.Dimension {
     if (std.mem.eql(u8, value, "auto")) return .auto;
     if (std.mem.eql(u8, value, "min-content")) return .min_content;
     if (std.mem.eql(u8, value, "max-content")) return .max_content;
+    if (std.mem.eql(u8, value, "fit-content")) return .{ .fit_content = null };
+    if (std.mem.startsWith(u8, value, "fit-content(") and std.mem.endsWith(u8, value, ")")) {
+        const body = std.mem.trim(u8, value[12 .. value.len - 1], " \t\n\r");
+        if (body.len == 0) return error.InvalidFixture;
+        const length = try parseNonnegativeLength(body);
+        return .{ .fit_content = length };
+    }
     if (std.mem.endsWith(u8, value, "%")) {
         const fraction = try parseNumber(value[0 .. value.len - 1]);
         if (fraction < 0) return error.InvalidFixture;

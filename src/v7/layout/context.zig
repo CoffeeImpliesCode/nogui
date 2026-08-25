@@ -112,7 +112,7 @@ fn percentageDependencies(
 fn isPercentDimension(value: style.Dimension) bool {
     return switch (value) {
         .percent => true,
-        .auto, .length, .min_content, .max_content => false,
+        .auto, .length, .min_content, .max_content, .fit_content => false,
     };
 }
 

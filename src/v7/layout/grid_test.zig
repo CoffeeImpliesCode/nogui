@@ -912,3 +912,91 @@ test "grid baseline alignment aligns items with differing font sizes to shared b
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 16, .w = 60, .h = 20 });
     try expectRelative(&tree, second_id, .{ .x = 80, .y = 0, .w = 60, .h = 40 });
 }
+
+test "grid absolute item positioned in grid area defined by grid-column 2 / 4 with insets" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const in_flow_id: Id = @enumFromInt(1);
+    const absolute_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    const columns = [_]style.GridTrack{
+        .{ .fixed = 50 },
+        .{ .fixed = 50 },
+        .{ .fixed = 50 },
+        .{ .fixed = 50 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 80 }};
+
+    var in_flow = leafStyle();
+    in_flow.size = .{ .width = .{ .length = 50 }, .height = .{ .length = 80 } };
+    try appendLeaf(&tree, in_flow_id, container_id, in_flow, .{ .spacer = .{} });
+
+    // Absolute item in grid-column: 2 / 4
+    // (tracks index 1 and 2, start line 2 = x: 60, end line 4 = x: 170, width = 110)
+    var absolute_style = leafStyle();
+    absolute_style.position = .absolute;
+    absolute_style.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 4 },
+    };
+    absolute_style.size = .{ .width = .{ .length = 80 }, .height = .{ .length = 40 } };
+    absolute_style.inset = .{
+        .left = .{ .length = 10 },
+        .top = .{ .length = 5 },
+        .right = .auto,
+        .bottom = .auto,
+    };
+    try appendLeaf(&tree, absolute_id, container_id, absolute_style, .{ .spacer = .{} });
+
+    var container = fixedContainer(230, 80, columns[0..], rows[0..]);
+    container.grid_column_gap = 10;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, in_flow_id);
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 230, .height = 80 }, null);
+
+    // In-flow item placed in column 1 (x: 0, y: 0, w: 50, h: 80)
+    try expectRelative(&tree, in_flow_id, .{ .x = 0, .y = 0, .w = 50, .h = 80 });
+    // Absolute item placed in grid area [col 2..4] (area_x = 50 + 10 = 60, area_width = 50 + 10 + 50 = 110)
+    // With left: 10, top: 5 -> x = 60 + 10 = 70, y = 0 + 5 = 5, w = 80, h = 40
+    try expectRelative(&tree, absolute_id, .{ .x = 70, .y = 5, .w = 80, .h = 40 });
+}
+
+test "grid percentage tracks 50% 50% in definite container" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    const columns = [_]style.GridTrack{
+        .{ .percent = 0.5 },
+        .{ .percent = 0.5 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 60 }};
+
+    var first = leafStyle();
+    first.size = .{ .width = .auto, .height = .auto };
+    try appendLeaf(&tree, first_id, container_id, first, .{ .spacer = .{} });
+
+    var second = leafStyle();
+    second.size = .{ .width = .auto, .height = .auto };
+    try appendLeaf(&tree, second_id, container_id, second, .{ .spacer = .{} });
+
+    var container = fixedContainer(200, 60, columns[0..], rows[0..]);
+    container.grid_justify_items = .stretch;
+    container.grid_align_items = .stretch;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 200, .height = 60 }, null);
+
+    // Each 50% track in 200px container resolves to 100px
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 100, .h = 60 });
+    try expectRelative(&tree, second_id, .{ .x = 100, .y = 0, .w = 100, .h = 60 });
+}

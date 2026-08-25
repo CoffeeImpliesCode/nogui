@@ -38,7 +38,7 @@ pub fn resolveDimension(
     const validated_percentage_basis = try validateOptionalFinite(percentage_basis);
 
     return switch (dimension) {
-        .auto, .min_content, .max_content => null,
+        .auto, .min_content, .max_content, .fit_content => null,
         .length => |value| try validateFinite(value),
         .percent => |value| try resolvePercentage(value, validated_percentage_basis),
     };

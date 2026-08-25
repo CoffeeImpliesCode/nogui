@@ -173,7 +173,7 @@ fn asOptionalF32(value: anytype) ?f32 {
     if (T == style.Dimension) {
         return switch (value) {
             .length => |length| length,
-            .auto, .percent, .min_content, .max_content => null,
+            .auto, .percent, .min_content, .max_content, .fit_content => null,
         };
     }
     if (T == style.LengthPercentage) {

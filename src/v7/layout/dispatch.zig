@@ -547,7 +547,7 @@ fn rootWidth(
             margins.left,
             margins.right,
         ),
-        .length, .percent, .min_content, .max_content => finiteNonNegative(
+        .length, .percent, .min_content, .max_content, .fit_content => finiteNonNegative(
             natural.border.width,
         ),
     };
@@ -566,7 +566,7 @@ fn rootBaseHeight(
         .auto => null,
         .length => |value| @as(?f32, value),
         .percent => |fraction| @as(?f32, fraction * available.height),
-        .min_content, .max_content => @as(?f32, natural.content.height),
+        .min_content, .max_content, .fit_content => @as(?f32, natural.content.height),
     };
     if (basis) |value| return sizingToBorder(value, vertical_edges, input.box_sizing);
     return finiteNonNegative(natural.border.height);
@@ -649,6 +649,7 @@ fn rootDimensionBorder(
         .length => |number| number,
         .percent => |fraction| try finiteMultiply(fraction, basis),
         .min_content, .max_content => intrinsic,
+        .fit_content => |limit_opt| if (limit_opt) |limit| @min(limit, intrinsic) else intrinsic,
     };
     return @as(?f32, try sizingToBorder(content, edges, box_sizing));
 }
@@ -773,13 +774,13 @@ fn needsNaturalMeasurement(node: *const widget.WidgetNode) bool {
 
 fn isIntrinsicDimension(value: style.Dimension) bool {
     return switch (value) {
-        .auto, .min_content, .max_content => true,
+        .auto, .min_content, .max_content, .fit_content => true,
         .length, .percent => false,
     };
 }
 fn hasIntrinsicRootConstraint(value: style.Dimension) bool {
     return switch (value) {
-        .min_content, .max_content => true,
+        .min_content, .max_content, .fit_content => true,
         .auto, .length, .percent => false,
     };
 }
@@ -928,7 +929,7 @@ fn resolveConcreteDimension(
             const resolved = try finiteNonNegative(fraction * basis);
             break :blk @as(?f32, resolved);
         },
-        .auto, .min_content, .max_content => intrinsic,
+        .auto, .min_content, .max_content, .fit_content => intrinsic,
     };
 }
 
@@ -1186,6 +1187,6 @@ fn isSupportedRootDimension(value: style.Dimension) bool {
         .auto => true,
         .length => |number| std.math.isFinite(number) and number >= 0,
         .percent => |fraction| std.math.isFinite(fraction) and fraction >= 0,
-        .min_content, .max_content => false,
+        .min_content, .max_content, .fit_content => false,
     };
 }

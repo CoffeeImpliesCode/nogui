@@ -78,7 +78,7 @@ fn hasDefaultSurfacePlacement(node: *const widget.WidgetNode) bool {
 fn isConcreteBlockFloatDimension(value: style.Dimension) bool {
     return switch (value) {
         .length, .percent => true,
-        .auto, .min_content, .max_content => false,
+        .auto, .min_content, .max_content, .fit_content => false,
     };
 }
 

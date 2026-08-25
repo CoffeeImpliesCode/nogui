@@ -111,6 +111,7 @@ pub const Dimension = union(enum) {
     percent: f32,
     min_content,
     max_content,
+    fit_content: ?f32,
 
     pub fn resolve(self: Dimension, containing: ?f32, intrinsic: f32) ?f32 {
         return switch (self) {
@@ -118,6 +119,13 @@ pub const Dimension = union(enum) {
             .length => |value| value,
             .percent => |fraction| if (containing) |size| size * fraction else null,
             .min_content, .max_content => intrinsic,
+            .fit_content => |limit_opt| blk: {
+                const available = if (containing) |c|
+                    (if (limit_opt) |lim| @min(c, lim) else c)
+                else
+                    (if (limit_opt) |lim| lim else intrinsic);
+                break :blk @min(intrinsic, @max(0, available));
+            },
         };
     }
 
@@ -226,6 +234,7 @@ pub const DimensionOverride = union(enum) {
     percent: f32,
     min_content,
     max_content,
+    fit_content: ?f32,
 };
 
 /// Length-percentage-auto overrides mirror the direct value tags.
@@ -249,6 +258,7 @@ fn dimensionOverrideValue(value: DimensionOverride) ?Dimension {
         .percent => |percent| .{ .percent = percent },
         .min_content => .min_content,
         .max_content => .max_content,
+        .fit_content => |limit| .{ .fit_content = limit },
     };
 }
 
@@ -386,6 +396,7 @@ pub fn dimensionFrom(value: anytype) Dimension {
             .auto => .auto,
             .min_content => .min_content,
             .max_content => .max_content,
+            .fit_content => .{ .fit_content = null },
             .length, .percent => .auto,
         };
     }
@@ -396,6 +407,7 @@ pub fn dimensionFrom(value: anytype) Dimension {
             .auto => .auto,
             .min_content => .min_content,
             .max_content => .max_content,
+            .fit_content => .{ .fit_content = null },
             else => .auto,
         },
         .@"struct" => blk: {
@@ -404,6 +416,15 @@ pub fn dimensionFrom(value: anytype) Dimension {
             if (@hasField(T, "auto")) break :blk .auto;
             if (@hasField(T, "min_content")) break :blk .min_content;
             if (@hasField(T, "max_content")) break :blk .max_content;
+            if (@hasField(T, "fit_content")) {
+                const raw = @field(value, "fit_content");
+                const limit: ?f32 = switch (@typeInfo(@TypeOf(raw))) {
+                    .optional => if (raw) |v| numericF32(v) else null,
+                    .null => null,
+                    else => numericF32(raw),
+                };
+                break :blk .{ .fit_content = limit };
+            }
             @compileError("dimension value must contain length, percent, or intrinsic tag");
         },
         else => @compileError("unsupported dimension value"),
@@ -1015,6 +1036,11 @@ test "typed dimension auto and intrinsic resolve" {
     try std.testing.expectEqual(@as(?f32, null), Dimension.resolve(.auto, null, 40));
     try std.testing.expectEqual(@as(?f32, 12), Dimension.resolve(.min_content, null, 12));
     try std.testing.expectEqual(@as(?f32, 24), Dimension.resolve(.max_content, null, 24));
+    try std.testing.expectEqual(@as(?f32, 100), Dimension.resolve(.{ .fit_content = null }, 200, 100));
+    try std.testing.expectEqual(@as(?f32, 50), Dimension.resolve(.{ .fit_content = null }, 50, 100));
+    try std.testing.expectEqual(@as(?f32, 80), Dimension.resolve(.{ .fit_content = 80 }, 200, 100));
+    try std.testing.expectEqual(@as(?f32, 100), Dimension.resolve(.{ .fit_content = 120 }, 200, 100));
+    try std.testing.expectEqual(@as(?f32, 100), Dimension.resolve(.{ .fit_content = null }, null, 100));
 }
 
 test "typed min max precedence clamps minimum" {

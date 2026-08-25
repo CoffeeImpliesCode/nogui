@@ -249,8 +249,10 @@ fn measureNaturalBlockContent(
                     request.percentage_basis.width,
                 .height = if (height_definite) @as(?f32, child_available.height) else null,
             },
-            .intrinsic_width = !width_definite and dimensionAuto(child.style.size.width),
-            .intrinsic_height = !height_definite and dimensionAuto(child.style.size.height),
+            .intrinsic_width = !width_definite and
+                (dimensionAuto(child.style.size.width) or isIntrinsicDimension(child.style.size.width)),
+            .intrinsic_height = !height_definite and
+                (dimensionAuto(child.style.size.height) or isIntrinsicDimension(child.style.size.height)),
         };
         const natural = if (child.children.items.len == 0 or
             child.style.display == .block or
@@ -314,14 +316,21 @@ fn naturalAxisDefinite(
         .length => true,
         .percent => percentage_basis != null,
         .auto => !intrinsic,
-        .min_content, .max_content => false,
+        .min_content, .max_content, .fit_content => false,
     };
 }
 
 fn dimensionAuto(dimension: style.Dimension) bool {
     return switch (dimension) {
         .auto => true,
-        .length, .percent, .min_content, .max_content => false,
+        .length, .percent, .min_content, .max_content, .fit_content => false,
+    };
+}
+
+fn isIntrinsicDimension(dimension: style.Dimension) bool {
+    return switch (dimension) {
+        .min_content, .max_content, .fit_content => true,
+        .auto, .length, .percent => false,
     };
 }
 
@@ -487,6 +496,7 @@ fn layoutPreparedContainerUnchecked(
             child_style,
             child_context.percentage_basis.width,
         );
+        const child_needs_intrinsic_width = isIntrinsicDimension(child_style.size.width);
         var intrinsic = try intrinsicContentSizeWithContext(
             tree,
             child,
@@ -494,7 +504,7 @@ fn layoutPreparedContainerUnchecked(
             measure,
             layout_ctx,
             child_context,
-            false,
+            child_needs_intrinsic_width,
         );
         const clear_y = try clearBottom(
             tree,
@@ -550,7 +560,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     child_context,
-                    false,
+                    child_needs_intrinsic_width,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -624,7 +634,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     child_context,
-                    false,
+                    child_needs_intrinsic_width,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -770,7 +780,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     child_context,
-                    false,
+                    child_needs_intrinsic_width,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -845,7 +855,7 @@ fn layoutPreparedContainerUnchecked(
                     measure,
                     layout_ctx,
                     mixed_child_context,
-                    false,
+                    child_needs_intrinsic_width,
                 );
                 child_size = try resolveChildSize(
                     child_style,
@@ -1125,8 +1135,22 @@ fn resolveChildSize(
     }
     candidate = try sizing.applyAspectRatio(normalized_style, candidate);
     if (candidate.width == null) {
+        var w = intrinsic.width;
+        switch (input_style.size.width) {
+            .fit_content => |limit_opt| {
+                var avail = if (context.available.width == .definite)
+                    context.available.width.definite
+                else if (context.percentage_basis.width) |pb|
+                    pb
+                else
+                    w;
+                if (limit_opt) |lim| avail = @min(avail, lim);
+                w = @min(w, avail);
+            },
+            else => {},
+        }
         candidate.width = try contentToSizingValue(
-            intrinsic.width,
+            w,
             edges.horizontal,
             input_style.box_sizing,
         );
@@ -1248,9 +1272,11 @@ fn layoutAbsoluteChildren(
         else
             null;
         const intrinsic_width =
-            child_style.size.width == .auto and auto_width_border == null;
+            (child_style.size.width == .auto or isIntrinsicDimension(child_style.size.width)) and
+            auto_width_border == null;
         const intrinsic_height =
-            child_style.size.height == .auto and auto_height_border == null;
+            (child_style.size.height == .auto or isIntrinsicDimension(child_style.size.height)) and
+            auto_height_border == null;
         const intrinsic = try intrinsicContentSizeWithContextAndAxes(
             tree,
             child,

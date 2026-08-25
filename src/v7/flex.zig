@@ -176,10 +176,20 @@ fn directionIsReverse(direction: Direction) bool {
 }
 
 fn resolvedMainDimension(node: *const WidgetNode, direction: Direction) ?f32 {
-    return if (directionIsColumn(direction))
-        node.resolved_dimensions.height
-    else
-        node.resolved_dimensions.width;
+    const is_col = directionIsColumn(direction);
+    if (is_col) {
+        if (node.resolved_dimensions.height) |h| return h;
+        return switch (node.style.size.height) {
+            .length => |val| val,
+            else => null,
+        };
+    } else {
+        if (node.resolved_dimensions.width) |w| return w;
+        return switch (node.style.size.width) {
+            .length => |val| val,
+            else => null,
+        };
+    }
 }
 
 fn resolvedCrossDimension(node: *const WidgetNode, direction: Direction) ?f32 {
@@ -187,6 +197,16 @@ fn resolvedCrossDimension(node: *const WidgetNode, direction: Direction) ?f32 {
         node.resolved_dimensions.width
     else
         node.resolved_dimensions.height;
+}
+
+fn isMainOverflowVisible(node: *const WidgetNode, direction: Direction) bool {
+    const is_col = directionIsColumn(direction);
+    const overflow_val = if (is_col)
+        node.resolved_overflow.height
+    else
+        node.resolved_overflow.width;
+    return overflow_val == .visible and
+        (if (is_col) node.style.overflow.height == .visible else node.style.overflow.width == .visible);
 }
 
 fn resolvedMainMinimum(node: *const WidgetNode, direction: Direction) ?f32 {
@@ -197,7 +217,13 @@ fn resolvedMainMinimum(node: *const WidgetNode, direction: Direction) ?f32 {
 }
 
 fn resolvedMainFloor(node: *const WidgetNode, direction: Direction, natural: f32) f32 {
-    return resolvedMainMinimum(node, direction) orelse natural;
+    if (resolvedMainMinimum(node, direction)) |minimum| {
+        return minimum;
+    }
+    if (!isMainOverflowVisible(node, direction)) {
+        return 0;
+    }
+    return natural;
 }
 
 /// Legacy flex basis is resolved on the parent's main axis, not the child's
@@ -280,6 +306,121 @@ fn effectiveMarginInset(
     };
 }
 
+fn effectiveLengthPercentage(
+    value: style.LengthPercentage,
+    legacy: f32,
+) style.LengthPercentage {
+    return switch (value) {
+        .length => |length| if (length == legacy) value else .{ .length = legacy },
+        .percent => if (legacy != 0) .{ .length = legacy } else value,
+    };
+}
+
+fn resolvePaddingEdge(
+    value: style.LengthPercentage,
+    containing_width: ?f32,
+    legacy: f32,
+) f32 {
+    return switch (value) {
+        .length => |length| length,
+        .percent => |fraction| if (containing_width) |width| width * fraction else legacy,
+    };
+}
+
+fn resolveItemPadding(
+    node: *const WidgetNode,
+    containing_width: ?f32,
+) style.Sides {
+    const padding = node.style.padding;
+    const inset = node.style.padding_inset;
+    return .{
+        .top = resolvePaddingEdge(
+            effectiveLengthPercentage(inset.top, padding.top),
+            containing_width,
+            padding.top,
+        ),
+        .right = resolvePaddingEdge(
+            effectiveLengthPercentage(inset.right, padding.right),
+            containing_width,
+            padding.right,
+        ),
+        .bottom = resolvePaddingEdge(
+            effectiveLengthPercentage(inset.bottom, padding.bottom),
+            containing_width,
+            padding.bottom,
+        ),
+        .left = resolvePaddingEdge(
+            effectiveLengthPercentage(inset.left, padding.left),
+            containing_width,
+            padding.left,
+        ),
+    };
+}
+
+fn resolveItemMargins(
+    node: *const WidgetNode,
+    containing_width: ?f32,
+) style.Sides {
+    const margin = node.style.margin;
+    const inset = node.style.margin_inset;
+    return .{
+        .top = resolvedMarginValue(
+            effectiveMarginInset(inset.top, margin.top),
+            containing_width,
+            margin.top,
+        ).size,
+        .right = resolvedMarginValue(
+            effectiveMarginInset(inset.right, margin.right),
+            containing_width,
+            margin.right,
+        ).size,
+        .bottom = resolvedMarginValue(
+            effectiveMarginInset(inset.bottom, margin.bottom),
+            containing_width,
+            margin.bottom,
+        ).size,
+        .left = resolvedMarginValue(
+            effectiveMarginInset(inset.left, margin.left),
+            containing_width,
+            margin.left,
+        ).size,
+    };
+}
+
+fn childHasTypedPadding(node: *const WidgetNode) bool {
+    const padding = node.style.padding;
+    const fixed: style.LengthPercentageRect = .{
+        .top = .{ .length = padding.top },
+        .right = .{ .length = padding.right },
+        .bottom = .{ .length = padding.bottom },
+        .left = .{ .length = padding.left },
+    };
+    return !std.meta.eql(node.style.padding_inset, fixed);
+}
+
+fn remeasureLeafWithPadding(node: *WidgetNode, padding: style.Sides) void {
+    const border = widget.sidesSum(node.style.border);
+    const pad = widget.sidesSum(padding);
+    switch (node.kind) {
+        .spacer => |s| {
+            node.rect.w = s.size + border.w + pad.w;
+            node.rect.h = s.size + border.h + pad.h;
+        },
+        .label, .slider => {
+            const old_edges = node.resolved_box_edges orelse widget.ResolvedBoxEdges{
+                .border = node.style.border,
+                .padding = node.style.padding,
+            };
+            const old_border = widget.sidesSum(old_edges.border);
+            const old_padding = widget.sidesSum(old_edges.padding);
+            const content_w = @max(0, node.rect.w - old_border.w - old_padding.w);
+            const content_h = @max(0, node.rect.h - old_border.h - old_padding.h);
+            node.rect.w = content_w + border.w + pad.w;
+            node.rect.h = content_h + border.h + pad.h;
+        },
+        else => {},
+    }
+}
 fn resolvedMarginValue(
     value: style.LengthPercentageAuto,
     containing: ?f32,
@@ -305,26 +446,25 @@ fn marginAxes(
     const main_is_column = directionIsColumn(direction);
     const main_reverse = directionIsReverse(direction);
     const cross_reverse = wrap == .wrap_reverse;
-    const main_containing: ?f32 = if (main_is_column) containing.height else containing.width;
-    const cross_containing: ?f32 = if (main_is_column) containing.width else containing.height;
+    const inline_containing: ?f32 = containing.width;
     const top = resolvedMarginValue(
         effectiveMarginInset(inset.top, margin.top),
-        if (main_is_column) main_containing else cross_containing,
+        inline_containing,
         margin.top,
     );
     const right = resolvedMarginValue(
         effectiveMarginInset(inset.right, margin.right),
-        if (main_is_column) cross_containing else main_containing,
+        inline_containing,
         margin.right,
     );
     const bottom = resolvedMarginValue(
         effectiveMarginInset(inset.bottom, margin.bottom),
-        if (main_is_column) main_containing else cross_containing,
+        inline_containing,
         margin.bottom,
     );
     const left = resolvedMarginValue(
         effectiveMarginInset(inset.left, margin.left),
-        if (main_is_column) cross_containing else main_containing,
+        inline_containing,
         margin.left,
     );
     if (main_is_column) {
@@ -391,7 +531,7 @@ fn resolvedFlexItemMain(
             }
             // Indefinite containing_main: treated as auto per CSS Flexbox §9.2.
         },
-        .min_content, .max_content => {
+        .min_content, .max_content, .fit_content => {
             base = natural_main;
         },
         .auto => {
@@ -413,6 +553,24 @@ fn resolvedFlexItemMain(
     if (base == null) {
         if (resolvedMainDimension(child, direction)) |dim| {
             base = dim;
+        } else {
+            const size_dim = if (main_is_column) child.style.size.height else child.style.size.width;
+            switch (size_dim) {
+                .percent => |fraction| {
+                    if (containing_main) |size| {
+                        base = size * fraction;
+                        if (child.style.box_sizing == .content_box) {
+                            base.? += if (main_is_column)
+                                child.style.border.top + child.style.border.bottom +
+                                    child.style.padding.top + child.style.padding.bottom
+                            else
+                                child.style.border.left + child.style.border.right +
+                                    child.style.padding.left + child.style.padding.right;
+                        }
+                    }
+                },
+                else => {},
+            }
         }
     }
 
@@ -476,6 +634,7 @@ fn needsAdvancedFlex(tree: *WidgetTree, parent: *const WidgetNode) bool {
         if (child.style.align_self != .auto) return true;
         if (childHasAutoMargin(child)) return true;
         if (childHasTypedMargin(child)) return true;
+        if (childHasTypedPadding(child)) return true;
     }
     return false;
 }
@@ -519,11 +678,13 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
             const child = tree.node(cid).?;
             if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) continue;
-            const m = child.style.margin;
+            const child_padding = resolveItemPadding(child, content_w);
+            child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
             child.resolveTypedStyle(
                 .{ .width = content_w, .height = content_h },
                 .{ .width = child.rect.w, .height = child.rect.h },
             );
+            const m = resolveItemMargins(child, content_w);
             const natural = if (is_col) child.rect.w else child.rect.h;
             const child_direction: Direction = if (is_col) .column else .row;
             const explicit_cross = resolvedCrossDimension(child, child_direction);
@@ -533,7 +694,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
             const size: f32 = if (explicit_cross) |value|
                 clampCross(child, child_direction, value)
             else if (@"align" == .stretch)
-                @max(0, extent - margin_lead - margin_trail)
+                clampCross(child, child_direction, @max(0, extent - margin_lead - margin_trail))
             else
                 natural;
             const free = @max(0, extent - size - margin_lead - margin_trail);
@@ -624,13 +785,15 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 continue;
             }
             flow_count += 1;
+            const child_padding = resolveItemPadding(child, parent_content.width);
+            child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
             child.resolveTypedStyle(
                 parent_content,
                 .{ .width = child.rect.w, .height = child.rect.h },
             );
             const parent_main = if (main_is_column) parent_content.height else parent_content.width;
             const parent_cross = if (main_is_column) parent_content.width else parent_content.height;
-            mains[i] = resolvedFlexItemMain(
+            const pre_main = resolvedFlexItemMain(
                 child,
                 dir,
                 parent_main,
@@ -638,8 +801,8 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 p.style.@"align",
                 child.natural_main,
             );
-            // Main-axis margins: top+bottom in a column, left+right in a row.
-            const m = child.style.margin;
+            mains[i] = pre_main;
+            const m = resolveItemMargins(child, parent_content.width);
             content += mains[i] + (if (main_is_column) m.top + m.bottom else m.left + m.right);
             if (child.style.grow > 0) total_grow += child.style.grow;
             if (child.style.shrink > 0) total_shrink += child.style.shrink;
@@ -762,8 +925,9 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count - 1));
             },
             .space_around => if (flow_count > 0) {
-                extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count));
-                main_offset = extra_gap / 2;
+                const share = free_for_justify / @as(f32, @floatFromInt(flow_count));
+                extra_gap = share;
+                main_offset = share / 2;
             },
             .space_evenly => if (flow_count > 0) {
                 extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count + 1));
@@ -1054,13 +1218,13 @@ fn layoutAdvancedFlexContainer(
     defer tree.allocator.free(cross_leads);
     var cross_trails = tree.allocator.alloc(f32, child_count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(cross_trails);
-    var main_auto_leads = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    const main_auto_leads = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(main_auto_leads);
-    var main_auto_trails = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    const main_auto_trails = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(main_auto_trails);
-    var cross_auto_leads = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    const cross_auto_leads = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(cross_auto_leads);
-    var cross_auto_trails = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
+    const cross_auto_trails = tree.allocator.alloc(bool, child_count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(cross_auto_trails);
     var lines = tree.allocator.alloc(FlexLine, child_count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(lines);
@@ -1071,8 +1235,12 @@ fn layoutAdvancedFlexContainer(
         const child = tree.node(node.children.items[child_index]) orelse continue;
         if (isHidden(tree, child) or child.style.position == .absolute) continue;
         // Finalization runs repeatedly, so the current rect is not a stable flex base.
-        const natural_main = child.natural_main;
+        const natural_main = if (main_is_column) child.rect.h else child.rect.w;
+        child.natural_main = natural_main;
         const natural_cross = if (main_is_column) child.rect.w else child.rect.h;
+        const child_padding = resolveItemPadding(child, content.width);
+        child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
+        remeasureLeafWithPadding(child, child_padding);
         child.resolveTypedStyle(content, .{ .width = child.rect.w, .height = child.rect.h });
         const main = resolvedFlexItemMain(
             child,
@@ -1402,7 +1570,7 @@ fn clampBlockAxis(
 
 fn styleDimensionIsDefinite(dimension: style.Dimension, containing_definite: bool) bool {
     return switch (dimension) {
-        .length, .min_content, .max_content => true,
+        .length, .min_content, .max_content, .fit_content => true,
         .percent => containing_definite,
         .auto => false,
     };
@@ -1495,6 +1663,7 @@ fn placeBlockContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
 }
 
 fn placeAbsoluteChild(
+    tree: *WidgetTree,
     child: *WidgetNode,
     containing: Size,
     width_definite: bool,
@@ -1503,6 +1672,9 @@ fn placeAbsoluteChild(
     const width_containing = if (width_definite) containing.width else null;
     const height_containing = if (height_definite) containing.height else null;
     const intrinsic: Size = .{ .width = child.rect.w, .height = child.rect.h };
+    child.style.padding = resolveItemPadding(child, width_containing);
+    child.style.margin = resolveItemMargins(child, width_containing);
+    child.resolved_box_edges = .{ .border = child.style.border, .padding = child.style.padding };
     const raw_width = child.style.size.width.resolve(width_containing, intrinsic.width);
     const raw_height = child.style.size.height.resolve(height_containing, intrinsic.height);
     const left = child.style.inset.left.resolve(width_containing);
@@ -1547,19 +1719,79 @@ fn placeAbsoluteChild(
     child.rect.w = width;
     child.rect.h = height;
 
+    const parent = if (child.parent != .root) tree.node(child.parent) else null;
+    const parent_is_flex = if (parent) |p| (p.style.display == .flex) else false;
+
     if (left) |value| {
         child.rect.x = value + margin.left;
     } else if (right) |value| {
         child.rect.x = containing.width - value - width - margin.right;
     } else {
-        child.rect.x = margin.left;
+        var x_pos: f32 = margin.left;
+        const free_x = @max(0, containing.width - width - margin.left - margin.right);
+        if (parent_is_flex) {
+            const p = parent.?;
+            if (directionIsColumn(p.style.direction)) {
+                const align_val = alignSelfAsAlign(child.style.align_self, p.style.@"align");
+                x_pos = switch (align_val) {
+                    .center => margin.left + free_x / 2,
+                    .end => containing.width - width - margin.right,
+                    else => margin.left,
+                };
+            } else {
+                x_pos = switch (p.style.justify) {
+                    .center => margin.left + free_x / 2,
+                    .end => containing.width - width - margin.right,
+                    else => margin.left,
+                };
+            }
+        } else {
+            if (child.style.align_self != .auto) {
+                const self_align = alignSelfAsAlign(child.style.align_self, .start);
+                x_pos = switch (self_align) {
+                    .center => margin.left + free_x / 2,
+                    .end => containing.width - width - margin.right,
+                    else => margin.left,
+                };
+            }
+        }
+        child.rect.x = x_pos;
     }
+
     if (top) |value| {
         child.rect.y = value + margin.top;
     } else if (bottom) |value| {
         child.rect.y = containing.height - value - height - margin.bottom;
     } else {
-        child.rect.y = margin.top;
+        var y_pos: f32 = margin.top;
+        const free_y = @max(0, containing.height - height - margin.top - margin.bottom);
+        if (parent_is_flex) {
+            const p = parent.?;
+            if (directionIsColumn(p.style.direction)) {
+                y_pos = switch (p.style.justify) {
+                    .center => margin.top + free_y / 2,
+                    .end => containing.height - height - margin.bottom,
+                    else => margin.top,
+                };
+            } else {
+                const align_val = alignSelfAsAlign(child.style.align_self, p.style.@"align");
+                y_pos = switch (align_val) {
+                    .center => margin.top + free_y / 2,
+                    .end => containing.height - height - margin.bottom,
+                    else => margin.top,
+                };
+            }
+        } else {
+            if (child.style.align_self != .auto) {
+                const self_align = alignSelfAsAlign(child.style.align_self, .start);
+                y_pos = switch (self_align) {
+                    .center => margin.top + free_y / 2,
+                    .end => containing.height - height - margin.bottom,
+                    else => margin.top,
+                };
+            }
+        }
+        child.rect.y = y_pos;
     }
 }
 fn reflowFlexContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
@@ -1594,7 +1826,7 @@ fn finalizeBlockChildren(
         const child = tree.node(child_id) orelse continue;
         if (isHidden(tree, child)) continue;
         if (child.style.position == .absolute) {
-            placeAbsoluteChild(child, containing, width_definite, height_definite);
+            placeAbsoluteChild(tree, child, containing, width_definite, height_definite);
             reflowFlexContainer(tree, child, available);
             continue;
         }
@@ -1662,7 +1894,7 @@ fn finalizeSpecialNode(
             const child = tree.node(child_id) orelse continue;
             if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) {
-                placeAbsoluteChild(child, containing, width_definite, height_definite);
+                placeAbsoluteChild(tree, child, containing, width_definite, height_definite);
             } else {
                 applyRelativeInsets(child, containing, true, true);
             }
@@ -1684,7 +1916,7 @@ fn finalizeSpecialNode(
             const child = tree.node(child_id) orelse continue;
             if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) {
-                placeAbsoluteChild(child, containing, width_definite, height_definite);
+                placeAbsoluteChild(tree, child, containing, width_definite, height_definite);
                 reflowFlexContainer(tree, child, available);
             } else {
                 applyRelativeInsets(child, containing, true, true);
@@ -1717,7 +1949,7 @@ fn finalizeSpecialRoots(tree: *WidgetTree, available: Size) void {
         if (isHidden(tree, node)) continue;
         if (node.parent != .root) continue;
         if (node.style.position == .absolute) {
-            placeAbsoluteChild(node, available, true, true);
+            placeAbsoluteChild(tree, node, available, true, true);
             reflowFlexContainer(tree, node, available);
         } else if (node.style.display == .grid) {
             const intrinsic: Size = .{ .width = node.rect.w, .height = node.rect.h };
@@ -1811,6 +2043,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     const inset_main = own_border_main + own_padding_main;
     const inset_cross = own_border_cross + own_padding_cross;
 
+    const root_level = node.parent == .root;
     const count = node.children.items.len;
     var mains = tree.allocator.alloc(f32, count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(mains);
@@ -1831,10 +2064,12 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
             continue;
         }
         flow_count += 1;
+        const parent_w: ?f32 = if (root_level) available.width else null;
+        const child_padding = resolveItemPadding(child, parent_w);
+        child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
+        remeasureLeafWithPadding(child, child_padding);
         const natural = if (directionIsColumn(dir)) child.rect.h else child.rect.w;
-        // The natural (pre-basis) main is the flex-shrink floor.
         child.natural_main = natural;
-        child.resolveTypedStyle(null, .{ .width = child.rect.w, .height = child.rect.h });
         // Basis remains content-box under the legacy option. Typed sizes and
         // flex basis are resolved values and therefore use border-box extents.
         const main = resolvedFlexItemMain(
@@ -1853,14 +2088,13 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         if (child.style.grow > 0) total_grow += child.style.grow;
         if (child.style.shrink > 0) total_shrink += child.style.shrink;
         // Main-axis margins: top+bottom in a column, left+right in a row.
-        const cm = child.style.margin;
+        const cm = resolveItemMargins(child, parent_w);
         content += main + (if (directionIsColumn(dir)) cm.top + cm.bottom else cm.left + cm.right);
     }
     if (flow_count > 1) content += gap * @as(f32, @floatFromInt(flow_count - 1));
 
     // Root-level containers lay out against `available`; nested containers
     // fit their own content — their parent allocates space later.
-    const root_level = node.parent == .root;
     const avail_main: f32 = if (root_level)
         (if (directionIsColumn(dir)) available.height else available.width)
     else
@@ -2101,17 +2335,11 @@ fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
             node.rect.h = @max(widget.slider_rail_height, ms.height) + border.h + padding.h;
         },
         .spacer => |s| {
-            node.rect.w = s.size + border.w + padding.w;
-            node.rect.h = s.size + border.h + padding.h;
+            node.rect.w = (node.resolved_dimensions.width orelse s.size) + border.w + padding.w;
+            node.rect.h = (node.resolved_dimensions.height orelse s.size) + border.h + padding.h;
         },
         else => unreachable,
     }
-    const intrinsic: Size = .{ .width = node.rect.w, .height = node.rect.h };
-    node.resolveTypedStyle(null, intrinsic);
-    node.rect.w = node.resolved_dimensions.width orelse intrinsic.width;
-    node.rect.h = node.resolved_dimensions.height orelse intrinsic.height;
-    node.rect.w = node.resolved_style.clampWidth(node.rect.w);
-    node.rect.h = node.resolved_style.clampHeight(node.rect.h);
 }
 
 /// The root-level main after the basis override: `basis` when set, else the
@@ -2138,7 +2366,7 @@ fn rootBasisMain(n: *const WidgetNode, containing_main: f32) f32 {
 /// advance, and stretch fills the available width minus its cross margins.
 fn placeRoot(tree: *WidgetTree, available: Size) void {
     // No fixed buffer: root-level nodes are iterated directly over the nodes
-    // slice (append order) — first count/sum, then shrink, then place.
+    // (append order) — first count/sum, then shrink, then place.
     var root_count: usize = 0;
     var content: f32 = 0;
     var total_grow: f32 = 0;
@@ -2147,7 +2375,6 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
         if (n.parent != .root or isHidden(tree, n)) continue;
         if (n.style.position == .absolute) continue;
         root_count += 1;
-        // The natural (pre-basis) main is the flex-shrink floor.
         n.natural_main = n.rect.h;
         n.resolveTypedStyle(available, .{ .width = n.rect.w, .height = n.rect.h });
         const main = rootBasisMain(n, available.height);
@@ -2790,8 +3017,14 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
         for (0..row_count) |index| result += row_sizes[index];
         break :blk result;
     };
-    const content_width = @max(0, width_containing orelse column_sum + column_gap_total);
-    const content_height = @max(0, height_containing orelse row_sum + row_gap_total);
+    const content_width = @max(
+        0,
+        width_containing orelse @max(existing_width orelse 0, column_sum + column_gap_total),
+    );
+    const content_height = @max(
+        0,
+        height_containing orelse @max(existing_height orelse 0, row_sum + row_gap_total),
+    );
     const width_free = content_width - column_sum - column_gap_total;
     const height_free = content_height - row_sum - row_gap_total;
     var total_column_fr: f32 = 0;

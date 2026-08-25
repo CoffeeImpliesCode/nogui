@@ -414,3 +414,218 @@ test "aspect-ratio propagates cross-axis min/max constraints to main axis" {
 
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 80, .h = 40 }, tree.node(item).?.rect);
 }
+
+test "automatic minimum size content floor prevents shrink past min-content" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    // Leaf label: default baked approximation width is 60 (6 chars * 10px), height = 20
+    try appendNode(&tree, item, row, .{ .label = .{ .text = "123456" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 40 }, .height = .{ .length = 50 } };
+    tree.node(item).?.style.flex_basis = .{ .length = 100 };
+    tree.node(item).?.style.shrink = 1;
+    tree.node(item).?.style.grow = 0;
+
+    flex.layout(&tree, .{ .width = 40, .height = 50 });
+
+    // Automatic minimum size (CSS Flexbox §4.5) floors the shrink at natural content main (60),
+    // preventing the item from collapsing down to the available width 40.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 60, .h = 50 }, tree.node(item).?.rect);
+}
+
+test "explicit min-width: 0 allows flex item to shrink past min-content" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, row, .{ .label = .{ .text = "123456" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 40 }, .height = .{ .length = 50 } };
+    tree.node(item).?.style.flex_basis = .{ .length = 100 };
+    tree.node(item).?.style.min_size = .{ .width = .{ .length = 0 }, .height = .auto };
+    tree.node(item).?.style.shrink = 1;
+    tree.node(item).?.style.grow = 0;
+
+    flex.layout(&tree, .{ .width = 40, .height = 50 });
+
+    // Explicit min_width: 0 allows the item to shrink past its 60px content size down to 40.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 50 }, tree.node(item).?.rect);
+}
+
+test "overflow not visible allows flex item with auto min-width to shrink past min-content" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, row, .{ .label = .{ .text = "123456" } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 40 }, .height = .{ .length = 50 } };
+    tree.node(item).?.style.flex_basis = .{ .length = 100 };
+    tree.node(item).?.style.overflow = .{ .width = .hidden, .height = .visible };
+    tree.node(item).?.style.shrink = 1;
+    tree.node(item).?.style.grow = 0;
+
+    flex.layout(&tree, .{ .width = 40, .height = 50 });
+
+    // Overflow != visible disables the automatic content minimum, allowing shrink to 40.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 50 }, tree.node(item).?.rect);
+}
+
+test "percentage padding resolves against parent flex container content width" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, row, .{ .spacer = .{ .size = 10 } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    tree.node(row).?.style.size = .{ .width = .{ .length = 200 }, .height = .{ .length = 100 } };
+    tree.node(row).?.style.@"align" = .start;
+    tree.node(item).?.style.padding_inset = .{
+        .left = .{ .percent = 0.10 }, // 20px
+        .right = .{ .percent = 0.05 }, // 10px
+        .top = .{ .percent = 0.05 }, // 10px
+        .bottom = .{ .percent = 0.10 }, // 20px
+    };
+    tree.node(item).?.style.grow = 0;
+    tree.node(item).?.style.shrink = 0;
+
+    flex.layout(&tree, .{ .width = 200, .height = 100 });
+
+    // Padding resolves against parent content width (200):
+    // horizontal padding = 20 + 10 = 30, vertical padding = 10 + 20 = 30.
+    // Spacer size 10 + horizontal padding 30 = 40 width, spacer 10 + vertical padding 30 = 40 height.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 40 }, tree.node(item).?.rect);
+}
+
+test "percentage padding in column container resolves against content inline width" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const col: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, col, .{ .spacer = .{ .size = 10 } });
+    try appendNode(&tree, col, .root, .{ .column = .{} });
+    try wireChildren(&tree);
+
+    // Column container width 300, height 100.
+    tree.node(col).?.style.size = .{ .width = .{ .length = 300 }, .height = .{ .length = 100 } };
+    tree.node(col).?.style.@"align" = .start;
+    tree.node(item).?.style.padding_inset = .{
+        .top = .{ .percent = 0.10 }, // 30px (10% of 300 width, not 100 height)
+        .right = .{ .percent = 0.05 }, // 15px
+        .bottom = .{ .percent = 0.05 }, // 15px
+        .left = .{ .percent = 0.10 }, // 30px
+    };
+    tree.node(item).?.style.grow = 0;
+    tree.node(item).?.style.shrink = 0;
+
+    flex.layout(&tree, .{ .width = 300, .height = 100 });
+
+    // Horizontal padding = 30 + 15 = 45, vertical padding = 30 + 15 = 45.
+    // Width = 10 + 45 = 55, Height = 10 + 45 = 55.
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 55, .h = 55 }, tree.node(item).?.rect);
+}
+
+test "percentage margin in column container resolves against content inline width" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const col: Id = @enumFromInt(1);
+    const item: Id = @enumFromInt(2);
+
+    try appendNode(&tree, item, col, .{ .spacer = .{ .size = 20 } });
+    try appendNode(&tree, col, .root, .{ .column = .{} });
+    try wireChildren(&tree);
+
+    // Column container width 200, height 100.
+    tree.node(col).?.style.size = .{ .width = .{ .length = 200 }, .height = .{ .length = 100 } };
+    tree.node(col).?.style.@"align" = .start;
+    tree.node(item).?.style.margin_inset = .{
+        .top = .{ .percent = 0.10 }, // 20px (10% of 200 width)
+        .left = .{ .percent = 0.05 }, // 10px (5% of 200 width)
+        .bottom = .auto,
+        .right = .auto,
+    };
+    tree.node(item).?.style.grow = 0;
+    tree.node(item).?.style.shrink = 0;
+
+    flex.layout(&tree, .{ .width = 200, .height = 100 });
+
+    try testing.expectEqual(Rect{ .x = 10, .y = 20, .w = 20, .h = 20 }, tree.node(item).?.rect);
+}
+
+test "absolute positioned child in flex container placed relative to content box with insets and alignment" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const row: Id = @enumFromInt(1);
+    const normal: Id = @enumFromInt(2);
+    const abs_with_insets: Id = @enumFromInt(3);
+    const abs_aligned: Id = @enumFromInt(4);
+
+    try appendNode(&tree, normal, row, .{ .spacer = .{ .size = 50 } });
+    try appendNode(&tree, abs_with_insets, row, .{ .spacer = .{ .size = 40 } });
+    try appendNode(&tree, abs_aligned, row, .{ .spacer = .{ .size = 30 } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    // Row container: border 2 on all sides, padding 8 on all sides.
+    // Border-box: 200 x 100.
+    // Content-box: (200 - 4 - 16) x (100 - 4 - 16) = 180 x 80.
+    tree.node(row).?.style.size = .{ .width = .{ .length = 200 }, .height = .{ .length = 100 } };
+    tree.node(row).?.style.border = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 };
+    tree.node(row).?.style.padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 };
+    tree.node(row).?.style.justify = .start;
+    tree.node(row).?.style.@"align" = .start;
+
+    // Normal in-flow child:
+    tree.node(normal).?.style.size = .{ .width = .{ .length = 50 }, .height = .{ .length = 50 } };
+    tree.node(normal).?.style.grow = 0;
+    tree.node(normal).?.style.shrink = 0;
+
+    // Absolute child with explicit insets:
+    tree.node(abs_with_insets).?.style.position = .absolute;
+    tree.node(abs_with_insets).?.style.size = .{ .width = .{ .length = 40 }, .height = .{ .length = 30 } };
+    tree.node(abs_with_insets).?.style.inset = .{
+        .left = .{ .length = 15 },
+        .top = .{ .length = 10 },
+        .right = .auto,
+        .bottom = .auto,
+    };
+
+    // Absolute child with auto insets and self-alignment (align_self = .center, parent justify = .center):
+    tree.node(abs_aligned).?.style.position = .absolute;
+    tree.node(abs_aligned).?.style.size = .{ .width = .{ .length = 60 }, .height = .{ .length = 20 } };
+    tree.node(abs_aligned).?.style.align_self = .center;
+
+    flex.layout(&tree, .{ .width = 200, .height = 100 });
+
+    // Normal item placed at (0, 0) inside content box:
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 50, .h = 50 }, tree.node(normal).?.rect);
+
+    // Absolute item with insets placed at (15, 10) relative to content box:
+    try testing.expectEqual(Rect{ .x = 15, .y = 10, .w = 40, .h = 30 }, tree.node(abs_with_insets).?.rect);
+
+    // Absolute item with auto insets and align_self = .center
+    // (cross axis Y = (80 - 20) / 2 = 30, main axis X = 0 for justify.start):
+    try testing.expectEqual(Rect{ .x = 0, .y = 30, .w = 60, .h = 20 }, tree.node(abs_aligned).?.rect);
+}

@@ -70,7 +70,7 @@ fn naturalAxisDefinite(
 ) bool {
     return switch (dimension) {
         .length => true,
-        .min_content, .max_content => false,
+        .min_content, .max_content, .fit_content => false,
         .percent => percentage_basis != null,
         .auto => !intrinsic,
     };
@@ -847,7 +847,7 @@ fn flexBasis(
     const intrinsic = if (axes.horizontal) natural.content.width else natural.content.height;
     const basis = switch (input.flex_basis) {
         .auto => null,
-        .length, .percent, .min_content, .max_content => try resolveDimensionBorder(
+        .length, .percent, .min_content, .max_content, .fit_content => try resolveDimensionBorder(
             input.flex_basis,
             containing_main,
             containing_main,
@@ -1322,6 +1322,14 @@ fn dimensionValue(
     return switch (dimension) {
         .auto => null,
         .min_content, .max_content => try nonNegative(intrinsic),
+        .fit_content => |limit| blk: {
+            const non_neg_intrinsic = try nonNegative(intrinsic);
+            if (limit) |lim| {
+                const non_neg_limit = try nonNegative(lim);
+                break :blk @min(non_neg_intrinsic, non_neg_limit);
+            }
+            break :blk non_neg_intrinsic;
+        },
         .length, .percent => sizing.resolveDimension(
             dimension,
             .{ .definite = containing },
@@ -1589,7 +1597,7 @@ fn isAuto(value: style.LengthPercentageAuto) bool {
 fn dimensionAuto(value: style.Dimension) bool {
     return switch (value) {
         .auto => true,
-        .length, .percent, .min_content, .max_content => false,
+        .length, .percent, .min_content, .max_content, .fit_content => false,
     };
 }
 
