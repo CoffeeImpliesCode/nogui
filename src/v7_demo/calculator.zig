@@ -1,26 +1,20 @@
-//! Calculator demo — a small interactive component showing the v7 API:
-//! containers (column/row), buttons with typed click handlers, labels,
-//! cards, and the immediate-mode state → redraw loop.
+//! Small calculator demo showing v7 containers, labels, styled buttons,
+//! typed callbacks, component-scoped defaults, and immediate-mode redraws.
 //!
-//!   zig build calculator            # graphical window
-//!   zig build v7 -- --calculator --sim script.json   # headless JSON frames
+//!   zig build calculator
+//!   zig build v7 -- --calculator --sim script.json
 //!
-//! All state lives in struct fields; every frame rebuilds the tree from
-//! scratch (no dirty tracking). Buttons bind `fn (*CalculatorApp) void`
-//! handlers; the App loop routes clicks back through the component
-//! registry. Arithmetic is immediate-execution (no operator precedence):
-//! digits build an entry, an operator commits the entry and chains the
-//! pending operation, `=` finishes the chain, `C` resets everything.
+//! Arithmetic is immediate-execution; all state persists in CalculatorApp.
 
 const std = @import("std");
 
 const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
 const Style = nogui.Style;
+const PaintStyle = nogui.PaintStyle;
 const WidgetTree = nogui.WidgetTree;
 const WidgetNode = nogui.WidgetNode;
 const App = nogui.App;
-const Id = nogui.Id;
 
 const srgbToOklab = @import("text.zig").srgbToOklab;
 
@@ -43,22 +37,118 @@ pub const CalculatorApp = struct {
     pending: ?Op = null,
     /// Digits typed since the last operator/`=` (ASCII, no terminator).
     // SAFETY: only the first entry_len bytes are ever read; digit/dot
-    // write before any read and clear() resets the whole struct.
+    // write before any read and clear() resets entry_len.
     entry: [entry_capacity]u8 = undefined,
     entry_len: usize = 0,
     entering: bool = false,
     /// Sticky error (division by zero); any key except `C` is ignored.
     error_state: bool = false,
+    keypad: Keypad = .{},
 
     pub const Op = enum { add, sub, mul, div };
 
-    pub const default_style: Style = .{
-        .direction = .column,
-        .gap = 12,
+    pub const Keypad = struct {
+        // SAFETY: CalculatorApp.draw sets owner before ctx.component draws
+        // or registers this persistent Keypad.
+        owner: *CalculatorApp = undefined,
+
+        const Action = union(enum) {
+            clear,
+            negate,
+            percent,
+            double_zero,
+            dot,
+            equals,
+            digit: u8,
+            op: CalculatorApp.Op,
+        };
+
+        const KeySpec = struct {
+            label: []const u8,
+            action: Action,
+            accent: bool = false,
+        };
+
+        const key_specs: [20]KeySpec = .{
+            .{ .label = "C", .action = .clear },
+            .{ .label = "±", .action = .negate },
+            .{ .label = "%", .action = .percent },
+            .{ .label = "÷", .action = .{ .op = .div }, .accent = true },
+            .{ .label = "7", .action = .{ .digit = 7 } },
+            .{ .label = "8", .action = .{ .digit = 8 } },
+            .{ .label = "9", .action = .{ .digit = 9 } },
+            .{ .label = "×", .action = .{ .op = .mul }, .accent = true },
+            .{ .label = "4", .action = .{ .digit = 4 } },
+            .{ .label = "5", .action = .{ .digit = 5 } },
+            .{ .label = "6", .action = .{ .digit = 6 } },
+            .{ .label = "−", .action = .{ .op = .sub }, .accent = true },
+            .{ .label = "1", .action = .{ .digit = 1 } },
+            .{ .label = "2", .action = .{ .digit = 2 } },
+            .{ .label = "3", .action = .{ .digit = 3 } },
+            .{ .label = "+", .action = .{ .op = .add }, .accent = true },
+            .{ .label = "0", .action = .{ .digit = 0 } },
+            .{ .label = "00", .action = .double_zero },
+            .{ .label = ".", .action = .dot },
+            .{ .label = "=", .action = .equals, .accent = true },
+        };
+
+        pub const default_style: Style = .{
+            .direction = .row,
+            .gap = 8,
+            .justify = .center,
+            .@"align" = .center,
+        };
+        // Shared visual default for every key; number/operator variants
+        // override their colors locally but keep the same corner shape.
+        pub const default_paint: PaintStyle = .{
+            .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+        };
+
+        pub fn draw(self: *Keypad, ctx: *DrawCtx) !void {
+            _ = self;
+            for (0..5) |row_index| {
+                const key_index_start = row_index * 4;
+                _ = try ctx.row(.{});
+                defer ctx.pop();
+
+                for (
+                    key_specs[key_index_start .. key_index_start + 4],
+                    key_index_start..,
+                ) |key, key_index| {
+                    const fill = if (key.accent) c_accent else c_key;
+                    _ = try ctx.button(.{
+                        .label = key.label,
+                        .on_click_with_data = nogui.bind(Keypad.onKey, key_index),
+                        .color = if (key.accent) c_on_accent else c_text,
+                        .font_size = 18,
+                        .grow = 1,
+                        .basis = 44,
+                        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+                        .border_color = if (key.accent) c_accent else c_border_strong,
+                        .fill = fill,
+                        .gradient = srgbToOklab(fill),
+                    });
+                }
+            }
+        }
+
+        fn onKey(self: *Keypad, index: usize) void {
+            std.debug.assert(index < key_specs.len);
+            switch (key_specs[index].action) {
+                .clear => self.owner.clear(),
+                .negate => self.owner.negate(),
+                .percent => self.owner.percent(),
+                .double_zero => self.owner.doubleZero(),
+                .dot => self.owner.dot(),
+                .equals => self.owner.equals(),
+                .digit => |digit_value| self.owner.digit(digit_value),
+                .op => |op| self.owner.setOp(op),
+            }
+        }
     };
+    pub const default_style: Style = .{ .direction = .column, .gap = 12 };
 
     // ── Interaction (also the unit-test surface) ──
-
     pub fn digit(self: *CalculatorApp, d: u8) void {
         if (self.error_state) return;
         if (!self.entering) {
@@ -112,7 +202,14 @@ pub const CalculatorApp = struct {
     }
 
     pub fn clear(self: *CalculatorApp) void {
-        self.* = .{};
+        // Keep persistent subcomponents registered; only calculator state
+        // resets. Clearing self wholesale would invalidate keypad.owner
+        // until the next frame.
+        self.acc = 0;
+        self.pending = null;
+        self.entry_len = 0;
+        self.entering = false;
+        self.error_state = false;
     }
 
     pub fn doubleZero(self: *CalculatorApp) void {
@@ -136,50 +233,6 @@ pub const CalculatorApp = struct {
         } else {
             self.acc /= 100;
         }
-    }
-
-    // Per-key adapters so each button binds a distinct comptime handler.
-    pub fn digit0(self: *CalculatorApp) void {
-        self.digit(0);
-    }
-    pub fn digit1(self: *CalculatorApp) void {
-        self.digit(1);
-    }
-    pub fn digit2(self: *CalculatorApp) void {
-        self.digit(2);
-    }
-    pub fn digit3(self: *CalculatorApp) void {
-        self.digit(3);
-    }
-    pub fn digit4(self: *CalculatorApp) void {
-        self.digit(4);
-    }
-    pub fn digit5(self: *CalculatorApp) void {
-        self.digit(5);
-    }
-    pub fn digit6(self: *CalculatorApp) void {
-        self.digit(6);
-    }
-    pub fn digit7(self: *CalculatorApp) void {
-        self.digit(7);
-    }
-    pub fn digit8(self: *CalculatorApp) void {
-        self.digit(8);
-    }
-    pub fn digit9(self: *CalculatorApp) void {
-        self.digit(9);
-    }
-    pub fn opAdd(self: *CalculatorApp) void {
-        self.setOp(.add);
-    }
-    pub fn opSub(self: *CalculatorApp) void {
-        self.setOp(.sub);
-    }
-    pub fn opMul(self: *CalculatorApp) void {
-        self.setOp(.mul);
-    }
-    pub fn opDiv(self: *CalculatorApp) void {
-        self.setOp(.div);
     }
 
     fn replaceEntry(self: *CalculatorApp, value: f64) void {
@@ -218,7 +271,7 @@ pub const CalculatorApp = struct {
     // ── Draw ──
 
     pub fn draw(self: *CalculatorApp, ctx: *DrawCtx) !void {
-        const display = try self.displayText(ctx.arena);
+        self.keypad.owner = self;
 
         // Root column: centers the calculator card in the window.
         _ = try ctx.column(.{
@@ -249,9 +302,10 @@ pub const CalculatorApp = struct {
             .font_size = 11,
         });
 
-        // Display: right-aligned, large; red while in the error state.
         {
             _ = try ctx.row(.{
+                .direction = .row,
+                .gap = 0,
                 .justify = .end,
                 .@"align" = .center,
                 .padding = .{ .top = 10, .right = 12, .bottom = 10, .left = 12 },
@@ -262,79 +316,14 @@ pub const CalculatorApp = struct {
                 .gradient = srgbToOklab(c_key),
             });
             defer ctx.pop();
+
             _ = try ctx.label(.{
-                .text = display,
+                .text = try self.displayText(ctx.arena),
                 .color = if (self.error_state) c_error else c_text,
                 .font_size = 28,
             });
         }
-
-        // Key grid: five unrolled rows so every button binds its own
-        // comptime handler (the TodoApp toggle pattern); each key grows
-        // to an equal share.
-        {
-            _ = try ctx.row(.{ .gap = 8 });
-            defer ctx.pop();
-            _ = try keyButton("C", CalculatorApp.clear, false, ctx);
-            _ = try keyButton("±", CalculatorApp.negate, false, ctx);
-            _ = try keyButton("%", CalculatorApp.percent, false, ctx);
-            _ = try keyButton("÷", CalculatorApp.opDiv, true, ctx);
-        }
-        {
-            _ = try ctx.row(.{ .gap = 8 });
-            defer ctx.pop();
-            _ = try keyButton("7", CalculatorApp.digit7, false, ctx);
-            _ = try keyButton("8", CalculatorApp.digit8, false, ctx);
-            _ = try keyButton("9", CalculatorApp.digit9, false, ctx);
-            _ = try keyButton("×", CalculatorApp.opMul, true, ctx);
-        }
-        {
-            _ = try ctx.row(.{ .gap = 8 });
-            defer ctx.pop();
-            _ = try keyButton("4", CalculatorApp.digit4, false, ctx);
-            _ = try keyButton("5", CalculatorApp.digit5, false, ctx);
-            _ = try keyButton("6", CalculatorApp.digit6, false, ctx);
-            _ = try keyButton("−", CalculatorApp.opSub, true, ctx);
-        }
-        {
-            _ = try ctx.row(.{ .gap = 8 });
-            defer ctx.pop();
-            _ = try keyButton("1", CalculatorApp.digit1, false, ctx);
-            _ = try keyButton("2", CalculatorApp.digit2, false, ctx);
-            _ = try keyButton("3", CalculatorApp.digit3, false, ctx);
-            _ = try keyButton("+", CalculatorApp.opAdd, true, ctx);
-        }
-        {
-            _ = try ctx.row(.{ .gap = 8 });
-            defer ctx.pop();
-            _ = try keyButton("0", CalculatorApp.digit0, false, ctx);
-            _ = try keyButton("00", CalculatorApp.doubleZero, false, ctx);
-            _ = try keyButton(".", CalculatorApp.dot, false, ctx);
-            _ = try keyButton("=", CalculatorApp.equals, true, ctx);
-        }
-    }
-    fn keyButton(
-        comptime label: []const u8,
-        comptime on_click: fn (*CalculatorApp) void,
-        comptime accent: bool,
-        ctx: *DrawCtx,
-    ) !Id {
-        const fill: [4]f32 = if (accent) c_accent else c_key;
-        return ctx.button(.{
-            .label = label,
-            .on_click = on_click,
-            .color = if (accent) c_on_accent else c_text,
-            .font_size = 18,
-            .grow = 1,
-            .basis = 44,
-            .justify = .center,
-            .@"align" = .center,
-            .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-            .border_color = if (accent) c_accent else c_border_strong,
-            .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
-            .fill = fill,
-            .gradient = srgbToOklab(fill),
-        });
+        try ctx.component(Keypad, .{ .key = .{ .static = "keypad" } }, &self.keypad);
     }
 };
 
@@ -426,6 +415,14 @@ test "division by zero raises the sticky error; C recovers" {
     app.digit(7);
     try std.testing.expectEqual(@as(f64, 7), app.currentValue());
     try std.testing.expect(!app.error_state);
+}
+test "clear keeps the persistent keypad owner valid before the next frame" {
+    var app: CalculatorApp = .{};
+    app.keypad.owner = &app;
+    app.digit(9);
+    app.keypad.onKey(0); // C
+    app.keypad.onKey(4); // 7
+    try std.testing.expectEqual(@as(f64, 7), app.currentValue());
 }
 
 test "leading zeros collapse and the dot stays single" {
