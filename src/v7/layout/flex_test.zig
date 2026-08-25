@@ -828,3 +828,239 @@ test "clip overflow keeps the visible automatic flex minimum" {
         );
     }
 }
+
+test "vertical scrollbar gutter reduces row flex space" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, first_id, container_id, growingItem(0, 20));
+    try appendNode(&tree, second_id, container_id, growingItem(0, 20));
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 20 },
+        },
+        .overflow = .{ .width = .visible, .height = .scroll },
+        .scrollbar_width = 15,
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 42.5, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 42.5, .y = 0, .w = 42.5, .h = 20 });
+    try expectRect(.{ .x = 0, .y = 0, .w = 42.5, .h = 20 }, widget.absoluteRect(&tree, first_id));
+    try expectRect(
+        .{ .x = 42.5, .y = 0, .w = 42.5, .h = 20 },
+        widget.absoluteRect(&tree, second_id),
+    );
+}
+
+test "horizontal scrollbar gutter reduces stretched cross size" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, container_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 10 },
+            .height = .auto,
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .stretch,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+        .overflow = .{ .width = .scroll, .height = .visible },
+        .scrollbar_width = 15,
+    });
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 10, .h = 85 });
+    try expectRect(.{ .x = 0, .y = 0, .w = 10, .h = 85 }, widget.absoluteRect(&tree, child_id));
+}
+
+test "non-scroll overflow modes do not reserve a gutter" {
+    const overflow_modes = [_]style.Overflow{ .hidden, .visible, .clip, .auto };
+
+    for (overflow_modes) |overflow_mode| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        try appendNode(&tree, child_id, container_id, growingItem(0, 20));
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 20 },
+            },
+            .overflow = .{ .width = .visible, .height = overflow_mode },
+            .scrollbar_width = 15,
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+        try expectRect(
+            .{ .x = 0, .y = 0, .w = 100, .h = 20 },
+            widget.absoluteRect(&tree, child_id),
+        );
+    }
+}
+
+test "content-box vertical scrollbar gutter reduces flex content width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, container_id, .{
+        .display = .block,
+        .grow = 1,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .flex_basis = .{ .length = 0 },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .stretch,
+        .box_sizing = .content_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 20 },
+        },
+        .overflow = .{ .width = .visible, .height = .scroll },
+        .scrollbar_width = 15,
+    });
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 20 });
+    try expectRect(
+        .{ .x = 0, .y = 0, .w = 85, .h = 20 },
+        widget.absoluteRect(&tree, child_id),
+    );
+}
+
+test "auto border-box intrinsic size adds scrollbar gutters" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .spacer = .{ .size = 40 } },
+        .parent = container_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .auto, .height = .auto },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .stretch,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .overflow = .{ .width = .scroll, .height = .scroll },
+        .scrollbar_width = 15,
+    });
+    try tree.appendChild(container_id, child_id);
+
+    try flex.layoutContainer(&tree, container_id, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = null,
+        .intrinsic_width = true,
+        .intrinsic_height = true,
+    });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 55, .h = 55 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 40, .h = 40 });
+    try expectRect(
+        .{ .x = 0, .y = 0, .w = 40, .h = 40 },
+        widget.absoluteRect(&tree, child_id),
+    );
+}
+
+test "explicit intrinsic widths add vertical scrollbar gutter" {
+    const widths = [_]style.Dimension{ .max_content, .{ .fit_content = 100 } };
+
+    for (widths) |width| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        try tree.appendNode(.{
+            .id = child_id,
+            .kind = .{ .spacer = .{ .size = 40 } },
+            .parent = container_id,
+            .style = .{
+                .display = .block,
+                .box_sizing = .border_box,
+                .size = .{ .width = .auto, .height = .auto },
+            },
+        });
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .stretch,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = width,
+                .height = .{ .length = 40 },
+            },
+            .overflow = .{ .width = .visible, .height = .scroll },
+            .scrollbar_width = 15,
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 100, .height = 40 });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 55, .h = 40 });
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 40, .h = 40 });
+        try expectRect(
+            .{ .x = 0, .y = 0, .w = 40, .h = 40 },
+            widget.absoluteRect(&tree, child_id),
+        );
+    }
+}

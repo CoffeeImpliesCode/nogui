@@ -3060,3 +3060,173 @@ test "absolute oversized child keeps negative free space in one auto margin" {
     try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 52, .h = 52 });
     try expectRelative(&tree, absolute_id, .{ .x = -50, .y = 0, .w = 72, .h = 72 });
 }
+
+test "vertical scrollbar gutter reduces percentage child width without changing border box" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .percent = 1 }, .height = .{ .length = 10 } },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+        .overflow = .{ .width = .visible, .height = .scroll },
+        .scrollbar_width = 15,
+    });
+    try tree.appendChild(root_id, child_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 10 });
+}
+
+test "horizontal scrollbar gutter contributes to empty auto border height" {
+    {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const scroll_id: Id = @enumFromInt(1);
+        try appendNode(&tree, scroll_id, .root, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .auto },
+            .overflow = .{ .width = .scroll, .height = .visible },
+            .scrollbar_width = 15,
+        });
+
+        try layoutContainer(&tree, scroll_id, 100, 100);
+
+        try expectRelative(&tree, scroll_id, .{ .x = 0, .y = 0, .w = 100, .h = 15 });
+    }
+
+    {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const hidden_id: Id = @enumFromInt(1);
+        try appendNode(&tree, hidden_id, .root, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 100 }, .height = .auto },
+            .overflow = .{ .width = .hidden, .height = .visible },
+            .scrollbar_width = 15,
+        });
+
+        try layoutContainer(&tree, hidden_id, 100, 100);
+
+        try expectRelative(&tree, hidden_id, .{ .x = 0, .y = 0, .w = 100, .h = 0 });
+    }
+}
+
+test "rtl vertical scrollbar gutter shifts the absolute content origin" {
+    {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const root_id: Id = @enumFromInt(2);
+
+        try appendNode(&tree, child_id, root_id, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .percent = 1 }, .height = .{ .length = 10 } },
+        });
+        try appendNode(&tree, root_id, .root, .{
+            .display = .block,
+            .writing_direction = .rtl,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+            .overflow = .{ .width = .visible, .height = .scroll },
+            .scrollbar_width = 15,
+        });
+        try tree.appendChild(root_id, child_id);
+
+        try layoutContainer(&tree, root_id, 100, 100);
+
+        try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 10 });
+        try expectRect(
+            .{ .x = 15, .y = 0, .w = 85, .h = 10 },
+            widget.absoluteRect(&tree, child_id),
+        );
+    }
+
+    {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const root_id: Id = @enumFromInt(2);
+
+        try appendNode(&tree, child_id, root_id, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .percent = 1 }, .height = .{ .length = 10 } },
+        });
+        try appendNode(&tree, root_id, .root, .{
+            .display = .block,
+            .writing_direction = .ltr,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+            .overflow = .{ .width = .visible, .height = .scroll },
+            .scrollbar_width = 15,
+        });
+        try tree.appendChild(root_id, child_id);
+
+        try layoutContainer(&tree, root_id, 100, 100);
+
+        try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 10 });
+        try expectRect(
+            .{ .x = 0, .y = 0, .w = 85, .h = 10 },
+            widget.absoluteRect(&tree, child_id),
+        );
+    }
+}
+
+test "vertical scrollbar gutter stays inside fixed content box" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .percent = 1 }, .height = .{ .length = 10 } },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .content_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 20 },
+        },
+        .overflow = .{ .width = .visible, .height = .scroll },
+        .scrollbar_width = 15,
+    });
+    try tree.appendChild(root_id, child_id);
+
+    try layoutContainer(&tree, root_id, 100, 20);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 10 });
+}

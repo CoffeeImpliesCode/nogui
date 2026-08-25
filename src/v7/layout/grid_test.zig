@@ -5,11 +5,30 @@ const Id = @import("../id.zig").Id;
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const grid = @import("grid.zig");
+const layout_context = @import("context.zig");
 
 const Rect = widget.Rect;
 const Style = style.Style;
 const WidgetKind = widget.WidgetKind;
 const WidgetTree = widget.WidgetTree;
+
+fn unreachableMeasureNode(
+    _: *layout_context.LayoutContext,
+    _: *WidgetTree,
+    _: *const widget.WidgetNode,
+    _: layout_context.Request,
+) layout_context.LayoutError!layout_context.Measured {
+    unreachable;
+}
+
+fn unreachableLayoutNode(
+    _: *layout_context.LayoutContext,
+    _: *WidgetTree,
+    _: *widget.WidgetNode,
+    _: layout_context.Request,
+) layout_context.LayoutError!void {
+    unreachable;
+}
 
 fn appendContainer(tree: *WidgetTree, id: Id, parent: Id, node_style: Style) !void {
     const kind: WidgetKind = switch (node_style.display) {
@@ -686,8 +705,8 @@ test "grid fit-content track clamps content growth to limit" {
     const second_id: Id = @enumFromInt(2);
     const container_id: Id = @enumFromInt(3);
     const columns = [_]style.GridTrack{
-        .{ .fit_content = 50 },
-        .{ .fit_content = 50 },
+        .{ .fit_content = .{ .length = 50 } },
+        .{ .fit_content = .{ .length = 50 } },
     };
     const rows = [_]style.GridTrack{.{ .fixed = 30 }};
 
@@ -714,6 +733,160 @@ test "grid fit-content track clamps content growth to limit" {
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 30, .h = 30 });
     try expectRelative(&tree, second_id, .{ .x = 30, .y = 0, .w = 80, .h = 30 });
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 80, .h = 30 });
+}
+
+test "grid fit-content percentage caps track against definite axis" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const marker_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{
+        .{ .fit_content = .{ .percent = 0.5 } },
+        .{ .fixed = 30 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    child.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{ .size = 40 } });
+
+    var marker = leafStyle();
+    marker.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    marker.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, marker_id, container_id, marker, .{ .spacer = .{} });
+
+    var container = fixedContainer(60, 20, columns[0..], rows[0..]);
+    container.grid_justify_items = .stretch;
+    container.grid_align_items = .stretch;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+    try tree.appendChild(container_id, marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 60, .height = 20 }, null);
+
+    // The 50% limit resolves against the definite 60px width. The marker starts
+    // at the resulting 30px boundary, which proves the first track was capped.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 60, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 30, .h = 20 });
+    try expectRelative(&tree, marker_id, .{ .x = 30, .y = 0, .w = 30, .h = 20 });
+}
+
+test "grid minmax fit-content maximum does not undercut fixed minimum" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const marker_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{
+        .{ .minmax = .{
+            .min = .{ .fixed = 60 },
+            .max = .{ .fit_content = .{ .percent = 0.5 } },
+        } },
+        .{ .fixed = 40 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    child.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{ .size = 40 } });
+
+    var marker = leafStyle();
+    marker.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    marker.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, marker_id, container_id, marker, .{ .spacer = .{} });
+
+    var container = fixedContainer(100, 20, columns[0..], rows[0..]);
+    container.grid_justify_items = .stretch;
+    container.grid_align_items = .stretch;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+    try tree.appendChild(container_id, marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    // The 50% maximum resolves to 50px, but it cannot undercut the 60px
+    // minimum. The marker's x position proves the first track remains 60px.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 60, .h = 20 });
+    try expectRelative(&tree, marker_id, .{ .x = 60, .y = 0, .w = 40, .h = 20 });
+}
+
+test "grid fit-content percentage is unbounded against indefinite axis" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fit_content = .{ .percent = 0.5 } }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    child.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{ .size = 40 } });
+
+    var container = fixedContainer(0, 20, columns[0..], rows[0..]);
+    container.size.width = .auto;
+    container.grid_justify_items = .stretch;
+    container.grid_align_items = .stretch;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 60, .height = 20 }, null);
+
+    // The auto width provides no percentage basis. The 50% limit must not use
+    // the synthetic 60px available width and cap the natural 40px child at 30px.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 40, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 40, .h = 20 });
+}
+
+test "grid measureNatural treats indefinite fit-content percentage as unbounded" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fit_content = .{ .percent = 0.5 } }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    child.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{ .size = 40 } });
+
+    var container = fixedContainer(0, 20, columns[0..], rows[0..]);
+    container.size.width = .auto;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    var context: layout_context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = null,
+        .measure_node = unreachableMeasureNode,
+        .layout_node = unreachableLayoutNode,
+    };
+    const measured = try grid.measureNatural(
+        &tree,
+        tree.nodeConst(container_id).?,
+        .{
+            .available = .{ .width = 60, .height = 20 },
+            .percentage_basis = .{ .width = null, .height = 20 },
+            .intrinsic_width = true,
+        },
+        &context,
+    );
+
+    // An indefinite width leaves fit-content(50%) unbounded, so the natural
+    // 40px contribution determines both content and border width.
+    try std.testing.expectEqual(@as(f32, 40), measured.content.width);
+    try std.testing.expectEqual(@as(f32, 40), measured.border.width);
+    try std.testing.expectEqual(@as(f32, 20), measured.content.height);
+    try std.testing.expectEqual(@as(f32, 20), measured.border.height);
 }
 
 test "grid min-content and max-content tracks size to item contributions" {
@@ -1245,4 +1418,129 @@ test "grid RTL absolute auto insets use physical end of definite area" {
     try layoutContainer(&tree, container_id, .{ .width = 180, .height = 20 }, null);
 
     try expectRelative(&tree, absolute_id, .{ .x = 140, .y = 2, .w = 0, .h = 10 });
+}
+
+test "grid vertical scrollbar gutter reduces one fr column" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fr = 1 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
+    var container = fixedContainer(100, 20, columns[0..], rows[0..]);
+    container.overflow.height = .scroll;
+    container.scrollbar_width = 15;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 20 });
+}
+
+test "grid RTL vertical scrollbar gutter shifts content origin" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fr = 1 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
+    var container = fixedContainer(100, 20, columns[0..], rows[0..]);
+    container.writing_direction = .rtl;
+    container.overflow.height = .scroll;
+    container.scrollbar_width = 15;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 20 });
+    try expectRect(
+        .{ .x = 15, .y = 0, .w = 85, .h = 20 },
+        widget.absoluteRect(&tree, child_id),
+    );
+}
+
+test "grid horizontal scrollbar gutter reduces one fr row" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fixed = 100 }};
+    const rows = [_]style.GridTrack{.{ .fr = 1 }};
+
+    try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
+    var container = fixedContainer(100, 100, columns[0..], rows[0..]);
+    container.overflow.width = .scroll;
+    container.scrollbar_width = 15;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 100, .h = 85 });
+}
+
+test "grid content-box vertical scrollbar gutter reduces one fr column" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fr = 1 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
+    var container = fixedContainer(100, 20, columns[0..], rows[0..]);
+    container.box_sizing = .content_box;
+    container.overflow.height = .scroll;
+    container.scrollbar_width = 15;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 20 });
+}
+
+test "grid intrinsic border-box scrollbars add gutters without filling available size" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.auto};
+    const rows = [_]style.GridTrack{.auto};
+
+    try appendLeaf(
+        &tree,
+        child_id,
+        container_id,
+        spacerStyle(),
+        .{ .spacer = .{ .size = 40 } },
+    );
+    var container = fixedContainer(0, 0, columns[0..], rows[0..]);
+    container.size = .{ .width = .auto, .height = .auto };
+    container.box_sizing = .border_box;
+    container.overflow.width = .scroll;
+    container.overflow.height = .scroll;
+    container.scrollbar_width = 15;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 55, .h = 55 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 40, .h = 40 });
 }

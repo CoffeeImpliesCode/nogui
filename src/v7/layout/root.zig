@@ -21,6 +21,16 @@ pub fn validateAvailable(available: widget.Size) LayoutError!void {
     if (!std.math.isFinite(available.width)) return error.InvalidStyle;
     if (!std.math.isFinite(available.height)) return error.InvalidStyle;
 }
+
+fn validateScrollbarWidths(tree: *const widget.WidgetTree) LayoutError!void {
+    for (tree.nodes.items) |node| {
+        const scrollbar_width = node.style.scrollbar_width;
+        if (scrollbar_width == 0) continue;
+        if (!std.math.isFinite(scrollbar_width)) return error.InvalidStyle;
+        if (scrollbar_width < 0) return error.InvalidStyle;
+    }
+}
+
 fn isAutoInset(value: style.LengthPercentageAuto) bool {
     return switch (value) {
         .auto => true,
@@ -252,6 +262,8 @@ fn eligibleGridRootIndex(tree: *const widget.WidgetTree) ?usize {
 }
 
 pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
+    try validateScrollbarWidths(tree);
+
     if (dispatch.eligibleMixedForest(tree)) {
         return dispatch.layoutTree(tree, .{
             .allocator = options.allocator,

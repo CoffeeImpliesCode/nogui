@@ -310,6 +310,7 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     if (@hasField(T, "inset")) local.inset = .{ .value = asInsets(opts.inset) };
     if (@hasField(T, "aspect_ratio")) local.aspect_ratio = .{ .value = opts.aspect_ratio };
     if (@hasField(T, "overflow")) local.overflow = .{ .value = asOverflowAxes(opts.overflow) };
+    if (@hasField(T, "scrollbar_width")) local.scrollbar_width = opts.scrollbar_width;
     if (@hasField(T, "margin")) {
         local.margin = asSides(opts.margin);
         local.margin_inset = asMarginInsets(opts.margin);

@@ -141,16 +141,16 @@ fn clearHiddenSubtrees(tree: *WidgetTree) void {
 fn updateScrollOffset(tree: *WidgetTree, node: *WidgetNode) void {
     if (isHidden(tree, node)) return;
     if (node.scroll == null) return;
-    const resolved = node.style;
+    const edges = legacyMathBoxEdges(node);
     const container_content_w = @max(
         0,
-        node.rect.w - resolved.border.left - resolved.border.right -
-            resolved.padding.left - resolved.padding.right,
+        node.rect.w - edges.border.left - edges.border.right -
+            edges.padding.left - edges.padding.right,
     );
     const container_content_h = @max(
         0,
-        node.rect.h - resolved.border.top - resolved.border.bottom -
-            resolved.padding.top - resolved.padding.bottom,
+        node.rect.h - edges.border.top - edges.border.bottom -
+            edges.padding.top - edges.padding.bottom,
     );
     var content_w: f32 = 0;
     var content_h: f32 = 0;
@@ -357,6 +357,57 @@ fn resolveItemPadding(
     };
 }
 
+fn resolveLegacyBoxEdges(
+    node: *const WidgetNode,
+    containing_width: ?f32,
+) widget.ResolvedBoxEdges {
+    var padding = resolveItemPadding(node, containing_width);
+    const gutter = node.style.scrollbarGutter();
+    padding.top += gutter.top;
+    padding.right += gutter.right;
+    padding.bottom += gutter.bottom;
+    padding.left += gutter.left;
+    return .{ .border = node.style.border, .padding = padding };
+}
+
+fn storeLegacyBoxEdges(
+    node: *WidgetNode,
+    containing_width: ?f32,
+) widget.ResolvedBoxEdges {
+    const edges = resolveLegacyBoxEdges(node, containing_width);
+    node.resolved_box_edges = edges;
+    return edges;
+}
+
+fn legacyBoxEdges(node: *const WidgetNode) widget.ResolvedBoxEdges {
+    return node.resolved_box_edges orelse resolveLegacyBoxEdges(node, null);
+}
+
+fn legacyMathBoxEdges(node: *const WidgetNode) widget.ResolvedBoxEdges {
+    const gutter = node.style.scrollbarGutter();
+    if (gutter.top == 0 and gutter.right == 0 and
+        gutter.bottom == 0 and gutter.left == 0)
+    {
+        return .{ .border = node.style.border, .padding = node.style.padding };
+    }
+    return legacyBoxEdges(node);
+}
+fn legacySizingBoxEdges(node: *const WidgetNode) widget.ResolvedBoxEdges {
+    const gutter = node.style.scrollbarGutter();
+    if (gutter.top == 0 and gutter.right == 0 and
+        gutter.bottom == 0 and gutter.left == 0)
+    {
+        return .{ .border = node.style.border, .padding = node.style.padding };
+    }
+
+    var edges = legacyBoxEdges(node);
+    edges.padding.top -= gutter.top;
+    edges.padding.right -= gutter.right;
+    edges.padding.bottom -= gutter.bottom;
+    edges.padding.left -= gutter.left;
+    return edges;
+}
+
 fn resolveItemMargins(
     node: *const WidgetNode,
     containing_width: ?f32,
@@ -407,10 +458,7 @@ fn remeasureLeafWithPadding(node: *WidgetNode, padding: style.Sides) void {
             node.rect.h = s.size + border.h + pad.h;
         },
         .label, .slider => {
-            const old_edges = node.resolved_box_edges orelse widget.ResolvedBoxEdges{
-                .border = node.style.border,
-                .padding = node.style.padding,
-            };
+            const old_edges = node.resolved_box_edges orelse resolveLegacyBoxEdges(node, null);
             const old_border = widget.sidesSum(old_edges.border);
             const old_padding = widget.sidesSum(old_edges.padding);
             const content_w = @max(0, node.rect.w - old_border.w - old_padding.w);
@@ -510,20 +558,22 @@ fn resolvedFlexItemMain(
     natural_main: f32,
 ) f32 {
     const main_is_column = directionIsColumn(direction);
+    const edges = legacySizingBoxEdges(child);
+    const border_main = if (main_is_column)
+        edges.border.top + edges.border.bottom
+    else
+        edges.border.left + edges.border.right;
+    const padding_main = if (main_is_column)
+        edges.padding.top + edges.padding.bottom
+    else
+        edges.padding.left + edges.padding.right;
     var base: ?f32 = null;
 
     // 1. Explicit flex_basis check:
     switch (child.style.flex_basis) {
         .length => |val| {
             base = val;
-            if (child.style.box_sizing == .content_box) {
-                base.? += if (main_is_column)
-                    child.style.border.top + child.style.border.bottom +
-                        child.style.padding.top + child.style.padding.bottom
-                else
-                    child.style.border.left + child.style.border.right +
-                        child.style.padding.left + child.style.padding.right;
-            }
+            if (child.style.box_sizing == .content_box) base.? += border_main + padding_main;
         },
         .percent => |fraction| {
             if (containing_main) |size| {
@@ -537,14 +587,7 @@ fn resolvedFlexItemMain(
         .auto => {
             if (child.style.basis > 0) {
                 base = child.style.basis;
-                if (child.style.box_sizing == .content_box) {
-                    base.? += if (main_is_column)
-                        child.style.border.top + child.style.border.bottom +
-                            child.style.padding.top + child.style.padding.bottom
-                    else
-                        child.style.border.left + child.style.border.right +
-                            child.style.padding.left + child.style.padding.right;
-                }
+                if (child.style.box_sizing == .content_box) base.? += border_main + padding_main;
             }
         },
     }
@@ -559,14 +602,7 @@ fn resolvedFlexItemMain(
                 .percent => |fraction| {
                     if (containing_main) |size| {
                         base = size * fraction;
-                        if (child.style.box_sizing == .content_box) {
-                            base.? += if (main_is_column)
-                                child.style.border.top + child.style.border.bottom +
-                                    child.style.padding.top + child.style.padding.bottom
-                            else
-                                child.style.border.left + child.style.border.right +
-                                    child.style.padding.left + child.style.padding.right;
-                        }
+                        if (child.style.box_sizing == .content_box) base.? += border_main + padding_main;
                     }
                 },
                 else => {},
@@ -662,15 +698,16 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
             }
             return;
         }
+        const edges = legacyMathBoxEdges(p);
         const content_w = @max(
             0,
-            p.rect.w - resolved.border.left - resolved.border.right -
-                resolved.padding.left - resolved.padding.right,
+            p.rect.w - edges.border.left - edges.border.right -
+                edges.padding.left - edges.padding.right,
         );
         const content_h = @max(
             0,
-            p.rect.h - resolved.border.top - resolved.border.bottom -
-                resolved.padding.top - resolved.padding.bottom,
+            p.rect.h - edges.border.top - edges.border.bottom -
+                edges.padding.top - edges.padding.bottom,
         );
         const @"align" = resolved.@"align";
         const is_col = directionIsColumn(p.style.direction);
@@ -678,8 +715,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
             const child = tree.node(cid).?;
             if (isHidden(tree, child)) continue;
             if (child.style.position == .absolute) continue;
-            const child_padding = resolveItemPadding(child, content_w);
-            child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
+            _ = storeLegacyBoxEdges(child, content_w);
             child.resolveTypedStyle(
                 .{ .width = content_w, .height = content_h },
                 .{ .width = child.rect.w, .height = child.rect.h },
@@ -719,6 +755,7 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
             if (isHidden(tree, n)) continue;
             if (n.parent != .root) continue;
             if (n.style.position == .absolute) continue;
+            _ = storeLegacyBoxEdges(n, available.width);
             const m = n.style.margin;
             n.resolveTypedStyle(
                 .{ .width = available.width, .height = available.height },
@@ -751,23 +788,21 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         const main_is_column = directionIsColumn(dir);
         const gap: f32 = p.style.gap;
         const justify = p.style.justify;
-
-        // The container's own box insets its content box on the main axis.
-        const box = p.style;
+        const edges = legacyMathBoxEdges(p);
         const own_border_main = if (main_is_column)
-            box.border.top + box.border.bottom
+            edges.border.top + edges.border.bottom
         else
-            box.border.left + box.border.right;
+            edges.border.left + edges.border.right;
         const own_padding_main = if (main_is_column)
-            box.padding.top + box.padding.bottom
+            edges.padding.top + edges.padding.bottom
         else
-            box.padding.left + box.padding.right;
+            edges.padding.left + edges.padding.right;
         const inset_main = own_border_main + own_padding_main;
         const parent_content: Size = .{
-            .width = @max(0, p.rect.w - box.border.left - box.border.right -
-                box.padding.left - box.padding.right),
-            .height = @max(0, p.rect.h - box.border.top - box.border.bottom -
-                box.padding.top - box.padding.bottom),
+            .width = @max(0, p.rect.w - edges.border.left - edges.border.right -
+                edges.padding.left - edges.padding.right),
+            .height = @max(0, p.rect.h - edges.border.top - edges.border.bottom -
+                edges.padding.top - edges.padding.bottom),
         };
 
         const count = p.children.items.len;
@@ -785,8 +820,7 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 continue;
             }
             flow_count += 1;
-            const child_padding = resolveItemPadding(child, parent_content.width);
-            child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
+            _ = storeLegacyBoxEdges(child, parent_content.width);
             child.resolveTypedStyle(
                 parent_content,
                 .{ .width = child.rect.w, .height = child.rect.h },
@@ -1189,16 +1223,16 @@ fn layoutAdvancedFlexContainer(
     const wrap = effectiveWrap(node);
     const cross_reverse = wrap == .wrap_reverse;
     const gap = @max(0, node.style.gap);
-    const box = node.style;
+    const edges = legacyMathBoxEdges(node);
     const inset_cross = if (main_is_column)
-        box.border.left + box.border.right + box.padding.left + box.padding.right
+        edges.border.left + edges.border.right + edges.padding.left + edges.padding.right
     else
-        box.border.top + box.border.bottom + box.padding.top + box.padding.bottom;
+        edges.border.top + edges.border.bottom + edges.padding.top + edges.padding.bottom;
     const content: Size = .{
-        .width = @max(0, node.rect.w - box.border.left - box.border.right -
-            box.padding.left - box.padding.right),
-        .height = @max(0, node.rect.h - box.border.top - box.border.bottom -
-            box.padding.top - box.padding.bottom),
+        .width = @max(0, node.rect.w - edges.border.left - edges.border.right -
+            edges.padding.left - edges.padding.right),
+        .height = @max(0, node.rect.h - edges.border.top - edges.border.bottom -
+            edges.padding.top - edges.padding.bottom),
     };
     const available_main = if (main_is_column) content.height else content.width;
     var available_cross = if (main_is_column) content.width else content.height;
@@ -1238,8 +1272,8 @@ fn layoutAdvancedFlexContainer(
         const natural_main = if (main_is_column) child.rect.h else child.rect.w;
         child.natural_main = natural_main;
         const natural_cross = if (main_is_column) child.rect.w else child.rect.h;
-        const child_padding = resolveItemPadding(child, content.width);
-        child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
+        const child_edges = storeLegacyBoxEdges(child, content.width);
+        const child_padding = child_edges.padding;
         remeasureLeafWithPadding(child, child_padding);
         child.resolveTypedStyle(content, .{ .width = child.rect.w, .height = child.rect.h });
         const main = resolvedFlexItemMain(
@@ -1501,16 +1535,6 @@ fn finalizeMain(tree: *WidgetTree, parent_id: Id, available: Size) void {
 /// relative to the container's CONTENT box (its border box inset by its own
 /// border + padding). The container's own rect is set by its parent (or the
 /// root pseudo-container).
-fn blockInsetWidth(node: *const WidgetNode) f32 {
-    return node.style.border.left + node.style.border.right +
-        node.style.padding.left + node.style.padding.right;
-}
-
-fn blockInsetHeight(node: *const WidgetNode) f32 {
-    return node.style.border.top + node.style.border.bottom +
-        node.style.padding.top + node.style.padding.bottom;
-}
-
 fn blockDimension(
     node: *const WidgetNode,
     dimension: style.Dimension,
@@ -1576,6 +1600,18 @@ fn styleDimensionIsDefinite(dimension: style.Dimension, containing_definite: boo
     };
 }
 
+fn blockInsetWidth(node: *const WidgetNode) f32 {
+    const edges = legacySizingBoxEdges(node);
+    return edges.border.left + edges.border.right +
+        edges.padding.left + edges.padding.right;
+}
+
+fn blockInsetHeight(node: *const WidgetNode) f32 {
+    const edges = legacySizingBoxEdges(node);
+    return edges.border.top + edges.border.bottom +
+        edges.padding.top + edges.padding.bottom;
+}
+
 fn applyRelativeInsets(
     node: *WidgetNode,
     containing: Size,
@@ -1600,8 +1636,12 @@ fn applyRelativeInsets(
 
 fn placeBlockContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     if (isHidden(tree, node)) return;
-    const inset_width = blockInsetWidth(node);
-    const inset_height = blockInsetHeight(node);
+    _ = storeLegacyBoxEdges(node, null);
+    const edges = legacyMathBoxEdges(node);
+    const inset_width = edges.border.left + edges.border.right +
+        edges.padding.left + edges.padding.right;
+    const inset_height = edges.border.top + edges.border.bottom +
+        edges.padding.top + edges.padding.bottom;
     var content_height: f32 = 0;
     var max_child_width: f32 = 0;
 
@@ -1672,9 +1712,8 @@ fn placeAbsoluteChild(
     const width_containing = if (width_definite) containing.width else null;
     const height_containing = if (height_definite) containing.height else null;
     const intrinsic: Size = .{ .width = child.rect.w, .height = child.rect.h };
-    child.style.padding = resolveItemPadding(child, width_containing);
+    _ = storeLegacyBoxEdges(child, width_containing);
     child.style.margin = resolveItemMargins(child, width_containing);
-    child.resolved_box_edges = .{ .border = child.style.border, .padding = child.style.padding };
     const raw_width = child.style.size.width.resolve(width_containing, intrinsic.width);
     const raw_height = child.style.size.height.resolve(height_containing, intrinsic.height);
     const left = child.style.inset.left.resolve(width_containing);
@@ -1809,16 +1848,17 @@ fn finalizeBlockChildren(
     height_definite: bool,
 ) void {
     if (isHidden(tree, parent)) return;
+    const parent_edges = legacyMathBoxEdges(parent);
     const containing: Size = .{
         .width = @max(
             0,
-            parent.rect.w - parent.style.border.left - parent.style.border.right -
-                parent.style.padding.left - parent.style.padding.right,
+            parent.rect.w - parent_edges.border.left - parent_edges.border.right -
+                parent_edges.padding.left - parent_edges.padding.right,
         ),
         .height = @max(
             0,
-            parent.rect.h - parent.style.border.top - parent.style.border.bottom -
-                parent.style.padding.top - parent.style.padding.bottom,
+            parent.rect.h - parent_edges.border.top - parent_edges.border.bottom -
+                parent_edges.padding.top - parent_edges.padding.bottom,
         ),
     };
     var cursor_y: f32 = 0;
@@ -1833,6 +1873,7 @@ fn finalizeBlockChildren(
         const margin = child.style.margin;
         const width_containing = if (width_definite) containing.width else null;
         const height_containing = if (height_definite) containing.height else null;
+        _ = storeLegacyBoxEdges(child, width_containing);
         child.resolveTypedStyleAxes(
             width_containing,
             height_containing,
@@ -1878,16 +1919,17 @@ fn finalizeSpecialNode(
         finalizeBlockChildren(tree, node, available, width_definite, height_definite);
     } else if (node.style.display == .grid) {
         layoutGridContainer(tree, node, available);
+        const edges = legacyMathBoxEdges(node);
         const containing: Size = .{
             .width = @max(
                 0,
-                node.rect.w - node.style.border.left - node.style.border.right -
-                    node.style.padding.left - node.style.padding.right,
+                node.rect.w - edges.border.left - edges.border.right -
+                    edges.padding.left - edges.padding.right,
             ),
             .height = @max(
                 0,
-                node.rect.h - node.style.border.top - node.style.border.bottom -
-                    node.style.padding.top - node.style.padding.bottom,
+                node.rect.h - edges.border.top - edges.border.bottom -
+                    edges.padding.top - edges.padding.bottom,
             ),
         };
         for (node.children.items) |child_id| {
@@ -1896,20 +1938,22 @@ fn finalizeSpecialNode(
             if (child.style.position == .absolute) {
                 placeAbsoluteChild(tree, child, containing, width_definite, height_definite);
             } else {
+                _ = storeLegacyBoxEdges(child, containing.width);
                 applyRelativeInsets(child, containing, true, true);
             }
         }
     } else {
+        const edges = legacyMathBoxEdges(node);
         const containing: Size = .{
             .width = @max(
                 0,
-                node.rect.w - node.style.border.left - node.style.border.right -
-                    node.style.padding.left - node.style.padding.right,
+                node.rect.w - edges.border.left - edges.border.right -
+                    edges.padding.left - edges.padding.right,
             ),
             .height = @max(
                 0,
-                node.rect.h - node.style.border.top - node.style.border.bottom -
-                    node.style.padding.top - node.style.padding.bottom,
+                node.rect.h - edges.border.top - edges.border.bottom -
+                    edges.padding.top - edges.padding.bottom,
             ),
         };
         for (node.children.items) |child_id| {
@@ -1919,6 +1963,7 @@ fn finalizeSpecialNode(
                 placeAbsoluteChild(tree, child, containing, width_definite, height_definite);
                 reflowFlexContainer(tree, child, available);
             } else {
+                _ = storeLegacyBoxEdges(child, containing.width);
                 applyRelativeInsets(child, containing, true, true);
             }
         }
@@ -1948,6 +1993,7 @@ fn finalizeSpecialRoots(tree: *WidgetTree, available: Size) void {
     for (tree.nodes.items) |*node| {
         if (isHidden(tree, node)) continue;
         if (node.parent != .root) continue;
+        _ = storeLegacyBoxEdges(node, available.width);
         if (node.style.position == .absolute) {
             placeAbsoluteChild(tree, node, available, true, true);
             reflowFlexContainer(tree, node, available);
@@ -2022,28 +2068,29 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     const justify = node.style.justify;
     const cross = node.style.@"align";
     const advanced = needsAdvancedFlex(tree, node);
+    const root_level = node.parent == .root;
+    _ = storeLegacyBoxEdges(node, if (root_level) available.width else null);
+    const edges = legacyMathBoxEdges(node);
     // The container's own box insets its content box on both axes.
-    const box = node.style;
     const own_border_main = if (directionIsColumn(dir))
-        box.border.top + box.border.bottom
+        edges.border.top + edges.border.bottom
     else
-        box.border.left + box.border.right;
+        edges.border.left + edges.border.right;
     const own_padding_main = if (directionIsColumn(dir))
-        box.padding.top + box.padding.bottom
+        edges.padding.top + edges.padding.bottom
     else
-        box.padding.left + box.padding.right;
+        edges.padding.left + edges.padding.right;
     const own_border_cross = if (directionIsColumn(dir))
-        box.border.left + box.border.right
+        edges.border.left + edges.border.right
     else
-        box.border.top + box.border.bottom;
+        edges.border.top + edges.border.bottom;
     const own_padding_cross = if (directionIsColumn(dir))
-        box.padding.left + box.padding.right
+        edges.padding.left + edges.padding.right
     else
-        box.padding.top + box.padding.bottom;
+        edges.padding.top + edges.padding.bottom;
     const inset_main = own_border_main + own_padding_main;
     const inset_cross = own_border_cross + own_padding_cross;
 
-    const root_level = node.parent == .root;
     const count = node.children.items.len;
     var mains = tree.allocator.alloc(f32, count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(mains);
@@ -2065,8 +2112,8 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         }
         flow_count += 1;
         const parent_w: ?f32 = if (root_level) available.width else null;
-        const child_padding = resolveItemPadding(child, parent_w);
-        child.resolved_box_edges = .{ .border = child.style.border, .padding = child_padding };
+        const child_edges = storeLegacyBoxEdges(child, parent_w);
+        const child_padding = child_edges.padding;
         remeasureLeafWithPadding(child, child_padding);
         const natural = if (directionIsColumn(dir)) child.rect.h else child.rect.w;
         child.natural_main = natural;
@@ -2304,8 +2351,10 @@ fn capTextWidth(node: *const WidgetNode, width: f32) f32 {
 /// added on top. Margins are not part of the node's rect — the parent
 /// consumes them when positioning.
 fn measureLeaf(node: *WidgetNode, measure: ?MeasureFn) void {
-    const border = widget.sidesSum(node.style.border);
-    const padding = widget.sidesSum(node.style.padding);
+    _ = storeLegacyBoxEdges(node, null);
+    const edges = legacyMathBoxEdges(node);
+    const border = widget.sidesSum(edges.border);
+    const padding = widget.sidesSum(edges.padding);
     switch (node.kind) {
         .label => |l| {
             const s = if (measure) |m|
@@ -2375,6 +2424,7 @@ fn placeRoot(tree: *WidgetTree, available: Size) void {
         if (n.parent != .root or isHidden(tree, n)) continue;
         if (n.style.position == .absolute) continue;
         root_count += 1;
+        _ = storeLegacyBoxEdges(n, available.width);
         n.natural_main = n.rect.h;
         n.resolveTypedStyle(available, .{ .width = n.rect.w, .height = n.rect.h });
         const main = rootBasisMain(n, available.height);
@@ -2533,7 +2583,10 @@ fn gridTrackAllowsIntrinsic(track: GridTrack) bool {
         .auto, .min_content, .max_content, .fit_content => true,
         .minmax => |value| switch (value.min) {
             .auto, .min_content, .max_content, .fit_content => true,
-            else => false,
+            else => switch (value.max) {
+                .fit_content => true,
+                else => false,
+            },
         },
         else => false,
     };
@@ -2543,13 +2596,25 @@ fn gridTrackMax(track: GridTrack, containing: ?f32) ?f32 {
     return switch (track) {
         .fixed => |value| @max(0, value),
         .percent => |fraction| if (containing) |size| @max(0, size * fraction) else null,
-        .fit_content => |limit| @max(0, limit),
+        .fit_content => |limit| if (limit.resolve(containing)) |value| @max(0, value) else null,
         .auto, .min_content, .max_content, .fr => null,
-        .minmax => |value| switch (value.max) {
-            .fixed => |size| @max(0, size),
-            .fit_content => |limit| @max(0, limit),
-            .percent => |fraction| if (containing) |size| @max(0, size * fraction) else null,
-            .auto, .min_content, .max_content, .fr => null,
+        .minmax => |value| blk: {
+            const maximum: ?f32 = switch (value.max) {
+                .fixed => |size| @max(0, size),
+                .fit_content => |limit| if (limit.resolve(containing)) |size|
+                    @max(0, size)
+                else
+                    null,
+                .percent => |fraction| if (containing) |size|
+                    @max(0, size * fraction)
+                else
+                    null,
+                .auto, .min_content, .max_content, .fr => null,
+            };
+            break :blk if (maximum) |resolved|
+                @max(gridBreadthMin(value.min, containing), resolved)
+            else
+                null;
         },
     };
 }
@@ -2702,8 +2767,12 @@ fn gridAlignContentOffset(
 /// space.
 fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     if (isHidden(tree, node)) return;
-    const inset_width = blockInsetWidth(node);
-    const inset_height = blockInsetHeight(node);
+    _ = storeLegacyBoxEdges(node, if (node.parent == .root) available.width else null);
+    const edges = legacyMathBoxEdges(node);
+    const inset_width = edges.border.left + edges.border.right +
+        edges.padding.left + edges.padding.right;
+    const inset_height = edges.border.top + edges.border.bottom +
+        edges.padding.top + edges.padding.bottom;
     const child_count = node.children.items.len;
     var flow_ids = tree.allocator.alloc(Id, child_count) catch @panic("layout scratch allocation failed");
     defer tree.allocator.free(flow_ids);
@@ -3113,6 +3182,7 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
             area_height += row_sizes[track_index];
         if (column_span > 1) area_width += column_gap * @as(f32, @floatFromInt(column_span - 1));
         if (row_span > 1) area_height += row_gap * @as(f32, @floatFromInt(row_span - 1));
+        _ = storeLegacyBoxEdges(child, area_width);
         child.resolveTypedStyleAxes(
             area_width,
             area_height,

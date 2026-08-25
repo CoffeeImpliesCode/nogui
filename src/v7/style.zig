@@ -45,7 +45,7 @@ pub const GridTrackBreadth = union(enum) {
     min_content,
     max_content,
     fr: f32,
-    fit_content: f32,
+    fit_content: LengthPercentage,
 };
 
 pub const GridMinMax = struct {
@@ -61,7 +61,7 @@ pub const GridTrack = union(enum) {
     min_content,
     max_content,
     fr: f32,
-    fit_content: f32,
+    fit_content: LengthPercentage,
     minmax: GridMinMax,
 
     pub fn fraction(weight: f32) GridTrack {
@@ -323,6 +323,7 @@ pub const ResolvedStyle = struct {
     },
     aspect_ratio: ?f32 = null,
     overflow: OverflowAxes = .{ .width = .visible, .height = .visible },
+    scrollbar_width: f32 = 0,
 
     pub fn clampWidth(self: ResolvedStyle, value: f32) f32 {
         return self.constraints.clampWidth(value);
@@ -593,6 +594,7 @@ pub const Style = struct {
     inset: Insets = defaultInsets(),
     aspect_ratio: ?f32 = null,
     overflow: OverflowAxes = .{ .width = .visible, .height = .visible },
+    scrollbar_width: f32 = 0,
 
     margin: Sides = .{},
     border: Sides = .{},
@@ -603,6 +605,25 @@ pub const Style = struct {
     margin_inset: Insets = defaultMarginInsets(),
     border_inset: LengthPercentageRect = defaultLengthPercentageRect(),
     padding_inset: LengthPercentageRect = defaultLengthPercentageRect(),
+
+    /// Return the physical space reserved for scrollbars.
+    /// `scrollbar_width` must be finite and nonnegative.
+    pub fn scrollbarGutter(self: Style) Sides {
+        std.debug.assert(std.math.isFinite(self.scrollbar_width));
+        std.debug.assert(self.scrollbar_width >= 0);
+
+        if (self.scrollbar_width == 0) return .{};
+
+        var gutter: Sides = .{};
+        if (self.overflow.height == .scroll) {
+            switch (self.writing_direction) {
+                .ltr => gutter.right = self.scrollbar_width,
+                .rtl => gutter.left = self.scrollbar_width,
+            }
+        }
+        if (self.overflow.width == .scroll) gutter.bottom = self.scrollbar_width;
+        return gutter;
+    }
 
     pub fn resolve(defaults: Style, local: StyleOverride) Style {
         var result = defaults;
@@ -711,6 +732,7 @@ pub const Style = struct {
             .value => |value| result.overflow = value,
             .clear => result.overflow = .{ .width = .visible, .height = .visible },
         }
+        if (local.scrollbar_width) |value| result.scrollbar_width = value;
         if (dimensionOverrideValue(local.width)) |value| result.size.width = value;
         if (dimensionOverrideValue(local.height)) |value| result.size.height = value;
         if (dimensionOverrideValue(local.min_width)) |value| result.min_size.width = value;
@@ -809,6 +831,7 @@ pub const Style = struct {
             },
             .aspect_ratio = self.aspect_ratio,
             .overflow = self.overflow,
+            .scrollbar_width = self.scrollbar_width,
         };
     }
 
@@ -874,6 +897,7 @@ pub const StyleOverride = struct {
     max_size: ExplicitOverride(DimensionSize) = .unspecified,
     inset: InsetsOverride = .unspecified,
     overflow: OverflowAxesOverride = .unspecified,
+    scrollbar_width: ?f32 = null,
     aspect_ratio: ExplicitOverride(?f32) = .unspecified,
 
     /// Direct axis fields make partial overrides possible without replacing
@@ -1003,6 +1027,46 @@ test "Style and PaintStyle apply explicit overrides fieldwise" {
     try std.testing.expectEqual(Color{ 0, 1, 0, 1 }, paint.fill);
     try std.testing.expectEqual(@as(?TextureId, null), paint.texture);
     try std.testing.expectEqual(@as(Layer, 2), paint.layer);
+}
+
+test "Style scrollbar width resolves fieldwise and maps physical gutters" {
+    const defaults: Style = .{};
+    try std.testing.expectEqual(@as(f32, 0), defaults.scrollbar_width);
+
+    const resolved = Style.resolve(.{}, .{ .scrollbar_width = 15 });
+    try std.testing.expectEqual(@as(f32, 15), resolved.scrollbar_width);
+
+    const ltr_vertical: Style = .{
+        .overflow = .{ .width = .visible, .height = .scroll },
+        .scrollbar_width = 15,
+    };
+    try std.testing.expectEqual(Sides{ .right = 15 }, ltr_vertical.scrollbarGutter());
+
+    const rtl_vertical: Style = .{
+        .writing_direction = .rtl,
+        .overflow = .{ .width = .visible, .height = .scroll },
+        .scrollbar_width = 15,
+    };
+    try std.testing.expectEqual(Sides{ .left = 15 }, rtl_vertical.scrollbarGutter());
+
+    const horizontal: Style = .{
+        .overflow = .{ .width = .scroll, .height = .visible },
+        .scrollbar_width = 15,
+    };
+    try std.testing.expectEqual(Sides{ .bottom = 15 }, horizontal.scrollbarGutter());
+
+    for ([_]Overflow{ .visible, .hidden, .clip, .auto }) |overflow| {
+        const no_gutter: Style = .{
+            .overflow = .{ .width = overflow, .height = overflow },
+            .scrollbar_width = 15,
+        };
+        try std.testing.expectEqual(Sides{}, no_gutter.scrollbarGutter());
+    }
+
+    const zero_width: Style = .{
+        .overflow = .{ .width = .scroll, .height = .scroll },
+    };
+    try std.testing.expectEqual(Sides{}, zero_width.scrollbarGutter());
 }
 
 test "layout values do not inherit from a parent style" {

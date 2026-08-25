@@ -10,6 +10,8 @@ const PhysicalSide = enum { none, left, right };
 const BoxEdges = struct {
     border: style.Sides,
     padding: style.Sides,
+    box_horizontal: f32,
+    box_vertical: f32,
     horizontal: f32,
     vertical: f32,
 };
@@ -1050,7 +1052,7 @@ fn resolveContainerInitialSize(
         const auto_width_border = (try definite(context.available.width)) orelse edges.horizontal;
         candidate.width = try borderToSizingValue(
             auto_width_border,
-            edges.horizontal,
+            edges.box_horizontal,
             input_style.box_sizing,
         );
     }
@@ -1090,13 +1092,13 @@ fn resolveContainerAutoHeight(
     if (candidate.width == null) {
         candidate.width = try borderToSizingValue(
             border_width,
-            edges.horizontal,
+            edges.box_horizontal,
             input_style.box_sizing,
         );
     }
     candidate.height = try borderToSizingValue(
         try addFinite(content_height, edges.vertical),
-        edges.vertical,
+        edges.box_vertical,
         input_style.box_sizing,
     );
     const resolved = try sizing.clampSize(
@@ -1129,7 +1131,7 @@ fn resolveChildSize(
         if (auto_width_border) |width| {
             candidate.width = try borderToSizingValue(
                 width,
-                edges.horizontal,
+                edges.box_horizontal,
                 input_style.box_sizing,
             );
         }
@@ -1138,7 +1140,7 @@ fn resolveChildSize(
         if (auto_height_border) |height| {
             candidate.height = try borderToSizingValue(
                 height,
-                edges.vertical,
+                edges.box_vertical,
                 input_style.box_sizing,
             );
         }
@@ -1162,6 +1164,7 @@ fn resolveChildSize(
         candidate.width = try contentToSizingValue(
             w,
             edges.horizontal,
+            edges.box_horizontal,
             input_style.box_sizing,
         );
     }
@@ -1170,6 +1173,7 @@ fn resolveChildSize(
         candidate.height = try contentToSizingValue(
             intrinsic.height,
             edges.vertical,
+            edges.box_vertical,
             input_style.box_sizing,
         );
     }
@@ -1190,23 +1194,25 @@ fn resolveChildSize(
 
 fn contentToSizingValue(
     content: f32,
-    edges: f32,
+    content_inset: f32,
+    box_adjustment: f32,
     box_sizing: style.BoxSizing,
 ) sizing.Error!f32 {
-    return switch (box_sizing) {
-        .content_box => finite(content),
-        .border_box => addFinite(content, edges),
-    };
+    return borderToSizingValue(
+        try addFinite(content, content_inset),
+        box_adjustment,
+        box_sizing,
+    );
 }
 
 fn borderToSizingValue(
     border: f32,
-    edges: f32,
+    box_adjustment: f32,
     box_sizing: style.BoxSizing,
 ) sizing.Error!f32 {
     const checked_border = try finite(border);
     return switch (box_sizing) {
-        .content_box => @max(0, try finite(checked_border - edges)),
+        .content_box => @max(0, try finite(checked_border - box_adjustment)),
         .border_box => checked_border,
     };
 }
@@ -1419,6 +1425,9 @@ fn resolveBoxEdges(
     input_style: style.Style,
     percentage_basis: ?f32,
 ) sizing.Error!BoxEdges {
+    const scrollbar_width = try finite(input_style.scrollbar_width);
+    if (scrollbar_width < 0) return error.InvalidStyle;
+    const scrollbar_gutter = input_style.scrollbarGutter();
     const border: style.Sides = .{
         .top = try resolveEdge(
             input_style.border_inset.top,
@@ -1441,7 +1450,7 @@ fn resolveBoxEdges(
             percentage_basis,
         ),
     };
-    const padding: style.Sides = .{
+    const resolved_padding: style.Sides = .{
         .top = try resolveEdge(
             input_style.padding_inset.top,
             input_style.padding.top,
@@ -1463,16 +1472,32 @@ fn resolveBoxEdges(
             percentage_basis,
         ),
     };
+    const padding: style.Sides = .{
+        .top = try addFinite(resolved_padding.top, scrollbar_gutter.top),
+        .right = try addFinite(resolved_padding.right, scrollbar_gutter.right),
+        .bottom = try addFinite(resolved_padding.bottom, scrollbar_gutter.bottom),
+        .left = try addFinite(resolved_padding.left, scrollbar_gutter.left),
+    };
+    const box_horizontal = try addFinite(
+        try addFinite(border.left, border.right),
+        try addFinite(resolved_padding.left, resolved_padding.right),
+    );
+    const box_vertical = try addFinite(
+        try addFinite(border.top, border.bottom),
+        try addFinite(resolved_padding.top, resolved_padding.bottom),
+    );
     return .{
         .border = border,
         .padding = padding,
+        .box_horizontal = box_horizontal,
+        .box_vertical = box_vertical,
         .horizontal = try addFinite(
-            try addFinite(border.left, border.right),
-            try addFinite(padding.left, padding.right),
+            box_horizontal,
+            try addFinite(scrollbar_gutter.left, scrollbar_gutter.right),
         ),
         .vertical = try addFinite(
-            try addFinite(border.top, border.bottom),
-            try addFinite(padding.top, padding.bottom),
+            box_vertical,
+            try addFinite(scrollbar_gutter.top, scrollbar_gutter.bottom),
         ),
     };
 }

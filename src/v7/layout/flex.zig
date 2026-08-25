@@ -189,6 +189,8 @@ pub fn measureNatural(
 const Edges = struct {
     border: style.Sides,
     padding: style.Sides,
+    box_horizontal: f32,
+    box_vertical: f32,
     horizontal: f32,
     vertical: f32,
 };
@@ -428,6 +430,7 @@ fn measureContainerContent(
         request.available.width,
         request.percentage_basis.width,
         0,
+        edges.box_horizontal,
         edges.horizontal,
         node.style.box_sizing,
     );
@@ -436,6 +439,7 @@ fn measureContainerContent(
         request.available.height,
         request.percentage_basis.height,
         0,
+        edges.box_vertical,
         edges.vertical,
         node.style.box_sizing,
     );
@@ -444,6 +448,7 @@ fn measureContainerContent(
         request.available.width,
         request.percentage_basis.width,
         0,
+        edges.box_horizontal,
         edges.horizontal,
         node.style.box_sizing,
     )) orelse 0;
@@ -452,6 +457,7 @@ fn measureContainerContent(
         request.available.height,
         request.percentage_basis.height,
         0,
+        edges.box_vertical,
         edges.vertical,
         node.style.box_sizing,
     )) orelse 0;
@@ -460,6 +466,7 @@ fn measureContainerContent(
         request.available.width,
         request.percentage_basis.width,
         0,
+        edges.box_horizontal,
         edges.horizontal,
         node.style.box_sizing,
     );
@@ -468,6 +475,7 @@ fn measureContainerContent(
         request.available.height,
         request.percentage_basis.height,
         0,
+        edges.box_vertical,
         edges.vertical,
         node.style.box_sizing,
     );
@@ -794,6 +802,7 @@ fn constraintsFor(
         containing.width,
         percentage_basis.width,
         intrinsic.width,
+        edges.box_horizontal,
         edges.horizontal,
         input.box_sizing,
     )) orelse 0;
@@ -802,6 +811,7 @@ fn constraintsFor(
         containing.height,
         percentage_basis.height,
         intrinsic.height,
+        edges.box_vertical,
         edges.vertical,
         input.box_sizing,
     )) orelse 0;
@@ -810,6 +820,7 @@ fn constraintsFor(
         containing.width,
         percentage_basis.width,
         intrinsic.width,
+        edges.box_horizontal,
         edges.horizontal,
         input.box_sizing,
     );
@@ -818,6 +829,7 @@ fn constraintsFor(
         containing.height,
         percentage_basis.height,
         intrinsic.height,
+        edges.box_vertical,
         edges.vertical,
         input.box_sizing,
     );
@@ -857,7 +869,8 @@ fn flexBasis(
     natural: Natural,
     edges: Edges,
 ) sizing.Error!f32 {
-    const edge_sum = if (axes.horizontal) edges.horizontal else edges.vertical;
+    const box_edge_sum = if (axes.horizontal) edges.box_horizontal else edges.box_vertical;
+    const content_edge_sum = if (axes.horizontal) edges.horizontal else edges.vertical;
     const intrinsic = if (axes.horizontal) natural.content.width else natural.content.height;
     const basis = switch (input.flex_basis) {
         .auto => null,
@@ -866,7 +879,8 @@ fn flexBasis(
             containing_main,
             containing_main,
             intrinsic,
-            edge_sum,
+            box_edge_sum,
+            content_edge_sum,
             input.box_sizing,
         ),
     };
@@ -874,7 +888,7 @@ fn flexBasis(
     if (input.basis != 0) {
         return sizingToBorder(
             try nonNegative(input.basis),
-            edge_sum,
+            explicitEdgeSum(box_edge_sum),
             input.box_sizing,
         );
     }
@@ -1286,29 +1300,57 @@ fn usedSize(
         percentage_basis.height,
         intrinsic.height,
     );
+    var width_edge_sum = dimensionEdgeSum(
+        input.size.width,
+        edges.box_horizontal,
+        edges.horizontal,
+    );
+    var height_edge_sum = dimensionEdgeSum(
+        input.size.height,
+        edges.box_vertical,
+        edges.vertical,
+    );
     const width_auto = width == null;
     const height_auto = height == null;
     if (width == null and height != null and input.aspect_ratio != null) {
         width = try finite(height.? * try ratio(input.aspect_ratio.?));
+        width_edge_sum = explicitEdgeSum(edges.box_horizontal);
     }
     if (height == null and width != null and input.aspect_ratio != null) {
         height = try finite(width.? / try ratio(input.aspect_ratio.?));
+        height_edge_sum = explicitEdgeSum(edges.box_vertical);
     }
     if (width == null) {
+        width_edge_sum = edges.horizontal;
         width = if (fallback) |value|
             try borderToSizing(value.width, edges.horizontal, input.box_sizing)
         else
-            try nonNegative(intrinsic.width);
+            try borderToSizing(
+                try add(intrinsic.width, edges.horizontal),
+                edges.horizontal,
+                input.box_sizing,
+            );
     }
     if (height == null) {
+        height_edge_sum = edges.vertical;
         height = if (fallback) |value|
             try borderToSizing(value.height, edges.vertical, input.box_sizing)
         else
-            try nonNegative(intrinsic.height);
+            try borderToSizing(
+                try add(intrinsic.height, edges.vertical),
+                edges.vertical,
+                input.box_sizing,
+            );
     }
     var result: widget.Size = .{
-        .width = try sizingToBorder(width.?, edges.horizontal, input.box_sizing),
-        .height = try sizingToBorder(height.?, edges.vertical, input.box_sizing),
+        .width = if (dimensionIntrinsic(input.size.width))
+            try add(width.?, edges.horizontal)
+        else
+            try sizingToBorder(width.?, width_edge_sum, input.box_sizing),
+        .height = if (dimensionIntrinsic(input.size.height))
+            try add(height.?, edges.vertical)
+        else
+            try sizingToBorder(height.?, height_edge_sum, input.box_sizing),
     };
     const width_before_clamp = result.width;
     const height_before_clamp = result.height;
@@ -1333,15 +1375,16 @@ fn usedSize(
     if (input.aspect_ratio) |aspect_ratio| {
         const ratio_value = try ratio(aspect_ratio);
         if (height_auto and result.width != width_before_clamp) {
-            const width_sizing = try borderToSizing(
+            const width_sizing = try borderToDimensionValue(
+                input.size.width,
                 result.width,
-                edges.horizontal,
+                width_edge_sum,
                 input.box_sizing,
             );
             const height_sizing = try finite(width_sizing / ratio_value);
             const height_border = try sizingToBorder(
                 height_sizing,
-                edges.vertical,
+                explicitEdgeSum(edges.box_vertical),
                 input.box_sizing,
             );
             result.height = try clampSize(
@@ -1355,15 +1398,16 @@ fn usedSize(
             );
         }
         if (width_auto and result.height != height_before_clamp) {
-            const height_sizing = try borderToSizing(
+            const height_sizing = try borderToDimensionValue(
+                input.size.height,
                 result.height,
-                edges.vertical,
+                height_edge_sum,
                 input.box_sizing,
             );
             const width_sizing = try finite(height_sizing * ratio_value);
             const width_border = try sizingToBorder(
                 width_sizing,
-                edges.horizontal,
+                explicitEdgeSum(edges.box_horizontal),
                 input.box_sizing,
             );
             result.width = try clampSize(
@@ -1378,8 +1422,14 @@ fn usedSize(
         }
     }
     return .{
-        .width = @max(edges.horizontal, result.width),
-        .height = @max(edges.vertical, result.height),
+        .width = @max(
+            dimensionEdgeSum(input.size.width, edges.box_horizontal, edges.horizontal),
+            result.width,
+        ),
+        .height = @max(
+            dimensionEdgeSum(input.size.height, edges.box_vertical, edges.vertical),
+            result.height,
+        ),
     };
 }
 
@@ -1408,13 +1458,15 @@ fn clampSize(
     else
         percentage_basis.height;
     const natural = if (axis == .horizontal) intrinsic.width else intrinsic.height;
-    const edge_sum = if (axis == .horizontal) edges.horizontal else edges.vertical;
+    const box_edge_sum = if (axis == .horizontal) edges.box_horizontal else edges.box_vertical;
+    const content_edge_sum = if (axis == .horizontal) edges.horizontal else edges.vertical;
     const minimum = (try resolveDimensionBorder(
         minimum_dimension,
         available,
         basis,
         natural,
-        edge_sum,
+        box_edge_sum,
+        content_edge_sum,
         input.box_sizing,
     )) orelse 0;
     const maximum = try resolveDimensionBorder(
@@ -1422,7 +1474,8 @@ fn clampSize(
         available,
         basis,
         natural,
-        edge_sum,
+        box_edge_sum,
+        content_edge_sum,
         input.box_sizing,
     );
     return clamp(candidate, minimum, maximum);
@@ -1453,17 +1506,59 @@ fn dimensionValue(
     };
 }
 
+fn explicitEdgeSum(box_edges: f32) f32 {
+    return box_edges;
+}
+
+fn dimensionIntrinsic(dimension: style.Dimension) bool {
+    return switch (dimension) {
+        .min_content, .max_content, .fit_content => true,
+        .auto, .length, .percent => false,
+    };
+}
+
+fn dimensionEdgeSum(
+    dimension: style.Dimension,
+    box_edges: f32,
+    content_edges: f32,
+) f32 {
+    return switch (dimension) {
+        .length, .percent => explicitEdgeSum(box_edges),
+        .auto, .min_content, .max_content, .fit_content => content_edges,
+    };
+}
+
+fn borderToDimensionValue(
+    dimension: style.Dimension,
+    border: f32,
+    edge_sum: f32,
+    box_sizing: style.BoxSizing,
+) sizing.Error!f32 {
+    if (dimensionIntrinsic(dimension)) {
+        return @max(0, try finite(border - edge_sum));
+    }
+    return borderToSizing(border, edge_sum, box_sizing);
+}
+
 fn resolveDimensionBorder(
     dimension: style.Dimension,
     containing: f32,
     percentage_basis: ?f32,
     intrinsic: f32,
-    edges: f32,
+    box_edges: f32,
+    content_edges: f32,
     box_sizing: style.BoxSizing,
 ) sizing.Error!?f32 {
     const value = try dimensionValue(dimension, containing, percentage_basis, intrinsic);
     if (value) |number| {
-        const border = try sizingToBorder(number, edges, box_sizing);
+        const border = if (dimensionIntrinsic(dimension))
+            try add(number, content_edges)
+        else
+            try sizingToBorder(
+                number,
+                dimensionEdgeSum(dimension, box_edges, content_edges),
+                box_sizing,
+            );
         return @as(?f32, border);
     }
     return null;
@@ -1492,21 +1587,38 @@ fn borderToSizing(
 }
 
 fn resolveEdges(input: style.Style, basis: ?f32) sizing.Error!Edges {
+    const scrollbar_width = try finite(input.scrollbar_width);
+    if (scrollbar_width < 0) return error.InvalidStyle;
+    const scrollbar_gutter = input.scrollbarGutter();
     const border: style.Sides = .{
         .top = try edge(input.border_inset.top, input.border.top, basis),
         .right = try edge(input.border_inset.right, input.border.right, basis),
         .bottom = try edge(input.border_inset.bottom, input.border.bottom, basis),
         .left = try edge(input.border_inset.left, input.border.left, basis),
     };
-    const padding: style.Sides = .{
+    const resolved_padding: style.Sides = .{
         .top = try edge(input.padding_inset.top, input.padding.top, basis),
         .right = try edge(input.padding_inset.right, input.padding.right, basis),
         .bottom = try edge(input.padding_inset.bottom, input.padding.bottom, basis),
         .left = try edge(input.padding_inset.left, input.padding.left, basis),
     };
+    const padding: style.Sides = .{
+        .top = try add(resolved_padding.top, scrollbar_gutter.top),
+        .right = try add(resolved_padding.right, scrollbar_gutter.right),
+        .bottom = try add(resolved_padding.bottom, scrollbar_gutter.bottom),
+        .left = try add(resolved_padding.left, scrollbar_gutter.left),
+    };
     return .{
         .border = border,
         .padding = padding,
+        .box_horizontal = try add(
+            try add(border.left, border.right),
+            try add(resolved_padding.left, resolved_padding.right),
+        ),
+        .box_vertical = try add(
+            try add(border.top, border.bottom),
+            try add(resolved_padding.top, resolved_padding.bottom),
+        ),
         .horizontal = try add(
             try add(border.left, border.right),
             try add(padding.left, padding.right),

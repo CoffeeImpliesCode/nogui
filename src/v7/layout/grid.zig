@@ -18,6 +18,8 @@ const TrackAxis = enum { columns, rows };
 const Edges = struct {
     border: style.Sides,
     padding: style.Sides,
+    box_horizontal: f32,
+    box_vertical: f32,
     horizontal: f32,
     vertical: f32,
 };
@@ -263,7 +265,7 @@ fn validateTrack(track: style.GridTrack) Error!void {
             _ = try finiteNonNegative(value);
         },
         .fit_content => |value| {
-            _ = try finiteNonNegative(value);
+            try validateLengthPercentage(value, false);
         },
         .auto, .min_content, .max_content => {},
         .fr => |value| {
@@ -289,7 +291,7 @@ fn validateBreadth(breadth: style.GridTrackBreadth) Error!void {
             _ = try finiteNonNegative(value);
         },
         .fit_content => |value| {
-            _ = try finiteNonNegative(value);
+            try validateLengthPercentage(value, false);
         },
         .auto, .min_content, .max_content => {},
         .fr => |value| {
@@ -586,16 +588,27 @@ fn autoAxisClamped(
     const dimension = if (axis == .horizontal) input.size.width else input.size.height;
     if (dimension != .auto) return false;
     const natural = if (axis == .horizontal) intrinsic.width else intrinsic.height;
-    const edge_sum = if (axis == .horizontal) edges.horizontal else edges.vertical;
-    const candidate = try sizingToBorder(natural, edge_sum, input.box_sizing);
-    const minimum_dimension = if (axis == .horizontal) input.min_size.width else input.min_size.height;
-    const maximum_dimension = if (axis == .horizontal) input.max_size.width else input.max_size.height;
+    const content_inset = if (axis == .horizontal) edges.horizontal else edges.vertical;
+    const box_adjustment = if (axis == .horizontal) edges.box_horizontal else edges.box_vertical;
+    const candidate = try sizingToBorder(
+        try contentToSizing(natural, content_inset, box_adjustment, input.box_sizing),
+        box_adjustment,
+        input.box_sizing,
+    );
+    const minimum_dimension = if (axis == .horizontal)
+        input.min_size.width
+    else
+        input.min_size.height;
+    const maximum_dimension = if (axis == .horizontal)
+        input.max_size.width
+    else
+        input.max_size.height;
     const basis = if (axis == .horizontal) percentage_basis.width else percentage_basis.height;
     const minimum = try resolveDimensionBorder(
         minimum_dimension,
         basis,
         natural,
-        edge_sum,
+        dimensionAdjustment(minimum_dimension, content_inset, box_adjustment),
         input.box_sizing,
     );
     if (minimum) |value| {
@@ -605,7 +618,7 @@ fn autoAxisClamped(
         maximum_dimension,
         basis,
         natural,
-        edge_sum,
+        dimensionAdjustment(maximum_dimension, content_inset, box_adjustment),
         input.box_sizing,
     );
     if (maximum) |value| {
@@ -1646,6 +1659,8 @@ fn nodeFirstBaseline(
                             .padding = .{},
                             .horizontal = 0,
                             .vertical = 0,
+                            .box_horizontal = 0,
+                            .box_vertical = 0,
                         };
                         const grandchild_baseline = nodeFirstBaseline(
                             tree,
@@ -1706,20 +1721,29 @@ fn breadthMinimum(breadth: style.GridTrackBreadth, basis: ?f32) Error!f32 {
 fn trackMaximum(track: style.GridTrack, basis: ?f32) Error!?f32 {
     return switch (track) {
         .fixed => |value| value,
-        .fit_content => |value| try finiteNonNegative(value),
+        .fit_content => |value| blk: {
+            const resolved = value.resolve(basis) orelse break :blk null;
+            break :blk try finiteNonNegative(resolved);
+        },
         .percent => |fraction| blk: {
             const percentage_basis = basis orelse return null;
             break :blk fraction * percentage_basis;
         },
         .auto, .min_content, .max_content, .fr => null,
-        .minmax => |value| breadthMaximum(value.max, basis),
+        .minmax => |value| blk: {
+            const maximum = (try breadthMaximum(value.max, basis)) orelse break :blk null;
+            break :blk @max(maximum, try breadthMinimum(value.min, basis));
+        },
     };
 }
 
 fn breadthMaximum(breadth: style.GridTrackBreadth, basis: ?f32) Error!?f32 {
     return switch (breadth) {
         .fixed => |value| value,
-        .fit_content => |value| try finiteNonNegative(value),
+        .fit_content => |value| blk: {
+            const resolved = value.resolve(basis) orelse break :blk null;
+            break :blk try finiteNonNegative(resolved);
+        },
         .percent => |fraction| blk: {
             const percentage_basis = basis orelse return null;
             break :blk fraction * percentage_basis;
@@ -2074,41 +2098,83 @@ fn usedSize(
     edges: Edges,
     fallback: ?widget.Size,
 ) Error!widget.Size {
+    const width_adjustment = dimensionAdjustment(
+        input.size.width,
+        edges.horizontal,
+        edges.box_horizontal,
+    );
+    const height_adjustment = dimensionAdjustment(
+        input.size.height,
+        edges.vertical,
+        edges.box_vertical,
+    );
     var width = try resolveDimensionBorder(
         input.size.width,
         percentage_basis.width,
         intrinsic.width,
-        edges.horizontal,
+        width_adjustment,
         input.box_sizing,
     );
     var height = try resolveDimensionBorder(
         input.size.height,
         percentage_basis.height,
         intrinsic.height,
-        edges.vertical,
+        height_adjustment,
         input.box_sizing,
     );
+    const width_resolved_border = width != null;
+    const height_resolved_border = height != null;
+    var width_edge_sum = width_adjustment;
+    var height_edge_sum = height_adjustment;
     if (width == null) {
-        width = if (fallback) |value|
-            try borderToSizing(value.width, edges.horizontal, input.box_sizing)
-        else
-            intrinsic.width;
+        if (fallback) |value| {
+            width = try borderToSizing(value.width, edges.horizontal, input.box_sizing);
+            width_edge_sum = edges.horizontal;
+        } else {
+            width = try contentToSizing(
+                intrinsic.width,
+                edges.horizontal,
+                edges.box_horizontal,
+                input.box_sizing,
+            );
+            width_edge_sum = edges.box_horizontal;
+        }
     }
     if (height == null and input.aspect_ratio != null and width != null) {
-        height = try finite(width.? / try ratio(input.aspect_ratio.?));
+        const width_sizing = if (width_resolved_border)
+            try borderToSizing(width.?, width_adjustment, input.box_sizing)
+        else
+            width.?;
+        height = try finite(width_sizing / try ratio(input.aspect_ratio.?));
+        height_edge_sum = edges.box_vertical;
     }
     if (height == null) {
-        height = if (fallback) |value|
-            try borderToSizing(value.height, edges.vertical, input.box_sizing)
-        else
-            intrinsic.height;
+        if (fallback) |value| {
+            height = try borderToSizing(value.height, edges.vertical, input.box_sizing);
+            height_edge_sum = edges.vertical;
+        } else {
+            height = try contentToSizing(
+                intrinsic.height,
+                edges.vertical,
+                edges.box_vertical,
+                input.box_sizing,
+            );
+            height_edge_sum = edges.box_vertical;
+        }
     }
     if (width == null and input.aspect_ratio != null and height != null) {
         width = try finite(height.? * try ratio(input.aspect_ratio.?));
+        width_edge_sum = edges.box_horizontal;
     }
     var result: widget.Size = .{
-        .width = try sizingToBorder(width orelse 0, edges.horizontal, input.box_sizing),
-        .height = try sizingToBorder(height orelse 0, edges.vertical, input.box_sizing),
+        .width = if (width_resolved_border)
+            width.?
+        else
+            try sizingToBorder(width orelse 0, width_edge_sum, input.box_sizing),
+        .height = if (height_resolved_border)
+            height.?
+        else
+            try sizingToBorder(height orelse 0, height_edge_sum, input.box_sizing),
     };
     result.width = try clampAxisSize(
         input,
@@ -2127,8 +2193,14 @@ fn usedSize(
         edges,
     );
     return .{
-        .width = @max(edges.horizontal, result.width),
-        .height = @max(edges.vertical, result.height),
+        .width = @max(
+            dimensionAdjustment(input.size.width, edges.horizontal, edges.box_horizontal),
+            result.width,
+        ),
+        .height = @max(
+            dimensionAdjustment(input.size.height, edges.vertical, edges.box_vertical),
+            result.height,
+        ),
     };
 }
 
@@ -2140,28 +2212,46 @@ fn clampAxisSize(
     intrinsic: widget.Size,
     edges: Edges,
 ) Error!f32 {
-    const dimension = if (axis == .horizontal) input.min_size.width else input.min_size.height;
-    const maximum_dimension = if (axis == .horizontal) input.max_size.width else input.max_size.height;
+    const minimum_dimension = if (axis == .horizontal)
+        input.min_size.width
+    else
+        input.min_size.height;
+    const maximum_dimension = if (axis == .horizontal)
+        input.max_size.width
+    else
+        input.max_size.height;
     const basis = if (axis == .horizontal) percentage_basis.width else percentage_basis.height;
     const natural = if (axis == .horizontal) intrinsic.width else intrinsic.height;
-    const edge_sum = if (axis == .horizontal) edges.horizontal else edges.vertical;
+    const content_inset = if (axis == .horizontal) edges.horizontal else edges.vertical;
+    const box_adjustment = if (axis == .horizontal) edges.box_horizontal else edges.box_vertical;
     const minimum = (try resolveDimensionBorder(
-        dimension,
+        minimum_dimension,
         basis,
         natural,
-        edge_sum,
+        dimensionAdjustment(minimum_dimension, content_inset, box_adjustment),
         input.box_sizing,
     )) orelse 0;
     const maximum = try resolveDimensionBorder(
         maximum_dimension,
         basis,
         natural,
-        edge_sum,
+        dimensionAdjustment(maximum_dimension, content_inset, box_adjustment),
         input.box_sizing,
     );
     var result = try nonNegative(candidate);
     if (maximum) |upper| result = @min(result, try nonNegative(upper));
     return @max(result, try nonNegative(minimum));
+}
+
+fn dimensionAdjustment(
+    dimension: style.Dimension,
+    content_inset: f32,
+    box_adjustment: f32,
+) f32 {
+    return switch (dimension) {
+        .length, .percent => box_adjustment,
+        .auto, .min_content, .max_content, .fit_content => content_inset,
+    };
 }
 
 fn resolveDimensionBorder(
@@ -2189,10 +2279,29 @@ fn resolveDimensionBorder(
         },
     };
     if (value) |number| {
-        const result = try sizingToBorder(number, edges, box_sizing);
-        return result;
+        const sizing_value = switch (dimension) {
+            .min_content, .max_content, .fit_content => try contentToSizing(
+                number,
+                edges,
+                edges,
+                box_sizing,
+            ),
+            .length, .percent => number,
+            .auto => unreachable,
+        };
+        return @as(?f32, try sizingToBorder(sizing_value, edges, box_sizing));
     }
     return null;
+}
+
+fn contentToSizing(
+    content: f32,
+    content_inset: f32,
+    box_adjustment: f32,
+    box_sizing: style.BoxSizing,
+) Error!f32 {
+    const border = try add(try nonNegative(content), content_inset);
+    return borderToSizing(border, box_adjustment, box_sizing);
 }
 
 fn sizingToBorder(value: f32, edges: f32, box_sizing: style.BoxSizing) Error!f32 {
@@ -2210,23 +2319,48 @@ fn borderToSizing(value: f32, edges: f32, box_sizing: style.BoxSizing) Error!f32
 }
 
 fn resolveEdges(input: style.Style, basis: ?f32) Error!Edges {
+    const scrollbar_width = try finite(input.scrollbar_width);
+    if (scrollbar_width < 0) return error.InvalidStyle;
+    const scrollbar_gutter = input.scrollbarGutter();
     const border: style.Sides = .{
         .top = try edge(input.border_inset.top, input.border.top, basis),
         .right = try edge(input.border_inset.right, input.border.right, basis),
         .bottom = try edge(input.border_inset.bottom, input.border.bottom, basis),
         .left = try edge(input.border_inset.left, input.border.left, basis),
     };
-    const padding: style.Sides = .{
+    const resolved_padding: style.Sides = .{
         .top = try edge(input.padding_inset.top, input.padding.top, basis),
         .right = try edge(input.padding_inset.right, input.padding.right, basis),
         .bottom = try edge(input.padding_inset.bottom, input.padding.bottom, basis),
         .left = try edge(input.padding_inset.left, input.padding.left, basis),
     };
+    const padding: style.Sides = .{
+        .top = try add(resolved_padding.top, scrollbar_gutter.top),
+        .right = try add(resolved_padding.right, scrollbar_gutter.right),
+        .bottom = try add(resolved_padding.bottom, scrollbar_gutter.bottom),
+        .left = try add(resolved_padding.left, scrollbar_gutter.left),
+    };
+    const box_horizontal = try add(
+        try add(border.left, border.right),
+        try add(resolved_padding.left, resolved_padding.right),
+    );
+    const box_vertical = try add(
+        try add(border.top, border.bottom),
+        try add(resolved_padding.top, resolved_padding.bottom),
+    );
     return .{
         .border = border,
         .padding = padding,
-        .horizontal = try add(try add(border.left, border.right), try add(padding.left, padding.right)),
-        .vertical = try add(try add(border.top, border.bottom), try add(padding.top, padding.bottom)),
+        .box_horizontal = box_horizontal,
+        .box_vertical = box_vertical,
+        .horizontal = try add(
+            box_horizontal,
+            try add(scrollbar_gutter.left, scrollbar_gutter.right),
+        ),
+        .vertical = try add(
+            box_vertical,
+            try add(scrollbar_gutter.top, scrollbar_gutter.bottom),
+        ),
     };
 }
 

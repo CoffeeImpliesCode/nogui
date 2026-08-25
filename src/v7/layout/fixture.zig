@@ -1024,12 +1024,18 @@ fn applyAttributeWithResources(
     if (std.mem.eql(u8, name, "justify-self")) return applyJustifySelf(result, value);
     if (std.mem.eql(u8, name, "grid-template-columns")) {
         const owner = resources orelse return error.InvalidFixture;
+        const scrollbar_gutter = result.scrollbarGutter();
         const width_avail: ?f32 = switch (result.size.width) {
             .length => |w| switch (result.box_sizing) {
-                .content_box => w,
+                .content_box => @max(
+                    0,
+                    w - scrollbar_gutter.left - scrollbar_gutter.right,
+                ),
                 .border_box => @max(
                     0,
-                    w - result.border.left - result.border.right - result.padding.left - result.padding.right,
+                    w - result.border.left - result.border.right -
+                        result.padding.left - result.padding.right -
+                        scrollbar_gutter.left - scrollbar_gutter.right,
                 ),
             },
             else => null,
@@ -1045,12 +1051,18 @@ fn applyAttributeWithResources(
     }
     if (std.mem.eql(u8, name, "grid-template-rows")) {
         const owner = resources orelse return error.InvalidFixture;
+        const scrollbar_gutter = result.scrollbarGutter();
         const height_avail: ?f32 = switch (result.size.height) {
             .length => |h| switch (result.box_sizing) {
-                .content_box => h,
+                .content_box => @max(
+                    0,
+                    h - scrollbar_gutter.top - scrollbar_gutter.bottom,
+                ),
                 .border_box => @max(
                     0,
-                    h - result.border.top - result.border.bottom - result.padding.top - result.padding.bottom,
+                    h - result.border.top - result.border.bottom -
+                        result.padding.top - result.padding.bottom -
+                        scrollbar_gutter.top - scrollbar_gutter.bottom,
                 ),
             },
             else => null,
@@ -1105,6 +1117,10 @@ fn applyAttributeWithResources(
     if (std.mem.eql(u8, name, "aspect-ratio")) return applyAspectRatio(result, value);
     if (std.mem.eql(u8, name, "overflow-x")) return applyOverflowAxis(&result.overflow.width, value);
     if (std.mem.eql(u8, name, "overflow-y")) return applyOverflowAxis(&result.overflow.height, value);
+    if (std.mem.eql(u8, name, "scrollbar-width")) {
+        result.scrollbar_width = try parseNonnegativeLength(value);
+        return;
+    }
     if (std.mem.eql(u8, name, "float")) return applyFloat(result, value);
     if (std.mem.eql(u8, name, "clear")) return applyClear(result, value);
     if (std.mem.eql(u8, name, "width")) return setDimension(&result.size.width, try parseDimension(value));
@@ -1459,6 +1475,27 @@ test "fixture numeric style values reject malformed and nonfinite input" {
     }
 }
 
+test "fixture scrollbar width parses finite nonnegative values" {
+    var result: style.Style = .{};
+    if (comptime @hasField(style.Style, "scrollbar_width")) {
+        try applyAttribute(&result, "scrollbar-width", "15");
+        try std.testing.expectEqual(@as(f32, 15), @field(result, "scrollbar_width"));
+
+        const invalid_values = [_][]const u8{ "-1", "nan", "inf", "15pxjunk" };
+        for (invalid_values) |value| {
+            var invalid: style.Style = .{};
+            try std.testing.expectError(
+                error.InvalidFixture,
+                applyAttribute(&invalid, "scrollbar-width", value),
+            );
+        }
+    } else {
+        // Keep the RED phase behavioral: the unsupported parser result is
+        // reported by the test instead of an absent-field compile error.
+        try applyAttribute(&result, "scrollbar-width", "15");
+    }
+}
+
 test "fixture accepts duplicated horizontal writing mode" {
     var result: style.Style = .{};
     try applyAttribute(&result, "writing-mode", "horizontal-tb");
@@ -1472,7 +1509,6 @@ test "fixture unmapped style syntax stays unsupported" {
         name: []const u8,
         value: []const u8,
     }{
-        .{ .name = "scrollbar-width", .value = "auto" },
         .{ .name = "text-align", .value = "left" },
         .{
             .name = "grid-template-columns",
@@ -1750,10 +1786,10 @@ test "fixture grid templates parse repeat and fit-content patterns" {
         "fit-content(20px) repeat(2, minmax(10px, 1fr)) fit-content(30px)",
     );
     const expected_rows = [_]style.GridTrack{
-        .{ .fit_content = 20 },
+        .{ .fit_content = .{ .length = 20 } },
         .{ .minmax = .{ .min = .{ .fixed = 10 }, .max = .{ .fr = 1 } } },
         .{ .minmax = .{ .min = .{ .fixed = 10 }, .max = .{ .fr = 1 } } },
-        .{ .fit_content = 30 },
+        .{ .fit_content = .{ .length = 30 } },
     };
     try std.testing.expectEqual(expected_rows.len, result.grid_template_rows.len);
     for (expected_rows, result.grid_template_rows) |expected, actual| {
@@ -1767,9 +1803,20 @@ test "fixture grid templates parse repeat and fit-content patterns" {
         "fit-content(50px)",
     );
     try std.testing.expect(std.meta.eql(
-        @as(style.GridTrack, .{ .fit_content = 50 }),
+        @as(style.GridTrack, .{ .fit_content = .{ .length = 50 } }),
         result.grid_auto_columns,
     ));
+
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-columns",
+        "fit-content(50%)",
+    );
+    try std.testing.expectEqual(
+        style.GridTrack{ .fit_content = .{ .percent = 0.5 } },
+        result.grid_template_columns[0],
+    );
 }
 
 test "fixture grid templates parse auto-fit and auto-fill repeat patterns" {
@@ -1811,6 +1858,48 @@ test "fixture grid templates parse auto-fit and auto-fill repeat patterns" {
     for (expected_fill, result.grid_template_columns) |expected, actual| {
         try std.testing.expect(std.meta.eql(expected, actual));
     }
+}
+
+test "fixture grid auto-fill subtracts scrollbar gutter from border-box width" {
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    var result: style.Style = .{};
+    try applyAttribute(&result, "display", "grid");
+    try applyAttribute(&result, "box-sizing", "border-box");
+    try applyAttribute(&result, "width", "100px");
+    try applyAttribute(&result, "overflow-y", "scroll");
+    try applyAttribute(&result, "scrollbar-width", "15");
+    try applyAttribute(&result, "gap", "0");
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-columns",
+        "repeat(auto-fill, 30px)",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), result.grid_template_columns.len);
+}
+
+test "fixture grid auto-fill subtracts scrollbar gutter from content-box width" {
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    var result: style.Style = .{};
+    try applyAttribute(&result, "display", "grid");
+    try applyAttribute(&result, "box-sizing", "content-box");
+    try applyAttribute(&result, "width", "100px");
+    try applyAttribute(&result, "overflow-y", "scroll");
+    try applyAttribute(&result, "scrollbar-width", "15");
+    try applyAttribute(&result, "gap", "0");
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-template-columns",
+        "repeat(auto-fill, 30px)",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), result.grid_template_columns.len);
 }
 
 test "fixture grid placements parse lines and positive spans" {
@@ -2316,15 +2405,15 @@ fn trackTokenEstimatedSize(token: []const u8, available_size: ?f32) f32 {
     return switch (track) {
         .fixed => |v| v,
         .percent => |p| if (available_size) |avail| p * avail else 0,
-        .fit_content => |v| v,
+        .fit_content => |limit| limit.resolve(available_size) orelse 0,
         .minmax => |mm| switch (mm.min) {
             .fixed => |v| v,
             .percent => |p| if (available_size) |avail| p * avail else 0,
-            .fit_content => |v| v,
+            .fit_content => |limit| limit.resolve(available_size) orelse 0,
             .auto, .min_content, .max_content => switch (mm.max) {
                 .fixed => |v| v,
                 .percent => |p| if (available_size) |avail| p * avail else 0,
-                .fit_content => |v| v,
+                .fit_content => |limit| limit.resolve(available_size) orelse 0,
                 .auto, .min_content, .max_content, .fr => 0,
             },
             .fr => 0,
@@ -2545,22 +2634,11 @@ fn parseGridTrackToken(token: []const u8) CaseError!style.GridTrack {
     }
     return error.Unsupported;
 }
-fn parseGridFitContent(token: []const u8) CaseError!f32 {
+fn parseGridFitContent(token: []const u8) CaseError!style.LengthPercentage {
     if (!std.mem.endsWith(u8, token, ")")) return error.Unsupported;
     const body = std.mem.trim(u8, token[12 .. token.len - 1], " \t\n\r");
     if (body.len == 0) return error.InvalidFixture;
-    if (std.mem.endsWith(u8, body, "px")) {
-        return parseGridNonnegativeNumber(body[0 .. body.len - 2]);
-    }
-    if (std.mem.endsWith(u8, body, "%")) {
-        const pct_str = body[0 .. body.len - 1];
-        const num = std.fmt.parseFloat(f32, pct_str) catch return error.InvalidFixture;
-        if (num < 0) return error.InvalidFixture;
-        return error.Unsupported;
-    }
-    const number = std.fmt.parseFloat(f32, body) catch return error.InvalidFixture;
-    if (number < 0) return error.InvalidFixture;
-    return number;
+    return parseLengthPercentage(body);
 }
 
 fn parseGridNonnegativeNumber(value: []const u8) CaseError!f32 {
