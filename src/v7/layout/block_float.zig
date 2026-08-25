@@ -286,11 +286,21 @@ fn measureNaturalBlockContent(
             .block, .flow_root => unreachable,
         };
         const margins = try resolveMargins(child.style, child_request.percentage_basis.width);
+        const intrinsic_margin_left = try resolveMargin(
+            child.style.margin_inset.left,
+            child.style.margin.left,
+            null,
+        );
+        const intrinsic_margin_right = try resolveMargin(
+            child.style.margin_inset.right,
+            child.style.margin.right,
+            null,
+        );
         content_width_natural = @max(
             content_width_natural,
             try addFinite(
-                try addFinite(natural.border.width, margins.left),
-                margins.right,
+                try addFinite(natural.border.width, intrinsic_margin_left),
+                intrinsic_margin_right,
             ),
         );
         content_height = try addFinite(
@@ -1620,16 +1630,16 @@ fn resolveAbsoluteAutoMarginAxis(
     const auto_count: u8 = @as(u8, @intFromBool(start_auto)) +
         @as(u8, @intFromBool(end_auto));
     if (auto_count == 0) return;
-    const free_space = @max(
-        0,
+    if (start_inset == null or end_inset == null) return;
+    const free_space = try subtractFinite(
         try subtractFinite(
             try subtractFinite(
                 try subtractFinite(
                     try subtractFinite(
                         available,
-                        start_inset orelse 0,
+                        start_inset.?,
                     ),
-                    end_inset orelse 0,
+                    end_inset.?,
                 ),
                 border_size,
             ),
@@ -1637,7 +1647,15 @@ fn resolveAbsoluteAutoMarginAxis(
         ),
         end_margin.*,
     );
-    const share = free_space / @as(f32, @floatFromInt(auto_count));
+    if (auto_count == 1) {
+        if (start_auto) {
+            start_margin.* = free_space;
+        } else {
+            end_margin.* = free_space;
+        }
+        return;
+    }
+    const share = @max(0, free_space) / @as(f32, @floatFromInt(auto_count));
     if (start_auto) start_margin.* = share;
     if (end_auto) end_margin.* = share;
 }

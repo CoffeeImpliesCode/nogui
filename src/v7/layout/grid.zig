@@ -384,7 +384,8 @@ fn measureNode(
     };
     _ = try finiteNonNegative(request.available.width);
     _ = try finiteNonNegative(request.available.height);
-    const edges = try resolveEdges(node.style, request.percentage_basis.width);
+    const input = node.style;
+    const edges = try resolveEdges(input, request.percentage_basis.width);
     var intrinsic: widget.Size = .{ .width = 0, .height = 0 };
     if (node.children.items.len == 0) {
         intrinsic = try measureLeaf(node, options.measure);
@@ -410,7 +411,7 @@ fn measureNode(
         intrinsic = try measureGridContent(tree, index, request, edges, options, depth - 1);
     }
     const border = try usedSize(
-        node.style,
+        input,
         request.percentage_basis,
         intrinsic,
         edges,
@@ -429,8 +430,9 @@ fn measureGridContent(
 ) Error!widget.Size {
     if (depth == 0) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
+    const input = node.style;
     const provisional = try usedSize(
-        node.style,
+        input,
         request.percentage_basis,
         request.available,
         edges,
@@ -440,12 +442,12 @@ fn measureGridContent(
         .width = @max(0, provisional.width - edges.horizontal),
         .height = @max(0, provisional.height - edges.vertical),
     };
-    const width_definite = switch (node.style.size.width) {
+    const width_definite = switch (input.size.width) {
         .length => true,
         .percent => request.percentage_basis.width != null,
         .auto, .min_content, .max_content, .fit_content => false,
     };
-    const height_definite = switch (node.style.size.height) {
+    const height_definite = switch (input.size.height) {
         .length => true,
         .percent => request.percentage_basis.height != null,
         .auto, .min_content, .max_content, .fit_content => false,
@@ -458,15 +460,15 @@ fn measureGridContent(
     try initTracks(
         options.allocator,
         &columns,
-        node.style.grid_template_columns,
-        node.style.grid_auto_columns,
+        input.grid_template_columns,
+        input.grid_auto_columns,
         if (width_definite) child_available.width else null,
     );
     try initTracks(
         options.allocator,
         &rows,
-        node.style.grid_template_rows,
-        node.style.grid_auto_rows,
+        input.grid_template_rows,
+        input.grid_auto_rows,
         if (height_definite) child_available.height else null,
     );
 
@@ -490,16 +492,16 @@ fn measureGridContent(
         &columns,
         &rows,
         &items,
-        node.style.grid_auto_flow,
-        node.style.grid_auto_columns,
-        node.style.grid_auto_rows,
+        input.grid_auto_flow,
+        input.grid_auto_columns,
+        input.grid_auto_rows,
         if (width_definite) child_available.width else null,
         if (height_definite) child_available.height else null,
         &occupied,
     );
 
-    const column_gap = try gridGap(node.style, .columns);
-    const row_gap = try gridGap(node.style, .rows);
+    const column_gap = try gridGap(input, .columns);
+    const row_gap = try gridGap(input, .rows);
 
     for (items.items) |item| {
         const width_need = try add(item.natural.border.width, item.margins.value.left + item.margins.value.right);
@@ -538,6 +540,78 @@ fn measureGridContent(
     const height = try trackTotal(rows.items, row_gap);
 
     return .{ .width = try nonNegative(width), .height = try nonNegative(height) };
+}
+
+fn intrinsicContributionStyle(
+    input: style.Style,
+    defer_width: bool,
+    defer_height: bool,
+) style.Style {
+    var result = input;
+    if (defer_width) {
+        if (result.size.width == .percent) result.size.width = .auto;
+        if (result.min_size.width == .percent) result.min_size.width = .auto;
+        if (result.max_size.width == .percent) result.max_size.width = .auto;
+    }
+    if (defer_height) {
+        if (result.size.height == .percent) result.size.height = .auto;
+        if (result.min_size.height == .percent) result.min_size.height = .auto;
+        if (result.max_size.height == .percent) result.max_size.height = .auto;
+    }
+    return result;
+}
+
+fn hasPercentageContribution(input: style.Style, axis: TrackAxis) bool {
+    const preferred = switch (axis) {
+        .columns => input.size.width,
+        .rows => input.size.height,
+    };
+    const minimum = switch (axis) {
+        .columns => input.min_size.width,
+        .rows => input.min_size.height,
+    };
+    const maximum = switch (axis) {
+        .columns => input.max_size.width,
+        .rows => input.max_size.height,
+    };
+    return preferred == .percent or minimum == .percent or maximum == .percent;
+}
+fn autoAxisClamped(
+    input: style.Style,
+    axis: enum { horizontal, vertical },
+    intrinsic: widget.Size,
+    edges: Edges,
+    percentage_basis: style.Size(?f32),
+) Error!bool {
+    const dimension = if (axis == .horizontal) input.size.width else input.size.height;
+    if (dimension != .auto) return false;
+    const natural = if (axis == .horizontal) intrinsic.width else intrinsic.height;
+    const edge_sum = if (axis == .horizontal) edges.horizontal else edges.vertical;
+    const candidate = try sizingToBorder(natural, edge_sum, input.box_sizing);
+    const minimum_dimension = if (axis == .horizontal) input.min_size.width else input.min_size.height;
+    const maximum_dimension = if (axis == .horizontal) input.max_size.width else input.max_size.height;
+    const basis = if (axis == .horizontal) percentage_basis.width else percentage_basis.height;
+    const minimum = try resolveDimensionBorder(
+        minimum_dimension,
+        basis,
+        natural,
+        edge_sum,
+        input.box_sizing,
+    );
+    if (minimum) |value| {
+        if (candidate < value) return true;
+    }
+    const maximum = try resolveDimensionBorder(
+        maximum_dimension,
+        basis,
+        natural,
+        edge_sum,
+        input.box_sizing,
+    );
+    if (maximum) |value| {
+        if (candidate > value) return true;
+    }
+    return false;
 }
 
 fn naturalAxisDefinite(
@@ -669,8 +743,22 @@ fn layoutGridNode(
         node.style.size.width == .max_content or node.style.size.width == .fit_content;
     const height_auto = node.style.size.height == .auto or node.style.size.height == .min_content or
         node.style.size.height == .max_content or node.style.size.height == .fit_content;
-    const width_definite = forced_border != null or !width_auto;
-    const height_definite = forced_border != null or !height_auto;
+    const width_clamped = try autoAxisClamped(
+        node.style,
+        .horizontal,
+        natural.content,
+        edges,
+        .{ .width = containing.width, .height = containing.height },
+    );
+    const height_clamped = try autoAxisClamped(
+        node.style,
+        .vertical,
+        natural.content,
+        edges,
+        .{ .width = containing.width, .height = containing.height },
+    );
+    const width_definite = forced_border != null or !width_auto or width_clamped;
+    const height_definite = forced_border != null or !height_auto or height_clamped;
     try sizeTracks(options.allocator, &columns, &rows, items.items, content, node, width_definite, height_definite);
 
     var column_offsets: std.ArrayList(f32) = .empty;
@@ -682,7 +770,7 @@ fn layoutGridNode(
     const column_total = try trackTotal(columns.items, column_gap);
     const row_total = try trackTotal(rows.items, row_gap);
     var final_content_height = content.height;
-    if (height_auto and forced_border == null) {
+    if (height_auto and forced_border == null and !height_clamped) {
         final_content_height = row_total;
         node.rect.h = try add(row_total, edges.vertical);
     }
@@ -946,6 +1034,7 @@ fn layoutGridNode(
         row_gap,
         justify_distribution.extra_gap,
         align_distribution.extra_gap,
+        node.style.writing_direction,
         options,
         depth - 1,
     );
@@ -965,21 +1054,44 @@ fn collectItems(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position == .absolute) continue;
+        const defer_width = hasPercentageContribution(child.style, .columns);
+        const defer_height = hasPercentageContribution(child.style, .rows);
         var child_req = request;
-        if (!naturalAxisDefinite(child.style.size.width, request.intrinsic_width, request.percentage_basis.width)) {
+        if (defer_width) {
+            child_req.intrinsic_width = true;
+        } else if (!naturalAxisDefinite(
+            child.style.size.width,
+            request.intrinsic_width,
+            request.percentage_basis.width,
+        )) {
             child_req.intrinsic_width = dimensionAuto(child.style.size.width);
         }
-        if (!naturalAxisDefinite(child.style.size.height, request.intrinsic_height, request.percentage_basis.height)) {
+        if (defer_height) {
+            child_req.intrinsic_height = true;
+        } else if (!naturalAxisDefinite(
+            child.style.size.height,
+            request.intrinsic_height,
+            request.percentage_basis.height,
+        )) {
             child_req.intrinsic_height = dimensionAuto(child.style.size.height);
         }
-        const natural = try measureNode(
-            tree,
-            child_index,
-            child_req,
-            options,
-            depth,
-            container.style.display,
-        );
+        const natural = blk: {
+            const original_style = child.style;
+            child.style = intrinsicContributionStyle(
+                original_style,
+                defer_width,
+                defer_height,
+            );
+            defer child.style = original_style;
+            break :blk try measureNode(
+                tree,
+                child_index,
+                child_req,
+                options,
+                depth,
+                container.style.display,
+            );
+        };
         const margins = try resolveMargins(child.style, request.percentage_basis.width);
         const row_line = gridLineFor(child.style, .rows);
         const column_line = gridLineFor(child.style, .columns);
@@ -1798,6 +1910,7 @@ fn placeAbsolute(
     row_gap: f32,
     column_extra_gap: f32,
     row_extra_gap: f32,
+    writing_direction: style.Direction,
     options: Options,
     depth: usize,
 ) Error!void {
@@ -1829,6 +1942,9 @@ fn placeAbsolute(
                     area_width = 0;
                 }
             }
+        }
+        if (writing_direction == .rtl and col_placement.definite) {
+            area_x = try finite(content.width - area_x - area_width);
         }
 
         const row_line = gridLineFor(child.style, .rows);
@@ -1908,8 +2024,13 @@ fn placeAbsolute(
             try add(area_x, try add(value, margins.value.left))
         else if (right) |value|
             try finite(area_x + area_width - value - margins.value.right - child_size.width)
-        else
-            try add(area_x, margins.value.left);
+        else if (writing_direction == .rtl) blk: {
+            const static_end = if (col_placement.definite)
+                try add(area_x, area_width)
+            else
+                content.width;
+            break :blk try finite(static_end - margins.value.right - child_size.width);
+        } else try add(area_x, margins.value.left);
         const y = if (top) |value|
             try add(area_y, try add(value, margins.value.top))
         else if (bottom) |value|

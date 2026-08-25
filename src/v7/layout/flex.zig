@@ -44,12 +44,10 @@ fn childNaturalRequest(
 ) layout_context.Request {
     const width_definite = naturalAxisDefinite(
         parent_node.style.size.width,
-        parent.intrinsic_width,
         parent.percentage_basis.width,
     );
     const height_definite = naturalAxisDefinite(
         parent_node.style.size.height,
-        parent.intrinsic_height,
         parent.percentage_basis.height,
     );
     return .{
@@ -65,14 +63,12 @@ fn childNaturalRequest(
 
 fn naturalAxisDefinite(
     dimension: style.Dimension,
-    intrinsic: bool,
     percentage_basis: ?f32,
 ) bool {
     return switch (dimension) {
         .length => true,
-        .min_content, .max_content, .fit_content => false,
         .percent => percentage_basis != null,
-        .auto => !intrinsic,
+        .auto, .min_content, .max_content, .fit_content => false,
     };
 }
 
@@ -117,13 +113,17 @@ pub fn layoutPreparedContainer(
         null,
     );
     const edges = try resolveEdges(tree.nodes.items[index].style, request.percentage_basis.width);
+    const fallback: widget.Size = .{
+        .width = if (options.intrinsic_width) intrinsic.border.width else request.available.width,
+        .height = if (options.intrinsic_height) intrinsic.border.height else request.available.height,
+    };
     const size = forced_border orelse try usedSize(
         tree.nodes.items[index].style,
         request.available,
         request.percentage_basis,
         intrinsic.content,
         edges,
-        request.available,
+        fallback,
     );
     const origin = tree.nodes.items[index].rect;
     tree.nodes.items[index].rect = .{
@@ -537,7 +537,7 @@ fn measureContainerContent(
             outer_main
         else
             try add(try add(line_main, main_gap), outer_main);
-        if (!intrinsic_main and effectiveWrap(node.style) != .nowrap and
+        if (effectiveWrap(node.style) != .nowrap and
             line_items != 0 and candidate > available_main)
         {
             total_main = @max(total_main, line_main);
@@ -733,6 +733,7 @@ fn collectItems(
             request.available,
             request.percentage_basis,
             natural.content,
+            natural.border,
             edges,
             axes,
         );
@@ -784,6 +785,7 @@ fn constraintsFor(
     containing: widget.Size,
     percentage_basis: style.Size(?f32),
     intrinsic: widget.Size,
+    natural_border: widget.Size,
     edges: Edges,
     axes: Axes,
 ) sizing.Error!Constraints {
@@ -829,6 +831,18 @@ fn constraintsFor(
             .main = .{ .min = try nonNegative(min_height), .max = max_height },
             .cross = .{ .min = try nonNegative(min_width), .max = max_width },
         };
+    const main_min_dimension = if (axes.horizontal) input.min_size.width else input.min_size.height;
+    const main_overflow = if (axes.horizontal) input.overflow.width else input.overflow.height;
+    const preserves_automatic_minimum = switch (main_overflow) {
+        .visible, .clip => true,
+        .hidden, .scroll, .auto => false,
+    };
+    if (dimensionAuto(main_min_dimension) and
+        input.min_main == null and
+        preserves_automatic_minimum)
+    {
+        result.main.min = @max(result.main.min, axisMain(axes, natural_border));
+    }
     if (input.min_main) |minimum| {
         result.main.min = @max(result.main.min, try nonNegative(minimum));
     }
@@ -1162,18 +1176,38 @@ fn placeAbsolute(
         const top = try resolveInset(child.style.inset.top, content.height);
         const bottom = try resolveInset(child.style.inset.bottom, content.height);
         const margins = try resolveMargins(child.style, content.width);
+        const axes = axesFor(container.style);
+        const alignment = alignValue(child.style.align_self, container.style.@"align");
+        const static_main = try staticMainPosition(
+            container.style.justify,
+            axisMain(axes, content),
+            axisMain(axes, size),
+            marginStart(axes, margins),
+            marginEnd(axes, margins),
+            axes.reverse,
+        );
+        const static_cross = try staticCrossPosition(
+            alignment,
+            axisCross(axes, content),
+            axisCross(axes, size),
+            crossStart(axes, margins),
+            crossEnd(axes, margins),
+            axes.cross_reverse,
+        );
+        const static_x = if (axes.horizontal) static_main else static_cross;
+        const static_y = if (axes.horizontal) static_cross else static_main;
         const x = if (left) |value|
             try add(value, margins.value.left)
         else if (right) |value|
             try finite(content.width - value - margins.value.right - size.width)
         else
-            margins.value.left;
+            static_x;
         const y = if (top) |value|
             try add(value, margins.value.top)
         else if (bottom) |value|
             try finite(content.height - value - margins.value.bottom - size.height)
         else
-            margins.value.top;
+            static_y;
         child.rect = .{ .x = x, .y = y, .w = size.width, .h = size.height };
         try checkRect(child.rect);
         if (child.children.items.len != 0) {
@@ -1202,6 +1236,36 @@ fn placeAbsolute(
         }
     }
 }
+fn staticMainPosition(
+    value: style.Justify,
+    available: f32,
+    size: f32,
+    margin_start: f32,
+    margin_end: f32,
+    reverse: bool,
+) sizing.Error!f32 {
+    const free = @max(0, try finite(available - size - margin_start - margin_end));
+    const distribution = try justify(value, free, 1);
+    return position(try add(margin_start, distribution.offset), size, available, reverse);
+}
+
+fn staticCrossPosition(
+    value: style.Align,
+    available: f32,
+    size: f32,
+    margin_start: f32,
+    margin_end: f32,
+    reverse: bool,
+) sizing.Error!f32 {
+    const free = @max(0, try finite(available - size - margin_start - margin_end));
+    const offset = switch (value) {
+        .stretch, .start, .baseline => 0,
+        .center => free / 2,
+        .end => free,
+    };
+    return position(try add(margin_start, offset), size, available, reverse);
+}
+
 fn usedSize(
     input: style.Style,
     containing: widget.Size,
@@ -1222,28 +1286,32 @@ fn usedSize(
         percentage_basis.height,
         intrinsic.height,
     );
+    const width_auto = width == null;
+    const height_auto = height == null;
+    if (width == null and height != null and input.aspect_ratio != null) {
+        width = try finite(height.? * try ratio(input.aspect_ratio.?));
+    }
+    if (height == null and width != null and input.aspect_ratio != null) {
+        height = try finite(width.? / try ratio(input.aspect_ratio.?));
+    }
     if (width == null) {
         width = if (fallback) |value|
             try borderToSizing(value.width, edges.horizontal, input.box_sizing)
         else
-            try contentToBorder(intrinsic.width, edges.horizontal, input.box_sizing);
-    }
-    if (height == null and input.aspect_ratio != null and width != null) {
-        height = try finite(width.? / try ratio(input.aspect_ratio.?));
+            try nonNegative(intrinsic.width);
     }
     if (height == null) {
         height = if (fallback) |value|
             try borderToSizing(value.height, edges.vertical, input.box_sizing)
         else
-            try contentToBorder(intrinsic.height, edges.vertical, input.box_sizing);
-    }
-    if (width == null and input.aspect_ratio != null and height != null) {
-        width = try finite(height.? * try ratio(input.aspect_ratio.?));
+            try nonNegative(intrinsic.height);
     }
     var result: widget.Size = .{
         .width = try sizingToBorder(width.?, edges.horizontal, input.box_sizing),
         .height = try sizingToBorder(height.?, edges.vertical, input.box_sizing),
     };
+    const width_before_clamp = result.width;
+    const height_before_clamp = result.height;
     result.width = try clampSize(
         input,
         .horizontal,
@@ -1262,6 +1330,53 @@ fn usedSize(
         intrinsic,
         edges,
     );
+    if (input.aspect_ratio) |aspect_ratio| {
+        const ratio_value = try ratio(aspect_ratio);
+        if (height_auto and result.width != width_before_clamp) {
+            const width_sizing = try borderToSizing(
+                result.width,
+                edges.horizontal,
+                input.box_sizing,
+            );
+            const height_sizing = try finite(width_sizing / ratio_value);
+            const height_border = try sizingToBorder(
+                height_sizing,
+                edges.vertical,
+                input.box_sizing,
+            );
+            result.height = try clampSize(
+                input,
+                .vertical,
+                height_border,
+                containing,
+                percentage_basis,
+                intrinsic,
+                edges,
+            );
+        }
+        if (width_auto and result.height != height_before_clamp) {
+            const height_sizing = try borderToSizing(
+                result.height,
+                edges.vertical,
+                input.box_sizing,
+            );
+            const width_sizing = try finite(height_sizing * ratio_value);
+            const width_border = try sizingToBorder(
+                width_sizing,
+                edges.horizontal,
+                input.box_sizing,
+            );
+            result.width = try clampSize(
+                input,
+                .horizontal,
+                width_border,
+                containing,
+                percentage_basis,
+                intrinsic,
+                edges,
+            );
+        }
+    }
     return .{
         .width = @max(edges.horizontal, result.width),
         .height = @max(edges.vertical, result.height),
@@ -1352,17 +1467,6 @@ fn resolveDimensionBorder(
         return @as(?f32, border);
     }
     return null;
-}
-
-fn contentToBorder(
-    content: f32,
-    edges: f32,
-    box_sizing: style.BoxSizing,
-) sizing.Error!f32 {
-    return switch (box_sizing) {
-        .content_box => add(try nonNegative(content), edges),
-        .border_box => @max(edges, try nonNegative(content)),
-    };
 }
 
 fn sizingToBorder(

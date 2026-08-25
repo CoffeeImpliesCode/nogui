@@ -107,6 +107,7 @@ test "flex bridge remeasures mixed block after main-axis shrink" {
 
     var mixed_block_style = autoStyle(.block);
     mixed_block_style.flex_basis = .{ .length = 80 };
+    mixed_block_style.min_size.width = .{ .length = 0 };
     try appendNode(
         &tree,
         mixed_block_id,

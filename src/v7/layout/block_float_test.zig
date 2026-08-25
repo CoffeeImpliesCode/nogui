@@ -2935,3 +2935,128 @@ test "block: absolute percentage insets resolve against the containing box" {
     try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 200, .h = 100 });
     try expectRelative(&tree, absolute_id, .{ .x = 50, .y = 10, .w = 10, .h = 10 });
 }
+
+test "block intrinsic auto width ignores positive and negative percentage child margins" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const positive_child_id: Id = @enumFromInt(1);
+    const positive_auto_id: Id = @enumFromInt(2);
+    const positive_intrinsic_id: Id = @enumFromInt(3);
+    const negative_child_id: Id = @enumFromInt(4);
+    const negative_auto_id: Id = @enumFromInt(5);
+    const negative_intrinsic_id: Id = @enumFromInt(6);
+    const root_id: Id = @enumFromInt(7);
+
+    try appendNode(&tree, positive_child_id, positive_auto_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .percent = 0.1 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .percent = 0.2 },
+        },
+    });
+    try appendNode(&tree, positive_auto_id, positive_intrinsic_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, positive_intrinsic_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .max_content, .height = .auto },
+    });
+    try appendNode(&tree, negative_child_id, negative_auto_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .percent = -0.1 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .percent = -0.2 },
+        },
+    });
+    try appendNode(&tree, negative_auto_id, negative_intrinsic_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, negative_intrinsic_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .max_content, .height = .auto },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 300 }, .height = .{ .length = 100 } },
+    });
+    try tree.appendChild(root_id, positive_intrinsic_id);
+    try tree.appendChild(root_id, negative_intrinsic_id);
+    try tree.appendChild(positive_intrinsic_id, positive_auto_id);
+    try tree.appendChild(positive_auto_id, positive_child_id);
+    try tree.appendChild(negative_intrinsic_id, negative_auto_id);
+    try tree.appendChild(negative_auto_id, negative_child_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(300, 100), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 300, .h = 100 });
+    try expectRelative(
+        &tree,
+        positive_intrinsic_id,
+        .{ .x = 0, .y = 0, .w = 100, .h = 10 },
+    );
+    try expectRelative(&tree, positive_auto_id, .{ .x = 0, .y = 0, .w = 100, .h = 10 });
+    try expectRelative(&tree, positive_child_id, .{ .x = 20, .y = 0, .w = 100, .h = 10 });
+    try expectRelative(
+        &tree,
+        negative_intrinsic_id,
+        .{ .x = 0, .y = 10, .w = 100, .h = 10 },
+    );
+    try expectRelative(&tree, negative_auto_id, .{ .x = 0, .y = 0, .w = 100, .h = 10 });
+    try expectRelative(&tree, negative_child_id, .{ .x = -20, .y = 0, .w = 100, .h = 10 });
+}
+
+test "absolute oversized child keeps negative free space in one auto margin" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 72 }, .height = .{ .length = 72 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+        .inset = .{
+            .top = .auto,
+            .right = .{ .length = 20 },
+            .bottom = .auto,
+            .left = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 52 }, .height = .{ .length = 52 } },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(52, 52), null);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 52, .h = 52 });
+    try expectRelative(&tree, absolute_id, .{ .x = -50, .y = 0, .w = 72, .h = 72 });
+}

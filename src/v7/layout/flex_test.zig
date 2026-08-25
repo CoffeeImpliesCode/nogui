@@ -417,3 +417,414 @@ test "non-finite available size returns InvalidStyle" {
         ));
     }
 }
+
+test "absolute auto insets use row justify center" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(60, 40);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .center,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 110 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 110, .height = 100 });
+
+    try expectRelative(&tree, absolute_id, .{ .x = 25, .y = 0, .w = 60, .h = 40 });
+}
+
+test "absolute auto insets use row cross-axis alignment" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(60, 40);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .start,
+        .@"align" = .center,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 110 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 110, .height = 100 });
+
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 30, .w = 60, .h = 40 });
+}
+
+test "indefinite flex percentages collapse while definite percentages resolve" {
+    {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var child = fixedItem(0, 0);
+        child.size = .{
+            .width = .{ .percent = 0.5 },
+            .height = .{ .percent = 0.5 },
+        };
+        try appendNode(&tree, child_id, container_id, child);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{ .width = .auto, .height = .auto },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try flex.layoutContainer(&tree, container_id, .{
+            .allocator = std.testing.allocator,
+            .available = .{ .width = 100, .height = 100 },
+            .measure = null,
+            .intrinsic_width = true,
+            .intrinsic_height = true,
+        });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 0, .h = 0 });
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 0, .h = 0 });
+    }
+
+    {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var child = fixedItem(0, 0);
+        child.size = .{
+            .width = .{ .percent = 0.5 },
+            .height = .{ .percent = 0.5 },
+        };
+        try appendNode(&tree, child_id, container_id, child);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    }
+}
+
+test "absolute aspect ratio reflows after max-width clamp" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    try tree.appendNode(.{
+        .id = absolute_id,
+        .kind = .{ .spacer = .{ .size = 100 } },
+        .parent = container_id,
+        .style = .{
+            .display = .block,
+            .position = .absolute,
+            .box_sizing = .border_box,
+            .size = .{ .width = .auto, .height = .auto },
+            .max_size = .{ .width = .{ .length = 50 }, .height = .auto },
+            .aspect_ratio = 3,
+            .inset = .{
+                .top = .auto,
+                .right = .auto,
+                .bottom = .auto,
+                .left = .auto,
+            },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(
+        &tree,
+        absolute_id,
+        .{ .x = 0, .y = 0, .w = 50, .h = 50.0 / 3.0 },
+    );
+}
+
+test "automatic flex minimum follows overflow visibility" {
+    const scenarios = [_]struct {
+        overflow: style.Overflow,
+        expected_width: f32,
+    }{
+        .{ .overflow = .visible, .expected_width = 100 },
+        .{ .overflow = .hidden, .expected_width = 50 },
+        .{ .overflow = .scroll, .expected_width = 50 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        try tree.appendNode(.{
+            .id = child_id,
+            .kind = .{ .spacer = .{ .size = 100 } },
+            .parent = container_id,
+            .style = .{
+                .display = .block,
+                .box_sizing = .border_box,
+                .shrink = 1,
+                .overflow = .{ .width = scenario.overflow, .height = .visible },
+                .size = .{
+                    .width = .auto,
+                    .height = .{ .length = 10 },
+                },
+            },
+        });
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 50 },
+            },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 50, .height = 50 });
+
+        try expectRelative(
+            &tree,
+            child_id,
+            .{ .x = 0, .y = 0, .w = scenario.expected_width, .h = 10 },
+        );
+    }
+}
+
+test "automatic flex minimum is capped by preferred width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .spacer = .{ .size = 100 } },
+        .parent = container_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .shrink = 1,
+            .overflow = .{ .width = .visible, .height = .visible },
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 50 },
+        },
+    });
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 50, .height = 50 });
+
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+}
+
+test "automatic flex minimum is capped by max width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .spacer = .{ .size = 100 } },
+        .parent = container_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .shrink = 1,
+            .overflow = .{ .width = .visible, .height = .visible },
+            .size = .{
+                .width = .auto,
+                .height = .{ .length = 10 },
+            },
+            .max_size = .{
+                .width = .{ .length = 50 },
+                .height = .auto,
+            },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 50 },
+        },
+    });
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 50, .height = 50 });
+
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+}
+
+test "absolute auto insets resolve auto margins to zero" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(20, 20);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    absolute.margin_inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
+}
+
+test "clip overflow keeps the visible automatic flex minimum" {
+    const scenarios = [_]struct {
+        overflow: style.Overflow,
+        expected_width: f32,
+    }{
+        .{ .overflow = .visible, .expected_width = 100 },
+        .{ .overflow = .clip, .expected_width = 100 },
+        .{ .overflow = .hidden, .expected_width = 50 },
+        .{ .overflow = .scroll, .expected_width = 50 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        try tree.appendNode(.{
+            .id = child_id,
+            .kind = .{ .spacer = .{ .size = 100 } },
+            .parent = container_id,
+            .style = .{
+                .display = .block,
+                .box_sizing = .border_box,
+                .shrink = 1,
+                .overflow = .{ .width = scenario.overflow, .height = .visible },
+                .size = .{
+                    .width = .auto,
+                    .height = .{ .length = 10 },
+                },
+            },
+        });
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 50 },
+            },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 50, .height = 50 });
+
+        try expectRelative(
+            &tree,
+            child_id,
+            .{ .x = 0, .y = 0, .w = scenario.expected_width, .h = 10 },
+        );
+    }
+}

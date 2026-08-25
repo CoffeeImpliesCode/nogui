@@ -955,6 +955,12 @@ fn applyFixtureAttributes(
             try jsonString(entry.value_ptr.*),
         );
     }
+    // CSS flex containers default to row; immediate-mode styles retain their column default.
+    if (attributes.get("display")) |display| {
+        if (std.mem.eql(u8, try jsonString(display), "flex")) {
+            if (!attributes.contains("flex-direction")) result.direction = .row;
+        }
+    }
 }
 
 fn isGridTemplateAttribute(name: []const u8) bool {
@@ -1157,6 +1163,56 @@ test "fixture flex direction and wrap attributes map represented values" {
         try std.testing.expectEqual(case.expected, result.wrap);
         try std.testing.expectEqual(case.expected, result.flex_wrap);
     }
+}
+
+test "fixture flex display defaults to row unless direction is explicit" {
+    const legacy: LegacyStyle = .{
+        .direction = "ltr",
+        .border_top = "0px",
+        .border_right = "0px",
+        .border_bottom = "0px",
+        .border_left = "0px",
+    };
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    var default_attributes: std.json.ObjectMap = .empty;
+    defer default_attributes.deinit(std.testing.allocator);
+    try default_attributes.put(std.testing.allocator, "display", .{ .string = "flex" });
+    const default_style = try fixtureStyle(
+        &fixture_tree.resources,
+        .{
+            .kind = "div",
+            .child_count = 0,
+            .attributes = .{ .object = default_attributes },
+            .style = legacy,
+        },
+        "border_box_ltr",
+    );
+
+    var explicit_attributes: std.json.ObjectMap = .empty;
+    defer explicit_attributes.deinit(std.testing.allocator);
+    try explicit_attributes.put(
+        std.testing.allocator,
+        "flex-direction",
+        .{ .string = "column" },
+    );
+    try explicit_attributes.put(std.testing.allocator, "display", .{ .string = "flex" });
+    const explicit_style = try fixtureStyle(
+        &fixture_tree.resources,
+        .{
+            .kind = "div",
+            .child_count = 0,
+            .attributes = .{ .object = explicit_attributes },
+            .style = legacy,
+        },
+        "border_box_ltr",
+    );
+
+    try std.testing.expectEqual(style.Display.flex, default_style.display);
+    try std.testing.expectEqual(style.Display.flex, explicit_style.display);
+    try std.testing.expectEqual(style.FlexDirection.column, explicit_style.direction);
+    try std.testing.expectEqual(style.FlexDirection.row, default_style.direction);
 }
 
 test "fixture flex item attributes map typed and legacy fields" {
