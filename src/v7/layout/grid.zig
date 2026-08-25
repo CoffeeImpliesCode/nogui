@@ -1047,11 +1047,9 @@ fn placeItems(
     for (items.items) |*item| {
         if (item.row.definite and item.column.definite) continue;
 
-        var candidate_row: usize = if (dense) 0 else cursor_row;
-        var candidate_column: usize = if (dense) 0 else cursor_column;
+        var candidate_row: usize = if (item.row.definite) item.row.start else if (dense) 0 else cursor_row;
+        var candidate_column: usize = if (item.column.definite) item.column.start else if (dense) 0 else cursor_column;
         while (true) {
-            if (item.row.definite) candidate_row = item.row.start;
-            if (item.column.definite) candidate_column = item.column.start;
             const row_span = item.row.end - item.row.start;
             const column_span = item.column.end - item.column.start;
             if (row_span == 0 or column_span == 0) return error.InvalidStyle;
@@ -1110,6 +1108,8 @@ fn placeItems(
             if (row_flow) {
                 if (item.column.definite) {
                     candidate_row += 1;
+                } else if (item.row.definite) {
+                    candidate_column += 1;
                 } else {
                     candidate_column += 1;
                     if (candidate_column >= columns.items.len) {
@@ -1120,6 +1120,8 @@ fn placeItems(
             } else {
                 if (item.row.definite) {
                     candidate_column += 1;
+                } else if (item.column.definite) {
+                    candidate_row += 1;
                 } else {
                     candidate_row += 1;
                     if (candidate_row >= rows.items.len) {

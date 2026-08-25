@@ -1660,7 +1660,6 @@ test "fixture grid placements parse lines and positive spans" {
         .{ .name = "grid-column-start", .value = "32768" },
         .{ .name = "grid-row-start", .value = "-32769" },
         .{ .name = "grid-column-end", .value = "span 0" },
-        .{ .name = "grid-column-end", .value = "span 256" },
         .{ .name = "grid-row-end", .value = "span -1" },
         .{ .name = "grid-row-end", .value = "span" },
         .{ .name = "grid-row-end", .value = "1 2" },
@@ -1677,6 +1676,15 @@ test "fixture grid placements parse lines and positive spans" {
             ),
         );
     }
+    try std.testing.expectError(
+        error.Unsupported,
+        applyAttributeWithResources(
+            &fixture_tree.resources,
+            &result,
+            "grid-column-end",
+            "span 256",
+        ),
+    );
     try std.testing.expectError(
         error.Unsupported,
         applyAttributeWithResources(
@@ -2297,11 +2305,13 @@ fn parseGridPlacement(value: []const u8) CaseError!style.GridPlacement {
         {
             return error.InvalidFixture;
         }
-        const span = std.fmt.parseInt(u8, span_text, 10) catch {
+        const parsed_span = std.fmt.parseInt(i64, span_text, 10) catch {
+            if (isNamedGridLine(span_text)) return error.Unsupported;
             return error.InvalidFixture;
         };
-        if (span == 0) return error.InvalidFixture;
-        return .{ .span = span };
+        if (parsed_span <= 0) return error.InvalidFixture;
+        if (parsed_span > std.math.maxInt(u8)) return error.Unsupported;
+        return .{ .span = @intCast(parsed_span) };
     }
     if (std.mem.indexOfAny(u8, trimmed, " \t\n\r") != null) {
         return error.InvalidFixture;
