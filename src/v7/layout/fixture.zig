@@ -894,12 +894,20 @@ fn fixtureStyle(
     setBorder(&result, .bottom, try pixelsF32(fixture_node.style.border_bottom));
     setBorder(&result, .left, try pixelsF32(fixture_node.style.border_left));
 
+    var has_flex_direction = false;
     if (fixture_node.attributes) |attributes| {
         const object = switch (attributes) {
             .object => |value| value,
             else => return error.InvalidFixture,
         };
+        has_flex_direction = object.contains("flex-direction");
         try applyFixtureAttributes(resources, &result, object);
+    }
+    if (std.mem.eql(u8, fixture_node.kind, "div") and
+        result.display == .flex and
+        !has_flex_direction)
+    {
+        result.direction = .row;
     }
     if (std.mem.eql(u8, fixture_node.kind, "text")) {
         const text = fixture_node.text orelse "";
@@ -954,12 +962,6 @@ fn applyFixtureAttributes(
             entry.key_ptr.*,
             try jsonString(entry.value_ptr.*),
         );
-    }
-    // CSS flex containers default to row; immediate-mode styles retain their column default.
-    if (attributes.get("display")) |display| {
-        if (std.mem.eql(u8, try jsonString(display), "flex")) {
-            if (!attributes.contains("flex-direction")) result.direction = .row;
-        }
     }
 }
 
@@ -1192,6 +1194,19 @@ test "fixture flex display defaults to row unless direction is explicit" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
 
+    var implicit_attributes: std.json.ObjectMap = .empty;
+    defer implicit_attributes.deinit(std.testing.allocator);
+    const implicit_style = try fixtureStyle(
+        &fixture_tree.resources,
+        .{
+            .kind = "div",
+            .child_count = 0,
+            .attributes = .{ .object = implicit_attributes },
+            .style = legacy,
+        },
+        "border_box_ltr",
+    );
+
     var default_attributes: std.json.ObjectMap = .empty;
     defer default_attributes.deinit(std.testing.allocator);
     try default_attributes.put(std.testing.allocator, "display", .{ .string = "flex" });
@@ -1201,6 +1216,20 @@ test "fixture flex display defaults to row unless direction is explicit" {
             .kind = "div",
             .child_count = 0,
             .attributes = .{ .object = default_attributes },
+            .style = legacy,
+        },
+        "border_box_ltr",
+    );
+
+    var block_attributes: std.json.ObjectMap = .empty;
+    defer block_attributes.deinit(std.testing.allocator);
+    try block_attributes.put(std.testing.allocator, "display", .{ .string = "block" });
+    const block_style = try fixtureStyle(
+        &fixture_tree.resources,
+        .{
+            .kind = "div",
+            .child_count = 0,
+            .attributes = .{ .object = block_attributes },
             .style = legacy,
         },
         "border_box_ltr",
@@ -1225,10 +1254,14 @@ test "fixture flex display defaults to row unless direction is explicit" {
         "border_box_ltr",
     );
 
+    try std.testing.expectEqual(style.Display.flex, implicit_style.display);
+    try std.testing.expectEqual(style.FlexDirection.row, implicit_style.direction);
     try std.testing.expectEqual(style.Display.flex, default_style.display);
+    try std.testing.expectEqual(style.FlexDirection.row, default_style.direction);
+    try std.testing.expectEqual(style.Display.block, block_style.display);
+    try std.testing.expectEqual(style.FlexDirection.column, block_style.direction);
     try std.testing.expectEqual(style.Display.flex, explicit_style.display);
     try std.testing.expectEqual(style.FlexDirection.column, explicit_style.direction);
-    try std.testing.expectEqual(style.FlexDirection.row, default_style.direction);
 }
 
 test "fixture flex item attributes map typed and legacy fields" {
@@ -1300,6 +1333,8 @@ test "fixture justify content maps represented values and flex aliases" {
         .{ .value = "start", .expected = .start },
         .{ .value = "flex-start", .expected = .start },
         .{ .value = "center", .expected = .center },
+        .{ .value = "safe center", .expected = .safe_center },
+        .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
         .{ .value = "flex-end", .expected = .end },
         .{ .value = "space-between", .expected = .space_between },
@@ -1322,6 +1357,8 @@ test "fixture alignment attributes map only represented values" {
         .{ .value = "start", .expected = .start },
         .{ .value = "flex-start", .expected = .start },
         .{ .value = "center", .expected = .center },
+        .{ .value = "safe center", .expected = .safe_center },
+        .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
         .{ .value = "flex-end", .expected = .end },
     };
@@ -1340,6 +1377,8 @@ test "fixture alignment attributes map only represented values" {
         .{ .value = "start", .expected = .start },
         .{ .value = "flex-start", .expected = .start },
         .{ .value = "center", .expected = .center },
+        .{ .value = "safe center", .expected = .safe_center },
+        .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
         .{ .value = "flex-end", .expected = .end },
     };
@@ -1357,6 +1396,8 @@ test "fixture alignment attributes map only represented values" {
         .{ .value = "start", .expected = .start },
         .{ .value = "flex-start", .expected = .start },
         .{ .value = "center", .expected = .center },
+        .{ .value = "safe center", .expected = .safe_center },
+        .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
         .{ .value = "flex-end", .expected = .end },
         .{ .value = "space-between", .expected = .space_between },
@@ -1375,9 +1416,6 @@ test "fixture unsupported alignment values stay explicit" {
         name: []const u8,
         value: []const u8,
     }{
-        .{ .name = "align-items", .value = "safe center" },
-        .{ .name = "align-self", .value = "safe center" },
-        .{ .name = "align-content", .value = "unsafe center" },
         .{ .name = "justify-content", .value = "baseline" },
         .{ .name = "column-gap", .value = "normal" },
         .{ .name = "aspect-ratio", .value = "1 / 2" },
@@ -2040,6 +2078,73 @@ test "fixture grid alignment and gaps populate grid fields" {
     try applyAttributeWithResources(&fixture_tree.resources, &result, "align-self", "stretch");
     try std.testing.expectEqual(style.AlignSelf.stretch, result.align_self);
     try std.testing.expectEqual(style.AlignSelf.stretch, result.grid_align_self);
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-content", "safe center");
+    try std.testing.expectEqual(style.Justify.safe_center, result.justify);
+    try std.testing.expectEqual(style.Justify.safe_center, result.grid_justify_content);
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "justify-content",
+        "unsafe center",
+    );
+    try std.testing.expectEqual(style.Justify.unsafe_center, result.justify);
+    try std.testing.expectEqual(style.Justify.unsafe_center, result.grid_justify_content);
+
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "align-content", "safe center");
+    try std.testing.expectEqual(style.AlignContent.safe_center, result.align_content);
+    try std.testing.expectEqual(style.AlignContent.safe_center, result.grid_align_content);
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "align-content",
+        "unsafe center",
+    );
+    try std.testing.expectEqual(style.AlignContent.unsafe_center, result.align_content);
+    try std.testing.expectEqual(style.AlignContent.unsafe_center, result.grid_align_content);
+
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-items", "safe center");
+    try std.testing.expectEqual(style.Align.safe_center, result.grid_justify_items);
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "justify-items",
+        "unsafe center",
+    );
+    try std.testing.expectEqual(style.Align.unsafe_center, result.grid_justify_items);
+
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "align-items", "safe center");
+    try std.testing.expectEqual(style.Align.safe_center, result.@"align");
+    try std.testing.expectEqual(style.Align.safe_center, result.grid_align_items);
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "align-items",
+        "unsafe center",
+    );
+    try std.testing.expectEqual(style.Align.unsafe_center, result.@"align");
+    try std.testing.expectEqual(style.Align.unsafe_center, result.grid_align_items);
+
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-self", "safe center");
+    try std.testing.expectEqual(style.AlignSelf.safe_center, result.grid_justify_self);
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "justify-self",
+        "unsafe center",
+    );
+    try std.testing.expectEqual(style.AlignSelf.unsafe_center, result.grid_justify_self);
+
+    try applyAttributeWithResources(&fixture_tree.resources, &result, "align-self", "safe center");
+    try std.testing.expectEqual(style.AlignSelf.safe_center, result.align_self);
+    try std.testing.expectEqual(style.AlignSelf.safe_center, result.grid_align_self);
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "align-self",
+        "unsafe center",
+    );
+    try std.testing.expectEqual(style.AlignSelf.unsafe_center, result.align_self);
+    try std.testing.expectEqual(style.AlignSelf.unsafe_center, result.grid_align_self);
 
     try applyAttributeWithResources(&fixture_tree.resources, &result, "gap", "4px");
     try std.testing.expectEqual(@as(f32, 4), result.grid_column_gap);
@@ -2048,28 +2153,6 @@ test "fixture grid alignment and gaps populate grid fields" {
     try applyAttributeWithResources(&fixture_tree.resources, &result, "row-gap", "3px");
     try std.testing.expectEqual(@as(f32, 2), result.grid_column_gap);
     try std.testing.expectEqual(@as(f32, 3), result.grid_row_gap);
-
-    const unsupported = [_]struct {
-        name: []const u8,
-        value: []const u8,
-    }{
-        .{ .name = "justify-items", .value = "safe center" },
-        .{ .name = "align-items", .value = "safe center" },
-        .{ .name = "justify-self", .value = "safe center" },
-        .{ .name = "align-self", .value = "safe center" },
-        .{ .name = "justify-content", .value = "safe center" },
-    };
-    for (unsupported) |case| {
-        try std.testing.expectError(
-            error.Unsupported,
-            applyAttributeWithResources(
-                &fixture_tree.resources,
-                &result,
-                case.name,
-                case.value,
-            ),
-        );
-    }
 }
 
 test "fixture grid representation gaps stay explicitly unsupported" {
@@ -2246,11 +2329,17 @@ fn applyRowGap(result: *style.Style, value: []const u8) CaseError!void {
 }
 
 fn applyJustifyContent(result: *style.Style, value: []const u8) CaseError!void {
-    result.justify = if (std.mem.eql(u8, value, "start") or
+    result.justify = if (std.mem.eql(u8, value, "normal"))
+        .normal
+    else if (std.mem.eql(u8, value, "start") or
         std.mem.eql(u8, value, "flex-start"))
         .start
     else if (std.mem.eql(u8, value, "center"))
         .center
+    else if (std.mem.eql(u8, value, "safe center"))
+        .safe_center
+    else if (std.mem.eql(u8, value, "unsafe center"))
+        .unsafe_center
     else if (std.mem.eql(u8, value, "end") or
         std.mem.eql(u8, value, "flex-end"))
         .end
@@ -2291,6 +2380,10 @@ fn applyAlignContent(result: *style.Style, value: []const u8) CaseError!void {
         .start
     else if (std.mem.eql(u8, value, "center"))
         .center
+    else if (std.mem.eql(u8, value, "safe center"))
+        .safe_center
+    else if (std.mem.eql(u8, value, "unsafe center"))
+        .unsafe_center
     else if (std.mem.eql(u8, value, "end") or
         std.mem.eql(u8, value, "flex-end"))
         .end
@@ -2375,6 +2468,10 @@ fn parseAlign(value: []const u8) CaseError!style.Align {
         .start
     else if (std.mem.eql(u8, value, "center"))
         .center
+    else if (std.mem.eql(u8, value, "safe center"))
+        .safe_center
+    else if (std.mem.eql(u8, value, "unsafe center"))
+        .unsafe_center
     else if (std.mem.eql(u8, value, "end") or
         std.mem.eql(u8, value, "flex-end"))
         .end
@@ -2390,6 +2487,8 @@ fn parseAlignSelf(value: []const u8) CaseError!style.AlignSelf {
         .stretch => .stretch,
         .start => .start,
         .center => .center,
+        .safe_center => .safe_center,
+        .unsafe_center => .unsafe_center,
         .end => .end,
         .baseline => .baseline,
     };

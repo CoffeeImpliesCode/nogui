@@ -22,19 +22,47 @@ pub const Position = enum { relative, absolute };
 
 pub const FlexDirection = enum { column, row, column_reverse, row_reverse };
 pub const FlexWrap = enum { nowrap, wrap, wrap_reverse };
-pub const Justify = enum { start, center, end, space_between, space_around, space_evenly };
+pub const Justify = enum {
+    normal,
+    start,
+    center,
+    safe_center,
+    unsafe_center,
+    end,
+    space_between,
+    space_around,
+    space_evenly,
+};
 pub const Align = enum {
     stretch,
     start,
     center,
+    safe_center,
+    unsafe_center,
     end,
     baseline,
-
-    pub const safe_center: Alignment = .safe_center;
-    pub const unsafe_center: Alignment = .unsafe_center;
 };
-pub const AlignContent = enum { stretch, start, center, end, space_between, space_around, space_evenly };
-pub const AlignSelf = enum { auto, stretch, start, center, end, baseline };
+pub const AlignContent = enum {
+    stretch,
+    start,
+    center,
+    safe_center,
+    unsafe_center,
+    end,
+    space_between,
+    space_around,
+    space_evenly,
+};
+pub const AlignSelf = enum {
+    auto,
+    stretch,
+    start,
+    center,
+    safe_center,
+    unsafe_center,
+    end,
+    baseline,
+};
 pub const BoxSizing = enum { content_box, border_box };
 
 /// One non-recursive grid track bound. Percentages are fractions in 0..1.
@@ -566,7 +594,7 @@ pub const Style = struct {
     grid_auto_flow: GridAutoFlow = .row,
     grid_column_gap: f32 = 0,
     grid_row_gap: f32 = 0,
-    grid_justify_content: Justify = .start,
+    grid_justify_content: Justify = .normal,
     grid_align_content: AlignContent = .stretch,
     grid_justify_items: Align = .stretch,
     grid_align_items: Align = .stretch,

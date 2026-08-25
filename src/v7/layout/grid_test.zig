@@ -274,7 +274,9 @@ test "nested auto-sized grid includes track gaps in intrinsic size" {
     nested.grid_column_gap = 10;
     nested.grid_align_self = .start;
     try appendContainer(&tree, nested_id, outer_id, nested);
-    try appendContainer(&tree, outer_id, .root, fixedContainer(100, 20, outer_columns[0..], outer_rows[0..]));
+    var outer = fixedContainer(100, 20, outer_columns[0..], outer_rows[0..]);
+    outer.grid_justify_content = .start;
+    try appendContainer(&tree, outer_id, .root, outer);
     try tree.appendChild(nested_id, first_id);
     try tree.appendChild(nested_id, second_id);
     try tree.appendChild(outer_id, nested_id);
@@ -1543,4 +1545,483 @@ test "grid intrinsic border-box scrollbars add gutters without filling available
 
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 55, .h = 55 });
     try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 40, .h = 40 });
+}
+
+test "grid fractional tracks below one leave remaining free space unused" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{ .{ .fr = 0.3 }, .{ .fr = 0.2 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    try appendLeaf(&tree, first_id, container_id, leafStyle(), .{ .spacer = .{} });
+    try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(100, 20, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 30, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 30, .y = 0, .w = 20, .h = 20 });
+}
+
+test "grid zero fr tracks retain intrinsic minimum widths" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{ .{ .fr = 0 }, .{ .fr = 0 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 50 }};
+
+    try appendLeaf(
+        &tree,
+        first_id,
+        container_id,
+        spacerStyle(),
+        .{ .spacer = .{ .size = 50 } },
+    );
+    try appendLeaf(
+        &tree,
+        second_id,
+        container_id,
+        spacerStyle(),
+        .{ .spacer = .{ .size = 50 } },
+    );
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(100, 50, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 50 }, null);
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, second_id, .{ .x = 50, .y = 0, .w = 50, .h = 50 });
+}
+
+test "grid normal content alignment stretches auto columns" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{ .auto, .auto };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var first_style = leafStyle();
+    first_style.size = .{
+        .width = .{ .percent = 1 },
+        .height = .{ .length = 20 },
+    };
+    try appendLeaf(&tree, first_id, container_id, first_style, .{ .spacer = .{} });
+
+    var second_style = leafStyle();
+    second_style.size = .{
+        .width = .{ .percent = 1 },
+        .height = .{ .length = 20 },
+    };
+    try appendLeaf(&tree, second_id, container_id, second_style, .{ .spacer = .{} });
+
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(200, 20, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 200, .height = 20 }, null);
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 100, .y = 0, .w = 100, .h = 20 });
+}
+
+test "grid center content alignment preserves signed overflow offset" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const third_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const columns = [_]style.GridTrack{.{ .fixed = 20 }};
+    const rows = [_]style.GridTrack{
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+    };
+
+    try appendLeaf(&tree, first_id, container_id, leafStyle(), .{ .spacer = .{} });
+    try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
+    try appendLeaf(&tree, third_id, container_id, leafStyle(), .{ .spacer = .{} });
+    var container = fixedContainer(20, 120, columns[0..], rows[0..]);
+    container.grid_row_gap = 10;
+    container.grid_align_content = .center;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+    try tree.appendChild(container_id, third_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 20, .height = 120 }, null);
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = -10, .w = 20, .h = 40 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 40, .w = 20, .h = 40 });
+    try expectRelative(&tree, third_id, .{ .x = 0, .y = 90, .w = 20, .h = 40 });
+}
+
+test "grid distributed content alignment falls back to start on overflow" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const third_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const columns = [_]style.GridTrack{.{ .fixed = 20 }};
+    const rows = [_]style.GridTrack{
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+    };
+
+    try appendLeaf(&tree, first_id, container_id, leafStyle(), .{ .spacer = .{} });
+    try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
+    try appendLeaf(&tree, third_id, container_id, leafStyle(), .{ .spacer = .{} });
+    var container = fixedContainer(20, 120, columns[0..], rows[0..]);
+    container.grid_row_gap = 10;
+    container.grid_align_content = .space_between;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+    try tree.appendChild(container_id, third_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 20, .height = 120 }, null);
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 20, .h = 40 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 50, .w = 20, .h = 40 });
+    try expectRelative(&tree, third_id, .{ .x = 0, .y = 100, .w = 20, .h = 40 });
+}
+
+test "negative grid inline free space distinguishes safe and unsafe center" {
+    const scenarios = [_]struct {
+        justify_content: style.Justify,
+        expected_x: f32,
+    }{
+        .{ .justify_content = .safe_center, .expected_x = 0 },
+        .{ .justify_content = .unsafe_center, .expected_x = -10 },
+        .{ .justify_content = .center, .expected_x = -10 },
+    };
+    const columns = [_]style.GridTrack{
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 40 }};
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+        try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
+        var container = fixedContainer(120, 40, columns[0..], rows[0..]);
+        container.grid_column_gap = 10;
+        container.grid_justify_content = scenario.justify_content;
+        container.grid_align_content = .start;
+        try appendContainer(&tree, container_id, .root, container);
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 120, .height = 40 }, null);
+
+        try expectRelative(&tree, child_id, .{
+            .x = scenario.expected_x,
+            .y = 0,
+            .w = 40,
+            .h = 40,
+        });
+    }
+}
+
+test "negative grid block free space distinguishes safe and unsafe center" {
+    const scenarios = [_]struct {
+        align_content: style.AlignContent,
+        expected_y: f32,
+    }{
+        .{ .align_content = .safe_center, .expected_y = 0 },
+        .{ .align_content = .unsafe_center, .expected_y = -10 },
+        .{ .align_content = .center, .expected_y = -10 },
+    };
+    const columns = [_]style.GridTrack{.{ .fixed = 40 }};
+    const rows = [_]style.GridTrack{
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+        try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
+        var container = fixedContainer(40, 120, columns[0..], rows[0..]);
+        container.grid_row_gap = 10;
+        container.grid_justify_content = .start;
+        container.grid_align_content = scenario.align_content;
+        try appendContainer(&tree, container_id, .root, container);
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 40, .height = 120 }, null);
+
+        try expectRelative(&tree, child_id, .{
+            .x = 0,
+            .y = scenario.expected_y,
+            .w = 40,
+            .h = 40,
+        });
+    }
+}
+
+test "oversized grid item distinguishes safe and unsafe alignment" {
+    const scenarios = [_]struct {
+        justify_items: style.Align,
+        justify_self: style.AlignSelf,
+        expected_x: f32,
+        align_items: style.Align,
+        align_self: style.AlignSelf,
+        expected_y: f32,
+    }{
+        .{
+            .justify_items = .safe_center,
+            .justify_self = .auto,
+            .expected_x = 0,
+            .align_items = .start,
+            .align_self = .auto,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .unsafe_center,
+            .justify_self = .auto,
+            .expected_x = -10,
+            .align_items = .start,
+            .align_self = .auto,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .center,
+            .justify_self = .auto,
+            .expected_x = -10,
+            .align_items = .start,
+            .align_self = .auto,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .safe_center,
+            .expected_x = 0,
+            .align_items = .start,
+            .align_self = .auto,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .unsafe_center,
+            .expected_x = -10,
+            .align_items = .start,
+            .align_self = .auto,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .center,
+            .expected_x = -10,
+            .align_items = .start,
+            .align_self = .auto,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .auto,
+            .expected_x = 0,
+            .align_items = .safe_center,
+            .align_self = .auto,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .auto,
+            .expected_x = 0,
+            .align_items = .unsafe_center,
+            .align_self = .auto,
+            .expected_y = -10,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .auto,
+            .expected_x = 0,
+            .align_items = .center,
+            .align_self = .auto,
+            .expected_y = -10,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .auto,
+            .expected_x = 0,
+            .align_items = .start,
+            .align_self = .safe_center,
+            .expected_y = 0,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .auto,
+            .expected_x = 0,
+            .align_items = .start,
+            .align_self = .unsafe_center,
+            .expected_y = -10,
+        },
+        .{
+            .justify_items = .start,
+            .justify_self = .auto,
+            .expected_x = 0,
+            .align_items = .start,
+            .align_self = .center,
+            .expected_y = -10,
+        },
+    };
+    const columns = [_]style.GridTrack{.{ .fixed = 20 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+        var child = leafStyle();
+        child.size = .{
+            .width = .{ .length = 40 },
+            .height = .{ .length = 40 },
+        };
+        child.grid_justify_self = scenario.justify_self;
+        child.grid_align_self = scenario.align_self;
+        try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+        var container = fixedContainer(20, 20, columns[0..], rows[0..]);
+        container.grid_justify_content = .start;
+        container.grid_align_content = .start;
+        container.grid_justify_items = scenario.justify_items;
+        container.grid_align_items = scenario.align_items;
+        try appendContainer(&tree, container_id, .root, container);
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 20, .height = 20 }, null);
+
+        try expectRelative(&tree, child_id, .{
+            .x = scenario.expected_x,
+            .y = scenario.expected_y,
+            .w = 40,
+            .h = 40,
+        });
+    }
+}
+
+test "positive grid free space makes all center safety variants equivalent" {
+    const scenarios = [_]struct {
+        justify_content: style.Justify,
+        align_content: style.AlignContent,
+        justify_items: style.Align,
+        align_items: style.Align,
+        justify_self: style.AlignSelf,
+        align_self: style.AlignSelf,
+    }{
+        .{
+            .justify_content = .safe_center,
+            .align_content = .safe_center,
+            .justify_items = .safe_center,
+            .align_items = .safe_center,
+            .justify_self = .safe_center,
+            .align_self = .safe_center,
+        },
+        .{
+            .justify_content = .unsafe_center,
+            .align_content = .unsafe_center,
+            .justify_items = .unsafe_center,
+            .align_items = .unsafe_center,
+            .justify_self = .unsafe_center,
+            .align_self = .unsafe_center,
+        },
+        .{
+            .justify_content = .center,
+            .align_content = .center,
+            .justify_items = .center,
+            .align_items = .center,
+            .justify_self = .center,
+            .align_self = .center,
+        },
+    };
+    const columns = [_]style.GridTrack{
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+    };
+    const rows = [_]style.GridTrack{
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const first_id: Id = @enumFromInt(1);
+        const second_id: Id = @enumFromInt(2);
+        const container_id: Id = @enumFromInt(3);
+        var first = leafStyle();
+        first.size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 20 },
+        };
+        var second = first;
+        second.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+        second.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+        second.grid_justify_self = scenario.justify_self;
+        second.grid_align_self = scenario.align_self;
+        try appendLeaf(&tree, first_id, container_id, first, .{ .spacer = .{} });
+        try appendLeaf(&tree, second_id, container_id, second, .{ .spacer = .{} });
+
+        var container = fixedContainer(160, 160, columns[0..], rows[0..]);
+        container.grid_column_gap = 10;
+        container.grid_row_gap = 10;
+        container.grid_justify_content = scenario.justify_content;
+        container.grid_align_content = scenario.align_content;
+        container.grid_justify_items = scenario.justify_items;
+        container.grid_align_items = scenario.align_items;
+        try appendContainer(&tree, container_id, .root, container);
+        try tree.appendChild(container_id, first_id);
+        try tree.appendChild(container_id, second_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 160, .height = 160 }, null);
+
+        try expectRelative(&tree, first_id, .{ .x = 20, .y = 20, .w = 20, .h = 20 });
+        try expectRelative(&tree, second_id, .{ .x = 70, .y = 20, .w = 20, .h = 20 });
+    }
 }

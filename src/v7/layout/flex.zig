@@ -930,11 +930,32 @@ fn makeLines(
 }
 
 fn resolveLine(items: []Item, available: f32, gap: f32) sizing.Error!void {
+    var hypothetical_used = try gaps(gap, items.len);
     for (items) |*item| {
-        item.size = try clamp(item.base, item.main_min, item.main_max);
-        item.frozen = item.size != item.base;
+        item.proposed = try clamp(item.base, item.main_min, item.main_max);
+        hypothetical_used = try add(hypothetical_used, item.proposed);
+        hypothetical_used = try add(hypothetical_used, item.margin_start);
+        hypothetical_used = try add(hypothetical_used, item.margin_end);
+    }
+    const growing = hypothetical_used < available;
+
+    for (items) |*item| {
+        const flex_factor = if (growing) item.grow else item.shrink;
+        const constraint_opposes_flex = if (growing)
+            item.base > item.proposed
+        else
+            item.base < item.proposed;
+        item.frozen = flex_factor == 0 or constraint_opposes_flex;
+        item.size = if (item.frozen) item.proposed else item.base;
     }
 
+    var initial_used = try gaps(gap, items.len);
+    for (items) |item| {
+        initial_used = try add(initial_used, item.size);
+        initial_used = try add(initial_used, item.margin_start);
+        initial_used = try add(initial_used, item.margin_end);
+    }
+    const initial_free = try finite(available - initial_used);
     var iteration: usize = 0;
     while (iteration <= items.len) : (iteration += 1) {
         var used = try gaps(gap, items.len);
@@ -945,35 +966,50 @@ fn resolveLine(items: []Item, available: f32, gap: f32) sizing.Error!void {
         }
         const free = try finite(available - used);
         if (free == 0) break;
-        const growing = free > 0;
+        var factor_sum: f32 = 0;
         var weight_sum: f32 = 0;
         for (items) |item| {
             if (item.frozen) continue;
+            const factor = if (growing) item.grow else item.shrink;
             const weight = if (growing) item.grow else item.shrink * item.base;
+            factor_sum = try add(factor_sum, factor);
             weight_sum = try add(weight_sum, weight);
         }
         if (weight_sum <= 0) break;
 
-        var clamped_any = false;
+        const scaled_free = try finite(
+            initial_free * @min(factor_sum, @as(f32, 1)),
+        );
+        const distributable_free = if (@abs(scaled_free) < @abs(free))
+            scaled_free
+        else
+            free;
+        var total_violation: f32 = 0;
         for (items) |*item| {
             if (item.frozen) continue;
             const weight = if (growing) item.grow else item.shrink * item.base;
-            item.proposed = try finite(item.base + free * weight / weight_sum);
-            const target = try clamp(item.proposed, item.main_min, item.main_max);
-            if (target != item.proposed) {
-                item.size = target;
-                item.frozen = true;
-                clamped_any = true;
-            }
+            item.proposed = try finite(
+                item.base + distributable_free * weight / weight_sum,
+            );
+            item.size = try clamp(item.proposed, item.main_min, item.main_max);
+            total_violation = try add(total_violation, item.size - item.proposed);
         }
-        if (!clamped_any) {
-            for (items) |*item| {
-                if (!item.frozen) item.size = item.proposed;
+        for (items) |*item| {
+            if (item.frozen) continue;
+            const violation = item.size - item.proposed;
+            const freeze = if (total_violation > 0)
+                violation > 0
+            else if (total_violation < 0)
+                violation < 0
+            else
+                true;
+            if (freeze) {
+                item.frozen = true;
+            } else {
+                item.size = item.base;
             }
-            break;
         }
     }
-
     var used = try gaps(gap, items.len);
     var auto_count: usize = 0;
     for (items) |item| {
@@ -1023,7 +1059,8 @@ fn lineDistribution(
     if (lines.len == 0) return;
     var used = try gaps(gap, lines.len);
     for (lines) |line| used = try add(used, line.cross);
-    var free = @max(0, try finite(available - used));
+    const signed_free = try finite(available - used);
+    var free = @max(0, signed_free);
     var offset: f32 = 0;
     var extra: f32 = 0;
     switch (align_content) {
@@ -1035,8 +1072,9 @@ fn lineDistribution(
             }
         },
         .start => {},
-        .center => offset = free / 2,
-        .end => offset = free,
+        .safe_center => offset = free / 2,
+        .center, .unsafe_center => offset = signed_free / 2,
+        .end => offset = signed_free,
         .space_between => {
             if (lines.len > 1) {
                 extra = free / @as(f32, @floatFromInt(lines.len - 1));
@@ -1078,7 +1116,7 @@ fn placeItems(
             used = try add(used, item.margin_start);
             used = try add(used, item.margin_end);
         }
-        const free = @max(0, try finite(main_available - used));
+        const free = try finite(main_available - used);
         const distribution = if (hasAuto(line_items))
             Distribution{ .offset = 0, .gap = 0 }
         else
@@ -1100,10 +1138,7 @@ fn placeItems(
             var cross_start = item.cross_margin_start;
             var cross_end = item.cross_margin_end;
             var cross = item.cross;
-            var cross_free = @max(
-                0,
-                try finite(line.cross - cross - cross_start - cross_end),
-            );
+            var cross_free = try finite(line.cross - cross - cross_start - cross_end);
             if (item.cross_start_auto or item.cross_end_auto) {
                 const auto_count = @as(usize, @intFromBool(item.cross_start_auto)) +
                     @as(usize, @intFromBool(item.cross_end_auto));
@@ -1119,16 +1154,14 @@ fn placeItems(
                     item.cross_min,
                     item.cross_max,
                 );
-                cross_free = @max(
-                    0,
-                    try finite(line.cross - cross - cross_start - cross_end),
-                );
+                cross_free = try finite(line.cross - cross - cross_start - cross_end);
             }
             const align_offset = if (item.cross_start_auto or item.cross_end_auto)
                 0
             else switch (alignment) {
                 .stretch, .start, .baseline => 0,
-                .center => cross_free / 2,
+                .safe_center => @max(0, cross_free) / 2,
+                .center, .unsafe_center => cross_free / 2,
                 .end => cross_free,
             };
             const logical_cross = try add(line.position, try add(cross_start, align_offset));
@@ -1258,7 +1291,7 @@ fn staticMainPosition(
     margin_end: f32,
     reverse: bool,
 ) sizing.Error!f32 {
-    const free = @max(0, try finite(available - size - margin_start - margin_end));
+    const free = try finite(available - size - margin_start - margin_end);
     const distribution = try justify(value, free, 1);
     return position(try add(margin_start, distribution.offset), size, available, reverse);
 }
@@ -1271,10 +1304,11 @@ fn staticCrossPosition(
     margin_end: f32,
     reverse: bool,
 ) sizing.Error!f32 {
-    const free = @max(0, try finite(available - size - margin_start - margin_end));
+    const free = try finite(available - size - margin_start - margin_end);
     const offset = switch (value) {
         .stretch, .start, .baseline => 0,
-        .center => free / 2,
+        .safe_center => @max(0, free) / 2,
+        .center, .unsafe_center => free / 2,
         .end => free,
     };
     return position(try add(margin_start, offset), size, available, reverse);
@@ -1823,6 +1857,8 @@ fn alignValue(self: style.AlignSelf, parent: style.Align) style.Align {
         .stretch => .stretch,
         .start => .start,
         .center => .center,
+        .safe_center => .safe_center,
+        .unsafe_center => .unsafe_center,
         .end => .end,
         .baseline => .baseline,
     };
@@ -1831,21 +1867,26 @@ fn alignValue(self: style.AlignSelf, parent: style.Align) style.Align {
 fn justify(value: style.Justify, free: f32, count: usize) sizing.Error!Distribution {
     if (count == 0) return .{ .offset = 0, .gap = 0 };
     const count_f: f32 = @floatFromInt(count);
+    const distributed_free = @max(0, free);
     return switch (value) {
-        .start => .{ .offset = 0, .gap = 0 },
-        .center => .{ .offset = free / 2, .gap = 0 },
+        .normal, .start => .{ .offset = 0, .gap = 0 },
+        .safe_center => .{ .offset = distributed_free / 2, .gap = 0 },
+        .center, .unsafe_center => .{ .offset = free / 2, .gap = 0 },
         .end => .{ .offset = free, .gap = 0 },
         .space_between => if (count > 1)
-            .{ .offset = 0, .gap = try finite(free / @as(f32, @floatFromInt(count - 1))) }
+            .{
+                .offset = 0,
+                .gap = try finite(distributed_free / @as(f32, @floatFromInt(count - 1))),
+            }
         else
             .{ .offset = 0, .gap = 0 },
         .space_around => .{
-            .offset = try finite(free / count_f / 2),
-            .gap = try finite(free / count_f),
+            .offset = try finite(distributed_free / count_f / 2),
+            .gap = try finite(distributed_free / count_f),
         },
         .space_evenly => .{
-            .offset = try finite(free / (count_f + 1)),
-            .gap = try finite(free / (count_f + 1)),
+            .offset = try finite(distributed_free / (count_f + 1)),
+            .gap = try finite(distributed_free / (count_f + 1)),
         },
     };
 }

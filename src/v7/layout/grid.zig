@@ -780,7 +780,7 @@ fn layoutGridNode(
     defer row_offsets.deinit(options.allocator);
     const column_gap = try gridGap(node.style, .columns);
     const row_gap = try gridGap(node.style, .rows);
-    const column_total = try trackTotal(columns.items, column_gap);
+    var column_total = try trackTotal(columns.items, column_gap);
     const row_total = try trackTotal(rows.items, row_gap);
     var final_content_height = content.height;
     if (height_auto and forced_border == null and !height_clamped) {
@@ -789,14 +789,34 @@ fn layoutGridNode(
     }
     const justify_content = effectiveJustifyContent(node.style);
     const align_content = effectiveAlignContent(node.style);
+    if (node.style.grid_justify_content == .normal and justify_content == .normal and width_definite) {
+        const inline_free = try finite(content.width - column_total);
+        if (inline_free > 0) {
+            var stretch_count: usize = 0;
+            for (columns.items) |track| {
+                if (trackCanStretch(track.spec) and trackHasAutoMaximum(track.spec)) {
+                    stretch_count += 1;
+                }
+            }
+            if (stretch_count != 0) {
+                const addition = inline_free / @as(f32, @floatFromInt(stretch_count));
+                for (columns.items) |*track| {
+                    if (trackCanStretch(track.spec) and trackHasAutoMaximum(track.spec)) {
+                        track.size = try add(track.size, addition);
+                    }
+                }
+                column_total = try trackTotal(columns.items, column_gap);
+            }
+        }
+    }
     const justify_distribution = try justifyContent(
         justify_content,
-        @max(0, content.width - column_total),
+        content.width - column_total,
         columns.items.len,
     );
     const align_distribution = try alignContent(
         align_content,
-        @max(0, final_content_height - row_total),
+        final_content_height - row_total,
         rows.items.len,
     );
     try buildOffsets(
@@ -937,18 +957,12 @@ fn layoutGridNode(
                 child_edges,
             );
         }
-        var free_width = @max(
-            0,
-            area_width - child_size.width - margins.value.left - margins.value.right,
-        );
-        var free_height = @max(
-            0,
-            area_height - child_size.height - margins.value.top - margins.value.bottom,
-        );
+        var free_width = area_width - child_size.width - margins.value.left - margins.value.right;
+        var free_height = area_height - child_size.height - margins.value.top - margins.value.bottom;
         const horizontal_auto_count: u8 = @as(u8, @intFromBool(margins.left_auto)) +
             @as(u8, @intFromBool(margins.right_auto));
         if (horizontal_auto_count != 0) {
-            const share = free_width / @as(f32, @floatFromInt(horizontal_auto_count));
+            const share = @max(0, free_width) / @as(f32, @floatFromInt(horizontal_auto_count));
             if (margins.left_auto) margins.value.left = share;
             if (margins.right_auto) margins.value.right = share;
             free_width = 0;
@@ -956,7 +970,7 @@ fn layoutGridNode(
         const vertical_auto_count: u8 = @as(u8, @intFromBool(margins.top_auto)) +
             @as(u8, @intFromBool(margins.bottom_auto));
         if (vertical_auto_count != 0) {
-            const share = free_height / @as(f32, @floatFromInt(vertical_auto_count));
+            const share = @max(0, free_height) / @as(f32, @floatFromInt(vertical_auto_count));
             if (margins.top_auto) margins.value.top = share;
             if (margins.bottom_auto) margins.value.bottom = share;
             free_height = 0;
@@ -1418,8 +1432,8 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
     var non_fr_bounded_capacity: f32 = 0;
 
     for (tracks[start..end]) |track| {
-        if (trackFraction(track.spec) != 0) continue;
-        if (!trackAllowsIntrinsic(track.spec)) continue;
+        if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+        if (!trackAllowsIntrinsicContribution(track.spec)) continue;
         if (try trackMaximum(track.spec, basis)) |maximum| {
             const capacity = @max(0, maximum - track.size);
             if (capacity > 0) {
@@ -1434,8 +1448,8 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
         if (non_fr_bounded_capacity > 0) {
             const to_bounded = @min(deficit, non_fr_bounded_capacity);
             for (tracks[start..end]) |*track| {
-                if (trackFraction(track.spec) != 0) continue;
-                if (!trackAllowsIntrinsic(track.spec)) continue;
+                if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+                if (!trackAllowsIntrinsicContribution(track.spec)) continue;
                 if (try trackMaximum(track.spec, basis)) |maximum| {
                     const capacity = @max(0, maximum - track.size);
                     if (capacity > 0) {
@@ -1449,8 +1463,8 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
         if (deficit > 0) {
             const share = deficit / @as(f32, @floatFromInt(non_fr_unbounded));
             for (tracks[start..end]) |*track| {
-                if (trackFraction(track.spec) != 0) continue;
-                if (!trackAllowsIntrinsic(track.spec)) continue;
+                if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+                if (!trackAllowsIntrinsicContribution(track.spec)) continue;
                 if ((try trackMaximum(track.spec, basis)) == null) {
                     track.size = try add(track.size, share);
                 }
@@ -1460,8 +1474,8 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
     } else if (non_fr_bounded_capacity > 0) {
         const to_bounded = @min(deficit, non_fr_bounded_capacity);
         for (tracks[start..end]) |*track| {
-            if (trackFraction(track.spec) != 0) continue;
-            if (!trackAllowsIntrinsic(track.spec)) continue;
+            if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+            if (!trackAllowsIntrinsicContribution(track.spec)) continue;
             if (try trackMaximum(track.spec, basis)) |maximum| {
                 const capacity = @max(0, maximum - track.size);
                 if (capacity > 0) {
@@ -1475,12 +1489,11 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
 
     if (deficit > 0) {
         var fr_total: f32 = 0;
-        var fr_count: usize = 0;
         for (tracks[start..end]) |track| {
+            if (!trackIsFlexible(track.spec)) continue;
             const fr = trackFraction(track.spec);
             if (fr > 0) {
                 fr_total = try add(fr_total, fr);
-                fr_count += 1;
             }
         }
         if (fr_total > 0) {
@@ -1491,19 +1504,11 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
                 }
             }
             deficit = 0;
-        } else if (fr_count > 0) {
-            const share = deficit / @as(f32, @floatFromInt(fr_count));
-            for (tracks[start..end]) |*track| {
-                if (trackFraction(track.spec) > 0) {
-                    track.size = try add(track.size, share);
-                }
-            }
-            deficit = 0;
         }
     }
 
     for (tracks[start..end]) |*track| {
-        if (trackFraction(track.spec) == 0) {
+        if (!trackIsFlexible(track.spec)) {
             if (try trackMaximum(track.spec, basis)) |maximum| {
                 track.size = @min(track.size, maximum);
             }
@@ -1521,18 +1526,20 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
     var bounded_capacity: f32 = 0;
     var non_fr_used: f32 = total_gaps;
     for (tracks) |track| {
-        if (trackFraction(track.spec) == 0) {
+        if (!trackIsFlexible(track.spec)) {
             non_fr_used = try add(non_fr_used, track.size);
             if (try trackMaximum(track.spec, content_size)) |maximum| {
                 bounded_capacity = try add(bounded_capacity, @max(0, maximum - track.size));
             }
+        } else if (trackHasZeroFlexWeight(track.spec)) {
+            non_fr_used = try add(non_fr_used, track.size);
         }
     }
 
     const initial_free = @max(0, try finite(content_size - non_fr_used));
     if (bounded_capacity > 0 and initial_free > 0) {
         for (tracks) |*track| {
-            if (trackFraction(track.spec) != 0) continue;
+            if (trackIsFlexible(track.spec)) continue;
             if (try trackMaximum(track.spec, content_size)) |maximum| {
                 const capacity = @max(0, maximum - track.size);
                 if (capacity > 0) {
@@ -1544,10 +1551,13 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
 
     non_fr_used = total_gaps;
     for (tracks) |*track| {
-        if (trackFraction(track.spec) == 0) {
+        if (!trackIsFlexible(track.spec)) {
             if (try trackMaximum(track.spec, content_size)) |maximum| {
                 track.size = @min(track.size, maximum);
             }
+            track.size = try nonNegative(track.size);
+            non_fr_used = try add(non_fr_used, track.size);
+        } else if (trackHasZeroFlexWeight(track.spec)) {
             track.size = try nonNegative(track.size);
             non_fr_used = try add(non_fr_used, track.size);
         }
@@ -1586,11 +1596,13 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
             break;
         }
 
+        const fr_denominator = @max(unfrozen_fr_sum, 1);
+
         var newly_frozen = false;
         for (tracks, 0..) |*track, i| {
             const fr = trackFraction(track.spec);
             if (fr > 0 and !frozen[i]) {
-                const hypothetical_size = free_space * fr / unfrozen_fr_sum;
+                const hypothetical_size = free_space * fr / fr_denominator;
                 if (hypothetical_size < bases[i]) {
                     frozen[i] = true;
                     newly_frozen = true;
@@ -1614,7 +1626,7 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
         for (tracks, 0..) |*track, i| {
             const fr = trackFraction(track.spec);
             if (fr > 0 and !frozen[i]) {
-                track.size = @max(free_space * fr / unfrozen_fr_sum, bases[i]);
+                track.size = @max(free_space * fr / fr_denominator, bases[i]);
                 const minimum = try trackMinimum(track.spec, content_size);
                 track.size = @max(track.size, minimum);
                 if (try trackMaximum(track.spec, content_size)) |maximum| {
@@ -1775,6 +1787,46 @@ fn trackCanStretch(track: style.GridTrack) bool {
     };
 }
 
+fn trackHasAutoMaximum(track: style.GridTrack) bool {
+    return switch (track) {
+        .auto => true,
+        .minmax => |value| switch (value.max) {
+            .auto => true,
+            .fixed, .percent, .min_content, .max_content, .fr, .fit_content => false,
+        },
+        .fixed, .percent, .min_content, .max_content, .fr, .fit_content => false,
+    };
+}
+
+fn trackIsFlexible(track: style.GridTrack) bool {
+    return switch (track) {
+        .fr => true,
+        .minmax => |value| switch (value.max) {
+            .fr => true,
+            .fixed, .percent, .auto, .min_content, .max_content, .fit_content => false,
+        },
+        .fixed, .percent, .auto, .min_content, .max_content, .fit_content => false,
+    };
+}
+
+fn trackHasZeroFlexWeight(track: style.GridTrack) bool {
+    return switch (track) {
+        .fr => |weight| weight == 0,
+        .minmax => |value| switch (value.max) {
+            .fr => |weight| weight == 0,
+            .fixed, .percent, .auto, .min_content, .max_content, .fit_content => false,
+        },
+        .fixed, .percent, .auto, .min_content, .max_content, .fit_content => false,
+    };
+}
+
+fn trackParticipatesInIntrinsicSizing(track: style.GridTrack) bool {
+    return !trackIsFlexible(track) or trackHasZeroFlexWeight(track);
+}
+
+fn trackAllowsIntrinsicContribution(track: style.GridTrack) bool {
+    return trackAllowsIntrinsic(track) or trackHasZeroFlexWeight(track);
+}
 fn trackFraction(track: style.GridTrack) f32 {
     return switch (track) {
         .fr => |value| value,
@@ -1834,49 +1886,64 @@ fn buildOffsets(
 }
 
 fn justifyContent(mode: style.Justify, free: f32, count: usize) Error!Distribution {
-    const available = @max(0, try finite(free));
+    const available = try finite(free);
+    const distributed = @max(0, available);
     if (count == 0) return .{ .offset = 0, .extra_gap = 0 };
     const count_f: f32 = @floatFromInt(count);
     return switch (mode) {
-        .start => .{ .offset = 0, .extra_gap = 0 },
-        .center => .{ .offset = available / 2, .extra_gap = 0 },
+        .normal, .start => .{ .offset = 0, .extra_gap = 0 },
+        .safe_center => .{ .offset = distributed / 2, .extra_gap = 0 },
+        .center, .unsafe_center => .{ .offset = available / 2, .extra_gap = 0 },
         .end => .{ .offset = available, .extra_gap = 0 },
         .space_between => .{
             .offset = 0,
             .extra_gap = if (count > 1)
-                available / @as(f32, @floatFromInt(count - 1))
+                distributed / @as(f32, @floatFromInt(count - 1))
             else
                 0,
         },
-        .space_around => .{ .offset = available / count_f / 2, .extra_gap = available / count_f },
-        .space_evenly => .{ .offset = available / (count_f + 1), .extra_gap = available / (count_f + 1) },
+        .space_around => .{ .offset = distributed / count_f / 2, .extra_gap = distributed / count_f },
+        .space_evenly => .{
+            .offset = distributed / (count_f + 1),
+            .extra_gap = distributed / (count_f + 1),
+        },
     };
 }
 
 fn alignContent(mode: style.AlignContent, free: f32, count: usize) Error!ContentDistribution {
-    const available = @max(0, try finite(free));
+    const available = try finite(free);
+    const distributed = @max(0, available);
     if (count == 0) return .{ .offset = 0, .extra_gap = 0, .stretch = 0 };
     const count_f: f32 = @floatFromInt(count);
     return switch (mode) {
-        .stretch => .{ .offset = 0, .extra_gap = 0, .stretch = available / count_f },
+        .stretch => .{ .offset = 0, .extra_gap = 0, .stretch = distributed / count_f },
         .start => .{ .offset = 0, .extra_gap = 0, .stretch = 0 },
-        .center => .{ .offset = available / 2, .extra_gap = 0, .stretch = 0 },
+        .safe_center => .{ .offset = distributed / 2, .extra_gap = 0, .stretch = 0 },
+        .center, .unsafe_center => .{ .offset = available / 2, .extra_gap = 0, .stretch = 0 },
         .end => .{ .offset = available, .extra_gap = 0, .stretch = 0 },
         .space_between => .{
             .offset = 0,
             .extra_gap = if (count > 1)
-                available / @as(f32, @floatFromInt(count - 1))
+                distributed / @as(f32, @floatFromInt(count - 1))
             else
                 0,
             .stretch = 0,
         },
-        .space_around => .{ .offset = available / count_f / 2, .extra_gap = available / count_f, .stretch = 0 },
-        .space_evenly => .{ .offset = available / (count_f + 1), .extra_gap = available / (count_f + 1), .stretch = 0 },
+        .space_around => .{
+            .offset = distributed / count_f / 2,
+            .extra_gap = distributed / count_f,
+            .stretch = 0,
+        },
+        .space_evenly => .{
+            .offset = distributed / (count_f + 1),
+            .extra_gap = distributed / (count_f + 1),
+            .stretch = 0,
+        },
     };
 }
 
 fn effectiveJustifyContent(input: style.Style) style.Justify {
-    return if (input.grid_justify_content == .start and input.justify != .start)
+    return if (input.grid_justify_content == .normal and input.justify != .start)
         input.justify
     else
         input.grid_justify_content;
@@ -1908,7 +1975,9 @@ fn alignValue(value: style.AlignSelf, fallback: style.Align) style.Align {
         .auto => fallback,
         .stretch => .stretch,
         .start => .start,
+        .safe_center => .safe_center,
         .center => .center,
+        .unsafe_center => .unsafe_center,
         .end => .end,
         .baseline => .baseline,
     };
@@ -1917,7 +1986,8 @@ fn alignValue(value: style.AlignSelf, fallback: style.Align) style.Align {
 fn alignOffset(value: style.Align, free: f32) f32 {
     return switch (value) {
         .stretch, .start, .baseline => 0,
-        .center => free / 2,
+        .safe_center => @max(0, free) / 2,
+        .center, .unsafe_center => free / 2,
         .end => free,
     };
 }

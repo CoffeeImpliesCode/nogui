@@ -1064,3 +1064,610 @@ test "explicit intrinsic widths add vertical scrollbar gutter" {
         );
     }
 }
+
+test "grow factors below one leave proportional free space unallocated" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const third_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+
+    var first = growingItem(40, 10);
+    first.grow = 0.2;
+    var second = growingItem(0, 10);
+    second.grow = 0.2;
+    var third = growingItem(0, 10);
+    third.grow = 0.4;
+
+    try appendNode(&tree, first_id, container_id, first);
+    try appendNode(&tree, second_id, container_id, second);
+    try appendNode(&tree, third_id, container_id, third);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 500 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+    try tree.appendChild(container_id, third_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 500, .height = 10 });
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 132, .h = 10 });
+    try expectRelative(&tree, second_id, .{ .x = 132, .y = 0, .w = 92, .h = 10 });
+    try expectRelative(&tree, third_id, .{ .x = 224, .y = 0, .w = 184, .h = 10 });
+}
+
+test "wrapped cross overflow preserves signed positional alignment" {
+    const scenarios = [_]struct {
+        align_content: style.AlignContent,
+        expected_y: [3]f32,
+    }{
+        .{ .align_content = .center, .expected_y = .{ -25, -5, 15 } },
+        .{ .align_content = .end, .expected_y = .{ -50, -30, -10 } },
+        .{ .align_content = .space_between, .expected_y = .{ 0, 20, 40 } },
+        .{ .align_content = .space_around, .expected_y = .{ 0, 20, 40 } },
+        .{ .align_content = .space_evenly, .expected_y = .{ 0, 20, 40 } },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const first_id: Id = @enumFromInt(1);
+        const second_id: Id = @enumFromInt(2);
+        const third_id: Id = @enumFromInt(3);
+        const container_id: Id = @enumFromInt(4);
+
+        try appendNode(&tree, first_id, container_id, fixedItem(20, 20));
+        try appendNode(&tree, second_id, container_id, fixedItem(20, 20));
+        try appendNode(&tree, third_id, container_id, fixedItem(20, 20));
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .wrap = .wrap,
+            .flex_wrap = .wrap,
+            .@"align" = .start,
+            .align_content = scenario.align_content,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 10 },
+            },
+        });
+        try tree.appendChild(container_id, first_id);
+        try tree.appendChild(container_id, second_id);
+        try tree.appendChild(container_id, third_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 20, .height = 10 });
+
+        try expectRelative(
+            &tree,
+            first_id,
+            .{ .x = 0, .y = scenario.expected_y[0], .w = 20, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            second_id,
+            .{ .x = 0, .y = scenario.expected_y[1], .w = 20, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            third_id,
+            .{ .x = 0, .y = scenario.expected_y[2], .w = 20, .h = 20 },
+        );
+    }
+}
+
+test "column main overflow preserves signed justify offsets" {
+    const scenarios = [_]struct {
+        justify: style.Justify,
+        expected_y: f32,
+    }{
+        .{ .justify = .center, .expected_y = -25 },
+        .{ .justify = .end, .expected_y = -50 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var child = fixedItem(10, 100);
+        child.shrink = 0;
+
+        try appendNode(&tree, child_id, container_id, child);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .column,
+            .justify = scenario.justify,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 50 },
+            },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 20, .height = 50 });
+
+        try expectRelative(
+            &tree,
+            child_id,
+            .{ .x = 0, .y = scenario.expected_y, .w = 10, .h = 100 },
+        );
+    }
+}
+
+test "cross-axis overflow preserves signed item alignment" {
+    const scenarios = [_]struct {
+        alignment: style.Align,
+        margin_top: f32,
+        margin_bottom: f32,
+        expected_y: f32,
+    }{
+        .{ .alignment = .center, .margin_top = 0, .margin_bottom = 0, .expected_y = -10 },
+        .{ .alignment = .end, .margin_top = 0, .margin_bottom = 0, .expected_y = -20 },
+        .{ .alignment = .center, .margin_top = 10, .margin_bottom = 20, .expected_y = -15 },
+        .{ .alignment = .end, .margin_top = 10, .margin_bottom = 20, .expected_y = -40 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var child = fixedItem(10, 70);
+        child.margin_inset = .{
+            .top = .{ .length = scenario.margin_top },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = scenario.margin_bottom },
+            .left = .{ .length = 0 },
+        };
+
+        try appendNode(&tree, child_id, container_id, child);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .justify = .start,
+            .@"align" = scenario.alignment,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 50 },
+            },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 20, .height = 50 });
+
+        try expectRelative(
+            &tree,
+            child_id,
+            .{ .x = 0, .y = scenario.expected_y, .w = 10, .h = 70 },
+        );
+    }
+}
+
+test "negative main free space distinguishes safe and unsafe center" {
+    const scenarios = [_]struct {
+        justify: style.Justify,
+        expected_x: f32,
+    }{
+        .{ .justify = .safe_center, .expected_x = 0 },
+        .{ .justify = .unsafe_center, .expected_x = -25 },
+        .{ .justify = .center, .expected_x = -25 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var child = fixedItem(100, 10);
+        child.shrink = 0;
+
+        try appendNode(&tree, child_id, container_id, child);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .justify = scenario.justify,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 20 },
+            },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 50, .height = 20 });
+
+        try expectRelative(
+            &tree,
+            child_id,
+            .{ .x = scenario.expected_x, .y = 0, .w = 100, .h = 10 },
+        );
+    }
+}
+
+test "negative wrapped cross free space distinguishes safe and unsafe center" {
+    const scenarios = [_]struct {
+        align_content: style.AlignContent,
+        expected_y: [3]f32,
+    }{
+        .{ .align_content = .safe_center, .expected_y = .{ 0, 20, 40 } },
+        .{ .align_content = .unsafe_center, .expected_y = .{ -25, -5, 15 } },
+        .{ .align_content = .center, .expected_y = .{ -25, -5, 15 } },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const first_id: Id = @enumFromInt(1);
+        const second_id: Id = @enumFromInt(2);
+        const third_id: Id = @enumFromInt(3);
+        const container_id: Id = @enumFromInt(4);
+
+        try appendNode(&tree, first_id, container_id, fixedItem(20, 20));
+        try appendNode(&tree, second_id, container_id, fixedItem(20, 20));
+        try appendNode(&tree, third_id, container_id, fixedItem(20, 20));
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .wrap = .wrap,
+            .flex_wrap = .wrap,
+            .@"align" = .start,
+            .align_content = scenario.align_content,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 10 },
+            },
+        });
+        try tree.appendChild(container_id, first_id);
+        try tree.appendChild(container_id, second_id);
+        try tree.appendChild(container_id, third_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 20, .height = 10 });
+
+        try expectRelative(
+            &tree,
+            first_id,
+            .{ .x = 0, .y = scenario.expected_y[0], .w = 20, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            second_id,
+            .{ .x = 0, .y = scenario.expected_y[1], .w = 20, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            third_id,
+            .{ .x = 0, .y = scenario.expected_y[2], .w = 20, .h = 20 },
+        );
+    }
+}
+
+test "oversized cross item distinguishes safe and unsafe alignment" {
+    const scenarios = [_]struct {
+        align_items: style.Align,
+        align_self: style.AlignSelf,
+        expected_y: f32,
+    }{
+        .{ .align_items = .safe_center, .align_self = .auto, .expected_y = 0 },
+        .{ .align_items = .unsafe_center, .align_self = .auto, .expected_y = -10 },
+        .{ .align_items = .center, .align_self = .auto, .expected_y = -10 },
+        .{ .align_items = .start, .align_self = .safe_center, .expected_y = 0 },
+        .{ .align_items = .start, .align_self = .unsafe_center, .expected_y = -10 },
+        .{ .align_items = .start, .align_self = .center, .expected_y = -10 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var child = fixedItem(10, 70);
+        child.align_self = scenario.align_self;
+
+        try appendNode(&tree, child_id, container_id, child);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .justify = .start,
+            .@"align" = scenario.align_items,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 50 },
+            },
+        });
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 20, .height = 50 });
+
+        try expectRelative(
+            &tree,
+            child_id,
+            .{ .x = 0, .y = scenario.expected_y, .w = 10, .h = 70 },
+        );
+    }
+}
+
+test "positive free space makes all center safety variants equivalent" {
+    const scenarios = [_]struct {
+        justify: style.Justify,
+        align_items: style.Align,
+        align_content: style.AlignContent,
+        align_self: style.AlignSelf,
+    }{
+        .{
+            .justify = .safe_center,
+            .align_items = .safe_center,
+            .align_content = .safe_center,
+            .align_self = .safe_center,
+        },
+        .{
+            .justify = .unsafe_center,
+            .align_items = .unsafe_center,
+            .align_content = .unsafe_center,
+            .align_self = .unsafe_center,
+        },
+        .{
+            .justify = .center,
+            .align_items = .center,
+            .align_content = .center,
+            .align_self = .center,
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const first_id: Id = @enumFromInt(1);
+        const second_id: Id = @enumFromInt(2);
+        const third_id: Id = @enumFromInt(3);
+        const fourth_id: Id = @enumFromInt(4);
+        const container_id: Id = @enumFromInt(5);
+
+        var third = fixedItem(40, 10);
+        third.align_self = scenario.align_self;
+
+        try appendNode(&tree, first_id, container_id, fixedItem(40, 10));
+        try appendNode(&tree, second_id, container_id, fixedItem(40, 20));
+        try appendNode(&tree, third_id, container_id, third);
+        try appendNode(&tree, fourth_id, container_id, fixedItem(40, 20));
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .wrap = .wrap,
+            .flex_wrap = .wrap,
+            .justify = scenario.justify,
+            .@"align" = scenario.align_items,
+            .align_content = scenario.align_content,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        });
+        try tree.appendChild(container_id, first_id);
+        try tree.appendChild(container_id, second_id);
+        try tree.appendChild(container_id, third_id);
+        try tree.appendChild(container_id, fourth_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+        try expectRelative(&tree, first_id, .{ .x = 10, .y = 35, .w = 40, .h = 10 });
+        try expectRelative(&tree, second_id, .{ .x = 50, .y = 30, .w = 40, .h = 20 });
+        try expectRelative(&tree, third_id, .{ .x = 10, .y = 55, .w = 40, .h = 10 });
+        try expectRelative(&tree, fourth_id, .{ .x = 50, .y = 50, .w = 40, .h = 20 });
+    }
+}
+
+test "fractional grow clamp preserves initial free-space scale" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    var first = growingItem(0, 10);
+    first.grow = 0.2;
+    first.max_size.width = .{ .length = 10 };
+    var second = growingItem(0, 10);
+    second.grow = 0.2;
+
+    try appendNode(&tree, first_id, container_id, first);
+    try appendNode(&tree, second_id, container_id, second);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .start,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 10 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 10 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
+    try expectRelative(&tree, second_id, .{ .x = 10, .y = 0, .w = 20, .h = 10 });
+
+    const container_rect = tree.nodeConst(container_id).?.rect;
+    const second_rect = tree.nodeConst(second_id).?.rect;
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 70),
+        container_rect.w - second_rect.x - second_rect.w,
+        0.001,
+    );
+}
+
+test "initial minimum freeze preserves initial free-space scale" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    var first = growingItem(0, 10);
+    first.grow = 0.2;
+    first.min_size.width = .{ .length = 20 };
+    var second = growingItem(0, 10);
+    second.grow = 0.2;
+
+    try appendNode(&tree, first_id, container_id, first);
+    try appendNode(&tree, second_id, container_id, second);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .start,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 10 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 10 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
+    try expectRelative(&tree, second_id, .{ .x = 20, .y = 0, .w = 20, .h = 10 });
+
+    const container_rect = tree.nodeConst(container_id).?.rect;
+    const second_rect = tree.nodeConst(second_id).?.rect;
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 60),
+        container_rect.w - second_rect.x - second_rect.w,
+        0.001,
+    );
+}
+
+test "grow violation selection freezes only the dominant minimum" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const third_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+
+    var first = growingItem(0, 10);
+    first.grow = 0.2;
+    first.max_size.width = .{ .length = 10 };
+    var second = growingItem(0, 10);
+    second.grow = 0.2;
+    second.min_size.width = .{ .length = 90 };
+    var third = growingItem(0, 10);
+    third.grow = 0.2;
+
+    try appendNode(&tree, first_id, container_id, first);
+    try appendNode(&tree, second_id, container_id, second);
+    try appendNode(&tree, third_id, container_id, third);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .start,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+    try tree.appendChild(container_id, third_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 10 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 10 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 5, .h = 10 });
+    try expectRelative(&tree, second_id, .{ .x = 5, .y = 0, .w = 90, .h = 10 });
+    try expectRelative(&tree, third_id, .{ .x = 95, .y = 0, .w = 5, .h = 10 });
+
+    const container_rect = tree.nodeConst(container_id).?.rect;
+    const third_rect = tree.nodeConst(third_id).?.rect;
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 0),
+        container_rect.w - third_rect.x - third_rect.w,
+        0.001,
+    );
+}
+
+test "fractional shrink factors preserve raw negative free space" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    var first = growingItem(50, 10);
+    first.grow = 0;
+    first.shrink = 0.2;
+    var second = growingItem(50, 10);
+    second.grow = 0;
+    second.shrink = 0.2;
+
+    try appendNode(&tree, first_id, container_id, first);
+    try appendNode(&tree, second_id, container_id, second);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .start,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 80 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 80, .height = 10 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 80, .h = 10 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 46, .h = 10 });
+    try expectRelative(&tree, second_id, .{ .x = 46, .y = 0, .w = 46, .h = 10 });
+
+    const container_rect = tree.nodeConst(container_id).?.rect;
+    const second_rect = tree.nodeConst(second_id).?.rect;
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 12),
+        second_rect.x + second_rect.w - container_rect.w,
+        0.001,
+    );
+}

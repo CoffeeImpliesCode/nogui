@@ -26,11 +26,31 @@ const Slot = struct {
     next_y: f32,
     occupied: bool,
 };
+const OccupiedState = struct {
+    slot: *Slot,
+    candidate_y: f32,
+    candidate_height: f32,
+};
 
 const Placement = struct {
     x: f32,
     y: f32,
     slot_width: f32,
+};
+const BfcAutoPlacement = struct {
+    x: f32,
+    y: f32,
+    border_width: f32,
+    slot_width: f32,
+};
+const ClearanceState = struct {
+    clear: style.Clear,
+    direction: style.Direction,
+    bottom: f32 = 0,
+};
+const FloatQuery = union(enum) {
+    slot: *OccupiedState,
+    clearance: *ClearanceState,
 };
 const ContainerInitialSize = struct {
     border_width: f32,
@@ -688,7 +708,10 @@ fn layoutPreparedContainerUnchecked(
 
         const effective_start_y = if (has_clearance) clear_y else flow_y;
         const vertical_margin = if (has_clearance)
-            child_top_margin.resolve()
+            if (top_collapse_open and !child_establishes_bfc)
+                @as(f32, 0)
+            else
+                child_top_margin.resolve()
         else
             hypothetical_margin;
         var child_x = inlineStartX(
@@ -705,39 +728,32 @@ fn layoutPreparedContainerUnchecked(
         if (child_establishes_bfc) {
             const width_is_auto = child_style.size.width == .auto;
             const inline_side = physicalInlineStart(container_style.writing_direction);
-            var placement = try findSlot(
-                tree,
-                child_ids,
-                child_index,
-                content_width,
-                if (width_is_auto)
-                    0
-                else
-                    try addFinite(
-                        try addFinite(child_width, margins.left),
-                        margins.right,
-                    ),
-                try addFinite(
-                    try addFinite(child_height, margins.top),
-                    margins.bottom,
-                ),
-                effective_start_y,
-                inline_side,
-                child_context.percentage_basis.width,
-            );
+            var placement: Placement = .{
+                .x = 0,
+                .y = 0,
+                .slot_width = 0,
+            };
+            var auto_placement: ?BfcAutoPlacement = null;
             if (width_is_auto) {
                 var attempt: usize = 0;
                 while (attempt <= child_index) : (attempt += 1) {
-                    used_auto_width_border = @max(
-                        0,
-                        try subtractFinite(
-                            try subtractFinite(
-                                placement.slot_width,
-                                margins.left,
-                            ),
-                            margins.right,
+                    const next_auto = try findAutoBfcPlacement(
+                        tree,
+                        child_ids,
+                        child_index,
+                        content_width,
+                        child_width,
+                        try addFinite(
+                            try addFinite(child_height, margins.top),
+                            margins.bottom,
                         ),
+                        effective_start_y,
+                        container_style.writing_direction,
+                        margins,
+                        child_context.percentage_basis.width,
+                        attempt != 0,
                     );
+                    used_auto_width_border = next_auto.border_width;
                     child_size = try resolveChildSize(
                         child_style,
                         child_context,
@@ -748,31 +764,46 @@ fn layoutPreparedContainerUnchecked(
                     );
                     child_width = child_size.width;
                     child_height = child_size.height;
-                    const next_placement = try findSlot(
-                        tree,
-                        child_ids,
-                        child_index,
-                        content_width,
-                        try addFinite(
-                            try addFinite(child_width, margins.left),
-                            margins.right,
-                        ),
-                        try addFinite(
-                            try addFinite(child_height, margins.top),
-                            margins.bottom,
-                        ),
-                        effective_start_y,
-                        inline_side,
-                        child_context.percentage_basis.width,
-                    );
-                    const stable_slot = next_placement.y == placement.y and
-                        next_placement.slot_width == placement.slot_width;
-                    placement = next_placement;
+                    const stable_slot = if (auto_placement) |previous|
+                        next_auto.y == previous.y and
+                            next_auto.border_width == previous.border_width and
+                            next_auto.slot_width == previous.slot_width
+                    else
+                        false;
+                    auto_placement = next_auto;
+                    placement = .{
+                        .x = next_auto.x,
+                        .y = next_auto.y,
+                        .slot_width = next_auto.slot_width,
+                    };
                     if (stable_slot) break;
                 }
+            } else {
+                placement = try findSlot(
+                    tree,
+                    child_ids,
+                    child_index,
+                    content_width,
+                    try addFinite(
+                        try addFinite(child_width, margins.left),
+                        margins.right,
+                    ),
+                    try addFinite(
+                        try addFinite(child_height, margins.top),
+                        margins.bottom,
+                    ),
+                    effective_start_y,
+                    inline_side,
+                    child_context.percentage_basis.width,
+                );
             }
-            child_x = try addFinite(placement.x, margins.left);
-            child_y = try addFinite(placement.y, margins.top);
+            if (auto_placement) |auto| {
+                child_x = auto.x;
+                child_y = try addFinite(auto.y, margins.top);
+            } else {
+                child_x = try addFinite(placement.x, margins.left);
+                child_y = try addFinite(placement.y, margins.top);
+            }
         }
         if (child_establishes_bfc) {
             nested_result = try layoutNestedBlockAtWidth(
@@ -813,44 +844,55 @@ fn layoutPreparedContainerUnchecked(
         var mixed_child_context = child_context;
         if (child_establishes_bfc) {
             const inline_side = physicalInlineStart(container_style.writing_direction);
-            const final_placement = try findSlot(
-                tree,
-                child_ids,
-                child_index,
-                content_width,
-                try addFinite(
-                    try addFinite(child_width, margins.left),
-                    margins.right,
-                ),
-                try addFinite(
-                    try addFinite(child_height, margins.top),
-                    margins.bottom,
-                ),
-                effective_start_y,
-                inline_side,
-                child_context.percentage_basis.width,
-            );
-            child_x = try addFinite(final_placement.x, margins.left);
-            child_y = try addFinite(final_placement.y, margins.top);
+            var final_slot_border_width = child_width;
+            if (child_style.size.width == .auto) {
+                const final_auto = try findAutoBfcPlacement(
+                    tree,
+                    child_ids,
+                    child_index,
+                    content_width,
+                    child_width,
+                    try addFinite(
+                        try addFinite(child_height, margins.top),
+                        margins.bottom,
+                    ),
+                    effective_start_y,
+                    container_style.writing_direction,
+                    margins,
+                    child_context.percentage_basis.width,
+                    true,
+                );
+                final_slot_border_width = final_auto.border_width;
+                used_auto_width_border = final_slot_border_width;
+                child_x = final_auto.x;
+                child_y = try addFinite(final_auto.y, margins.top);
+            } else {
+                const final_placement = try findSlot(
+                    tree,
+                    child_ids,
+                    child_index,
+                    content_width,
+                    try addFinite(
+                        try addFinite(child_width, margins.left),
+                        margins.right,
+                    ),
+                    try addFinite(
+                        try addFinite(child_height, margins.top),
+                        margins.bottom,
+                    ),
+                    effective_start_y,
+                    inline_side,
+                    child_context.percentage_basis.width,
+                );
+                child_x = try addFinite(final_placement.x, margins.left);
+                child_y = try addFinite(final_placement.y, margins.top);
+            }
 
             if (layout_ctx != null and
                 child.children.items.len != 0 and
                 child_style.display != .block and
                 child_style.display != .flow_root)
             {
-                const final_slot_border_width = if (child_style.size.width == .auto)
-                    @max(
-                        0,
-                        try subtractFinite(
-                            try subtractFinite(
-                                final_placement.slot_width,
-                                margins.left,
-                            ),
-                            margins.right,
-                        ),
-                    )
-                else
-                    child_width;
                 if (child_style.size.width == .auto) {
                     used_auto_width_border = final_slot_border_width;
                 }
@@ -1997,23 +2039,129 @@ fn clearBottom(
     direction: style.Direction,
     percentage_basis: ?f32,
 ) sizing.Error!f32 {
-    var bottom: f32 = 0;
+    var state: ClearanceState = .{
+        .clear = clear,
+        .direction = direction,
+    };
+    var query: FloatQuery = .{ .clearance = &state };
+    try walkPriorFloats(
+        tree,
+        child_ids,
+        prior_count,
+        percentage_basis,
+        &query,
+    );
+    return state.bottom;
+}
+fn walkPriorFloats(
+    tree: *const widget.WidgetTree,
+    child_ids: []const Id,
+    prior_count: usize,
+    percentage_basis: ?f32,
+    query: *FloatQuery,
+) sizing.Error!void {
+    if (prior_count > child_ids.len) return error.InvalidStyle;
+    const depth = tree.nodes.items.len;
     for (child_ids[0..prior_count]) |child_id| {
-        const child = tree.nodeConst(child_id) orelse return error.InvalidStyle;
-        if (child.layout_hidden or child.style.position == .absolute) continue;
-
-        const side = physicalFloat(child.style.float, child.style.writing_direction);
-        if (!clears(clear, direction, side)) continue;
-        const margins = try resolveMargins(child.style, percentage_basis);
-        bottom = @max(
-            bottom,
-            try addFinite(
-                try addFinite(child.rect.y, child.rect.h),
-                margins.bottom,
-            ),
+        try walkFloatSubtree(
+            tree,
+            child_id,
+            0,
+            0,
+            percentage_basis,
+            query,
+            depth,
         );
     }
-    return bottom;
+}
+
+fn walkFloatSubtree(
+    tree: *const widget.WidgetTree,
+    node_id: Id,
+    parent_origin_x: f32,
+    parent_origin_y: f32,
+    percentage_basis: ?f32,
+    query: *FloatQuery,
+    depth: usize,
+) sizing.Error!void {
+    if (depth == 0) return error.InvalidStyle;
+    const node = tree.nodeConst(node_id) orelse return error.InvalidStyle;
+    if (node.layout_hidden or node.style.position == .absolute) return;
+
+    const node_x = try addFinite(parent_origin_x, node.rect.x);
+    const node_y = try addFinite(parent_origin_y, node.rect.y);
+    const side = physicalFloat(node.style.float, node.style.writing_direction);
+    if (side != .none) {
+        const margins = try resolveMargins(node.style, percentage_basis);
+        const outer: widget.Rect = .{
+            .x = try subtractFinite(node_x, margins.left),
+            .y = try subtractFinite(node_y, margins.top),
+            .w = try addFinite(
+                try addFinite(node.rect.w, margins.left),
+                margins.right,
+            ),
+            .h = try addFinite(
+                try addFinite(node.rect.h, margins.top),
+                margins.bottom,
+            ),
+        };
+        try visitFloat(query, side, outer);
+        return;
+    }
+
+    if (floatTraversalBoundary(node.style)) return;
+    const edges = try resolveBoxEdges(node.style, percentage_basis);
+    const content_origin_x = try addFinite(
+        node_x,
+        try addFinite(edges.border.left, edges.padding.left),
+    );
+    const content_origin_y = try addFinite(
+        node_y,
+        try addFinite(edges.border.top, edges.padding.top),
+    );
+    const content_width = @max(
+        0,
+        try subtractFinite(node.rect.w, edges.horizontal),
+    );
+    for (node.children.items) |child_id| {
+        try walkFloatSubtree(
+            tree,
+            child_id,
+            content_origin_x,
+            content_origin_y,
+            @as(?f32, content_width),
+            query,
+            depth - 1,
+        );
+    }
+}
+
+fn floatTraversalBoundary(input_style: style.Style) bool {
+    if (establishesBfc(input_style)) return true;
+    return input_style.display == .flex or input_style.display == .grid;
+}
+
+fn visitFloat(
+    query: *FloatQuery,
+    side: PhysicalSide,
+    outer: widget.Rect,
+) sizing.Error!void {
+    switch (query.*) {
+        .slot => |state| {
+            if (!verticalOverlap(outer, state.candidate_y, state.candidate_height)) return;
+            state.slot.occupied = true;
+            if (side == .left) {
+                state.slot.left = @max(state.slot.left, try addFinite(outer.x, outer.w));
+            } else {
+                state.slot.right = @min(state.slot.right, outer.x);
+            }
+            state.slot.next_y = @min(state.slot.next_y, try addFinite(outer.y, outer.h));
+        },
+        .clearance => |state| {
+            if (!clears(state.clear, state.direction, side)) return;
+            state.bottom = @max(state.bottom, try addFinite(outer.y, outer.h));
+        },
+    }
 }
 
 fn clears(clear: style.Clear, direction: style.Direction, side: PhysicalSide) bool {
@@ -2034,6 +2182,132 @@ fn clears(clear: style.Clear, direction: style.Direction, side: PhysicalSide) bo
     };
 }
 
+fn findAutoBfcPlacement(
+    tree: *const widget.WidgetTree,
+    child_ids: []const Id,
+    prior_count: usize,
+    container_width: f32,
+    candidate_border_width: f32,
+    child_height: f32,
+    start_y: f32,
+    direction: style.Direction,
+    margins: style.Sides,
+    percentage_basis: ?f32,
+    enforce_candidate_fit: bool,
+) sizing.Error!BfcAutoPlacement {
+    const checked_candidate_width = try finite(candidate_border_width);
+    var y = start_y;
+    var attempt: usize = 0;
+    while (attempt <= tree.nodes.items.len) : (attempt += 1) {
+        const slot = try occupiedSlot(
+            tree,
+            child_ids,
+            prior_count,
+            container_width,
+            y,
+            child_height,
+            percentage_basis,
+        );
+        const slot_width = @max(0, slot.right - slot.left);
+        const left_float = slot.left > 0;
+        const right_float = slot.right < container_width;
+
+        if (!slot.occupied or (!left_float and !right_float)) {
+            const border_width = try autoBorderWidth(container_width, margins);
+            const x = try autoBorderX(
+                container_width,
+                border_width,
+                margins,
+                direction,
+            );
+            return .{
+                .x = x,
+                .y = y,
+                .border_width = border_width,
+                .slot_width = slot_width,
+            };
+        }
+
+        const border_width = if (left_float and right_float)
+            slot_width
+        else if (left_float)
+            @max(0, try subtractFinite(slot_width, margins.right))
+        else
+            @max(0, try subtractFinite(slot_width, margins.left));
+        const provisional_outer_width = try addFinite(
+            try addFinite(border_width, margins.left),
+            margins.right,
+        );
+        const border_x = if (left_float and !right_float)
+            if (direction == .ltr)
+                slot.left
+            else
+                try subtractFinite(
+                    try subtractFinite(slot.right, margins.right),
+                    border_width,
+                )
+        else if (right_float and !left_float)
+            try addFinite(slot.left, margins.left)
+        else if (direction == .ltr)
+            slot.left
+        else
+            try subtractFinite(slot.right, border_width);
+        const border_right = try addFinite(border_x, border_width);
+        const border_contained = border_x >= slot.left and border_right <= slot.right;
+        if ((!enforce_candidate_fit or checked_candidate_width <= border_width) and
+            provisional_outer_width > 0 and
+            border_contained)
+        {
+            return .{
+                .x = border_x,
+                .y = y,
+                .border_width = border_width,
+                .slot_width = slot_width,
+            };
+        }
+        if (!std.math.isFinite(slot.next_y) or slot.next_y <= y) break;
+        y = slot.next_y;
+    }
+
+    const border_width = try autoBorderWidth(container_width, margins);
+    return .{
+        .x = try autoBorderX(
+            container_width,
+            border_width,
+            margins,
+            direction,
+        ),
+        .y = y,
+        .border_width = border_width,
+        .slot_width = container_width,
+    };
+}
+
+fn autoBorderWidth(container_width: f32, margins: style.Sides) sizing.Error!f32 {
+    return @max(
+        0,
+        try subtractFinite(
+            try subtractFinite(container_width, margins.left),
+            margins.right,
+        ),
+    );
+}
+
+fn autoBorderX(
+    container_width: f32,
+    border_width: f32,
+    margins: style.Sides,
+    direction: style.Direction,
+) sizing.Error!f32 {
+    return if (direction == .ltr)
+        try finite(margins.left)
+    else
+        try subtractFinite(
+            try subtractFinite(container_width, margins.right),
+            border_width,
+        );
+}
+
 fn findSlot(
     tree: *const widget.WidgetTree,
     child_ids: []const Id,
@@ -2047,7 +2321,7 @@ fn findSlot(
 ) sizing.Error!Placement {
     var y = start_y;
     var attempt: usize = 0;
-    while (attempt <= prior_count) : (attempt += 1) {
+    while (attempt <= tree.nodes.items.len) : (attempt += 1) {
         const slot = try occupiedSlot(
             tree,
             child_ids,
@@ -2085,35 +2359,19 @@ fn occupiedSlot(
         .next_y = std.math.inf(f32),
         .occupied = false,
     };
-
-    for (child_ids[0..prior_count]) |child_id| {
-        const child = tree.nodeConst(child_id) orelse return error.InvalidStyle;
-        if (child.layout_hidden or child.style.position == .absolute) continue;
-        const side = physicalFloat(child.style.float, child.style.writing_direction);
-        if (side == .none) continue;
-        const margins = try resolveMargins(child.style, percentage_basis);
-        const outer: widget.Rect = .{
-            .x = try subtractFinite(child.rect.x, margins.left),
-            .y = try subtractFinite(child.rect.y, margins.top),
-            .w = try addFinite(
-                try addFinite(child.rect.w, margins.left),
-                margins.right,
-            ),
-            .h = try addFinite(
-                try addFinite(child.rect.h, margins.top),
-                margins.bottom,
-            ),
-        };
-        if (!verticalOverlap(outer, candidate_y, candidate_height)) continue;
-
-        result.occupied = true;
-        if (side == .left) {
-            result.left = @max(result.left, try addFinite(outer.x, outer.w));
-        } else {
-            result.right = @min(result.right, outer.x);
-        }
-        result.next_y = @min(result.next_y, try addFinite(outer.y, outer.h));
-    }
+    var state: OccupiedState = .{
+        .slot = &result,
+        .candidate_y = candidate_y,
+        .candidate_height = candidate_height,
+    };
+    var query: FloatQuery = .{ .slot = &state };
+    try walkPriorFloats(
+        tree,
+        child_ids,
+        prior_count,
+        percentage_basis,
+        &query,
+    );
     return result;
 }
 

@@ -3230,3 +3230,481 @@ test "vertical scrollbar gutter stays inside fixed content box" {
     try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
     try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 10 });
 }
+
+test "auto-width BFC ignores a small negative leading margin beside a float" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const bfc_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, float_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 100 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = -20 },
+        },
+        .overflow = .{ .width = .hidden, .height = .hidden },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 50, .h = 100 });
+    try expectRelative(&tree, bfc_id, .{ .x = 50, .y = 0, .w = 50, .h = 100 });
+}
+
+test "auto-width BFC absorbs a positive leading margin beside a float" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const bfc_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, float_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 50 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 20 },
+        },
+        .overflow = .{ .width = .hidden, .height = .hidden },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 50, .h = 100 });
+    try expectRelative(&tree, bfc_id, .{ .x = 50, .y = 0, .w = 50, .h = 50 });
+}
+
+test "large negative leading margin moves an auto-width BFC below a float" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const bfc_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, float_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 50 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = -60 },
+        },
+        .overflow = .{ .width = .hidden, .height = .hidden },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 150 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 50, .h = 100 });
+    try expectRelative(&tree, bfc_id, .{ .x = -60, .y = 100, .w = 160, .h = 50 });
+}
+
+test "BFC avoids a float from a preceding sibling subtree" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const preceding_id: Id = @enumFromInt(2);
+    const bfc_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+
+    try appendNode(&tree, float_id, preceding_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, preceding_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 50 },
+        },
+        .overflow = .{ .width = .hidden, .height = .hidden },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(preceding_id, float_id);
+    try tree.appendChild(root_id, preceding_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
+    try expectRelative(&tree, preceding_id, .{ .x = 0, .y = 0, .w = 100, .h = 0 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 50, .h = 100 });
+    try expectRelative(&tree, bfc_id, .{ .x = 50, .y = 0, .w = 50, .h = 50 });
+}
+
+test "forced clearance ignores an adjoining collapsed top margin" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const float_parent_id: Id = @enumFromInt(2);
+    const clear_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const root_id: Id = @enumFromInt(5);
+
+    try appendNode(&tree, float_id, float_parent_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 50 },
+        },
+    });
+    try appendNode(&tree, float_parent_id, container_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, clear_id, container_id, .{
+        .display = .block,
+        .clear = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 50 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 400 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, container_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(float_parent_id, float_id);
+    try tree.appendChild(container_id, float_parent_id);
+    try tree.appendChild(container_id, clear_id);
+    try tree.appendChild(root_id, container_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, float_parent_id, .{ .x = 0, .y = 0, .w = 100, .h = 0 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
+    try expectRelative(&tree, clear_id, .{ .x = 0, .y = 50, .w = 100, .h = 50 });
+}
+
+test "negative clearance preserves following sibling collapse geometry" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const clear_id: Id = @enumFromInt(2);
+    const inner_id: Id = @enumFromInt(3);
+    const following_id: Id = @enumFromInt(4);
+    const container_id: Id = @enumFromInt(5);
+    const root_id: Id = @enumFromInt(6);
+
+    try appendNode(&tree, float_id, inner_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 50 },
+        },
+    });
+    try appendNode(&tree, clear_id, inner_id, .{
+        .display = .block,
+        .clear = .left,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .margin_inset = .{
+            .top = .{ .length = 200 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, inner_id, container_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, following_id, container_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 50 },
+        },
+    });
+    try appendNode(&tree, container_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(inner_id, float_id);
+    try tree.appendChild(inner_id, clear_id);
+    try tree.appendChild(container_id, inner_id);
+    try tree.appendChild(container_id, following_id);
+    try tree.appendChild(root_id, container_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
+    try expectRelative(&tree, clear_id, .{ .x = 0, .y = 50, .w = 100, .h = 0 });
+    try expectRelative(&tree, following_id, .{ .x = 0, .y = 50, .w = 100, .h = 50 });
+}
+
+test "fixed-width BFC retries past every float in a preceding sibling subtree" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_float_id: Id = @enumFromInt(1);
+    const second_float_id: Id = @enumFromInt(2);
+    const third_float_id: Id = @enumFromInt(3);
+    const preceding_id: Id = @enumFromInt(4);
+    const bfc_id: Id = @enumFromInt(5);
+    const root_id: Id = @enumFromInt(6);
+
+    try appendNode(&tree, first_float_id, preceding_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, second_float_id, preceding_id, .{
+        .display = .block,
+        .float = .left,
+        .clear = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, third_float_id, preceding_id, .{
+        .display = .block,
+        .float = .left,
+        .clear = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, preceding_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 60 },
+            .height = .{ .length = 5 },
+        },
+        .overflow = .{ .width = .hidden, .height = .hidden },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(preceding_id, first_float_id);
+    try tree.appendChild(preceding_id, second_float_id);
+    try tree.appendChild(preceding_id, third_float_id);
+    try tree.appendChild(root_id, preceding_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 35 });
+    try expectRelative(&tree, preceding_id, .{ .x = 0, .y = 0, .w = 100, .h = 0 });
+    try expectRelative(&tree, first_float_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+    try expectRelative(&tree, second_float_id, .{ .x = 0, .y = 10, .w = 50, .h = 10 });
+    try expectRelative(&tree, third_float_id, .{ .x = 0, .y = 20, .w = 50, .h = 10 });
+    try expectRelative(&tree, bfc_id, .{ .x = 0, .y = 30, .w = 60, .h = 5 });
+}
+
+test "auto-width BFC retries past every float in a preceding sibling subtree" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_float_id: Id = @enumFromInt(1);
+    const second_float_id: Id = @enumFromInt(2);
+    const third_float_id: Id = @enumFromInt(3);
+    const preceding_id: Id = @enumFromInt(4);
+    const bfc_id: Id = @enumFromInt(5);
+    const root_id: Id = @enumFromInt(6);
+
+    try appendNode(&tree, first_float_id, preceding_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, second_float_id, preceding_id, .{
+        .display = .block,
+        .float = .left,
+        .clear = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, third_float_id, preceding_id, .{
+        .display = .block,
+        .float = .left,
+        .clear = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, preceding_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 5 },
+        },
+        .min_size = .{
+            .width = .{ .length = 60 },
+            .height = .auto,
+        },
+        .overflow = .{ .width = .hidden, .height = .hidden },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .auto },
+    });
+    try tree.appendChild(preceding_id, first_float_id);
+    try tree.appendChild(preceding_id, second_float_id);
+    try tree.appendChild(preceding_id, third_float_id);
+    try tree.appendChild(root_id, preceding_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 35 });
+    try expectRelative(&tree, preceding_id, .{ .x = 0, .y = 0, .w = 100, .h = 0 });
+    try expectRelative(&tree, first_float_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+    try expectRelative(&tree, second_float_id, .{ .x = 0, .y = 10, .w = 50, .h = 10 });
+    try expectRelative(&tree, third_float_id, .{ .x = 0, .y = 20, .w = 50, .h = 10 });
+    try expectRelative(&tree, bfc_id, .{ .x = 0, .y = 30, .w = 100, .h = 5 });
+}

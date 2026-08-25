@@ -553,8 +553,12 @@ pub const DrawCtx = struct {
         var resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
         resolved_style.display = .grid;
         const T = @TypeOf(opts);
-        if (!@hasField(T, "grid_justify_content") and @hasField(T, "justify"))
+        if (!@hasField(T, "grid_justify_content") and
+            @hasField(T, "justify") and
+            resolved_style.grid_justify_content == .normal)
+        {
             resolved_style.grid_justify_content = resolved_style.justify;
+        }
         if (!@hasField(T, "grid_align_content") and @hasField(T, "align_content"))
             resolved_style.grid_align_content = resolved_style.align_content;
         if (!@hasField(T, "grid_justify_items") and @hasField(T, "align"))

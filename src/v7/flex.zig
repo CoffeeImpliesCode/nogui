@@ -545,6 +545,8 @@ fn alignSelfAsAlign(value: style.AlignSelf, parent_align: style.Align) style.Ali
         .stretch => .stretch,
         .start => .start,
         .center => .center,
+        .safe_center => .safe_center,
+        .unsafe_center => .unsafe_center,
         .end => .end,
         .baseline => .baseline,
     };
@@ -733,10 +735,12 @@ fn finalizeCross(tree: *WidgetTree, parent_id: Id, available: Size) void {
                 clampCross(child, child_direction, @max(0, extent - margin_lead - margin_trail))
             else
                 natural;
-            const free = @max(0, extent - size - margin_lead - margin_trail);
+            const signed_free = extent - size - margin_lead - margin_trail;
+            const free = @max(0, signed_free);
             const pos: f32 = switch (@"align") {
                 .stretch, .start, .baseline => margin_lead,
-                .center => margin_lead + free / 2,
+                .safe_center => margin_lead + free / 2,
+                .center, .unsafe_center => margin_lead + signed_free / 2,
                 .end => margin_lead + free,
             };
             if (is_col) {
@@ -948,12 +952,14 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         }
         if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
 
-        const free_for_justify = @max(0, container_content_main - final_fitted);
+        const signed_free_for_justify = container_content_main - final_fitted;
+        const free_for_justify = @max(0, signed_free_for_justify);
         var main_offset: f32 = 0;
         var extra_gap: f32 = 0;
         switch (justify) {
-            .start => {},
-            .center => main_offset = free_for_justify / 2,
+            .normal, .start => {},
+            .safe_center => main_offset = free_for_justify / 2,
+            .center, .unsafe_center => main_offset = signed_free_for_justify / 2,
             .end => main_offset = free_for_justify,
             .space_between => if (flow_count > 1) {
                 extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count - 1));
@@ -1366,7 +1372,8 @@ fn layoutAdvancedFlexContainer(
         line_cross_total = available_cross;
     }
 
-    var cross_free = @max(0, available_cross - line_cross_total);
+    const signed_cross_free = available_cross - line_cross_total;
+    var cross_free = @max(0, signed_cross_free);
     var line_offset: f32 = 0;
     var line_gap = gap;
     if (node.style.align_content == .stretch and line_count > 0) {
@@ -1376,7 +1383,8 @@ fn layoutAdvancedFlexContainer(
     } else {
         switch (node.style.align_content) {
             .start, .stretch => {},
-            .center => line_offset = cross_free / 2,
+            .safe_center => line_offset = cross_free / 2,
+            .center, .unsafe_center => line_offset = signed_cross_free / 2,
             .end => line_offset = cross_free,
             .space_between => if (line_count > 1) {
                 line_gap += cross_free / @as(f32, @floatFromInt(line_count - 1));
@@ -1401,13 +1409,15 @@ fn layoutAdvancedFlexContainer(
 
     for (0..line_count) |line_index| {
         const line = lines[line_index];
-        var main_free = @max(0, available_main - lineFitted(
+
+        var signed_main_free = available_main - lineFitted(
             line,
             item_mains,
             main_leads,
             main_trails,
             gap,
-        ));
+        );
+        var main_free = @max(0, signed_main_free);
         var auto_main_count: usize = 0;
         for (0..line.flow_count) |offset| {
             const flow_index = line.first_flow + offset;
@@ -1422,12 +1432,14 @@ fn layoutAdvancedFlexContainer(
                 if (main_auto_trails[flow_index]) main_trails[flow_index] = auto_size;
             }
             main_free = 0;
+            signed_main_free = 0;
         }
         var main_offset: f32 = 0;
         var extra_gap: f32 = 0;
         switch (node.style.justify) {
-            .start => {},
-            .center => main_offset = main_free / 2,
+            .normal, .start => {},
+            .safe_center => main_offset = main_free / 2,
+            .center, .unsafe_center => main_offset = signed_main_free / 2,
             .end => main_offset = main_free,
             .space_between => if (line.flow_count > 1) {
                 extra_gap = main_free / @as(f32, @floatFromInt(line.flow_count - 1));
@@ -1461,7 +1473,8 @@ fn layoutAdvancedFlexContainer(
                     @max(0, line.cross_size - cross_margin_total),
                 );
             }
-            var cross_item_free = @max(0, line.cross_size - child_cross - cross_margin_total);
+            const signed_cross_item_free = line.cross_size - child_cross - cross_margin_total;
+            var cross_item_free = @max(0, signed_cross_item_free);
             var cross_lead = cross_leads[flow_index];
             if (auto_cross_count > 0 and cross_item_free > 0) {
                 const auto_size = cross_item_free / @as(f32, @floatFromInt(auto_cross_count));
@@ -1472,7 +1485,8 @@ fn layoutAdvancedFlexContainer(
             if (auto_cross_count == 0) {
                 cross_item_offset = switch (item_align) {
                     .stretch, .start, .baseline => cross_lead,
-                    .center => cross_lead + cross_item_free / 2,
+                    .safe_center => cross_lead + cross_item_free / 2,
+                    .center, .unsafe_center => cross_lead + signed_cross_item_free / 2,
                     .end => cross_lead + cross_item_free,
                 };
             }
@@ -1767,19 +1781,22 @@ fn placeAbsoluteChild(
         child.rect.x = containing.width - value - width - margin.right;
     } else {
         var x_pos: f32 = margin.left;
-        const free_x = @max(0, containing.width - width - margin.left - margin.right);
+        const signed_free_x = containing.width - width - margin.left - margin.right;
+        const free_x = @max(0, signed_free_x);
         if (parent_is_flex) {
             const p = parent.?;
             if (directionIsColumn(p.style.direction)) {
                 const align_val = alignSelfAsAlign(child.style.align_self, p.style.@"align");
                 x_pos = switch (align_val) {
-                    .center => margin.left + free_x / 2,
+                    .safe_center => margin.left + free_x / 2,
+                    .center, .unsafe_center => margin.left + signed_free_x / 2,
                     .end => containing.width - width - margin.right,
                     else => margin.left,
                 };
             } else {
                 x_pos = switch (p.style.justify) {
-                    .center => margin.left + free_x / 2,
+                    .safe_center => margin.left + free_x / 2,
+                    .center, .unsafe_center => margin.left + signed_free_x / 2,
                     .end => containing.width - width - margin.right,
                     else => margin.left,
                 };
@@ -1788,7 +1805,8 @@ fn placeAbsoluteChild(
             if (child.style.align_self != .auto) {
                 const self_align = alignSelfAsAlign(child.style.align_self, .start);
                 x_pos = switch (self_align) {
-                    .center => margin.left + free_x / 2,
+                    .safe_center => margin.left + free_x / 2,
+                    .center, .unsafe_center => margin.left + signed_free_x / 2,
                     .end => containing.width - width - margin.right,
                     else => margin.left,
                 };
@@ -1803,19 +1821,22 @@ fn placeAbsoluteChild(
         child.rect.y = containing.height - value - height - margin.bottom;
     } else {
         var y_pos: f32 = margin.top;
-        const free_y = @max(0, containing.height - height - margin.top - margin.bottom);
+        const signed_free_y = containing.height - height - margin.top - margin.bottom;
+        const free_y = @max(0, signed_free_y);
         if (parent_is_flex) {
             const p = parent.?;
             if (directionIsColumn(p.style.direction)) {
                 y_pos = switch (p.style.justify) {
-                    .center => margin.top + free_y / 2,
+                    .safe_center => margin.top + free_y / 2,
+                    .center, .unsafe_center => margin.top + signed_free_y / 2,
                     .end => containing.height - height - margin.bottom,
                     else => margin.top,
                 };
             } else {
                 const align_val = alignSelfAsAlign(child.style.align_self, p.style.@"align");
                 y_pos = switch (align_val) {
-                    .center => margin.top + free_y / 2,
+                    .safe_center => margin.top + free_y / 2,
+                    .center, .unsafe_center => margin.top + signed_free_y / 2,
                     .end => containing.height - height - margin.bottom,
                     else => margin.top,
                 };
@@ -1824,7 +1845,8 @@ fn placeAbsoluteChild(
             if (child.style.align_self != .auto) {
                 const self_align = alignSelfAsAlign(child.style.align_self, .start);
                 y_pos = switch (self_align) {
-                    .center => margin.top + free_y / 2,
+                    .safe_center => margin.top + free_y / 2,
+                    .center, .unsafe_center => margin.top + signed_free_y / 2,
                     .end => containing.height - height - margin.bottom,
                     else => margin.top,
                 };
@@ -2257,7 +2279,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     }
     if (flow_count > 1) final_fitted += gap * @as(f32, @floatFromInt(flow_count - 1));
 
-    const spread = flow_count > 0 and free > 0 and justify != .start;
+    const spread = flow_count > 0 and free > 0 and justify != .start and justify != .normal;
     const container_main: f32 = if (grew or shrank or spread) avail_main else final_fitted + inset_main;
 
     const container_cross: f32 = if (cross == .stretch and root_level) avail_cross else max_cross + inset_cross;
@@ -2271,15 +2293,17 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         node.rect.h = container_cross;
     }
 
-    const free_for_justify = if (grew or shrank or spread)
-        @max(0, container_main - inset_main - final_fitted)
+    const signed_free_for_justify = if (grew or shrank or spread)
+        container_main - inset_main - final_fitted
     else
         0;
+    const free_for_justify = @max(0, signed_free_for_justify);
     var main_offset: f32 = 0;
     var extra_gap: f32 = 0;
     switch (justify) {
-        .start => {},
-        .center => main_offset = free_for_justify / 2,
+        .normal, .start => {},
+        .safe_center => main_offset = free_for_justify / 2,
+        .center, .unsafe_center => main_offset = signed_free_for_justify / 2,
         .end => main_offset = free_for_justify,
         .space_between => if (flow_count > 1) {
             extra_gap = free_for_justify / @as(f32, @floatFromInt(flow_count - 1));
@@ -2309,11 +2333,14 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
         else
             crosses[i];
         // Cross position per align, within the content-box cross extent.
+        const signed_cross_free = place_cross - child_cross;
+        const cross_free = @max(0, signed_cross_free);
         var cross_pos: f32 = 0;
         switch (cross) {
             .stretch, .start, .baseline => {},
-            .center => cross_pos = (place_cross - child_cross) / 2,
-            .end => cross_pos = place_cross - child_cross,
+            .safe_center => cross_pos = cross_free / 2,
+            .center, .unsafe_center => cross_pos = signed_cross_free / 2,
+            .end => cross_pos = cross_free,
         }
         const m = child.style.margin;
         if (directionIsColumn(dir)) {
@@ -2698,6 +2725,8 @@ fn gridAlign(value: style.AlignSelf, fallback: style.Align) style.Align {
         .stretch => .stretch,
         .start => .start,
         .center => .center,
+        .safe_center => .safe_center,
+        .unsafe_center => .unsafe_center,
         .end => .end,
         .baseline => .baseline,
     };
@@ -2708,22 +2737,27 @@ fn gridContentOffset(
     free: f32,
     count: usize,
 ) struct { offset: f32, extra_gap: f32 } {
-    if (free <= 0 or count == 0) return .{ .offset = 0, .extra_gap = 0 };
+    if (count == 0) return .{ .offset = 0, .extra_gap = 0 };
+    const distributed_free = @max(0, free);
     return switch (mode) {
-        .start => .{ .offset = 0, .extra_gap = 0 },
-        .center => .{ .offset = free / 2, .extra_gap = 0 },
-        .end => .{ .offset = free, .extra_gap = 0 },
+        .normal, .start => .{ .offset = 0, .extra_gap = 0 },
+        .safe_center => .{ .offset = distributed_free / 2, .extra_gap = 0 },
+        .center, .unsafe_center => .{ .offset = free / 2, .extra_gap = 0 },
+        .end => .{ .offset = distributed_free, .extra_gap = 0 },
         .space_between => .{
             .offset = 0,
-            .extra_gap = if (count > 1) free / @as(f32, @floatFromInt(count - 1)) else 0,
+            .extra_gap = if (count > 1)
+                distributed_free / @as(f32, @floatFromInt(count - 1))
+            else
+                0,
         },
         .space_around => .{
-            .offset = free / @as(f32, @floatFromInt(count * 2)),
-            .extra_gap = free / @as(f32, @floatFromInt(count)),
+            .offset = distributed_free / @as(f32, @floatFromInt(count * 2)),
+            .extra_gap = distributed_free / @as(f32, @floatFromInt(count)),
         },
         .space_evenly => .{
-            .offset = free / @as(f32, @floatFromInt(count + 1)),
-            .extra_gap = free / @as(f32, @floatFromInt(count + 1)),
+            .offset = distributed_free / @as(f32, @floatFromInt(count + 1)),
+            .extra_gap = distributed_free / @as(f32, @floatFromInt(count + 1)),
         },
     };
 }
@@ -2733,30 +2767,43 @@ fn gridAlignContentOffset(
     free: f32,
     count: usize,
 ) struct { offset: f32, extra_gap: f32, stretch: f32 } {
-    if (free <= 0 or count == 0) return .{ .offset = 0, .extra_gap = 0, .stretch = 0 };
+    if (count == 0) return .{ .offset = 0, .extra_gap = 0, .stretch = 0 };
+    const distributed_free = @max(0, free);
     return switch (mode) {
         .start => .{ .offset = 0, .extra_gap = 0, .stretch = 0 },
-        .center => .{ .offset = free / 2, .extra_gap = 0, .stretch = 0 },
-        .end => .{ .offset = free, .extra_gap = 0, .stretch = 0 },
+        .safe_center => .{
+            .offset = distributed_free / 2,
+            .extra_gap = 0,
+            .stretch = 0,
+        },
+        .center, .unsafe_center => .{
+            .offset = free / 2,
+            .extra_gap = 0,
+            .stretch = 0,
+        },
+        .end => .{ .offset = distributed_free, .extra_gap = 0, .stretch = 0 },
         .space_between => .{
             .offset = 0,
-            .extra_gap = if (count > 1) free / @as(f32, @floatFromInt(count - 1)) else 0,
+            .extra_gap = if (count > 1)
+                distributed_free / @as(f32, @floatFromInt(count - 1))
+            else
+                0,
             .stretch = 0,
         },
         .space_around => .{
-            .offset = free / @as(f32, @floatFromInt(count * 2)),
-            .extra_gap = free / @as(f32, @floatFromInt(count)),
+            .offset = distributed_free / @as(f32, @floatFromInt(count * 2)),
+            .extra_gap = distributed_free / @as(f32, @floatFromInt(count)),
             .stretch = 0,
         },
         .space_evenly => .{
-            .offset = free / @as(f32, @floatFromInt(count + 1)),
-            .extra_gap = free / @as(f32, @floatFromInt(count + 1)),
+            .offset = distributed_free / @as(f32, @floatFromInt(count + 1)),
+            .extra_gap = distributed_free / @as(f32, @floatFromInt(count + 1)),
             .stretch = 0,
         },
         .stretch => .{
             .offset = 0,
             .extra_gap = 0,
-            .stretch = free / @as(f32, @floatFromInt(count)),
+            .stretch = distributed_free / @as(f32, @floatFromInt(count)),
         },
     };
 }
@@ -3122,7 +3169,7 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
         for (0..row_count) |index| result += row_sizes[index];
         break :blk result;
     };
-    const grid_justify_content = if (node.style.grid_justify_content == .start and node.style.justify != .start)
+    const grid_justify_content = if (node.style.grid_justify_content == .normal and node.style.justify != .start)
         node.style.justify
     else
         node.style.grid_justify_content;
@@ -3140,12 +3187,12 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
         node.style.grid_align_items;
     const justify_offset = gridContentOffset(
         grid_justify_content,
-        @max(0, content_width - final_column_sum - column_gap_total),
+        content_width - final_column_sum - column_gap_total,
         column_count,
     );
     const align_offset = gridAlignContentOffset(
         grid_align_content,
-        @max(0, content_height - final_row_sum - row_gap_total),
+        content_height - final_row_sum - row_gap_total,
         row_count,
     );
     var column_offsets: [32]f32 = [_]f32{0} ** 32;
@@ -3207,16 +3254,20 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
         child_height = child.resolved_style.clampHeight(child_height);
         const justify_self = gridAlign(child.style.grid_justify_self, grid_justify_items);
         const align_self = gridAlign(child.style.grid_align_self, grid_align_items);
-        const free_width = @max(0, area_width - child_width - margin.left - margin.right);
-        const free_height = @max(0, area_height - child_height - margin.top - margin.bottom);
+        const signed_free_width = area_width - child_width - margin.left - margin.right;
+        const free_width = @max(0, signed_free_width);
+        const signed_free_height = area_height - child_height - margin.top - margin.bottom;
+        const free_height = @max(0, signed_free_height);
         const child_x = column_offsets[column_start[index]] + margin.left + switch (justify_self) {
             .stretch, .start, .baseline => 0,
-            .center => free_width / 2,
+            .safe_center => free_width / 2,
+            .center, .unsafe_center => signed_free_width / 2,
             .end => free_width,
         };
         const child_y = row_offsets[row_start[index]] + margin.top + switch (align_self) {
             .stretch, .start, .baseline => 0,
-            .center => free_height / 2,
+            .safe_center => free_height / 2,
+            .center, .unsafe_center => signed_free_height / 2,
             .end => free_height,
         };
         child.rect = .{
