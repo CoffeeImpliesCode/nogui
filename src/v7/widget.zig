@@ -216,6 +216,9 @@ pub const WidgetNode = struct {
     /// BORDER box, positioned relative to the parent's CONTENT box (see
     /// Rect's doc). Filled by the layout dispatcher.
     rect: Rect = .{},
+    /// First baseline from the border-box top after final child placement.
+    /// Null means the node has no natural baseline.
+    first_baseline: ?f32 = null,
     /// Resolved typed layout values. This is the canonical flex/style view.
     resolved_style: ResolvedStyle = .{},
     resolved_dimensions: ResolvedDimensions = .{},

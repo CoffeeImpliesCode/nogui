@@ -92,7 +92,9 @@ pub fn layoutPreparedContainer(
     forced_border: ?widget.Size,
 ) sizing.Error!void {
     const index = tree.nodeIndex(container_id) orelse return error.InvalidStyle;
-    if (tree.nodes.items[index].layout_hidden) return;
+    const node = &tree.nodes.items[index];
+    node.first_baseline = null;
+    if (node.layout_hidden) return;
 
     var cache: std.ArrayList(Natural) = .empty;
     defer cache.deinit(options.allocator);
@@ -246,6 +248,11 @@ const Item = struct {
     grow: f32,
     shrink: f32,
     frozen: bool,
+    baseline: f32,
+    baseline_participates: bool,
+    physical_top_margin: f32,
+    physical_bottom_margin: f32,
+    laid_out: bool,
 };
 
 const Line = struct {
@@ -253,6 +260,9 @@ const Line = struct {
     count: usize,
     cross: f32 = 0,
     position: f32 = 0,
+    max_baseline: f32 = 0,
+    max_descent: f32 = 0,
+    baseline_count: usize = 0,
 };
 
 const Distribution = struct {
@@ -304,8 +314,8 @@ fn markHidden(
 ) sizing.Error!void {
     if (depth == 0) return error.InvalidStyle;
     const hidden = inherited or tree.nodes.items[index].style.display == .none;
-    tree.nodes.items[index].layout_hidden = hidden;
     if (hidden) {
+        tree.nodes.items[index].first_baseline = null;
         tree.nodes.items[index].rect = .{};
         tree.nodes.items[index].natural_main = 0;
         tree.nodes.items[index].resolved_box_edges = null;
@@ -341,7 +351,10 @@ fn measureNode(
             edges,
             null,
         );
-        cache[index] = .{ .content = content, .border = border };
+        cache[index] = .{
+            .content = content,
+            .border = border,
+        };
         return cache[index];
     }
     if (options.context) |context| {
@@ -375,7 +388,10 @@ fn measureNode(
         edges,
         null,
     );
-    cache[index] = .{ .content = content, .border = border };
+    cache[index] = .{
+        .content = content,
+        .border = border,
+    };
     return cache[index];
 }
 
@@ -584,6 +600,7 @@ fn layoutFlex(
 ) sizing.Error!void {
     if (depth == 0) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
+    node.first_baseline = null;
     if (node.layout_hidden) return;
     if (node.style.display != .flex) return error.InvalidStyle;
     const edges = try resolveEdges(node.style, containing.width);
@@ -659,12 +676,54 @@ fn layoutFlex(
             );
         }
     }
-    try lineCrossSizes(lines.items, items.items, cross_size, cross_gap);
+    for (items.items) |*item| {
+        const child = &tree.nodes.items[item.index];
+        child.first_baseline = null;
+        if (!item.baseline_participates) continue;
+
+        const child_border = if (axes.horizontal)
+            widget.Size{ .width = item.size, .height = item.cross }
+        else
+            widget.Size{ .width = item.cross, .height = item.size };
+        if (child.children.items.len == 0) {
+            child.first_baseline = child_border.height;
+        } else if (child.style.display == .flex) {
+            try layoutFlex(
+                tree,
+                item.index,
+                content,
+                child_border,
+                options,
+                cache,
+                depth - 1,
+            );
+        } else if (options.context) |context| {
+            try context.layout_node(
+                context,
+                tree,
+                child,
+                .{
+                    .available = content,
+                    .percentage_basis = .{
+                        .width = content.width,
+                        .height = content.height,
+                    },
+                    .forced_border = child_border,
+                },
+            );
+        } else {
+            return error.InvalidStyle;
+        }
+        item.laid_out = true;
+        item.baseline = child.first_baseline orelse child_border.height;
+    }
+    try lineCrossSizes(lines.items, items.items, cross_size, cross_gap, axes);
     try lineDistribution(lines.items, node.style.align_content, cross_size, cross_gap);
     try placeItems(tree, node, axes, content, lines.items, items.items, main_gap);
 
-    for (items.items) |item| {
+    for (items.items) |*item| {
         const child = &tree.nodes.items[item.index];
+        if (item.laid_out) continue;
         if (child.children.items.len == 0) continue;
         if (options.context) |context| {
             if (child.style.display != .flex) {
@@ -696,6 +755,34 @@ fn layoutFlex(
             cache,
             depth - 1,
         );
+    }
+    if (lines.items.len != 0) {
+        const selected_index = if (effectiveWrap(node.style) == .wrap_reverse)
+            lines.items.len - 1
+        else
+            0;
+        const selected_line = lines.items[selected_index];
+        var donor: ?*const Item = null;
+        if (axes.horizontal) {
+            const selected_items = items.items[selected_line.start .. selected_line.start + selected_line.count];
+            for (selected_items) |*item| {
+                if (item.baseline_participates) {
+                    donor = item;
+                    break;
+                }
+            }
+        }
+        if (donor == null and selected_line.count != 0) {
+            donor = &items.items[selected_line.start];
+        }
+        if (donor) |item| {
+            const child = &tree.nodes.items[item.index];
+            const child_baseline = child.first_baseline orelse child.rect.h;
+            node.first_baseline = try add(
+                try add(edges.border.top, edges.padding.top),
+                try add(child.rect.y, child_baseline),
+            );
+        }
     }
     try placeAbsolute(tree, node, content, options, cache, depth - 1);
 }
@@ -753,6 +840,11 @@ fn collectItems(
             natural,
             edges,
         );
+        const alignment = alignValue(child.style.align_self, container.style.@"align");
+        const baseline_participates = axes.horizontal and
+            alignment == .baseline and
+            !crossStartAuto(axes, margins) and
+            !crossEndAuto(axes, margins);
         const item: Item = .{
             .index = child_index,
             .base = basis,
@@ -782,6 +874,11 @@ fn collectItems(
             .grow = try nonNegative(child.style.grow),
             .shrink = try nonNegative(child.style.shrink),
             .frozen = false,
+            .baseline = 0,
+            .baseline_participates = baseline_participates,
+            .physical_top_margin = margins.value.top,
+            .physical_bottom_margin = margins.value.bottom,
+            .laid_out = false,
         };
         child.natural_main = axisMain(axes, natural.border);
         items.append(options.allocator, item) catch return error.InvalidStyle;
@@ -1034,14 +1131,36 @@ fn lineCrossSizes(
     items: []const Item,
     available: f32,
     gap: f32,
+    axes: Axes,
 ) sizing.Error!void {
     for (lines) |*line| {
+        line.max_baseline = 0;
+        line.max_descent = 0;
+        line.baseline_count = 0;
         for (items[line.start .. line.start + line.count]) |item| {
             const outer = try add(
                 try add(item.cross, item.cross_margin_start),
                 item.cross_margin_end,
             );
             line.cross = @max(line.cross, outer);
+            if (axes.horizontal and item.baseline_participates) {
+                const ascent = try add(item.physical_top_margin, item.baseline);
+                const descent = @max(
+                    0,
+                    try finite(
+                        item.physical_bottom_margin + item.cross - item.baseline,
+                    ),
+                );
+                line.max_baseline = @max(line.max_baseline, ascent);
+                line.max_descent = @max(line.max_descent, descent);
+                line.baseline_count += 1;
+            }
+        }
+        if (axes.horizontal and line.baseline_count > 1) {
+            line.cross = @max(
+                line.cross,
+                try add(line.max_baseline, line.max_descent),
+            );
         }
     }
     if (lines.len == 1) lines[0].cross = available;
@@ -1159,7 +1278,14 @@ fn placeItems(
             const align_offset = if (item.cross_start_auto or item.cross_end_auto)
                 0
             else switch (alignment) {
-                .stretch, .start, .baseline => 0,
+                .stretch, .start => 0,
+                .baseline => if (axes.horizontal and line.baseline_count > 1)
+                    if (axes.cross_reverse)
+                        line.max_descent - (cross_start + cross - item.baseline)
+                    else
+                        line.max_baseline - (cross_start + item.baseline)
+                else
+                    0,
                 .safe_center => @max(0, cross_free) / 2,
                 .center, .unsafe_center => cross_free / 2,
                 .end => cross_free,

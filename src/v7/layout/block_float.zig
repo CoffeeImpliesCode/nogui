@@ -18,6 +18,16 @@ const BoxEdges = struct {
 const Natural = struct {
     content: widget.Size,
     border: widget.Size,
+    edge_vertical: f32 = 0,
+    margin_collapse: ?MarginCollapseResult = null,
+};
+const NaturalBlockContent = struct {
+    size: widget.Size,
+    margin_collapse: MarginCollapseResult,
+};
+const ScratchFloat = struct {
+    side: PhysicalSide,
+    outer: widget.Rect,
 };
 
 const Slot = struct {
@@ -182,17 +192,22 @@ fn measureNaturalNode(
     };
 
     const edges = try resolveBoxEdges(node.style, request.percentage_basis.width);
+    var margin_collapse: ?MarginCollapseResult = null;
     const content = if (node.children.items.len == 0)
         try measureNaturalLeaf(node, context.measure)
     else switch (node.style.display) {
-        .block, .flow_root => try measureNaturalBlockContent(
-            tree,
-            index,
-            request,
-            edges,
-            context,
-            depth - 1,
-        ),
+        .block, .flow_root => blk: {
+            const block_content = try measureNaturalBlockContent(
+                tree,
+                index,
+                request,
+                edges,
+                context,
+                depth - 1,
+            );
+            margin_collapse = block_content.margin_collapse;
+            break :blk block_content.size;
+        },
         .flex, .grid => return error.InvalidStyle,
         .none => unreachable,
     };
@@ -214,6 +229,8 @@ fn measureNaturalNode(
     return .{
         .content = content,
         .border = .{ .width = resolved.width, .height = resolved.height },
+        .edge_vertical = edges.vertical,
+        .margin_collapse = margin_collapse,
     };
 }
 
@@ -224,9 +241,16 @@ fn measureNaturalBlockContent(
     edges: BoxEdges,
     context: *layout_context.LayoutContext,
     depth: usize,
-) sizing.Error!widget.Size {
+) sizing.Error!NaturalBlockContent {
     if (depth == 0) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
+    const parent_is_flex_or_grid = if (tree.nodeConst(node.parent)) |parent|
+        parent.style.display == .flex or parent.style.display == .grid
+    else
+        false;
+    const container_establishes_bfc = node.parent == .root or
+        establishesBfc(node.style) or
+        (node.style.display == .block and parent_is_flex_or_grid);
     const sizing_context: sizing.SizingContext = .{
         .available = .{
             .width = .{ .definite = request.available.width },
@@ -256,8 +280,35 @@ fn measureNaturalBlockContent(
         request.intrinsic_height,
         request.percentage_basis.height,
     );
-    var content_height: f32 = 0;
+    const margins_collapse_with_children = node.style.display == .block and
+        node.style.position == .relative and
+        !container_establishes_bfc and
+        box_model.border_box.height == null;
+    const top_margin_collapses_with_children = margins_collapse_with_children and
+        edges.border.top == 0 and
+        edges.padding.top == 0;
+    const bottom_margin_collapses_with_children = margins_collapse_with_children and
+        edges.border.bottom == 0 and
+        edges.padding.bottom == 0;
+
+    const scratch_floats = context.allocator.alloc(
+        ScratchFloat,
+        node.children.items.len,
+    ) catch @panic("block natural-layout scratch allocation failed");
+    defer context.allocator.free(scratch_floats);
+
+    var scratch_float_count: usize = 0;
+    var flow_y: f32 = 0;
+    var in_flow_bottom: f32 = 0;
+    var float_bottom: f32 = 0;
+    var float_ceiling: f32 = 0;
     var content_width_natural: f32 = 0;
+    var pending_bottom: ?CollapsibleMarginSet = null;
+    var first_child_top: CollapsibleMarginSet = .{};
+    var last_child_bottom: ?CollapsibleMarginSet = null;
+    var top_collapse_open = top_margin_collapses_with_children;
+    var all_in_flow_children_collapse_through = true;
+
     for (node.children.items) |child_id| {
         const child = tree.nodeConst(child_id) orelse return error.InvalidStyle;
         if (child.layout_hidden or child.style.position == .absolute) continue;
@@ -296,9 +347,14 @@ fn measureNaturalBlockContent(
                     child,
                     child_request,
                 );
+                const child_edges = try resolveBoxEdges(
+                    child.style,
+                    child_request.percentage_basis.width,
+                );
                 break :blk Natural{
                     .content = measured.content,
                     .border = measured.border,
+                    .edge_vertical = child_edges.vertical,
                 };
             },
             .none => Natural{
@@ -325,17 +381,159 @@ fn measureNaturalBlockContent(
                 intrinsic_margin_right,
             ),
         );
-        content_height = try addFinite(
-            content_height,
+
+        const outer_width = @max(
+            0,
+            try addFinite(
+                try addFinite(natural.border.width, margins.left),
+                margins.right,
+            ),
+        );
+        const outer_height = @max(
+            0,
             try addFinite(
                 try addFinite(natural.border.height, margins.top),
                 margins.bottom,
             ),
         );
+        const clear_y = try scratchClearBottom(
+            scratch_floats[0..scratch_float_count],
+            child.style.clear,
+            child.style.writing_direction,
+        );
+        const float_side = physicalFloat(child.style.float, child.style.writing_direction);
+        if (float_side != .none) {
+            const float_start_y = @max(@max(flow_y, clear_y), float_ceiling);
+            const placement = try findScratchSlot(
+                scratch_floats[0..scratch_float_count],
+                child_available.width,
+                outer_width,
+                outer_height,
+                float_start_y,
+                float_side,
+            );
+            const placed_float: ScratchFloat = .{
+                .side = float_side,
+                .outer = .{
+                    .x = placement.x,
+                    .y = placement.y,
+                    .w = outer_width,
+                    .h = outer_height,
+                },
+            };
+            scratch_floats[scratch_float_count] = placed_float;
+            scratch_float_count += 1;
+            float_ceiling = @max(float_ceiling, placement.y);
+            float_bottom = @max(
+                float_bottom,
+                try addFinite(placement.y, outer_height),
+            );
+            continue;
+        }
+
+        const child_top_margin = CollapsibleMarginSet.fromMargin(margins.top).collapse(
+            if (natural.margin_collapse) |result| result.top else .{},
+        );
+        const child_bottom_margin = CollapsibleMarginSet.fromMargin(margins.bottom).collapse(
+            if (natural.margin_collapse) |result| result.bottom else .{},
+        );
+        var child_collapses_through = if (natural.margin_collapse) |result|
+            result.through
+        else
+            natural.border.height == 0 and
+                natural.edge_vertical == 0 and
+                !establishesBfc(child.style);
+
+        const child_establishes_bfc = establishesBfc(child.style);
+        const hypothetical_margin = if (top_collapse_open and !child_establishes_bfc)
+            @as(f32, 0)
+        else if (pending_bottom) |bottom_margin|
+            bottom_margin.collapse(child_top_margin).resolve()
+        else
+            child_top_margin.resolve();
+        const hypothetical_y = try addFinite(flow_y, hypothetical_margin);
+        const has_clearance = (clear_y > 0) and (hypothetical_y < clear_y);
+        if (has_clearance) child_collapses_through = false;
+
+        const effective_start_y = if (has_clearance) clear_y else flow_y;
+        const vertical_margin = if (has_clearance)
+            if (top_collapse_open and !child_establishes_bfc)
+                @as(f32, 0)
+            else
+                child_top_margin.resolve()
+        else
+            hypothetical_margin;
+        var child_y = try addFinite(effective_start_y, vertical_margin);
+        if (child_establishes_bfc) {
+            const bfc_start_y = try addFinite(
+                effective_start_y,
+                try subtractFinite(vertical_margin, margins.top),
+            );
+            const placement = try findScratchSlot(
+                scratch_floats[0..scratch_float_count],
+                child_available.width,
+                outer_width,
+                outer_height,
+                bfc_start_y,
+                physicalInlineStart(node.style.writing_direction),
+            );
+            child_y = try addFinite(placement.y, margins.top);
+        }
+
+        if (top_collapse_open and !child_establishes_bfc and !has_clearance) {
+            first_child_top = first_child_top.collapse(child_top_margin);
+            if (child_collapses_through) {
+                first_child_top = first_child_top.collapse(child_bottom_margin);
+            } else {
+                top_collapse_open = false;
+            }
+        } else if (top_collapse_open) {
+            top_collapse_open = false;
+        }
+        all_in_flow_children_collapse_through =
+            all_in_flow_children_collapse_through and child_collapses_through;
+
+        if (child_collapses_through) {
+            const child_self_collapsed = child_top_margin.collapse(child_bottom_margin);
+            const combined_bottom = if (pending_bottom) |previous|
+                previous.collapse(child_self_collapsed)
+            else
+                child_self_collapsed;
+            pending_bottom = combined_bottom;
+            last_child_bottom = combined_bottom;
+        } else {
+            flow_y = try addFinite(child_y, natural.border.height);
+            pending_bottom = child_bottom_margin;
+            last_child_bottom = child_bottom_margin;
+            in_flow_bottom = @max(in_flow_bottom, flow_y);
+        }
     }
+
+    const bottom_collapses = bottom_margin_collapses_with_children and
+        last_child_bottom != null;
+    const bottom_margin_for_height = if (bottom_collapses)
+        0
+    else if (pending_bottom) |bottom_margin|
+        bottom_margin.resolve()
+    else
+        0;
+    const normal_bottom = try addFinite(in_flow_bottom, bottom_margin_for_height);
+    const auto_content_height = if (container_establishes_bfc)
+        @max(normal_bottom, float_bottom)
+    else
+        normal_bottom;
     return .{
-        .width = content_width_natural,
-        .height = content_height,
+        .size = .{
+            .width = content_width_natural,
+            .height = @max(0, auto_content_height),
+        },
+        .margin_collapse = .{
+            .top = if (top_margin_collapses_with_children) first_child_top else .{},
+            .bottom = if (bottom_collapses) last_child_bottom.? else .{},
+            .through = top_margin_collapses_with_children and
+                bottom_margin_collapses_with_children and
+                all_in_flow_children_collapse_through,
+        },
     };
 }
 
@@ -437,12 +635,19 @@ fn layoutPreparedContainerUnchecked(
     layout_ctx: ?*layout_context.LayoutContext,
 ) sizing.Error!MarginCollapseResult {
     const container_index = tree.nodeIndex(container_id) orelse return error.InvalidStyle;
+    tree.nodes.items[container_index].first_baseline = null;
     if (tree.nodes.items[container_index].layout_hidden) return .{};
 
-    const container_style = tree.nodes.items[container_index].style;
+    const container_node = &tree.nodes.items[container_index];
+    const container_style = container_node.style;
+    const parent_is_flex_or_grid = if (tree.nodeConst(container_node.parent)) |parent|
+        parent.style.display == .flex or parent.style.display == .grid
+    else
+        false;
     const container_establishes_bfc = is_layout_root or
         establishesBfc(container_style) or
-        tree.nodes.items[container_index].parent == .root;
+        container_node.parent == .root or
+        (container_style.display == .block and parent_is_flex_or_grid);
     const container_edges = try resolveBoxEdges(
         container_style,
         context.percentage_basis.width,
@@ -508,6 +713,7 @@ fn layoutPreparedContainerUnchecked(
 
     for (child_ids, 0..) |child_id, child_index| {
         const child = tree.node(child_id) orelse return error.InvalidStyle;
+        child.first_baseline = null;
         if (child.layout_hidden) continue;
 
         const child_style = child.style;
@@ -725,9 +931,48 @@ fn layoutPreparedContainerUnchecked(
         } else {
             child_x = try subtractFinite(child_x, margins.right);
         }
+        if (child_style.display == .block and
+            child_style.position != .absolute and
+            float_side == .none and
+            !child_establishes_bfc and
+            !isAutoMargin(child_style.margin_inset.left) and
+            !isAutoMargin(child_style.margin_inset.right))
+        {
+            const alignment_y = try subtractFinite(child_y, margins.top);
+            const alignment_height = try addFinite(
+                try addFinite(child_height, margins.top),
+                margins.bottom,
+            );
+            const alignment_slot = try occupiedSlot(
+                tree,
+                child_ids,
+                child_index,
+                content_width,
+                alignment_y,
+                alignment_height,
+                child_context.percentage_basis.width,
+            );
+            if (!alignment_slot.occupied and
+                alignment_slot.left == 0 and
+                alignment_slot.right == content_width)
+            {
+                if (try physicalTextAlignX(
+                    content_width,
+                    child_width,
+                    margins,
+                    container_style.text_align,
+                )) |aligned_x| {
+                    child_x = aligned_x;
+                }
+            }
+        }
         if (child_establishes_bfc) {
             const width_is_auto = child_style.size.width == .auto;
             const inline_side = physicalInlineStart(container_style.writing_direction);
+            const bfc_start_y = try addFinite(
+                effective_start_y,
+                try subtractFinite(vertical_margin, margins.top),
+            );
             var placement: Placement = .{
                 .x = 0,
                 .y = 0,
@@ -747,7 +992,7 @@ fn layoutPreparedContainerUnchecked(
                             try addFinite(child_height, margins.top),
                             margins.bottom,
                         ),
-                        effective_start_y,
+                        bfc_start_y,
                         container_style.writing_direction,
                         margins,
                         child_context.percentage_basis.width,
@@ -792,7 +1037,7 @@ fn layoutPreparedContainerUnchecked(
                         try addFinite(child_height, margins.top),
                         margins.bottom,
                     ),
-                    effective_start_y,
+                    bfc_start_y,
                     inline_side,
                     child_context.percentage_basis.width,
                 );
@@ -844,6 +1089,11 @@ fn layoutPreparedContainerUnchecked(
         var mixed_child_context = child_context;
         if (child_establishes_bfc) {
             const inline_side = physicalInlineStart(container_style.writing_direction);
+            const bfc_start_y = try addFinite(
+                effective_start_y,
+                try subtractFinite(vertical_margin, margins.top),
+            );
+            var final_slot_width = content_width;
             var final_slot_border_width = child_width;
             if (child_style.size.width == .auto) {
                 const final_auto = try findAutoBfcPlacement(
@@ -856,12 +1106,13 @@ fn layoutPreparedContainerUnchecked(
                         try addFinite(child_height, margins.top),
                         margins.bottom,
                     ),
-                    effective_start_y,
+                    bfc_start_y,
                     container_style.writing_direction,
                     margins,
                     child_context.percentage_basis.width,
                     true,
                 );
+                final_slot_width = final_auto.slot_width;
                 final_slot_border_width = final_auto.border_width;
                 used_auto_width_border = final_slot_border_width;
                 child_x = final_auto.x;
@@ -880,10 +1131,11 @@ fn layoutPreparedContainerUnchecked(
                         try addFinite(child_height, margins.top),
                         margins.bottom,
                     ),
-                    effective_start_y,
+                    bfc_start_y,
                     inline_side,
                     child_context.percentage_basis.width,
                 );
+                final_slot_width = final_placement.slot_width;
                 child_x = try addFinite(final_placement.x, margins.left);
                 child_y = try addFinite(final_placement.y, margins.top);
             }
@@ -926,6 +1178,21 @@ fn layoutPreparedContainerUnchecked(
                         child_x,
                         try subtractFinite(measured_child_width, child_width),
                     );
+                }
+            }
+            if ((child_style.display == .block or child_style.display == .flow_root) and
+                child_style.size.width != .auto and
+                !isAutoMargin(child_style.margin_inset.left) and
+                !isAutoMargin(child_style.margin_inset.right) and
+                final_slot_width == content_width)
+            {
+                if (try physicalTextAlignX(
+                    content_width,
+                    child_width,
+                    margins,
+                    container_style.text_align,
+                )) |aligned_x| {
+                    child_x = aligned_x;
                 }
             }
         }
@@ -1012,6 +1279,7 @@ fn layoutPreparedContainerUnchecked(
         content_height,
         child_context.percentage_basis.width,
     );
+    try writeFirstBaseline(tree, container_index, child_ids);
     return .{
         .top = if (top_margin_collapses_with_children) first_child_top else .{},
         .bottom = if (bottom_collapses) last_child_bottom.? else .{},
@@ -1912,6 +2180,7 @@ fn measureNaturalBlockRequest(
         );
         return measured.content;
     }
+
     var pure_context: layout_context.LayoutContext = .{
         .allocator = tree.allocator,
         .measure = measure,
@@ -1925,6 +2194,91 @@ fn measureNaturalBlockRequest(
         &pure_context,
     );
     return measured.content;
+}
+fn scratchClearBottom(
+    floats: []const ScratchFloat,
+    clear: style.Clear,
+    direction: style.Direction,
+) sizing.Error!f32 {
+    var state: ClearanceState = .{
+        .clear = clear,
+        .direction = direction,
+    };
+    var query: FloatQuery = .{ .clearance = &state };
+    for (floats) |float| {
+        try visitFloat(&query, float.side, float.outer);
+    }
+    return state.bottom;
+}
+
+fn findScratchSlot(
+    floats: []const ScratchFloat,
+    container_width: f32,
+    child_width: f32,
+    child_height: f32,
+    start_y: f32,
+    side: PhysicalSide,
+) sizing.Error!Placement {
+    const checked_container_width = try finite(container_width);
+    const checked_child_width = try finite(child_width);
+    const checked_child_height = try finite(child_height);
+    var y = try finite(start_y);
+    var attempt: usize = 0;
+    while (attempt <= floats.len) : (attempt += 1) {
+        const slot = try occupiedScratchSlot(
+            floats,
+            checked_container_width,
+            y,
+            checked_child_height,
+        );
+        const slot_width = @max(0, try subtractFinite(slot.right, slot.left));
+        if (!slot.occupied or checked_child_width <= slot_width) {
+            const x = if (side == .right)
+                try subtractFinite(slot.right, checked_child_width)
+            else
+                slot.left;
+            return .{
+                .x = x,
+                .y = y,
+                .slot_width = slot_width,
+            };
+        }
+        if (!std.math.isFinite(slot.next_y) or slot.next_y <= y) break;
+        y = try finite(slot.next_y);
+    }
+    const x = if (side == .right)
+        @max(0, try subtractFinite(checked_container_width, checked_child_width))
+    else
+        0;
+    return .{
+        .x = x,
+        .y = y,
+        .slot_width = checked_container_width,
+    };
+}
+
+fn occupiedScratchSlot(
+    floats: []const ScratchFloat,
+    container_width: f32,
+    candidate_y: f32,
+    candidate_height: f32,
+) sizing.Error!Slot {
+    var result: Slot = .{
+        .left = 0,
+        .right = try finite(container_width),
+        .next_y = std.math.inf(f32),
+        .occupied = false,
+    };
+    var state: OccupiedState = .{
+        .slot = &result,
+        .candidate_y = try finite(candidate_y),
+        .candidate_height = try finite(candidate_height),
+    };
+    var query: FloatQuery = .{ .slot = &state };
+    for (floats) |float| {
+        try visitFloat(&query, float.side, float.outer);
+    }
+    return result;
 }
 
 fn layoutMixedChild(
@@ -1990,6 +2344,50 @@ fn establishesBfc(input_style: style.Style) bool {
 fn physicalInlineStart(direction: style.Direction) PhysicalSide {
     return if (direction == .ltr) .left else .right;
 }
+fn physicalTextAlignX(
+    container_width: f32,
+    child_width: f32,
+    margins: style.Sides,
+    text_align: style.TextAlign,
+) sizing.Error!?f32 {
+    const free_space = @max(
+        0,
+        try subtractFinite(
+            try subtractFinite(container_width, child_width),
+            try addFinite(margins.left, margins.right),
+        ),
+    );
+    return switch (text_align) {
+        .start => null,
+        .left => margins.left,
+        .center => try addFinite(margins.left, free_space / 2),
+        .right => try addFinite(margins.left, free_space),
+    };
+}
+
+fn writeFirstBaseline(
+    tree: *widget.WidgetTree,
+    container_index: usize,
+    child_ids: []const Id,
+) sizing.Error!void {
+    var baseline: ?f32 = null;
+    for (child_ids) |child_id| {
+        const child = tree.nodeConst(child_id) orelse return error.InvalidStyle;
+        if (child.layout_hidden or
+            child.style.display == .none or
+            child.style.position == .absolute or
+            physicalFloat(child.style.float, child.style.writing_direction) != .none)
+        {
+            continue;
+        }
+        baseline = try addFinite(
+            child.rect.y,
+            child.first_baseline orelse child.rect.h,
+        );
+        break;
+    }
+    tree.nodes.items[container_index].first_baseline = baseline;
+}
 
 fn inlineStartX(direction: style.Direction, content_width: f32, child_width: f32) f32 {
     return if (direction == .ltr)
@@ -2015,6 +2413,7 @@ fn classifyHiddenLayout(tree: *widget.WidgetTree) sizing.Error!void {
 
         node.layout_hidden = hidden;
         if (!hidden) continue;
+        node.first_baseline = null;
         node.rect = .{};
         node.resolved_box_edges = null;
         node.natural_main = 0;

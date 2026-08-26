@@ -5,6 +5,7 @@ const Id = @import("../id.zig").Id;
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const flex = @import("flex.zig");
+const dispatch = @import("dispatch.zig");
 
 const Rect = widget.Rect;
 const Style = style.Style;
@@ -69,6 +70,15 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
     try expectRect(expected, tree.nodeConst(id).?.rect);
 }
+
+const CountedLeafMeasure = struct {
+    var calls: usize = 0;
+
+    fn measure(_: []const u8, _: f32, _: u8) widget.Size {
+        calls += 1;
+        return .{ .width = 10, .height = 10 };
+    }
+};
 
 test "fixed row distributes space around and evenly" {
     const scenarios = [_]struct {
@@ -1670,4 +1680,523 @@ test "fractional shrink factors preserve raw negative free space" {
         second_rect.x + second_rect.w - container_rect.w,
         0.001,
     );
+}
+
+test "baseline aligns direct row items by their synthesized baselines" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, first_id, container_id, fixedItem(50, 50));
+    try appendNode(&tree, second_id, container_id, fixedItem(50, 20));
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, second_id, .{ .x = 50, .y = 30, .w = 50, .h = 20 });
+}
+
+test "baseline propagates through nested flex columns" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const inner_first_id: Id = @enumFromInt(2);
+    const inner_second_id: Id = @enumFromInt(3);
+    const inner_id: Id = @enumFromInt(4);
+    const wrapper_id: Id = @enumFromInt(5);
+    const container_id: Id = @enumFromInt(6);
+
+    try appendNode(&tree, first_id, container_id, fixedItem(50, 60));
+    try appendNode(&tree, inner_first_id, inner_id, .{
+        .display = .flex,
+        .direction = .column,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 30 },
+        },
+    });
+    try appendNode(&tree, inner_second_id, inner_id, .{
+        .display = .flex,
+        .direction = .column,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 40 },
+        },
+    });
+    try appendNode(&tree, inner_id, wrapper_id, .{
+        .display = .flex,
+        .direction = .column,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 80 },
+        },
+    });
+    try appendNode(&tree, wrapper_id, container_id, .{
+        .display = .flex,
+        .direction = .column,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(inner_id, inner_first_id);
+    try tree.appendChild(inner_id, inner_second_id);
+    try tree.appendChild(wrapper_id, inner_id);
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, wrapper_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 50, .h = 60 });
+    try expectRelative(&tree, wrapper_id, .{ .x = 50, .y = 30, .w = 50, .h = 80 });
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 0, .w = 50, .h = 80 });
+    try expectRelative(&tree, inner_first_id, .{ .x = 0, .y = 0, .w = 50, .h = 30 });
+    try expectRelative(&tree, inner_second_id, .{ .x = 0, .y = 30, .w = 50, .h = 40 });
+}
+
+test "wrapped baseline lines include their maximum ascent and descent" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_child_id: Id = @enumFromInt(2);
+    const second_id: Id = @enumFromInt(3);
+    const third_child_id: Id = @enumFromInt(4);
+    const third_id: Id = @enumFromInt(5);
+    const fourth_id: Id = @enumFromInt(6);
+    const container_id: Id = @enumFromInt(7);
+
+    try appendNode(&tree, first_id, container_id, fixedItem(50, 50));
+    try appendNode(&tree, second_child_id, second_id, fixedItem(50, 10));
+    try appendNode(&tree, second_id, container_id, .{
+        .display = .flex,
+        .direction = .column,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 20 },
+        },
+    });
+    try appendNode(&tree, third_child_id, third_id, fixedItem(50, 10));
+    try appendNode(&tree, third_id, container_id, .{
+        .display = .flex,
+        .direction = .column,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 20 },
+        },
+    });
+    try appendNode(&tree, fourth_id, container_id, fixedItem(50, 50));
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .wrap = .wrap,
+        .flex_wrap = .wrap,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(second_id, second_child_id);
+    try tree.appendChild(third_id, third_child_id);
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+    try tree.appendChild(container_id, third_id);
+    try tree.appendChild(container_id, fourth_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, second_id, .{ .x = 50, .y = 40, .w = 50, .h = 20 });
+    try expectRelative(&tree, second_child_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+    try expectRelative(&tree, third_id, .{ .x = 0, .y = 100, .w = 50, .h = 20 });
+    try expectRelative(&tree, third_child_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+    try expectRelative(&tree, fourth_id, .{ .x = 50, .y = 60, .w = 50, .h = 50 });
+}
+
+test "deep nested baseline measurement stays linear" {
+    const depths = [_]usize{ 8, 10 };
+    for (depths) |depth| {
+        CountedLeafMeasure.calls = 0;
+
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const leaf_id: Id = @enumFromInt(1);
+        const root_id: Id = @enumFromInt(@as(u32, @intCast(depth + 1)));
+        try tree.appendNode(.{
+            .id = leaf_id,
+            .kind = .{ .label = .{ .text = "counted" } },
+            .parent = @enumFromInt(2),
+            .style = .{
+                .display = .block,
+                .box_sizing = .border_box,
+                .size = .{ .width = .auto, .height = .auto },
+            },
+        });
+
+        var level: usize = 0;
+        while (level < depth) : (level += 1) {
+            const id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
+            const parent: Id = if (level + 1 == depth)
+                .root
+            else
+                @enumFromInt(@as(u32, @intCast(level + 3)));
+            var node_style = fixedItem(100, 100);
+            node_style.display = .flex;
+            node_style.direction = if (level + 1 == depth) .row else .column;
+            node_style.@"align" = .baseline;
+            try appendNode(&tree, id, parent, node_style);
+        }
+
+        var child_id = leaf_id;
+        level = 0;
+        while (level < depth) : (level += 1) {
+            const parent_id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
+            try tree.appendChild(parent_id, child_id);
+            child_id = parent_id;
+        }
+
+        try flex.layoutContainer(&tree, root_id, .{
+            .allocator = std.testing.allocator,
+            .available = .{ .width = 100, .height = 100 },
+            .measure = CountedLeafMeasure.measure,
+        });
+
+        try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+        level = 0;
+        while (level < depth) : (level += 1) {
+            const id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
+            try expectRelative(&tree, id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+        }
+        try expectRelative(&tree, leaf_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
+        try std.testing.expect(CountedLeafMeasure.calls <= 2 * depth + 8);
+    }
+}
+
+test "column reverse baseline propagates from first source child" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const sibling_id: Id = @enumFromInt(1);
+    const first_id: Id = @enumFromInt(2);
+    const second_id: Id = @enumFromInt(3);
+    const column_id: Id = @enumFromInt(4);
+    const container_id: Id = @enumFromInt(5);
+
+    try appendNode(&tree, sibling_id, container_id, fixedItem(50, 70));
+    try appendNode(&tree, first_id, column_id, fixedItem(50, 30));
+    try appendNode(&tree, second_id, column_id, fixedItem(50, 40));
+    try appendNode(&tree, column_id, container_id, .{
+        .display = .flex,
+        .direction = .column_reverse,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 70 },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(column_id, first_id);
+    try tree.appendChild(column_id, second_id);
+    try tree.appendChild(container_id, sibling_id);
+    try tree.appendChild(container_id, column_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, sibling_id, .{ .x = 0, .y = 0, .w = 50, .h = 70 });
+    try expectRelative(&tree, column_id, .{ .x = 50, .y = 0, .w = 50, .h = 70 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 40, .w = 50, .h = 30 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 0, .w = 50, .h = 40 });
+}
+
+test "wrap reverse baseline uses physical margins" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_child_id: Id = @enumFromInt(2);
+    const second_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+
+    var first = fixedItem(20, 20);
+    first.margin_inset = .{
+        .top = .{ .length = 100 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 0 },
+    };
+    var second: Style = .{
+        .display = .flex,
+        .direction = .column,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 20 },
+        },
+    };
+    second.margin_inset = .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = 50 },
+        .left = .{ .length = 0 },
+    };
+    try appendNode(&tree, first_id, container_id, first);
+    try appendNode(&tree, second_child_id, second_id, fixedItem(20, 10));
+    try appendNode(&tree, second_id, container_id, second);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .wrap = .wrap_reverse,
+        .flex_wrap = .wrap_reverse,
+        .@"align" = .baseline,
+        .align_content = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 40 },
+            .height = .{ .length = 180 },
+        },
+    });
+    try tree.appendChild(second_id, second_child_id);
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 40, .height = 180 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 40, .h = 180 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 100, .w = 20, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 20, .y = 110, .w = 20, .h = 20 });
+    try expectRelative(&tree, second_child_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
+}
+
+test "baseline uses first in-flow child of a block item" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const sibling_id: Id = @enumFromInt(1);
+    const block_child_id: Id = @enumFromInt(2);
+    const block_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+
+    try appendNode(&tree, sibling_id, container_id, fixedItem(50, 50));
+    try appendNode(&tree, block_child_id, block_id, fixedItem(50, 10));
+    try appendNode(&tree, block_id, container_id, fixedItem(50, 50));
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(block_id, block_child_id);
+    try tree.appendChild(container_id, sibling_id);
+    try tree.appendChild(container_id, block_id);
+
+    try dispatch.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = null,
+    });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, sibling_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, block_id, .{ .x = 50, .y = 40, .w = 50, .h = 50 });
+    try expectRelative(&tree, block_child_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+}
+
+test "wrapped flex baseline includes align-content line offset" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const nested_id: Id = @enumFromInt(3);
+    const sibling_id: Id = @enumFromInt(4);
+    const container_id: Id = @enumFromInt(5);
+
+    try appendNode(&tree, first_id, nested_id, fixedItem(100, 20));
+    try appendNode(&tree, second_id, nested_id, fixedItem(100, 20));
+    try appendNode(&tree, nested_id, container_id, .{
+        .display = .flex,
+        .direction = .row,
+        .wrap = .wrap,
+        .flex_wrap = .wrap,
+        .@"align" = .start,
+        .align_content = .end,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, sibling_id, container_id, fixedItem(100, 80));
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 200 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(nested_id, first_id);
+    try tree.appendChild(nested_id, second_id);
+    try tree.appendChild(container_id, sibling_id);
+    try tree.appendChild(container_id, nested_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 200, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 200, .h = 100 });
+    try expectRelative(&tree, sibling_id, .{ .x = 0, .y = 0, .w = 100, .h = 80 });
+    try expectRelative(&tree, nested_id, .{ .x = 100, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 60, .w = 100, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 80, .w = 100, .h = 20 });
+}
+
+test "post-flexing column baseline propagates the grown first child" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const sibling_id: Id = @enumFromInt(1);
+    const first_id: Id = @enumFromInt(2);
+    const second_id: Id = @enumFromInt(3);
+    const nested_id: Id = @enumFromInt(4);
+    const container_id: Id = @enumFromInt(5);
+
+    try appendNode(&tree, sibling_id, container_id, fixedItem(50, 80));
+    var first = fixedItem(50, 0);
+    first.grow = 1;
+    try appendNode(&tree, first_id, nested_id, first);
+    try appendNode(&tree, second_id, nested_id, fixedItem(50, 20));
+    try appendNode(&tree, nested_id, container_id, .{
+        .display = .flex,
+        .direction = .column,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(nested_id, first_id);
+    try tree.appendChild(nested_id, second_id);
+    try tree.appendChild(container_id, sibling_id);
+    try tree.appendChild(container_id, nested_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, sibling_id, .{ .x = 0, .y = 0, .w = 50, .h = 80 });
+    try expectRelative(&tree, nested_id, .{ .x = 50, .y = 0, .w = 50, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 50, .h = 80 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 80, .w = 50, .h = 20 });
+}
+
+test "wrap reverse column baseline uses the cross-start-most line" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const sibling_id: Id = @enumFromInt(1);
+    const first_id: Id = @enumFromInt(2);
+    const second_id: Id = @enumFromInt(3);
+    const nested_id: Id = @enumFromInt(4);
+    const container_id: Id = @enumFromInt(5);
+
+    try appendNode(&tree, sibling_id, container_id, fixedItem(20, 20));
+    try appendNode(&tree, first_id, nested_id, fixedItem(10, 20));
+    try appendNode(&tree, second_id, nested_id, fixedItem(10, 10));
+    try appendNode(&tree, nested_id, container_id, .{
+        .display = .flex,
+        .direction = .column,
+        .wrap = .wrap_reverse,
+        .flex_wrap = .wrap_reverse,
+        .@"align" = .start,
+        .align_content = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 20 },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 40 },
+            .height = .{ .length = 40 },
+        },
+    });
+    try tree.appendChild(nested_id, first_id);
+    try tree.appendChild(nested_id, second_id);
+    try tree.appendChild(container_id, sibling_id);
+    try tree.appendChild(container_id, nested_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 40, .height = 40 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 40, .h = 40 });
+    try expectRelative(&tree, sibling_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
+    try expectRelative(&tree, nested_id, .{ .x = 20, .y = 10, .w = 20, .h = 20 });
+    try expectRelative(&tree, first_id, .{ .x = 10, .y = 0, .w = 10, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
 }

@@ -63,6 +63,7 @@ pub const AlignSelf = enum {
     end,
     baseline,
 };
+pub const TextAlign = enum { start, left, center, right };
 pub const BoxSizing = enum { content_box, border_box };
 
 /// One non-recursive grid track bound. Percentages are fractions in 0..1.
@@ -581,6 +582,7 @@ pub const Style = struct {
     @"align": Align = .stretch,
     align_content: AlignContent = .stretch,
     align_self: AlignSelf = .auto,
+    text_align: TextAlign = .start,
     gap: f32 = 0,
     column_gap: f32 = 0,
     row_gap: f32 = 0,
@@ -674,6 +676,7 @@ pub const Style = struct {
         if (local.@"align") |value| result.@"align" = value;
         if (local.align_content) |value| result.align_content = value;
         if (local.align_self) |value| result.align_self = value;
+        if (local.text_align) |value| result.text_align = value;
         if (local.gap) |value| result.gap = value;
         if (local.column_gap) |value| result.column_gap = value;
         if (local.row_gap) |value| result.row_gap = value;
@@ -891,6 +894,7 @@ pub const StyleOverride = struct {
     @"align": ?Align = null,
     align_content: ?AlignContent = null,
     align_self: ?AlignSelf = null,
+    text_align: ?TextAlign = null,
     gap: ?f32 = null,
     column_gap: ?f32 = null,
     row_gap: ?f32 = null,
@@ -1012,6 +1016,11 @@ test "ComponentDefaults keeps layout and paint scopes independently optional" {
     const empty: ComponentDefaults = .{};
     try std.testing.expectEqual(@as(?Style, null), empty.style);
     try std.testing.expectEqual(@as(?PaintStyle, null), empty.paint);
+}
+
+test "Style text alignment defaults to logical start" {
+    const defaults: Style = .{};
+    try std.testing.expectEqual(TextAlign.start, defaults.text_align);
 }
 
 test "Style resolution retains component defaults" {

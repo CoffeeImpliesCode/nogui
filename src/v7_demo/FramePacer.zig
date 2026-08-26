@@ -183,6 +183,10 @@ pub fn update(self: *FramePacer, io: Io, slop_ns: u64) u64 {
 
     // Clamp to the headroom allowed range.
     self.sleep_ms = std.math.clamp(self.sleep_ms, 0.0, @max(refresh_period_ms - headroom_ms, 0.0));
+    const sleep_ns = sleepNsFromMs(self.sleep_ms) orelse {
+        self.sleep_ms = 0.0;
+        return 0;
+    };
 
     // Tracy plots.
     tracy.plot(.{ .name = plot_slop_ms, .value = .{ .f32 = slop_ms } });
@@ -191,7 +195,24 @@ pub fn update(self: *FramePacer, io: Io, slop_ns: u64) u64 {
     tracy.plot(.{ .name = plot_sleep_ms, .value = .{ .f32 = self.sleep_ms } });
 
     // Return the recommended delay in nanoseconds.
-    return @intFromFloat(self.sleep_ms * std.time.ns_per_ms);
+    return sleep_ns;
+}
+
+fn sleepNsFromMs(sleep_ms: f32) ?u64 {
+    const sleep_ns_f32 = sleep_ms * std.time.ns_per_ms;
+    const sleep_ns: f64 = @floatCast(sleep_ns_f32);
+    const max_safe_ns = std.math.maxInt(u64) - 2048;
+    const max_safe_ns_f64: f64 = @floatFromInt(max_safe_ns);
+
+    if (!std.math.isFinite(sleep_ns)) return null;
+    if (sleep_ns < 0.0) return null;
+    if (sleep_ns > max_safe_ns_f64) return null;
+
+    const bounded_ns = @min(
+        @max(sleep_ns, 0.0),
+        max_safe_ns_f64,
+    );
+    return @intFromFloat(bounded_ns);
 }
 
 /// Call this before sleeping the main thread for the sleep to not count
@@ -262,3 +283,42 @@ const Timer = struct {
         return self.previous;
     }
 };
+
+test "update clears sleep for a tiny finite refresh rate" {
+    var io_impl = Io.Threaded.init(std.testing.allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var pacer = FramePacer.init(io, 60.0);
+    pacer.refresh_rate_hz = 1e-20;
+    pacer.sleep_ms = 4.0;
+
+    try std.testing.expectEqual(@as(u64, 0), pacer.update(io, 0));
+    try std.testing.expectEqual(@as(f32, 0.0), pacer.sleep_ms);
+}
+
+test "update clears sleep when the refresh period overflows" {
+    var io_impl = Io.Threaded.init(std.testing.allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var pacer = FramePacer.init(io, 60.0);
+    pacer.refresh_rate_hz = 1e-40;
+    pacer.sleep_ms = 4.0;
+
+    try std.testing.expectEqual(@as(u64, 0), pacer.update(io, 0));
+    try std.testing.expectEqual(@as(f32, 0.0), pacer.sleep_ms);
+}
+
+test "update keeps unknown refresh at the finite 60 Hz cap" {
+    var io_impl = Io.Threaded.init(std.testing.allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var pacer = FramePacer.init(io, 0.0);
+    pacer.sleep_ms = 100.0;
+
+    const sleep_ns = pacer.update(io, 0);
+    try std.testing.expect(sleep_ns > 0);
+    try std.testing.expect(sleep_ns <= 11_667_000);
+}

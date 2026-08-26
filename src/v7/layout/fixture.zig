@@ -1016,6 +1016,7 @@ fn applyAttributeWithResources(
     if (std.mem.eql(u8, name, "gap")) return applyGap(result, value);
     if (std.mem.eql(u8, name, "column-gap")) return applyColumnGap(result, value);
     if (std.mem.eql(u8, name, "row-gap")) return applyRowGap(result, value);
+    if (std.mem.eql(u8, name, "text-align")) return applyTextAlign(result, value);
     if (std.mem.eql(u8, name, "justify-content")) {
         return applyJustifyContent(result, value);
     }
@@ -1411,6 +1412,22 @@ test "fixture alignment attributes map only represented values" {
     }
 }
 
+test "fixture text align maps physical values and WebKit aliases" {
+    const cases = [_]struct {
+        value: []const u8,
+        expected: style.TextAlign,
+    }{
+        .{ .value = "-webkit-left", .expected = .left },
+        .{ .value = "-webkit-center", .expected = .center },
+        .{ .value = "-webkit-right", .expected = .right },
+    };
+    for (cases) |case| {
+        var result: style.Style = .{};
+        try applyAttribute(&result, "text-align", case.value);
+        try std.testing.expectEqual(case.expected, result.text_align);
+    }
+}
+
 test "fixture unsupported alignment values stay explicit" {
     const cases = [_]struct {
         name: []const u8,
@@ -1419,6 +1436,7 @@ test "fixture unsupported alignment values stay explicit" {
         .{ .name = "justify-content", .value = "baseline" },
         .{ .name = "column-gap", .value = "normal" },
         .{ .name = "aspect-ratio", .value = "1 / 2" },
+        .{ .name = "text-align", .value = "diagonal" },
     };
     for (cases) |case| {
         var result: style.Style = .{};
@@ -2326,6 +2344,17 @@ fn applyRowGap(result: *style.Style, value: []const u8) CaseError!void {
     const gap = try parseGap(value);
     result.row_gap = gap;
     result.grid_row_gap = gap;
+}
+
+fn applyTextAlign(result: *style.Style, value: []const u8) CaseError!void {
+    result.text_align = if (std.mem.eql(u8, value, "-webkit-left"))
+        .left
+    else if (std.mem.eql(u8, value, "-webkit-center"))
+        .center
+    else if (std.mem.eql(u8, value, "-webkit-right"))
+        .right
+    else
+        return error.Unsupported;
 }
 
 fn applyJustifyContent(result: *style.Style, value: []const u8) CaseError!void {

@@ -40,6 +40,7 @@ const Natural = struct {
 const Track = struct {
     spec: style.GridTrack,
     size: f32,
+    planned_increase: f32 = 0,
 };
 
 const AxisPlacement = struct {
@@ -505,26 +506,20 @@ fn measureGridContent(
     const column_gap = try gridGap(input, .columns);
     const row_gap = try gridGap(input, .rows);
 
-    for (items.items) |item| {
-        const width_need = try add(item.natural.border.width, item.margins.value.left + item.margins.value.right);
-        const height_need = try add(item.natural.border.height, item.margins.value.top + item.margins.value.bottom);
-        try growTracks(
-            columns.items,
-            item.column.start,
-            item.column.end,
-            width_need,
-            column_gap,
-            if (width_definite) child_available.width else null,
-        );
-        try growTracks(
-            rows.items,
-            item.row.start,
-            item.row.end,
-            height_need,
-            row_gap,
-            if (height_definite) child_available.height else null,
-        );
-    }
+    try growTrackItems(
+        columns.items,
+        items.items,
+        .columns,
+        column_gap,
+        if (width_definite) child_available.width else null,
+    );
+    try growTrackItems(
+        rows.items,
+        items.items,
+        .rows,
+        row_gap,
+        if (height_definite) child_available.height else null,
+    );
 
     if (width_definite) {
         try resolveFlexibleTracks(columns.items, child_available.width, column_gap);
@@ -1373,6 +1368,103 @@ fn markArea(
     }
 }
 
+fn growTrackItems(
+    tracks: []Track,
+    items: []const FlowItem,
+    axis: TrackAxis,
+    gap: f32,
+    basis: ?f32,
+) Error!void {
+    var span: usize = 1;
+    while (span <= tracks.len) : (span += 1) {
+        clearTrackPlans(tracks);
+        for (items) |item| {
+            const placement = switch (axis) {
+                .columns => item.column,
+                .rows => item.row,
+            };
+            if (placement.end - placement.start != span) continue;
+            if (spanHasFlexible(tracks, placement.start, placement.end)) continue;
+            const need = switch (axis) {
+                .columns => try add(
+                    item.natural.border.width,
+                    item.margins.value.left + item.margins.value.right,
+                ),
+                .rows => try add(
+                    item.natural.border.height,
+                    item.margins.value.top + item.margins.value.bottom,
+                ),
+            };
+            try growTracks(
+                tracks,
+                placement.start,
+                placement.end,
+                need,
+                gap,
+                basis,
+            );
+        }
+        try flushTrackPlans(tracks, basis);
+    }
+
+    clearTrackPlans(tracks);
+    for (items) |item| {
+        const placement = switch (axis) {
+            .columns => item.column,
+            .rows => item.row,
+        };
+        if (!spanHasFlexible(tracks, placement.start, placement.end)) continue;
+        const need = switch (axis) {
+            .columns => try add(
+                item.natural.border.width,
+                item.margins.value.left + item.margins.value.right,
+            ),
+            .rows => try add(
+                item.natural.border.height,
+                item.margins.value.top + item.margins.value.bottom,
+            ),
+        };
+        try growTracks(
+            tracks,
+            placement.start,
+            placement.end,
+            need,
+            gap,
+            basis,
+        );
+    }
+    try flushTrackPlans(tracks, basis);
+}
+
+fn clearTrackPlans(tracks: []Track) void {
+    for (tracks) |*track| track.planned_increase = 0;
+}
+
+fn flushTrackPlans(tracks: []Track, basis: ?f32) Error!void {
+    for (tracks) |*track| {
+        if (track.planned_increase > 0) {
+            track.size = try add(track.size, track.planned_increase);
+        }
+        if (!trackIsFlexible(track.spec)) {
+            if (try trackMaximum(track.spec, basis)) |maximum| {
+                track.size = @min(track.size, try finiteNonNegative(maximum));
+            }
+            if (track.spec == .minmax) {
+                track.size = @max(track.size, try breadthMinimum(track.spec.minmax.min, basis));
+            }
+        }
+        track.size = try nonNegative(track.size);
+        track.planned_increase = 0;
+    }
+}
+
+fn spanHasFlexible(tracks: []const Track, start: usize, end: usize) bool {
+    for (tracks[start..end]) |track| {
+        if (trackIsFlexible(track.spec)) return true;
+    }
+    return false;
+}
+
 fn sizeTracks(
     allocator: std.mem.Allocator,
     columns: *std.ArrayList(Track),
@@ -1386,26 +1478,21 @@ fn sizeTracks(
     _ = allocator;
     const column_gap = try gridGap(container.style, .columns);
     const row_gap = try gridGap(container.style, .rows);
-    for (items) |item| {
-        const width_need = try add(item.natural.border.width, item.margins.value.left + item.margins.value.right);
-        const height_need = try add(item.natural.border.height, item.margins.value.top + item.margins.value.bottom);
-        try growTracks(
-            columns.items,
-            item.column.start,
-            item.column.end,
-            width_need,
-            column_gap,
-            if (width_definite) content.width else null,
-        );
-        try growTracks(
-            rows.items,
-            item.row.start,
-            item.row.end,
-            height_need,
-            row_gap,
-            if (height_definite) content.height else null,
-        );
-    }
+    try growTrackItems(
+        columns.items,
+        items,
+        .columns,
+        column_gap,
+        if (width_definite) content.width else null,
+    );
+    try growTrackItems(
+        rows.items,
+        items,
+        .rows,
+        row_gap,
+        if (height_definite) content.height else null,
+    );
+
     if (width_definite) {
         try resolveFlexibleTracks(columns.items, content.width, column_gap);
     } else {
@@ -1428,6 +1515,16 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
     var deficit = need - current;
     if (deficit <= 0) return;
 
+    const crosses_flexible = spanHasFlexible(tracks, start, end);
+    var suppress_non_flex = false;
+    if (crosses_flexible) {
+        if (try distributeIntrinsicFlexDeficit(tracks[start..end], deficit, basis)) {
+            deficit = 0;
+        } else {
+            suppress_non_flex = true;
+        }
+    }
+
     var non_fr_unbounded: usize = 0;
     var non_fr_bounded_capacity: f32 = 0;
 
@@ -1444,8 +1541,35 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
         }
     }
 
-    if (non_fr_unbounded > 0) {
-        if (non_fr_bounded_capacity > 0) {
+    if (!suppress_non_flex) {
+        if (non_fr_unbounded > 0) {
+            if (non_fr_bounded_capacity > 0) {
+                const to_bounded = @min(deficit, non_fr_bounded_capacity);
+                for (tracks[start..end]) |*track| {
+                    if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+                    if (!trackAllowsIntrinsicContribution(track.spec)) continue;
+                    if (try trackMaximum(track.spec, basis)) |maximum| {
+                        const capacity = @max(0, maximum - track.size);
+                        if (capacity > 0) {
+                            const share = to_bounded * capacity / non_fr_bounded_capacity;
+                            try planTrackIncrease(track, share, basis);
+                        }
+                    }
+                }
+                deficit -= to_bounded;
+            }
+            if (deficit > 0) {
+                const share = deficit / @as(f32, @floatFromInt(non_fr_unbounded));
+                for (tracks[start..end]) |*track| {
+                    if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+                    if (!trackAllowsIntrinsicContribution(track.spec)) continue;
+                    if ((try trackMaximum(track.spec, basis)) == null) {
+                        try planTrackIncrease(track, share, basis);
+                    }
+                }
+                deficit = 0;
+            }
+        } else if (non_fr_bounded_capacity > 0) {
             const to_bounded = @min(deficit, non_fr_bounded_capacity);
             for (tracks[start..end]) |*track| {
                 if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
@@ -1454,69 +1578,18 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
                     const capacity = @max(0, maximum - track.size);
                     if (capacity > 0) {
                         const share = to_bounded * capacity / non_fr_bounded_capacity;
-                        track.size = try add(track.size, share);
+                        try planTrackIncrease(track, share, basis);
                     }
                 }
             }
             deficit -= to_bounded;
         }
+
         if (deficit > 0) {
-            const share = deficit / @as(f32, @floatFromInt(non_fr_unbounded));
-            for (tracks[start..end]) |*track| {
-                if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
-                if (!trackAllowsIntrinsicContribution(track.spec)) continue;
-                if ((try trackMaximum(track.spec, basis)) == null) {
-                    track.size = try add(track.size, share);
-                }
-            }
-            deficit = 0;
-        }
-    } else if (non_fr_bounded_capacity > 0) {
-        const to_bounded = @min(deficit, non_fr_bounded_capacity);
-        for (tracks[start..end]) |*track| {
-            if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
-            if (!trackAllowsIntrinsicContribution(track.spec)) continue;
-            if (try trackMaximum(track.spec, basis)) |maximum| {
-                const capacity = @max(0, maximum - track.size);
-                if (capacity > 0) {
-                    const share = to_bounded * capacity / non_fr_bounded_capacity;
-                    track.size = try add(track.size, share);
-                }
+            if (try distributeIntrinsicFlexDeficit(tracks[start..end], deficit, basis)) {
+                deficit = 0;
             }
         }
-        deficit -= to_bounded;
-    }
-
-    if (deficit > 0) {
-        var fr_total: f32 = 0;
-        for (tracks[start..end]) |track| {
-            if (!trackIsFlexible(track.spec)) continue;
-            const fr = trackFraction(track.spec);
-            if (fr > 0) {
-                fr_total = try add(fr_total, fr);
-            }
-        }
-        if (fr_total > 0) {
-            for (tracks[start..end]) |*track| {
-                const fr = trackFraction(track.spec);
-                if (fr > 0) {
-                    track.size = try add(track.size, deficit * fr / fr_total);
-                }
-            }
-            deficit = 0;
-        }
-    }
-
-    for (tracks[start..end]) |*track| {
-        if (!trackIsFlexible(track.spec)) {
-            if (try trackMaximum(track.spec, basis)) |maximum| {
-                track.size = @min(track.size, maximum);
-            }
-            if (track.spec == .minmax) {
-                track.size = @max(track.size, try breadthMinimum(track.spec.minmax.min, basis));
-            }
-        }
-        track.size = try nonNegative(track.size);
     }
 }
 
@@ -1820,12 +1893,66 @@ fn trackHasZeroFlexWeight(track: style.GridTrack) bool {
     };
 }
 
+fn trackHasIntrinsicMinimum(track: style.GridTrack) bool {
+    return switch (track) {
+        .auto, .min_content, .max_content, .fit_content, .fr => true,
+        .minmax => |value| switch (value.min) {
+            .auto, .min_content, .max_content, .fit_content => true,
+            .fixed, .percent, .fr => false,
+        },
+        .fixed, .percent => false,
+    };
+}
+
+fn planTrackIncrease(track: *Track, increase: f32, basis: ?f32) Error!void {
+    var planned = try finiteNonNegative(increase);
+    if (try trackMaximum(track.spec, basis)) |maximum| {
+        const finite_maximum = try finiteNonNegative(maximum);
+        const capacity = @max(0, finite_maximum - track.size);
+        planned = @min(planned, capacity);
+    }
+    if (planned > track.planned_increase) track.planned_increase = planned;
+}
+
+fn distributeIntrinsicFlexDeficit(tracks: []Track, deficit: f32, basis: ?f32) Error!bool {
+    var flex_total: f32 = 0;
+    var eligible_flexible_count: usize = 0;
+    for (tracks) |track| {
+        if (!trackIsFlexible(track.spec)) continue;
+        if (!trackHasIntrinsicMinimum(track.spec)) continue;
+        eligible_flexible_count += 1;
+        const fraction = trackFraction(track.spec);
+        if (fraction > 0) flex_total = try add(flex_total, fraction);
+    }
+    if (eligible_flexible_count == 0) return false;
+
+    if (flex_total > 0) {
+        for (tracks) |*track| {
+            if (!trackIsFlexible(track.spec)) continue;
+            if (!trackHasIntrinsicMinimum(track.spec)) continue;
+            const fraction = trackFraction(track.spec);
+            if (fraction > 0) {
+                try planTrackIncrease(track, deficit * fraction / flex_total, basis);
+            }
+        }
+    } else {
+        const share = deficit / @as(f32, @floatFromInt(eligible_flexible_count));
+        for (tracks) |*track| {
+            if (!trackIsFlexible(track.spec)) continue;
+            if (!trackHasIntrinsicMinimum(track.spec)) continue;
+            try planTrackIncrease(track, share, basis);
+        }
+    }
+    return true;
+}
+
 fn trackParticipatesInIntrinsicSizing(track: style.GridTrack) bool {
     return !trackIsFlexible(track) or trackHasZeroFlexWeight(track);
 }
 
 fn trackAllowsIntrinsicContribution(track: style.GridTrack) bool {
-    return trackAllowsIntrinsic(track) or trackHasZeroFlexWeight(track);
+    if (trackHasZeroFlexWeight(track)) return trackHasIntrinsicMinimum(track);
+    return trackAllowsIntrinsic(track);
 }
 fn trackFraction(track: style.GridTrack) f32 {
     return switch (track) {

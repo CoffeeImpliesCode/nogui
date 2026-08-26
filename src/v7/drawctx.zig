@@ -229,6 +229,7 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     if (@hasField(T, "align_self")) local.align_self = @as(AlignSelf, opts.align_self);
     if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
+    if (@hasField(T, "text_align")) local.text_align = @as(style.TextAlign, opts.text_align);
     if (@hasField(T, "gap")) local.gap = opts.gap;
     if (@hasField(T, "column_gap")) local.column_gap = opts.column_gap;
     if (@hasField(T, "row_gap")) local.row_gap = opts.row_gap;
@@ -1194,6 +1195,25 @@ test "DrawCtx: justify and align flow into the node's Style" {
     // Defaults stay when the opts omit the fields.
     try std.testing.expectEqual(Justify.start, tree.node(plain).?.style.justify);
     try std.testing.expectEqual(Align.stretch, tree.node(plain).?.style.@"align");
+}
+
+test "DrawCtx: text align flows into the node's Style" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const centered = try ctx.column(.{ .text_align = .center });
+    ctx.pop();
+    const plain = try ctx.column(.{});
+    ctx.pop();
+
+    try std.testing.expectEqual(
+        style.TextAlign.center,
+        tree.node(centered).?.style.text_align,
+    );
+    try std.testing.expectEqual(style.TextAlign.start, tree.node(plain).?.style.text_align);
 }
 test "DrawCtx: button label honors justify and align overrides" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

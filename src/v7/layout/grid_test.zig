@@ -2025,3 +2025,681 @@ test "positive grid free space makes all center safety variants equivalent" {
         try expectRelative(&tree, second_id, .{ .x = 70, .y = 20, .w = 20, .h = 20 });
     }
 }
+
+test "grid intrinsic cross spans batch non-flexible items before cross-flex items" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_span_id: Id = @enumFromInt(1);
+    const second_span_id: Id = @enumFromInt(2);
+    const first_marker_id: Id = @enumFromInt(3);
+    const second_marker_id: Id = @enumFromInt(4);
+    const third_marker_id: Id = @enumFromInt(5);
+    const fourth_marker_id: Id = @enumFromInt(6);
+    const container_id: Id = @enumFromInt(7);
+    const tracks = [_]style.GridTrack{ .{ .fr = 1 }, .auto, .auto, .auto };
+
+    var first_span = leafStyle();
+    first_span.size = .{
+        .width = .{ .length = 60 },
+        .height = .{ .length = 60 },
+    };
+    first_span.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .span = 2 },
+    };
+    first_span.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .span = 2 },
+    };
+    try appendLeaf(&tree, first_span_id, container_id, first_span, .{ .spacer = .{} });
+
+    var second_span = leafStyle();
+    second_span.size = .{
+        .width = .{ .length = 150 },
+        .height = .{ .length = 150 },
+    };
+    second_span.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .span = 3 },
+    };
+    second_span.grid_row = .{
+        .start = .{ .line = 2 },
+        .end = .{ .span = 3 },
+    };
+    try appendLeaf(&tree, second_span_id, container_id, second_span, .{ .spacer = .{} });
+
+    const marker_ids = [_]Id{
+        first_marker_id,
+        second_marker_id,
+        third_marker_id,
+        fourth_marker_id,
+    };
+    for (marker_ids, 0..) |marker_id, index| {
+        var marker = leafStyle();
+        marker.grid_column = .{
+            .start = .{ .line = @intCast(index + 1) },
+            .end = .{ .line = @intCast(index + 2) },
+        };
+        marker.grid_row = .{
+            .start = .{ .line = @intCast(index + 1) },
+            .end = .{ .line = @intCast(index + 2) },
+        };
+        try appendLeaf(&tree, marker_id, container_id, marker, .{ .spacer = .{} });
+    }
+
+    var container = fixedContainer(50, 50, tracks[0..], tracks[0..]);
+    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
+    container.border_inset = .{
+        .top = .{ .length = 3 },
+        .right = .{ .length = 3 },
+        .bottom = .{ .length = 3 },
+        .left = .{ .length = 3 },
+    };
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, first_span_id);
+    try tree.appendChild(container_id, second_span_id);
+    for (marker_ids) |marker_id| try tree.appendChild(container_id, marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 50, .height = 50 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, first_span_id, .{ .x = 0, .y = 0, .w = 60, .h = 60 });
+    try expectRelative(&tree, second_span_id, .{ .x = 10, .y = 10, .w = 150, .h = 150 });
+    try expectRelative(&tree, first_marker_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
+    try expectRelative(&tree, second_marker_id, .{ .x = 10, .y = 10, .w = 50, .h = 50 });
+    try expectRelative(&tree, third_marker_id, .{ .x = 60, .y = 60, .w = 50, .h = 50 });
+    try expectRelative(&tree, fourth_marker_id, .{ .x = 110, .y = 110, .w = 50, .h = 50 });
+}
+
+test "grid cross-span intrinsic deficit grows flexible row before auto row" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const spanning_id: Id = @enumFromInt(1);
+    const first_marker_id: Id = @enumFromInt(2);
+    const second_marker_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const columns = [_]style.GridTrack{.{ .fixed = 20 }};
+    const rows = [_]style.GridTrack{ .{ .fr = 1 }, .auto };
+
+    var spanning = leafStyle();
+    spanning.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 60 },
+    };
+    spanning.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    spanning.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .span = 2 } };
+    try appendLeaf(&tree, spanning_id, container_id, spanning, .{ .spacer = .{} });
+
+    var first_marker = leafStyle();
+    first_marker.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first_marker.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_marker_id, container_id, first_marker, .{ .spacer = .{} });
+
+    var second_marker = leafStyle();
+    second_marker.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    second_marker.grid_row = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    try appendLeaf(&tree, second_marker_id, container_id, second_marker, .{ .spacer = .{} });
+
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(20, 50, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, spanning_id);
+    try tree.appendChild(container_id, first_marker_id);
+    try tree.appendChild(container_id, second_marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 20, .height = 50 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 20, .h = 50 });
+    try expectRelative(&tree, spanning_id, .{ .x = 0, .y = 0, .w = 20, .h = 60 });
+    try expectRelative(&tree, first_marker_id, .{ .x = 0, .y = 0, .w = 20, .h = 60 });
+    try expectRelative(&tree, second_marker_id, .{ .x = 0, .y = 60, .w = 20, .h = 0 });
+}
+
+test "grid zero fr track receives no positive free space share" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{ .{ .fr = 0 }, .{ .fr = 1 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var first = leafStyle();
+    first.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_id, container_id, first, .{ .spacer = .{} });
+
+    var second = leafStyle();
+    second.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    second.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, second_id, container_id, second, .{ .spacer = .{} });
+
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(100, 20, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 0, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+}
+
+test "grid positive fr tracks divide free space by weight" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 3 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var first = leafStyle();
+    first.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_id, container_id, first, .{ .spacer = .{} });
+
+    var second = leafStyle();
+    second.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    second.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, second_id, container_id, second, .{ .spacer = .{} });
+
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(100, 20, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 25, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 25, .y = 0, .w = 75, .h = 20 });
+}
+
+test "grid zero fr absorbs cross-span intrinsic deficit before auto track" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const spanning_id: Id = @enumFromInt(1);
+    const first_marker_id: Id = @enumFromInt(2);
+    const second_marker_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const tracks = [_]style.GridTrack{ .{ .fr = 0 }, .auto };
+
+    var spanning = leafStyle();
+    spanning.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 100 },
+    };
+    spanning.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .span = 2 } };
+    spanning.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .span = 2 } };
+    try appendLeaf(&tree, spanning_id, container_id, spanning, .{ .spacer = .{} });
+
+    var first_marker = leafStyle();
+    first_marker.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first_marker.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_marker_id, container_id, first_marker, .{ .spacer = .{} });
+
+    var second_marker = leafStyle();
+    second_marker.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    second_marker.grid_row = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    try appendLeaf(&tree, second_marker_id, container_id, second_marker, .{ .spacer = .{} });
+
+    var container = fixedContainer(50, 50, tracks[0..], tracks[0..]);
+    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
+    container.border_inset = .{
+        .top = .{ .length = 3 },
+        .right = .{ .length = 3 },
+        .bottom = .{ .length = 3 },
+        .left = .{ .length = 3 },
+    };
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, spanning_id);
+    try tree.appendChild(container_id, first_marker_id);
+    try tree.appendChild(container_id, second_marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 50, .height = 50 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, spanning_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_marker_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, second_marker_id, .{ .x = 100, .y = 100, .w = 0, .h = 0 });
+}
+
+test "grid zero fr cross-span intrinsic deficit falls back to equal growth" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const spanning_id: Id = @enumFromInt(1);
+    const first_marker_id: Id = @enumFromInt(2);
+    const second_marker_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const tracks = [_]style.GridTrack{ .{ .fr = 0 }, .{ .fr = 0 } };
+
+    var spanning = leafStyle();
+    spanning.size = .{
+        .width = .{ .length = 50 },
+        .height = .{ .length = 50 },
+    };
+    spanning.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .span = 2 } };
+    spanning.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .span = 2 } };
+    try appendLeaf(&tree, spanning_id, container_id, spanning, .{ .spacer = .{} });
+
+    var first_marker = leafStyle();
+    first_marker.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first_marker.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_marker_id, container_id, first_marker, .{ .spacer = .{} });
+
+    var second_marker = leafStyle();
+    second_marker.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    second_marker.grid_row = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    try appendLeaf(&tree, second_marker_id, container_id, second_marker, .{ .spacer = .{} });
+
+    var container = fixedContainer(60, 60, tracks[0..], tracks[0..]);
+    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
+    container.border_inset = .{
+        .top = .{ .length = 3 },
+        .right = .{ .length = 3 },
+        .bottom = .{ .length = 3 },
+        .left = .{ .length = 3 },
+    };
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, spanning_id);
+    try tree.appendChild(container_id, first_marker_id);
+    try tree.appendChild(container_id, second_marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 60, .height = 60 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 60, .h = 60 });
+    try expectRelative(&tree, spanning_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, first_marker_id, .{ .x = 0, .y = 0, .w = 25, .h = 25 });
+    try expectRelative(&tree, second_marker_id, .{ .x = 25, .y = 25, .w = 25, .h = 25 });
+}
+
+test "grid minmax zero fr cross-span deficit leaves auto track at zero" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const spanning_id: Id = @enumFromInt(1);
+    const first_marker_id: Id = @enumFromInt(2);
+    const second_marker_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const tracks = [_]style.GridTrack{
+        .{ .minmax = .{
+            .min = .{ .fixed = 0 },
+            .max = .{ .fr = 1 },
+        } },
+        .auto,
+    };
+
+    var spanning = leafStyle();
+    spanning.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 100 },
+    };
+    spanning.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .span = 2 } };
+    spanning.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .span = 2 } };
+    try appendLeaf(&tree, spanning_id, container_id, spanning, .{ .spacer = .{} });
+
+    var first_marker = leafStyle();
+    first_marker.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    first_marker.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    try appendLeaf(&tree, first_marker_id, container_id, first_marker, .{ .spacer = .{} });
+
+    var second_marker = leafStyle();
+    second_marker.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    second_marker.grid_row = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    try appendLeaf(&tree, second_marker_id, container_id, second_marker, .{ .spacer = .{} });
+
+    var container = fixedContainer(50, 50, tracks[0..], tracks[0..]);
+    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
+    container.border_inset = .{
+        .top = .{ .length = 3 },
+        .right = .{ .length = 3 },
+        .bottom = .{ .length = 3 },
+        .left = .{ .length = 3 },
+    };
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, spanning_id);
+    try tree.appendChild(container_id, first_marker_id);
+    try tree.appendChild(container_id, second_marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 50, .height = 50 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 50, .h = 50 });
+    try expectRelative(&tree, spanning_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_marker_id, .{ .x = 0, .y = 0, .w = 44, .h = 44 });
+    try expectRelative(&tree, second_marker_id, .{ .x = 44, .y = 44, .w = 0, .h = 0 });
+}
+
+test "grid equal-span intrinsic batches are source-order independent" {
+    const source_orders_reversed = [_]bool{ false, true };
+
+    for (source_orders_reversed) |source_order_reversed| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const second_third_span_id: Id = @enumFromInt(1);
+        const first_second_span_id: Id = @enumFromInt(2);
+        const first_marker_id: Id = @enumFromInt(3);
+        const second_marker_id: Id = @enumFromInt(4);
+        const third_marker_id: Id = @enumFromInt(5);
+        const container_id: Id = @enumFromInt(6);
+        const columns = [_]style.GridTrack{ .auto, .auto, .auto };
+        const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+        var second_third_span = leafStyle();
+        second_third_span.size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 20 },
+        };
+        second_third_span.grid_column = .{
+            .start = .{ .line = 2 },
+            .end = .{ .line = 4 },
+        };
+        second_third_span.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(
+            &tree,
+            second_third_span_id,
+            container_id,
+            second_third_span,
+            .{ .spacer = .{} },
+        );
+
+        var first_second_span = leafStyle();
+        first_second_span.size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 20 },
+        };
+        first_second_span.grid_column = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 3 },
+        };
+        first_second_span.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(
+            &tree,
+            first_second_span_id,
+            container_id,
+            first_second_span,
+            .{ .spacer = .{} },
+        );
+
+        const marker_ids = [_]Id{
+            first_marker_id,
+            second_marker_id,
+            third_marker_id,
+        };
+        for (marker_ids, 0..) |marker_id, index| {
+            var marker = leafStyle();
+            marker.grid_column = .{
+                .start = .{ .line = @intCast(index + 1) },
+                .end = .{ .line = @intCast(index + 2) },
+            };
+            marker.grid_row = .{
+                .start = .{ .line = 1 },
+                .end = .{ .line = 2 },
+            };
+            try appendLeaf(
+                &tree,
+                marker_id,
+                container_id,
+                marker,
+                .{ .spacer = .{ .size = 0 } },
+            );
+        }
+
+        const container: Style = .{
+            .display = .grid,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .auto,
+                .height = .{ .length = 20 },
+            },
+            .grid_template_columns = columns[0..],
+            .grid_template_rows = rows[0..],
+        };
+        try appendContainer(&tree, container_id, .root, container);
+        if (source_order_reversed) {
+            try tree.appendChild(container_id, first_second_span_id);
+            try tree.appendChild(container_id, second_third_span_id);
+        } else {
+            try tree.appendChild(container_id, second_third_span_id);
+            try tree.appendChild(container_id, first_second_span_id);
+        }
+        for (marker_ids) |marker_id| try tree.appendChild(container_id, marker_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 500, .height = 20 }, null);
+
+        try expectRelative(
+            &tree,
+            container_id,
+            .{ .x = 0, .y = 0, .w = 150, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            second_third_span_id,
+            .{ .x = 50, .y = 0, .w = 100, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            first_second_span_id,
+            .{ .x = 0, .y = 0, .w = 100, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            first_marker_id,
+            .{ .x = 0, .y = 0, .w = 50, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            second_marker_id,
+            .{ .x = 50, .y = 0, .w = 50, .h = 20 },
+        );
+        try expectRelative(
+            &tree,
+            third_marker_id,
+            .{ .x = 100, .y = 0, .w = 50, .h = 20 },
+        );
+    }
+}
+
+test "grid indefinite flex crossing routes intrinsic deficit to fr track" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const spanning_id: Id = @enumFromInt(1);
+    const fr_marker_id: Id = @enumFromInt(2);
+    const auto_marker_id: Id = @enumFromInt(3);
+    const container_id: Id = @enumFromInt(4);
+    const columns = [_]style.GridTrack{ .{ .fr = 1 }, .auto };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var spanning = leafStyle();
+    spanning.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 20 },
+    };
+    spanning.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 3 },
+    };
+    spanning.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, spanning_id, container_id, spanning, .{ .spacer = .{} });
+
+    var fr_marker = leafStyle();
+    fr_marker.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    fr_marker.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(
+        &tree,
+        fr_marker_id,
+        container_id,
+        fr_marker,
+        .{ .spacer = .{ .size = 0 } },
+    );
+
+    var auto_marker = leafStyle();
+    auto_marker.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 3 },
+    };
+    auto_marker.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(
+        &tree,
+        auto_marker_id,
+        container_id,
+        auto_marker,
+        .{ .spacer = .{ .size = 0 } },
+    );
+
+    const container: Style = .{
+        .display = .grid,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 20 },
+        },
+        .grid_template_columns = columns[0..],
+        .grid_template_rows = rows[0..],
+    };
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, spanning_id);
+    try tree.appendChild(container_id, fr_marker_id);
+    try tree.appendChild(container_id, auto_marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 500, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, spanning_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, fr_marker_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, auto_marker_id, .{ .x = 100, .y = 0, .w = 0, .h = 20 });
+}
+
+test "grid flexible span contributions batch before final fr distribution" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const spanning_id: Id = @enumFromInt(2);
+    const first_marker_id: Id = @enumFromInt(3);
+    const second_marker_id: Id = @enumFromInt(4);
+    const container_id: Id = @enumFromInt(5);
+    const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 1 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var first = leafStyle();
+    first.size = .{
+        .width = .{ .length = 50 },
+        .height = .{ .length = 20 },
+    };
+    first.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    first.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, first_id, container_id, first, .{ .spacer = .{} });
+
+    var spanning = leafStyle();
+    spanning.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 20 },
+    };
+    spanning.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 3 },
+    };
+    spanning.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, spanning_id, container_id, spanning, .{ .spacer = .{} });
+
+    var first_marker = leafStyle();
+    first_marker.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    first_marker.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(
+        &tree,
+        first_marker_id,
+        container_id,
+        first_marker,
+        .{ .spacer = .{ .size = 0 } },
+    );
+
+    var second_marker = leafStyle();
+    second_marker.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 3 },
+    };
+    second_marker.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(
+        &tree,
+        second_marker_id,
+        container_id,
+        second_marker,
+        .{ .spacer = .{ .size = 0 } },
+    );
+
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(100, 20, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, spanning_id);
+    try tree.appendChild(container_id, first_marker_id);
+    try tree.appendChild(container_id, second_marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 50, .h = 20 });
+    try expectRelative(&tree, spanning_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRelative(&tree, first_marker_id, .{ .x = 0, .y = 0, .w = 50, .h = 20 });
+    try expectRelative(&tree, second_marker_id, .{ .x = 50, .y = 0, .w = 50, .h = 20 });
+}
