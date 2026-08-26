@@ -48,6 +48,7 @@ pub const Renderer = struct {
     /// Releases the owned shaders and GPU buffers.
     pub fn deinit(self: *Renderer) void {
         self.batch.deinit();
+        self.* = undefined;
     }
 
     /// Applies material-buffer and pixel-path configuration.
