@@ -386,11 +386,11 @@ test "border and padding preserve relative geometry and exclude absolute child" 
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 120, .h = 60 });
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
     try expectRelative(&tree, second_id, .{ .x = 74, .y = 0, .w = 20, .h = 10 });
-    try expectRelative(&tree, absolute_id, .{ .x = 7, .y = 9, .w = 10, .h = 8 });
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = -4, .w = 10, .h = 8 });
     try expectRect(.{ .x = 10, .y = 15, .w = 20, .h = 10 }, widget.absoluteRect(&tree, first_id));
     try expectRect(.{ .x = 84, .y = 15, .w = 20, .h = 10 }, widget.absoluteRect(&tree, second_id));
     try expectRect(
-        .{ .x = 17, .y = 24, .w = 10, .h = 8 },
+        .{ .x = 10, .y = 11, .w = 10, .h = 8 },
         widget.absoluteRect(&tree, absolute_id),
     );
 }
@@ -2199,4 +2199,439 @@ test "wrap reverse column baseline uses the cross-start-most line" {
     try expectRelative(&tree, nested_id, .{ .x = 20, .y = 10, .w = 20, .h = 20 });
     try expectRelative(&tree, first_id, .{ .x = 10, .y = 0, .w = 10, .h = 20 });
     try expectRelative(&tree, second_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
+}
+
+test "paired insets size auto axis on absolute child" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(10, 0);
+    absolute.position = .absolute;
+    absolute.size.height = .auto;
+    absolute.inset = .{
+        .top = .{ .percent = 0.1 },
+        .right = .auto,
+        .bottom = .{ .percent = 0.1 },
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 200 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 200 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 200 });
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 20, .w = 10, .h = 160 });
+}
+
+test "percentage insets resolve against containing padding box" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(10, 10);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .{ .percent = 0.5 },
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 200 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 200 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 200 });
+    try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 90, .w = 10, .h = 10 });
+}
+
+test "row reverse static position uses physical alignment" {
+    const scenarios = [_]struct {
+        justify: style.Justify,
+        expected_x: f32,
+    }{
+        .{ .justify = .flex_start, .expected_x = 80 },
+        .{ .justify = .start, .expected_x = 0 },
+        .{ .justify = .end, .expected_x = 80 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const absolute_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var absolute = fixedItem(20, 20);
+        absolute.position = .absolute;
+        absolute.inset = .{
+            .top = .auto,
+            .right = .auto,
+            .bottom = .auto,
+            .left = .auto,
+        };
+        try appendNode(&tree, absolute_id, container_id, absolute);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row_reverse,
+            .justify = scenario.justify,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 20 },
+            },
+        });
+        try tree.appendChild(container_id, absolute_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+        try expectRelative(
+            &tree,
+            absolute_id,
+            .{ .x = scenario.expected_x, .y = 0, .w = 20, .h = 20 },
+        );
+    }
+}
+
+test "wrap reverse static cross alignment uses physical start" {
+    const scenarios = [_]style.AlignSelf{ .start, .baseline };
+
+    for (scenarios) |align_self| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const absolute_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+
+        var absolute = fixedItem(20, 20);
+        absolute.position = .absolute;
+        absolute.align_self = align_self;
+        absolute.inset = .{
+            .top = .auto,
+            .right = .auto,
+            .bottom = .auto,
+            .left = .auto,
+        };
+        try appendNode(&tree, absolute_id, container_id, absolute);
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .wrap = .wrap_reverse,
+            .flex_wrap = .wrap_reverse,
+            .justify = .start,
+            .@"align" = .end,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 100 },
+            },
+        });
+        try tree.appendChild(container_id, absolute_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 20, .height = 100 });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 20, .h = 100 });
+        try expectRelative(&tree, absolute_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
+    }
+}
+
+test "absolute child auto margins distribute within available inset space" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(20, 20);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 0 },
+    };
+    absolute.margin_inset = .{
+        .top = .{ .length = 0 },
+        .right = .auto,
+        .bottom = .{ .length = 0 },
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = 40, .y = 0, .w = 20, .h = 20 });
+}
+
+test "paired horizontal insets respect absolute max width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(0, 20);
+    absolute.position = .absolute;
+    absolute.size.width = .auto;
+    absolute.max_size.width = .{ .length = 40 };
+    absolute.inset = .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 10 },
+        .bottom = .auto,
+        .left = .{ .length = 10 },
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = 10, .y = 0, .w = 40, .h = 20 });
+}
+
+test "paired absolute insets defer auto height to aspect ratio" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(0, 0);
+    absolute.position = .absolute;
+    absolute.size = .{ .width = .auto, .height = .auto };
+    absolute.aspect_ratio = 2;
+    absolute.inset = .{
+        .top = .{ .length = 10 },
+        .right = .{ .length = 10 },
+        .bottom = .{ .length = 10 },
+        .left = .{ .length = 10 },
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = 10, .y = 10, .w = 80, .h = 40 });
+}
+
+test "padding box inset writes a content frame relative rectangle" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(20, 20);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .{ .length = 0 },
+        .right = .auto,
+        .bottom = .auto,
+        .left = .{ .length = 0 },
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+        .border = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 },
+        .padding = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 },
+        .border_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 10 },
+        },
+        .padding_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 10 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = -10, .y = -10, .w = 20, .h = 20 });
+    const expected_origin = [2]f32{ 10, 10 };
+    try std.testing.expectEqual(expected_origin, widget.absoluteBorderOrigin(&tree, absolute_id));
+    try expectRect(
+        .{ .x = 10, .y = 10, .w = 20, .h = 20 },
+        widget.absoluteRect(&tree, absolute_id),
+    );
+}
+
+test "absolute static center uses the flex content box" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(20, 20);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .center,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+        .padding = .{ .right = 10, .left = 10 },
+        .padding_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 10 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = 30, .y = 0, .w = 20, .h = 20 });
+}
+
+test "absolute safe end remains end during main axis overflow" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var absolute = fixedItem(200, 20);
+    absolute.position = .absolute;
+    absolute.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .justify = .safe_end,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = -100, .y = 0, .w = 200, .h = 20 });
+}
+
+test "row cross axis self start ignores inline direction mismatch" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+
+    var child = fixedItem(20, 20);
+    child.writing_direction = .rtl;
+    child.align_self = .self_start;
+    try appendNode(&tree, child_id, container_id, child);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .writing_direction = .ltr,
+        .justify = .start,
+        .@"align" = .end,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
 }

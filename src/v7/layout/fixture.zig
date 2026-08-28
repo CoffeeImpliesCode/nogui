@@ -1412,6 +1412,131 @@ test "fixture alignment attributes map only represented values" {
     }
 }
 
+test "fixture alignment parser maps future positions" {
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    const justify_content_cases = [_]struct {
+        value: []const u8,
+        expected: style.Justify,
+    }{
+        .{ .value = "safe end", .expected = .safe_end },
+        .{ .value = "unsafe end", .expected = .unsafe_end },
+    };
+    for (justify_content_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttributeWithResources(
+            &fixture_tree.resources,
+            &result,
+            "justify-content",
+            case.value,
+        );
+        try std.testing.expectEqual(case.expected, result.justify);
+        try std.testing.expectEqual(case.expected, result.grid_justify_content);
+    }
+
+    const align_content_cases = [_]struct {
+        value: []const u8,
+        expected: style.AlignContent,
+    }{
+        .{ .value = "safe end", .expected = .safe_end },
+        .{ .value = "unsafe end", .expected = .unsafe_end },
+    };
+    for (align_content_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttributeWithResources(
+            &fixture_tree.resources,
+            &result,
+            "align-content",
+            case.value,
+        );
+        try std.testing.expectEqual(case.expected, result.align_content);
+        try std.testing.expectEqual(case.expected, result.grid_align_content);
+    }
+
+    const align_items_cases = [_]struct {
+        value: []const u8,
+        expected: style.Align,
+    }{
+        .{ .value = "safe end", .expected = .safe_end },
+        .{ .value = "unsafe end", .expected = .unsafe_end },
+        .{ .value = "self-start", .expected = .self_start },
+        .{ .value = "self-end", .expected = .self_end },
+    };
+    for (align_items_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttributeWithResources(
+            &fixture_tree.resources,
+            &result,
+            "align-items",
+            case.value,
+        );
+        try std.testing.expectEqual(case.expected, result.@"align");
+        try std.testing.expectEqual(case.expected, result.grid_align_items);
+    }
+
+    const align_self_cases = [_]struct {
+        value: []const u8,
+        expected: style.AlignSelf,
+    }{
+        .{ .value = "safe end", .expected = .safe_end },
+        .{ .value = "unsafe end", .expected = .unsafe_end },
+        .{ .value = "self-start", .expected = .self_start },
+        .{ .value = "self-end", .expected = .self_end },
+    };
+    for (align_self_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttributeWithResources(
+            &fixture_tree.resources,
+            &result,
+            "align-self",
+            case.value,
+        );
+        try std.testing.expectEqual(case.expected, result.align_self);
+        try std.testing.expectEqual(case.expected, result.grid_align_self);
+    }
+
+    const justify_items_cases = [_]struct {
+        value: []const u8,
+        expected: style.Align,
+    }{
+        .{ .value = "safe end", .expected = .safe_end },
+        .{ .value = "unsafe end", .expected = .unsafe_end },
+        .{ .value = "self-start", .expected = .self_start },
+        .{ .value = "self-end", .expected = .self_end },
+    };
+    for (justify_items_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttributeWithResources(
+            &fixture_tree.resources,
+            &result,
+            "justify-items",
+            case.value,
+        );
+        try std.testing.expectEqual(case.expected, result.grid_justify_items);
+    }
+
+    const justify_self_cases = [_]struct {
+        value: []const u8,
+        expected: style.AlignSelf,
+    }{
+        .{ .value = "safe end", .expected = .safe_end },
+        .{ .value = "unsafe end", .expected = .unsafe_end },
+        .{ .value = "self-start", .expected = .self_start },
+        .{ .value = "self-end", .expected = .self_end },
+    };
+    for (justify_self_cases) |case| {
+        var result: style.Style = .{};
+        try applyAttributeWithResources(
+            &fixture_tree.resources,
+            &result,
+            "justify-self",
+            case.value,
+        );
+        try std.testing.expectEqual(case.expected, result.grid_justify_self);
+    }
+}
+
 test "fixture text align maps physical values and WebKit aliases" {
     const cases = [_]struct {
         value: []const u8,
@@ -2360,8 +2485,9 @@ fn applyTextAlign(result: *style.Style, value: []const u8) CaseError!void {
 fn applyJustifyContent(result: *style.Style, value: []const u8) CaseError!void {
     result.justify = if (std.mem.eql(u8, value, "normal"))
         .normal
-    else if (std.mem.eql(u8, value, "start") or
-        std.mem.eql(u8, value, "flex-start"))
+    else if (std.mem.eql(u8, value, "start"))
+        .start
+    else if (std.mem.eql(u8, value, "flex-start"))
         .start
     else if (std.mem.eql(u8, value, "center"))
         .center
@@ -2369,9 +2495,14 @@ fn applyJustifyContent(result: *style.Style, value: []const u8) CaseError!void {
         .safe_center
     else if (std.mem.eql(u8, value, "unsafe center"))
         .unsafe_center
-    else if (std.mem.eql(u8, value, "end") or
-        std.mem.eql(u8, value, "flex-end"))
+    else if (std.mem.eql(u8, value, "end"))
         .end
+    else if (std.mem.eql(u8, value, "flex-end"))
+        .end
+    else if (std.mem.eql(u8, value, "safe end"))
+        .safe_end
+    else if (std.mem.eql(u8, value, "unsafe end"))
+        .unsafe_end
     else if (std.mem.eql(u8, value, "space-between"))
         .space_between
     else if (std.mem.eql(u8, value, "space-around"))
@@ -2404,8 +2535,9 @@ fn applyJustifySelf(result: *style.Style, value: []const u8) CaseError!void {
 fn applyAlignContent(result: *style.Style, value: []const u8) CaseError!void {
     result.align_content = if (std.mem.eql(u8, value, "stretch"))
         .stretch
-    else if (std.mem.eql(u8, value, "start") or
-        std.mem.eql(u8, value, "flex-start"))
+    else if (std.mem.eql(u8, value, "start"))
+        .start
+    else if (std.mem.eql(u8, value, "flex-start"))
         .start
     else if (std.mem.eql(u8, value, "center"))
         .center
@@ -2413,9 +2545,14 @@ fn applyAlignContent(result: *style.Style, value: []const u8) CaseError!void {
         .safe_center
     else if (std.mem.eql(u8, value, "unsafe center"))
         .unsafe_center
-    else if (std.mem.eql(u8, value, "end") or
-        std.mem.eql(u8, value, "flex-end"))
+    else if (std.mem.eql(u8, value, "end"))
         .end
+    else if (std.mem.eql(u8, value, "flex-end"))
+        .end
+    else if (std.mem.eql(u8, value, "safe end"))
+        .safe_end
+    else if (std.mem.eql(u8, value, "unsafe end"))
+        .unsafe_end
     else if (std.mem.eql(u8, value, "space-between"))
         .space_between
     else if (std.mem.eql(u8, value, "space-around"))
@@ -2492,8 +2629,9 @@ fn applyClear(result: *style.Style, value: []const u8) CaseError!void {
 fn parseAlign(value: []const u8) CaseError!style.Align {
     return if (std.mem.eql(u8, value, "stretch"))
         .stretch
-    else if (std.mem.eql(u8, value, "start") or
-        std.mem.eql(u8, value, "flex-start"))
+    else if (std.mem.eql(u8, value, "start"))
+        .start
+    else if (std.mem.eql(u8, value, "flex-start"))
         .start
     else if (std.mem.eql(u8, value, "center"))
         .center
@@ -2501,9 +2639,18 @@ fn parseAlign(value: []const u8) CaseError!style.Align {
         .safe_center
     else if (std.mem.eql(u8, value, "unsafe center"))
         .unsafe_center
-    else if (std.mem.eql(u8, value, "end") or
-        std.mem.eql(u8, value, "flex-end"))
+    else if (std.mem.eql(u8, value, "end"))
         .end
+    else if (std.mem.eql(u8, value, "flex-end"))
+        .end
+    else if (std.mem.eql(u8, value, "safe end"))
+        .safe_end
+    else if (std.mem.eql(u8, value, "unsafe end"))
+        .unsafe_end
+    else if (std.mem.eql(u8, value, "self-start"))
+        .self_start
+    else if (std.mem.eql(u8, value, "self-end"))
+        .self_end
     else if (std.mem.eql(u8, value, "baseline"))
         .baseline
     else
@@ -2512,13 +2659,21 @@ fn parseAlign(value: []const u8) CaseError!style.Align {
 
 fn parseAlignSelf(value: []const u8) CaseError!style.AlignSelf {
     if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "safe end")) return .safe_end;
+    if (std.mem.eql(u8, value, "unsafe end")) return .unsafe_end;
     return switch (try parseAlign(value)) {
         .stretch => .stretch,
         .start => .start,
+        .flex_start => .flex_start,
         .center => .center,
         .safe_center => .safe_center,
         .unsafe_center => .unsafe_center,
         .end => .end,
+        .flex_end => .flex_end,
+        .safe_end => .safe_end,
+        .unsafe_end => .unsafe_end,
+        .self_start => .self_start,
+        .self_end => .self_end,
         .baseline => .baseline,
     };
 }

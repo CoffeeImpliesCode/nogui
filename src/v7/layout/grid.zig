@@ -920,8 +920,19 @@ fn layoutGridNode(
         );
         const justify_items = effectiveJustifyItems(node.style);
         const align_items = effectiveAlignItems(node.style);
-        const justify_self = alignValue(child.style.grid_justify_self, justify_items);
-        const align_self = alignValue(child.style.grid_align_self, align_items);
+        const directions_match = child.style.writing_direction == node.style.writing_direction;
+        const justify_self = alignValue(
+            child.style.grid_justify_self,
+            justify_items,
+            directions_match,
+            true,
+        );
+        const align_self = alignValue(
+            child.style.grid_align_self,
+            align_items,
+            directions_match,
+            false,
+        );
         const stretch_width = dimensionAuto(child.style.size.width) and justify_self == .stretch and
             !margins.left_auto and !margins.right_auto;
         if (stretch_width) {
@@ -979,7 +990,7 @@ fn layoutGridNode(
             track_x,
             try add(
                 margins.value.left,
-                alignOffset(justify_self, free_width),
+                alignOffset(justify_self, free_width, directions_match, true),
             ),
         );
         var y_offset: f32 = 0;
@@ -988,7 +999,14 @@ fn layoutGridNode(
             for (items.items) |other| {
                 if (other.row.start == item.row.start) {
                     const other_child = &tree.nodes.items[other.index];
-                    const other_align = alignValue(other_child.style.grid_align_self, align_items);
+                    const other_directions_match =
+                        other_child.style.writing_direction == node.style.writing_direction;
+                    const other_align = alignValue(
+                        other_child.style.grid_align_self,
+                        align_items,
+                        other_directions_match,
+                        false,
+                    );
                     if (other_align == .baseline) {
                         const other_edges = try resolveEdges(other_child.style, content.width);
                         const other_baseline = nodeFirstBaseline(tree, other.index, other.natural.border, other_edges);
@@ -1001,7 +1019,7 @@ fn layoutGridNode(
             const my_ascent = margins.value.top + my_baseline;
             y_offset = @max(0, max_ascent - my_ascent);
         } else {
-            y_offset = alignOffset(align_self, free_height);
+            y_offset = alignOffset(align_self, free_height, directions_match, false);
         }
         const logical_y = try add(
             row_offsets.items[item.row.start],
@@ -2018,10 +2036,12 @@ fn justifyContent(mode: style.Justify, free: f32, count: usize) Error!Distributi
     if (count == 0) return .{ .offset = 0, .extra_gap = 0 };
     const count_f: f32 = @floatFromInt(count);
     return switch (mode) {
-        .normal, .start => .{ .offset = 0, .extra_gap = 0 },
+        .normal, .start, .flex_start => .{ .offset = 0, .extra_gap = 0 },
         .safe_center => .{ .offset = distributed / 2, .extra_gap = 0 },
         .center, .unsafe_center => .{ .offset = available / 2, .extra_gap = 0 },
-        .end => .{ .offset = available, .extra_gap = 0 },
+        .end, .flex_end => .{ .offset = available, .extra_gap = 0 },
+        .safe_end => .{ .offset = distributed, .extra_gap = 0 },
+        .unsafe_end => .{ .offset = available, .extra_gap = 0 },
         .space_between => .{
             .offset = 0,
             .extra_gap = if (count > 1)
@@ -2044,10 +2064,12 @@ fn alignContent(mode: style.AlignContent, free: f32, count: usize) Error!Content
     const count_f: f32 = @floatFromInt(count);
     return switch (mode) {
         .stretch => .{ .offset = 0, .extra_gap = 0, .stretch = distributed / count_f },
-        .start => .{ .offset = 0, .extra_gap = 0, .stretch = 0 },
+        .start, .flex_start => .{ .offset = 0, .extra_gap = 0, .stretch = 0 },
         .safe_center => .{ .offset = distributed / 2, .extra_gap = 0, .stretch = 0 },
         .center, .unsafe_center => .{ .offset = available / 2, .extra_gap = 0, .stretch = 0 },
-        .end => .{ .offset = available, .extra_gap = 0, .stretch = 0 },
+        .end, .flex_end => .{ .offset = available, .extra_gap = 0, .stretch = 0 },
+        .safe_end => .{ .offset = distributed, .extra_gap = 0, .stretch = 0 },
+        .unsafe_end => .{ .offset = available, .extra_gap = 0, .stretch = 0 },
         .space_between => .{
             .offset = 0,
             .extra_gap = if (count > 1)
@@ -2097,25 +2119,44 @@ fn effectiveAlignItems(input: style.Style) style.Align {
         input.grid_align_items;
 }
 
-fn alignValue(value: style.AlignSelf, fallback: style.Align) style.Align {
+fn alignValue(
+    value: style.AlignSelf,
+    fallback: style.Align,
+    directions_match: bool,
+    axis_is_inline: bool,
+) style.Align {
+    const reverse_self = axis_is_inline and !directions_match;
     return switch (value) {
         .auto => fallback,
         .stretch => .stretch,
-        .start => .start,
+        .start, .flex_start => .start,
         .safe_center => .safe_center,
         .center => .center,
         .unsafe_center => .unsafe_center,
-        .end => .end,
+        .end, .flex_end => .end,
+        .safe_end => .safe_end,
+        .unsafe_end => .unsafe_end,
+        .self_start => if (reverse_self) .end else .start,
+        .self_end => if (reverse_self) .start else .end,
         .baseline => .baseline,
     };
 }
 
-fn alignOffset(value: style.Align, free: f32) f32 {
+fn alignOffset(
+    value: style.Align,
+    free: f32,
+    directions_match: bool,
+    axis_is_inline: bool,
+) f32 {
+    const reverse_self = axis_is_inline and !directions_match;
     return switch (value) {
-        .stretch, .start, .baseline => 0,
+        .stretch, .start, .flex_start, .baseline => 0,
         .safe_center => @max(0, free) / 2,
         .center, .unsafe_center => free / 2,
-        .end => free,
+        .end, .flex_end, .unsafe_end => free,
+        .safe_end => @max(0, free),
+        .self_start => if (reverse_self) free else 0,
+        .self_end => if (reverse_self) 0 else free,
     };
 }
 

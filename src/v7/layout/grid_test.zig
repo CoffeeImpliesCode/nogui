@@ -2703,3 +2703,133 @@ test "grid flexible span contributions batch before final fr distribution" {
     try expectRelative(&tree, first_marker_id, .{ .x = 0, .y = 0, .w = 50, .h = 20 });
     try expectRelative(&tree, second_marker_id, .{ .x = 50, .y = 0, .w = 50, .h = 20 });
 }
+
+test "grid align self-start stays at block start across direction mismatch" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fixed = 60 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 40 }};
+
+    var child = leafStyle();
+    child.writing_direction = .rtl;
+    child.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 10 },
+    };
+    child.grid_justify_self = .start;
+    child.grid_align_self = .self_start;
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+
+    var container = fixedContainer(60, 40, columns[0..], rows[0..]);
+    container.writing_direction = .ltr;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 60, .height = 40 }, null);
+
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
+}
+
+test "grid align self-end stays at block end across direction mismatch" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fixed = 60 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 40 }};
+
+    var child = leafStyle();
+    child.writing_direction = .rtl;
+    child.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 10 },
+    };
+    child.grid_justify_self = .start;
+    child.grid_align_self = .self_end;
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+
+    var container = fixedContainer(60, 40, columns[0..], rows[0..]);
+    container.writing_direction = .ltr;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 60, .height = 40 }, null);
+
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 30, .w = 20, .h = 10 });
+}
+
+test "grid justify self start and end flip across direction mismatch" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const self_start_id: Id = @enumFromInt(1);
+    const self_end_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{.{ .fixed = 60 }};
+    const rows = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
+
+    var self_start = leafStyle();
+    self_start.writing_direction = .rtl;
+    self_start.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 10 },
+    };
+    self_start.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    self_start.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    self_start.grid_justify_self = .self_start;
+    self_start.grid_align_self = .start;
+    try appendLeaf(
+        &tree,
+        self_start_id,
+        container_id,
+        self_start,
+        .{ .spacer = .{} },
+    );
+
+    var self_end = leafStyle();
+    self_end.writing_direction = .rtl;
+    self_end.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 10 },
+    };
+    self_end.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    self_end.grid_row = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 3 },
+    };
+    self_end.grid_justify_self = .self_end;
+    self_end.grid_align_self = .start;
+    try appendLeaf(&tree, self_end_id, container_id, self_end, .{ .spacer = .{} });
+
+    var container = fixedContainer(60, 40, columns[0..], rows[0..]);
+    container.writing_direction = .ltr;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, self_start_id);
+    try tree.appendChild(container_id, self_end_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 60, .height = 40 }, null);
+
+    try expectRelative(
+        &tree,
+        self_start_id,
+        .{ .x = 40, .y = 0, .w = 20, .h = 10 },
+    );
+    try expectRelative(
+        &tree,
+        self_end_id,
+        .{ .x = 0, .y = 20, .w = 20, .h = 10 },
+    );
+}

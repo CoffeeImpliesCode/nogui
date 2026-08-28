@@ -149,7 +149,7 @@ pub fn applyAspectRatio(
     if (width != null and height == null) {
         return .{
             .width = width,
-            .height = try validateFinite(width.? / ratio),
+            .height = try resolveAspectRatioHeight(width.?, ratio),
         };
     }
     if (width == null and height != null) {
@@ -163,6 +163,13 @@ pub fn applyAspectRatio(
         .width = width,
         .height = height,
     };
+}
+
+pub fn resolveAspectRatioHeight(width: f32, ratio: f32) Error!f32 {
+    const checked_width = try validateFinite(width);
+    const checked_ratio = try validateFinite(ratio);
+    if (checked_ratio <= 0) return error.InvalidStyle;
+    return validateFinite(checked_width / checked_ratio);
 }
 
 fn resolvePaddingBorder(

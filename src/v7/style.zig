@@ -25,10 +25,14 @@ pub const FlexWrap = enum { nowrap, wrap, wrap_reverse };
 pub const Justify = enum {
     normal,
     start,
+    flex_start,
     center,
     safe_center,
     unsafe_center,
     end,
+    flex_end,
+    safe_end,
+    unsafe_end,
     space_between,
     space_around,
     space_evenly,
@@ -36,19 +40,29 @@ pub const Justify = enum {
 pub const Align = enum {
     stretch,
     start,
+    flex_start,
     center,
     safe_center,
     unsafe_center,
     end,
+    flex_end,
+    safe_end,
+    unsafe_end,
+    self_start,
+    self_end,
     baseline,
 };
 pub const AlignContent = enum {
     stretch,
     start,
+    flex_start,
     center,
     safe_center,
     unsafe_center,
     end,
+    flex_end,
+    safe_end,
+    unsafe_end,
     space_between,
     space_around,
     space_evenly,
@@ -57,10 +71,16 @@ pub const AlignSelf = enum {
     auto,
     stretch,
     start,
+    flex_start,
     center,
     safe_center,
     unsafe_center,
     end,
+    flex_end,
+    safe_end,
+    unsafe_end,
+    self_start,
+    self_end,
     baseline,
 };
 pub const TextAlign = enum { start, left, center, right };
@@ -1312,6 +1332,16 @@ test "canonical clear defaults to none" {
 
 test "canonical alignment distinguishes safe and unsafe center" {
     try std.testing.expect(Align.safe_center != Align.unsafe_center);
+}
+
+test "canonical alignment exposes distinct end and self tags" {
+    try std.testing.expect(Justify.safe_end != Justify.unsafe_end);
+    try std.testing.expect(AlignContent.safe_end != AlignContent.unsafe_end);
+    try std.testing.expect(Align.self_start != Align.self_end);
+    try std.testing.expect(AlignSelf.safe_end != AlignSelf.unsafe_end);
+    try std.testing.expect(AlignSelf.self_start != AlignSelf.self_end);
+    try std.testing.expect(values.Alignment.safe_end != values.Alignment.unsafe_end);
+    try std.testing.expect(values.Alignment.self_start != values.Alignment.self_end);
 }
 
 test "calc resolves length plus percentage" {

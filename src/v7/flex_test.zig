@@ -710,3 +710,201 @@ test "wrapped row with gap breaks lines including the gap cost" {
     try testing.expectEqual(Rect{ .x = 50, .y = 0, .w = 40, .h = 20 }, tree.node(b).?.rect);
     try testing.expectEqual(Rect{ .x = 0, .y = 30, .w = 40, .h = 20 }, tree.node(c).?.rect);
 }
+
+test "scrollable leaf container horizontal scroll extent" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const leaf: Id = @enumFromInt(1);
+    try appendNode(&tree, leaf, .root, .{ .label = .{ .text = "content" } });
+
+    var scroll_state: widget.ScrollState = .{};
+    const leaf_node = tree.node(leaf).?;
+    leaf_node.style.size = .{
+        .width = .{ .length = 45 },
+        .height = .{ .length = 45 },
+    };
+    leaf_node.style.overflow = .{ .width = .scroll, .height = .scroll };
+    leaf_node.scroll = .{ .state = &scroll_state, .axis = .horizontal };
+
+    const measureText = struct {
+        fn measure(_: []const u8, _: f32, _: u8) widget.Size {
+            return .{ .width = 210, .height = 10 };
+        }
+    }.measure;
+    flex.layoutWith(&tree, .{ .width = 45, .height = 45 }, measureText);
+
+    const node = tree.node(leaf).?;
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 45, .h = 45 }, node.rect);
+    try testing.expectEqual([2]f32{ 165, 0 }, node.scroll.?.state.max_offset);
+}
+
+test "scrollable leaf container vertical scroll extent" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const leaf: Id = @enumFromInt(1);
+    try appendNode(&tree, leaf, .root, .{ .label = .{ .text = "content" } });
+
+    var scroll_state: widget.ScrollState = .{};
+    const leaf_node = tree.node(leaf).?;
+    leaf_node.style.size = .{
+        .width = .{ .length = 45 },
+        .height = .{ .length = 45 },
+    };
+    leaf_node.style.overflow = .{ .width = .scroll, .height = .scroll };
+    leaf_node.scroll = .{ .state = &scroll_state, .axis = .vertical };
+
+    const measureText = struct {
+        fn measure(_: []const u8, _: f32, _: u8) widget.Size {
+            return .{ .width = 10, .height = 210 };
+        }
+    }.measure;
+    flex.layoutWith(&tree, .{ .width = 45, .height = 45 }, measureText);
+
+    const node = tree.node(leaf).?;
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 45, .h = 45 }, node.rect);
+    try testing.expectEqual([2]f32{ 0, 165 }, node.scroll.?.state.max_offset);
+}
+
+test "scrollable leaf container both axis with scrollbars" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const leaf: Id = @enumFromInt(1);
+    try appendNode(&tree, leaf, .root, .{ .label = .{ .text = "content" } });
+
+    var scroll_state: widget.ScrollState = .{};
+    const leaf_node = tree.node(leaf).?;
+    leaf_node.style.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 100 },
+    };
+    leaf_node.style.overflow = .{ .width = .scroll, .height = .scroll };
+    leaf_node.style.scrollbar_width = 15;
+    leaf_node.scroll = .{ .state = &scroll_state, .axis = .both };
+
+    const measureText = struct {
+        fn measure(_: []const u8, _: f32, _: u8) widget.Size {
+            return .{ .width = 200, .height = 200 };
+        }
+    }.measure;
+    flex.layoutWith(&tree, .{ .width = 100, .height = 100 }, measureText);
+
+    const node = tree.node(leaf).?;
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 100 }, node.rect);
+    try testing.expectEqual([2]f32{ 115, 115 }, node.scroll.?.state.max_offset);
+}
+
+test "auto-overflow scrollable leaf keeps intrinsic horizontal extent" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const leaf: Id = @enumFromInt(1);
+    try appendNode(&tree, leaf, .root, .{ .label = .{ .text = "content" } });
+
+    var scroll_state: widget.ScrollState = .{};
+    const leaf_node = tree.node(leaf).?;
+    leaf_node.style.size = .{
+        .width = .{ .length = 45 },
+        .height = .{ .length = 45 },
+    };
+    leaf_node.style.overflow = .{ .width = .auto, .height = .visible };
+    leaf_node.scroll = .{ .state = &scroll_state, .axis = .horizontal };
+
+    const measureText = struct {
+        fn measure(_: []const u8, _: f32, _: u8) widget.Size {
+            return .{ .width = 210, .height = 10 };
+        }
+    }.measure;
+    flex.layoutWith(&tree, .{ .width = 45, .height = 45 }, measureText);
+
+    const node = tree.node(leaf).?;
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 45, .h = 45 }, node.rect);
+    try testing.expectEqual([2]f32{ 165, 0 }, node.scroll.?.state.max_offset);
+}
+
+test "RTL row absolute static flex-start follows resolved main axis" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const absolute: Id = @enumFromInt(1);
+    const row: Id = @enumFromInt(2);
+    try appendNode(&tree, absolute, row, .{ .spacer = .{ .size = 20 } });
+    try appendNode(&tree, row, .root, .{ .row = .{} });
+    try wireChildren(&tree);
+
+    const row_node = tree.node(row).?;
+    row_node.style.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 20 },
+    };
+    row_node.style.writing_direction = .rtl;
+    row_node.style.justify = .flex_start;
+    row_node.style.@"align" = .flex_start;
+
+    const absolute_node = tree.node(absolute).?;
+    absolute_node.style.position = .absolute;
+    absolute_node.style.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 20 },
+    };
+    absolute_node.style.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+
+    flex.layout(&tree, .{ .width = 100, .height = 20 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 20 }, row_node.rect);
+    try testing.expectEqual(
+        Rect{ .x = 80, .y = 0, .w = 20, .h = 20 },
+        absolute_node.rect,
+    );
+}
+
+test "RTL column absolute static cross flex-start follows resolved cross axis" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const absolute: Id = @enumFromInt(1);
+    const column: Id = @enumFromInt(2);
+    try appendNode(&tree, absolute, column, .{ .spacer = .{ .size = 20 } });
+    try appendNode(&tree, column, .root, .{ .column = .{} });
+    try wireChildren(&tree);
+
+    const column_node = tree.node(column).?;
+    column_node.style.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 100 },
+    };
+    column_node.style.writing_direction = .rtl;
+    column_node.style.justify = .flex_start;
+    column_node.style.@"align" = .flex_start;
+
+    const absolute_node = tree.node(absolute).?;
+    absolute_node.style.position = .absolute;
+    absolute_node.style.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 20 },
+    };
+    absolute_node.style.inset = .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+
+    flex.layout(&tree, .{ .width = 100, .height = 100 });
+
+    try testing.expectEqual(
+        Rect{ .x = 0, .y = 0, .w = 100, .h = 100 },
+        column_node.rect,
+    );
+    try testing.expectEqual(
+        Rect{ .x = 80, .y = 0, .w = 20, .h = 20 },
+        absolute_node.rect,
+    );
+}

@@ -225,6 +225,7 @@ fn measureNaturalNode(
         edges,
         null,
         null,
+        false,
     );
     return .{
         .content = content,
@@ -776,6 +777,7 @@ fn layoutPreparedContainerUnchecked(
             child_edges,
             used_auto_width_border,
             null,
+            false,
         );
         var child_width = child_size.width;
         var child_height = child_size.height;
@@ -787,6 +789,7 @@ fn layoutPreparedContainerUnchecked(
                 child_context,
                 child_width,
                 measure,
+                null,
                 null,
                 layout_ctx,
             );
@@ -807,6 +810,7 @@ fn layoutPreparedContainerUnchecked(
                     child_edges,
                     used_auto_width_border,
                     null,
+                    false,
                 );
                 child_width = child_size.width;
                 child_height = child_size.height;
@@ -862,6 +866,7 @@ fn layoutPreparedContainerUnchecked(
                 child_width,
                 measure,
                 null,
+                null,
                 layout_ctx,
             );
             if (nested_result != null) {
@@ -881,6 +886,7 @@ fn layoutPreparedContainerUnchecked(
                     child_edges,
                     used_auto_width_border,
                     null,
+                    false,
                 );
                 child_width = child_size.width;
                 child_height = child_size.height;
@@ -1006,6 +1012,7 @@ fn layoutPreparedContainerUnchecked(
                         child_edges,
                         used_auto_width_border,
                         null,
+                        false,
                     );
                     child_width = child_size.width;
                     child_height = child_size.height;
@@ -1058,6 +1065,7 @@ fn layoutPreparedContainerUnchecked(
                 child_width,
                 measure,
                 null,
+                null,
                 layout_ctx,
             );
             if (nested_result) |result| {
@@ -1077,6 +1085,7 @@ fn layoutPreparedContainerUnchecked(
                     child_edges,
                     used_auto_width_border,
                     null,
+                    false,
                 );
                 child_width = child_size.width;
                 child_height = child_size.height;
@@ -1170,6 +1179,7 @@ fn layoutPreparedContainerUnchecked(
                     child_edges,
                     used_auto_width_border,
                     null,
+                    false,
                 );
                 child_width = child_size.width;
                 child_height = child_size.height;
@@ -1239,14 +1249,14 @@ fn layoutPreparedContainerUnchecked(
     }
     const bottom_collapses = bottom_margin_collapses_with_children and
         last_child_bottom != null;
+    const bottom_margin_for_height = if (bottom_collapses)
+        0
+    else if (pending_bottom) |bottom_margin|
+        bottom_margin.resolve()
+    else
+        0;
+    const normal_bottom = try addFinite(in_flow_bottom, bottom_margin_for_height);
     const content_height = content_height_fixed orelse blk: {
-        const bottom_margin_for_height = if (bottom_collapses)
-            0
-        else if (pending_bottom) |bottom_margin|
-            bottom_margin.resolve()
-        else
-            0;
-        const normal_bottom = try addFinite(in_flow_bottom, bottom_margin_for_height);
         const auto_content_height = if (container_establishes_bfc)
             @max(normal_bottom, float_bottom)
         else
@@ -1261,6 +1271,13 @@ fn layoutPreparedContainerUnchecked(
         tree.nodes.items[container_index].rect.h = final_border_height;
         break :blk @max(0, final_border_height - container_edges.vertical);
     };
+    try alignBlockChildren(
+        tree,
+        child_ids,
+        content_height,
+        normal_bottom,
+        container_style.align_content,
+    );
 
     try layoutAbsoluteChildren(
         tree,
@@ -1289,12 +1306,54 @@ fn layoutPreparedContainerUnchecked(
     };
 }
 
+fn alignBlockChildren(
+    tree: *widget.WidgetTree,
+    child_ids: []const Id,
+    content_height: f32,
+    in_flow_content_height: f32,
+    alignment: style.AlignContent,
+) sizing.Error!void {
+    const occupied_height = @max(0, try finite(in_flow_content_height));
+    const free_height = try subtractFinite(content_height, occupied_height);
+    const offset = try resolveBlockContentOffset(alignment, free_height);
+    if (offset == 0) return;
+
+    for (child_ids) |child_id| {
+        const child = tree.node(child_id) orelse return error.InvalidStyle;
+        if (child.layout_hidden or child.style.position == .absolute) continue;
+        if (physicalFloat(child.style.float, child.style.writing_direction) != .none) continue;
+
+        child.rect.y = try addFinite(child.rect.y, offset);
+    }
+}
+
+fn resolveBlockContentOffset(
+    alignment: style.AlignContent,
+    free_height: f32,
+) sizing.Error!f32 {
+    const checked_free_height = try finite(free_height);
+    const safe_free_height = @max(0, checked_free_height);
+
+    // A block's in-flow contents form one alignment subject, so distributed
+    // values use their single-subject fallback and never add child gaps.
+    return switch (alignment) {
+        .stretch, .start, .flex_start, .space_between => 0,
+        .center, .unsafe_center => try finite(checked_free_height / 2),
+        .safe_center, .space_around, .space_evenly => try finite(
+            safe_free_height / 2,
+        ),
+        .end, .flex_end, .unsafe_end => checked_free_height,
+        .safe_end => safe_free_height,
+    };
+}
+
 fn layoutNestedBlockAtWidth(
     tree: *widget.WidgetTree,
     child_id: Id,
     parent_context: sizing.SizingContext,
     used_width: f32,
     measure: ?layout_context.MeasureFn,
+    forced_border_width: ?f32,
     forced_border_height: ?f32,
     layout_ctx: ?*layout_context.LayoutContext,
 ) sizing.Error!?MarginCollapseResult {
@@ -1311,7 +1370,7 @@ fn layoutNestedBlockAtWidth(
         child_id,
         nested_context,
         measure,
-        null,
+        forced_border_width,
         forced_border_height,
         false,
         layout_ctx,
@@ -1429,6 +1488,7 @@ fn resolveChildSize(
     edges: BoxEdges,
     auto_width_border: ?f32,
     auto_height_border: ?f32,
+    full_inset_aspect_ratio: bool,
 ) sizing.Error!sizing.ResolvedSize {
     const normalized_style = styleForSizing(input_style);
     const box_model = try sizing.resolveBoxModel(normalized_style, context);
@@ -1437,22 +1497,32 @@ fn resolveChildSize(
         .border_box => box_model.border_box,
     };
 
-    if (candidate.width == null) {
-        if (auto_width_border) |width| {
-            candidate.width = try borderToSizingValue(
-                width,
-                edges.box_horizontal,
-                input_style.box_sizing,
-            );
+    if (full_inset_aspect_ratio) {
+        const width = auto_width_border orelse return error.InvalidStyle;
+        candidate.width = try borderToSizingValue(
+            width,
+            edges.box_horizontal,
+            input_style.box_sizing,
+        );
+        candidate.height = null;
+    } else {
+        if (candidate.width == null) {
+            if (auto_width_border) |width| {
+                candidate.width = try borderToSizingValue(
+                    width,
+                    edges.box_horizontal,
+                    input_style.box_sizing,
+                );
+            }
         }
-    }
-    if (candidate.height == null) {
-        if (auto_height_border) |height| {
-            candidate.height = try borderToSizingValue(
-                height,
-                edges.box_vertical,
-                input_style.box_sizing,
-            );
+        if (candidate.height == null) {
+            if (auto_height_border) |height| {
+                candidate.height = try borderToSizingValue(
+                    height,
+                    edges.box_vertical,
+                    input_style.box_sizing,
+                );
+            }
         }
     }
     candidate = try sizing.applyAspectRatio(normalized_style, candidate);
@@ -1563,6 +1633,13 @@ fn layoutAbsoluteChildren(
         const right = try resolveInset(child_style.inset.right, content_width);
         const top = try resolveInset(child_style.inset.top, content_height);
         const bottom = try resolveInset(child_style.inset.bottom, content_height);
+        const full_inset_aspect_ratio = child_style.size.width == .auto and
+            child_style.size.height == .auto and
+            child_style.aspect_ratio != null and
+            left != null and
+            right != null and
+            top != null and
+            bottom != null;
         const auto_width_border = if (child_style.size.width == .auto and
             left != null and right != null)
             @max(
@@ -1580,8 +1657,8 @@ fn layoutAbsoluteChildren(
             )
         else
             null;
-        const auto_height_border = if (child_style.size.height == .auto and
-            top != null and bottom != null)
+        const auto_height_border = if (!full_inset_aspect_ratio and
+            child_style.size.height == .auto and top != null and bottom != null)
             @max(
                 0,
                 try subtractFinite(
@@ -1602,7 +1679,8 @@ fn layoutAbsoluteChildren(
             auto_width_border == null;
         const intrinsic_height =
             (child_style.size.height == .auto or isIntrinsicDimension(child_style.size.height)) and
-            auto_height_border == null;
+            auto_height_border == null and
+            !full_inset_aspect_ratio;
         const intrinsic = try intrinsicContentSizeWithContextAndAxes(
             tree,
             child,
@@ -1620,6 +1698,7 @@ fn layoutAbsoluteChildren(
             child_edges,
             auto_width_border,
             auto_height_border,
+            full_inset_aspect_ratio,
         );
         const used_width = child_size.width;
         if (try layoutNestedBlockAtWidth(
@@ -1628,7 +1707,8 @@ fn layoutAbsoluteChildren(
             absolute_context,
             used_width,
             measure,
-            if (auto_height_border != null) child_size.height else null,
+            if (full_inset_aspect_ratio) child_size.width else null,
+            if (auto_height_border != null or full_inset_aspect_ratio) child_size.height else null,
             layout_ctx,
         )) |_| {
             child_size = .{

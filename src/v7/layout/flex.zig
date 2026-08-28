@@ -607,9 +607,25 @@ fn layoutFlex(
     node.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
     node.rect.w = try nonNegative(border_size.width);
     node.rect.h = try nonNegative(border_size.height);
+    const pad_box: widget.Size = .{
+        .width = @max(
+            0,
+            try finite(node.rect.w - edges.border.left - edges.border.right),
+        ),
+        .height = @max(
+            0,
+            try finite(node.rect.h - edges.border.top - edges.border.bottom),
+        ),
+    };
     const content: widget.Size = .{
-        .width = @max(0, node.rect.w - edges.horizontal),
-        .height = @max(0, node.rect.h - edges.vertical),
+        .width = @max(
+            0,
+            try finite(pad_box.width - edges.padding.left - edges.padding.right),
+        ),
+        .height = @max(
+            0,
+            try finite(pad_box.height - edges.padding.top - edges.padding.bottom),
+        ),
     };
     node.resolveTypedStyle(containing, content);
     const axes = axesFor(node.style);
@@ -784,7 +800,7 @@ fn layoutFlex(
             );
         }
     }
-    try placeAbsolute(tree, node, content, options, cache, depth - 1);
+    try placeAbsolute(tree, node, content, pad_box, edges, options, cache, depth - 1);
 }
 
 fn collectItems(
@@ -840,7 +856,12 @@ fn collectItems(
             natural,
             edges,
         );
-        const alignment = alignValue(child.style.align_self, container.style.@"align");
+        const alignment = alignValue(
+            child.style.align_self,
+            container.style.@"align",
+            child.style.writing_direction == container.style.writing_direction,
+            !axes.horizontal,
+        );
         const baseline_participates = axes.horizontal and
             alignment == .baseline and
             !crossStartAuto(axes, margins) and
@@ -1190,10 +1211,11 @@ fn lineDistribution(
                 free = 0;
             }
         },
-        .start => {},
+        .start, .flex_start => {},
         .safe_center => offset = free / 2,
         .center, .unsafe_center => offset = signed_free / 2,
-        .end => offset = signed_free,
+        .end, .flex_end, .unsafe_end => offset = signed_free,
+        .safe_end => offset = free,
         .space_between => {
             if (lines.len > 1) {
                 extra = free / @as(f32, @floatFromInt(lines.len - 1));
@@ -1253,7 +1275,12 @@ fn placeItems(
             }
 
             const child = &tree.nodes.items[item.index];
-            const alignment = alignValue(child.style.align_self, container.style.@"align");
+            const alignment = alignValue(
+                child.style.align_self,
+                container.style.@"align",
+                child.style.writing_direction == container.style.writing_direction,
+                !axes.horizontal,
+            );
             var cross_start = item.cross_margin_start;
             var cross_end = item.cross_margin_end;
             var cross = item.cross;
@@ -1277,19 +1304,13 @@ fn placeItems(
             }
             const align_offset = if (item.cross_start_auto or item.cross_end_auto)
                 0
-            else switch (alignment) {
-                .stretch, .start => 0,
-                .baseline => if (axes.horizontal and line.baseline_count > 1)
-                    if (axes.cross_reverse)
-                        line.max_descent - (cross_start + cross - item.baseline)
-                    else
-                        line.max_baseline - (cross_start + item.baseline)
+            else if (alignment == .baseline and axes.horizontal and line.baseline_count > 1)
+                if (axes.cross_reverse)
+                    line.max_descent - (cross_start + cross - item.baseline)
                 else
-                    0,
-                .safe_center => @max(0, cross_free) / 2,
-                .center, .unsafe_center => cross_free / 2,
-                .end => cross_free,
-            };
+                    line.max_baseline - (cross_start + item.baseline)
+            else
+                try alignmentOffset(alignment, cross_free);
             const logical_cross = try add(line.position, try add(cross_start, align_offset));
             const physical_main = try position(
                 logical_main,
@@ -1317,6 +1338,8 @@ fn placeAbsolute(
     tree: *widget.WidgetTree,
     container: *const widget.WidgetNode,
     content: widget.Size,
+    pad_box: widget.Size,
+    container_edges: Edges,
     options: Options,
     cache: []Natural,
     depth: usize,
@@ -1336,21 +1359,90 @@ fn placeAbsolute(
         );
         const edges = try resolveEdges(child.style, content.width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
+        const left = try resolveInset(child.style.inset.left, pad_box.width);
+        const right = try resolveInset(child.style.inset.right, pad_box.width);
+        const top = try resolveInset(child.style.inset.top, pad_box.height);
+        const bottom = try resolveInset(child.style.inset.bottom, pad_box.height);
+        var margins = try resolveMargins(child.style, pad_box.width);
+        const full_inset_aspect_ratio = child.style.size.width == .auto and
+            child.style.size.height == .auto and
+            child.style.aspect_ratio != null and
+            left != null and
+            right != null and
+            top != null and
+            bottom != null;
+        var sizing_style = child.style;
+        if (child.style.size.width == .auto and left != null and right != null) {
+            const inset_width = try absoluteSizeFromInsets(
+                pad_box.width,
+                left.?,
+                right.?,
+                margins.value.left,
+                margins.value.right,
+            );
+            sizing_style.size.width = .{ .length = try borderToSizing(
+                inset_width,
+                edges.box_horizontal,
+                child.style.box_sizing,
+            ) };
+        }
+        if (!full_inset_aspect_ratio and
+            child.style.size.height == .auto and
+            top != null and
+            bottom != null)
+        {
+            const inset_height = try absoluteSizeFromInsets(
+                pad_box.height,
+                top.?,
+                bottom.?,
+                margins.value.top,
+                margins.value.bottom,
+            );
+            sizing_style.size.height = .{ .length = try borderToSizing(
+                inset_height,
+                edges.box_vertical,
+                child.style.box_sizing,
+            ) };
+        }
         const size = try usedSize(
-            child.style,
+            sizing_style,
             content,
             .{ .width = content.width, .height = content.height },
             natural.content,
             edges,
             null,
         );
-        const left = try resolveInset(child.style.inset.left, content.width);
-        const right = try resolveInset(child.style.inset.right, content.width);
-        const top = try resolveInset(child.style.inset.top, content.height);
-        const bottom = try resolveInset(child.style.inset.bottom, content.height);
-        const margins = try resolveMargins(child.style, content.width);
+        try distributeAbsoluteAutoMargins(
+            &margins.value.left,
+            &margins.value.right,
+            margins.left_auto,
+            margins.right_auto,
+            pad_box.width,
+            size.width,
+            left,
+            right,
+        );
+        try distributeAbsoluteAutoMargins(
+            &margins.value.top,
+            &margins.value.bottom,
+            margins.top_auto,
+            margins.bottom_auto,
+            pad_box.height,
+            size.height,
+            top,
+            bottom,
+        );
         const axes = axesFor(container.style);
-        const alignment = alignValue(child.style.align_self, container.style.@"align");
+        const main_writing_reverse =
+            axes.horizontal and container.style.writing_direction == .rtl;
+        const cross_writing_reverse =
+            !axes.horizontal and container.style.writing_direction == .rtl;
+        const alignment = alignValue(
+            child.style.align_self,
+            container.style.@"align",
+            child.style.writing_direction == container.style.writing_direction,
+            !axes.horizontal,
+        );
         const static_main = try staticMainPosition(
             container.style.justify,
             axisMain(axes, content),
@@ -1358,6 +1450,7 @@ fn placeAbsolute(
             marginStart(axes, margins),
             marginEnd(axes, margins),
             axes.reverse,
+            main_writing_reverse,
         );
         const static_cross = try staticCrossPosition(
             alignment,
@@ -1366,19 +1459,32 @@ fn placeAbsolute(
             crossStart(axes, margins),
             crossEnd(axes, margins),
             axes.cross_reverse,
+            cross_writing_reverse,
         );
         const static_x = if (axes.horizontal) static_main else static_cross;
         const static_y = if (axes.horizontal) static_cross else static_main;
         const x = if (left) |value|
-            try add(value, margins.value.left)
+            try finite(value + margins.value.left - container_edges.padding.left)
         else if (right) |value|
-            try finite(content.width - value - margins.value.right - size.width)
+            try finite(
+                pad_box.width -
+                    value -
+                    margins.value.right -
+                    size.width -
+                    container_edges.padding.left,
+            )
         else
             static_x;
         const y = if (top) |value|
-            try add(value, margins.value.top)
+            try finite(value + margins.value.top - container_edges.padding.top)
         else if (bottom) |value|
-            try finite(content.height - value - margins.value.bottom - size.height)
+            try finite(
+                pad_box.height -
+                    value -
+                    margins.value.bottom -
+                    size.height -
+                    container_edges.padding.top,
+            )
         else
             static_y;
         child.rect = .{ .x = x, .y = y, .w = size.width, .h = size.height };
@@ -1409,17 +1515,77 @@ fn placeAbsolute(
         }
     }
 }
+
+fn absoluteSizeFromInsets(
+    available: f32,
+    start: f32,
+    end: f32,
+    margin_start: f32,
+    margin_end: f32,
+) sizing.Error!f32 {
+    return @max(0, try finite(available - start - end - margin_start - margin_end));
+}
+
+fn distributeAbsoluteAutoMargins(
+    start: *f32,
+    end: *f32,
+    start_auto: bool,
+    end_auto: bool,
+    available: f32,
+    size: f32,
+    start_inset: ?f32,
+    end_inset: ?f32,
+) sizing.Error!void {
+    if (start_inset == null or end_inset == null) return;
+    if (!start_auto and !end_auto) return;
+    const fixed_start = if (start_auto) 0 else start.*;
+    const fixed_end = if (end_auto) 0 else end.*;
+    const remaining = try finite(
+        available - start_inset.? - end_inset.? - size - fixed_start - fixed_end,
+    );
+    if (start_auto and end_auto) {
+        const share = try finite(@max(0, remaining) / 2);
+        start.* = share;
+        end.* = share;
+    } else if (start_auto) {
+        start.* = remaining;
+    } else {
+        end.* = remaining;
+    }
+}
 fn staticMainPosition(
     value: style.Justify,
     available: f32,
     size: f32,
     margin_start: f32,
     margin_end: f32,
-    reverse: bool,
+    flex_reverse: bool,
+    writing_reverse: bool,
 ) sizing.Error!f32 {
     const free = try finite(available - size - margin_start - margin_end);
-    const distribution = try justify(value, free, 1);
-    return position(try add(margin_start, distribution.offset), size, available, reverse);
+    const offset = try staticMainOffset(value, free, flex_reverse, writing_reverse);
+    return position(try add(margin_start, offset), size, available, flex_reverse);
+}
+
+fn staticMainOffset(
+    value: style.Justify,
+    free: f32,
+    flex_reverse: bool,
+    writing_reverse: bool,
+) sizing.Error!f32 {
+    const distributed_free = @max(0, free);
+    const start_offset = staticStartOffset(free, flex_reverse, writing_reverse);
+    const end_offset = staticEndOffset(free, flex_reverse, writing_reverse);
+    return switch (value) {
+        .normal, .flex_start, .space_between => 0,
+        .start => start_offset,
+        .safe_center => try finite(distributed_free / 2),
+        .center, .unsafe_center => try finite(free / 2),
+        .end, .unsafe_end => end_offset,
+        .flex_end => free,
+        .safe_end => end_offset,
+        .space_around, .space_evenly => try finite(distributed_free / 2),
+    };
 }
 
 fn staticCrossPosition(
@@ -1428,18 +1594,51 @@ fn staticCrossPosition(
     size: f32,
     margin_start: f32,
     margin_end: f32,
-    reverse: bool,
+    flex_reverse: bool,
+    writing_reverse: bool,
 ) sizing.Error!f32 {
     const free = try finite(available - size - margin_start - margin_end);
-    const offset = switch (value) {
-        .stretch, .start, .baseline => 0,
-        .safe_center => @max(0, free) / 2,
-        .center, .unsafe_center => free / 2,
-        .end => free,
-    };
-    return position(try add(margin_start, offset), size, available, reverse);
+    const offset = try staticCrossOffset(value, free, flex_reverse, writing_reverse);
+    return position(try add(margin_start, offset), size, available, flex_reverse);
 }
 
+fn staticCrossOffset(
+    value: style.Align,
+    free: f32,
+    flex_reverse: bool,
+    writing_reverse: bool,
+) sizing.Error!f32 {
+    const start_offset = staticStartOffset(free, flex_reverse, writing_reverse);
+    const end_offset = staticEndOffset(free, flex_reverse, writing_reverse);
+    return switch (value) {
+        .stretch, .flex_start => 0,
+        .start, .baseline, .self_start => start_offset,
+        .safe_center => try finite(@max(0, free) / 2),
+        .center, .unsafe_center => try finite(free / 2),
+        .end, .unsafe_end, .self_end => end_offset,
+        .flex_end => free,
+        .safe_end => if (free < 0) start_offset else end_offset,
+    };
+}
+
+fn staticStartOffset(free: f32, flex_reverse: bool, writing_reverse: bool) f32 {
+    return if (flex_reverse == writing_reverse) 0 else free;
+}
+
+fn staticEndOffset(free: f32, flex_reverse: bool, writing_reverse: bool) f32 {
+    return if (flex_reverse == writing_reverse) free else 0;
+}
+
+fn alignmentOffset(value: style.Align, free: f32) sizing.Error!f32 {
+    const distributed_free = @max(0, free);
+    return switch (value) {
+        .stretch, .start, .flex_start, .baseline, .self_start => 0,
+        .safe_center => try finite(distributed_free / 2),
+        .center, .unsafe_center => try finite(free / 2),
+        .end, .flex_end, .unsafe_end, .self_end => free,
+        .safe_end => distributed_free,
+    };
+}
 fn usedSize(
     input: style.Style,
     containing: widget.Size,
@@ -1977,28 +2176,60 @@ fn dimensionAuto(value: style.Dimension) bool {
     };
 }
 
-fn alignValue(self: style.AlignSelf, parent: style.Align) style.Align {
-    return switch (self) {
+fn alignValue(
+    self: style.AlignSelf,
+    parent: style.Align,
+    directions_match: bool,
+    alignment_axis_inline: bool,
+) style.Align {
+    const value: style.Align = switch (self) {
         .auto => parent,
         .stretch => .stretch,
         .start => .start,
+        .flex_start => .flex_start,
         .center => .center,
         .safe_center => .safe_center,
         .unsafe_center => .unsafe_center,
         .end => .end,
+        .flex_end => .flex_end,
+        .safe_end => .safe_end,
+        .unsafe_end => .unsafe_end,
+        .self_start => .self_start,
+        .self_end => .self_end,
         .baseline => .baseline,
+    };
+    return switch (value) {
+        .stretch,
+        .start,
+        .flex_start,
+        .center,
+        .safe_center,
+        .unsafe_center,
+        .end,
+        .flex_end,
+        .safe_end,
+        .unsafe_end,
+        .baseline,
+        => value,
+        .self_start => if (!alignment_axis_inline or directions_match) .start else .end,
+        .self_end => if (!alignment_axis_inline or directions_match) .end else .start,
     };
 }
 
-fn justify(value: style.Justify, free: f32, count: usize) sizing.Error!Distribution {
+fn justify(
+    value: style.Justify,
+    free: f32,
+    count: usize,
+) sizing.Error!Distribution {
     if (count == 0) return .{ .offset = 0, .gap = 0 };
     const count_f: f32 = @floatFromInt(count);
     const distributed_free = @max(0, free);
     return switch (value) {
-        .normal, .start => .{ .offset = 0, .gap = 0 },
-        .safe_center => .{ .offset = distributed_free / 2, .gap = 0 },
-        .center, .unsafe_center => .{ .offset = free / 2, .gap = 0 },
-        .end => .{ .offset = free, .gap = 0 },
+        .normal, .start, .flex_start => .{ .offset = 0, .gap = 0 },
+        .safe_center => .{ .offset = try finite(distributed_free / 2), .gap = 0 },
+        .center, .unsafe_center => .{ .offset = try finite(free / 2), .gap = 0 },
+        .end, .flex_end, .unsafe_end => .{ .offset = free, .gap = 0 },
+        .safe_end => .{ .offset = distributed_free, .gap = 0 },
         .space_between => if (count > 1)
             .{
                 .offset = 0,

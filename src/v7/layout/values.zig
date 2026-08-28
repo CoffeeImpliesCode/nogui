@@ -30,10 +30,16 @@ pub const Alignment = enum {
     normal,
     stretch,
     start,
+    flex_start,
     center,
-    end,
     safe_center,
     unsafe_center,
+    end,
+    flex_end,
+    safe_end,
+    unsafe_end,
+    self_start,
+    self_end,
     baseline,
 };
 

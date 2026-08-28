@@ -4157,3 +4157,254 @@ test "flex-item BFC clear uses only the requested float side" {
     try expectRelative(&tree, right_float_id, .{ .x = 50, .y = 0, .w = 50, .h = 20 });
     try expectRelative(&tree, clear_id, .{ .x = 0, .y = 20, .w = 100, .h = 10 });
 }
+
+test "full inset absolute aspect ratio overrides height" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .aspect_ratio = 3.0,
+        .inset = .{
+            .top = .{ .percent = 0.05 },
+            .right = .{ .percent = 0.05 },
+            .bottom = .{ .percent = 0.05 },
+            .left = .{ .percent = 0.05 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 400 },
+            .height = .{ .length = 300 },
+        },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    try layoutContainer(&tree, root_id, 400, 300);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 20, .y = 15, .w = 360, .h = 120 });
+}
+
+test "block container align content center" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, first_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try appendNode(&tree, second_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .align_content = .center,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 200 },
+        },
+    });
+    try tree.appendChild(root_id, first_id);
+    try tree.appendChild(root_id, second_id);
+
+    try layoutContainer(&tree, root_id, 100, 200);
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 50, .w = 100, .h = 50 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 100, .w = 100, .h = 50 });
+}
+
+test "block container align content end" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, first_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try appendNode(&tree, second_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .align_content = .end,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 200 },
+        },
+    });
+    try tree.appendChild(root_id, first_id);
+    try tree.appendChild(root_id, second_id);
+
+    try layoutContainer(&tree, root_id, 100, 200);
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 100, .w = 100, .h = 50 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 150, .w = 100, .h = 50 });
+}
+
+test "block container align content space between retains normal block flow" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, first_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try appendNode(&tree, second_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .align_content = .space_between,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 200 },
+        },
+    });
+    try tree.appendChild(root_id, first_id);
+    try tree.appendChild(root_id, second_id);
+
+    try layoutContainer(&tree, root_id, 100, 200);
+
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
+    try expectRelative(&tree, second_id, .{ .x = 0, .y = 50, .w = 100, .h = 50 });
+}
+
+fn expectBlockOverflowAlignment(
+    align_content: style.AlignContent,
+    expected_y: [3]f32,
+) !void {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const third_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+    const child_ids = [_]Id{ first_id, second_id, third_id };
+
+    for (child_ids) |child_id| {
+        try appendNode(&tree, child_id, root_id, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 50 },
+            },
+        });
+    }
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .align_content = align_content,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    for (child_ids) |child_id| {
+        try tree.appendChild(root_id, child_id);
+    }
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(
+        &tree,
+        first_id,
+        .{ .x = 0, .y = expected_y[0], .w = 100, .h = 50 },
+    );
+    try expectRelative(
+        &tree,
+        second_id,
+        .{ .x = 0, .y = expected_y[1], .w = 100, .h = 50 },
+    );
+    try expectRelative(
+        &tree,
+        third_id,
+        .{ .x = 0, .y = expected_y[2], .w = 100, .h = 50 },
+    );
+}
+
+test "plain block align content center remains unsafe during overflow" {
+    try expectBlockOverflowAlignment(.center, .{ -25, 25, 75 });
+}
+
+test "plain block align content end remains unsafe during overflow" {
+    try expectBlockOverflowAlignment(.end, .{ -50, 0, 50 });
+}
+
+test "safe block align content center falls back to start during overflow" {
+    try expectBlockOverflowAlignment(.safe_center, .{ 0, 50, 100 });
+}
+
+test "safe block align content end falls back to start during overflow" {
+    try expectBlockOverflowAlignment(.safe_end, .{ 0, 50, 100 });
+}
+
+test "auto block min height aligns content in the final box" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 50 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .align_content = .center,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .auto,
+        },
+        .min_size = .{
+            .width = .auto,
+            .height = .{ .length = 200 },
+        },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    try layoutContainer(&tree, root_id, 100, 200);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 200 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 75, .w = 100, .h = 50 });
+}
