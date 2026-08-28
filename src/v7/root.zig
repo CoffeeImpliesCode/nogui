@@ -141,7 +141,7 @@ test "canonical module exports App and DrawCtx" {
 test "root component defaults scope only the root draw" {
     const Root = struct {
         const Self = @This();
-        pub const default_style: Style = .{ .direction = .row, .gap = 9 };
+        pub const default_style: Style = .{ .direction = .row, .gap = .{ .length = 9 } };
         pub const default_paint: PaintStyle = .{ .fill = .{ 0.25, 0.5, 0.75, 1 } };
         label_id: Id = .root,
 
@@ -163,7 +163,7 @@ test "root component defaults scope only the root draw" {
 
     const node = tree.node(root_component.label_id).?;
     try std.testing.expectEqual(FlexDirection.row, node.style.direction);
-    try std.testing.expectEqual(@as(f32, 9), node.style.gap);
+    try std.testing.expectEqual(style.LengthPercentage{ .length = 9 }, node.style.gap);
     try std.testing.expectEqual([4]f32{ 0.25, 0.5, 0.75, 1 }, node.paint.fill);
     try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
     try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);

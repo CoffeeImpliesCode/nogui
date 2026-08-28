@@ -88,7 +88,7 @@ test "dispatcher gives an auto-height mixed flex root its natural grid height" {
     var grid_style = autoStyle(.grid);
     grid_style.grid_template_columns = columns[0..];
     grid_style.grid_template_rows = rows[0..];
-    grid_style.grid_row_gap = 4;
+    grid_style.grid_row_gap = .{ .length = 4 };
     grid_style.grid_justify_content = .start;
     grid_style.grid_align_content = .start;
     grid_style.grid_justify_items = .start;

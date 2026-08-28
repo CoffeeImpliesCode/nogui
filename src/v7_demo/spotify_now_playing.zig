@@ -11,7 +11,7 @@ const now_playing_artwork_size: f32 = 160;
 const MetadataRow = struct {
     pub const default_style: nogui.Style = .{
         .direction = .row,
-        .gap = 8,
+        .gap = .{ .length = 8 },
         .@"align" = .center,
     };
 };

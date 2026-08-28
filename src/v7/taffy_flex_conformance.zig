@@ -298,7 +298,7 @@ test "test_fixtures/flex/gap_row_gap_determines_parent_height.html" {
     });
     try appendNode(&tree, root, .root, .{ .row = .{} }, .{
         .direction = .column,
-        .gap = 10,
+        .gap = .{ .length = 10 },
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 80 } },
     });
     try wireChildren(&tree);
@@ -330,7 +330,7 @@ test "test_fixtures/flex/gap_column_gap_determines_parent_width.html" {
     });
     try appendNode(&tree, root, .root, .{ .row = .{} }, .{
         .direction = .row,
-        .gap = 10,
+        .gap = .{ .length = 10 },
         .size = .{ .width = .{ .length = 80 }, .height = .{ .length = 100 } },
     });
     try wireChildren(&tree);

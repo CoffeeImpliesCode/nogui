@@ -257,7 +257,7 @@ const PaddedLabel = struct {
 
     pub const default_style: Style = .{
         .direction = .column,
-        .gap = 0,
+        .gap = .{ .length = 0 },
         .justify = .start,
         .@"align" = .stretch,
         .padding = .{ .left = 6, .right = 6 },
@@ -286,7 +286,7 @@ const ShowcaseLabel = struct {
 
     pub const default_style: Style = .{
         .direction = .column,
-        .gap = 0,
+        .gap = .{ .length = 0 },
         .justify = .start,
         .@"align" = .stretch,
         .padding = .{ .left = 6, .right = 6 },
@@ -320,7 +320,7 @@ const ShowcaseLabel = struct {
 const Card = struct {
     pub const default_style: Style = .{
         .direction = .column,
-        .gap = 8,
+        .gap = .{ .length = 8 },
         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
         .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
     };
@@ -334,7 +334,7 @@ const Card = struct {
 const GhostButton = struct {
     pub const default_style: Style = .{
         .direction = .row,
-        .gap = 0,
+        .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
         .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
@@ -351,7 +351,7 @@ const GhostButton = struct {
 const PrimaryButton = struct {
     pub const default_style: Style = .{
         .direction = .row,
-        .gap = 0,
+        .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
         .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
@@ -368,7 +368,7 @@ const PrimaryButton = struct {
 const ActivePill = struct {
     pub const default_style: Style = .{
         .direction = .row,
-        .gap = 0,
+        .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
         .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
@@ -383,7 +383,7 @@ const ActivePill = struct {
 const InactivePill = struct {
     pub const default_style: Style = .{
         .direction = .row,
-        .gap = 0,
+        .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
         .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
@@ -561,7 +561,7 @@ const VolumeSlider = struct {
 
     pub const default_style: Style = .{
         .direction = .column,
-        .gap = 8,
+        .gap = .{ .length = 8 },
     };
 
     pub fn draw(self: *Self, ctx: *DrawCtx) !void {
@@ -601,7 +601,7 @@ fn showcaseLabel(ctx: *DrawCtx, text: []const u8, variant: ShowcaseLabel.Variant
 const Showcase = struct {
     pub const default_style: Style = .{
         .direction = .row,
-        .gap = 10,
+        .gap = .{ .length = 10 },
         .justify = .space_between,
         .@"align" = .center,
         .padding = .{ .left = 12, .right = 12 },
@@ -648,7 +648,7 @@ pub const TodoApp = struct {
     pub const items = [4][]const u8{ "buy milk", "water plants", "write docs", "exercise" };
     pub const default_style: Style = .{
         .direction = .column,
-        .gap = 12,
+        .gap = .{ .length = 12 },
     };
 
     pub fn draw(self: *TodoApp, ctx: *DrawCtx) !void {

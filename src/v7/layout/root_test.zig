@@ -35,7 +35,7 @@ test "layoutTree preserves legacy relative column geometry" {
         .id = root_id,
         .kind = .{ .column = .{ .gap = 4 } },
         .parent = .root,
-        .style = .{ .@"align" = .start, .gap = 4 },
+        .style = .{ .@"align" = .start, .gap = .{ .length = 4 } },
     });
     try tree.appendChild(root_id, first_id);
     try tree.appendChild(root_id, second_id);

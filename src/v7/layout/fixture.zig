@@ -1043,9 +1043,9 @@ fn applyAttributeWithResources(
             },
             else => null,
         };
-        const gap = if (result.grid_column_gap != 0)
+        const gap = if (!isTypedZero(result.grid_column_gap))
             result.grid_column_gap
-        else if (result.column_gap != 0)
+        else if (!isTypedZero(result.column_gap))
             result.column_gap
         else
             result.gap;
@@ -1070,9 +1070,9 @@ fn applyAttributeWithResources(
             },
             else => null,
         };
-        const gap = if (result.grid_row_gap != 0)
+        const gap = if (!isTypedZero(result.grid_row_gap))
             result.grid_row_gap
-        else if (result.row_gap != 0)
+        else if (!isTypedZero(result.row_gap))
             result.row_gap
         else
             result.gap;
@@ -1303,27 +1303,27 @@ test "fixture flex item attributes map typed and legacy fields" {
 test "fixture gap attributes keep generic and axis fields coherent" {
     var result: style.Style = .{};
     try applyAttribute(&result, "gap", "4px");
-    try std.testing.expectEqual(@as(f32, 4), result.gap);
-    try std.testing.expectEqual(@as(f32, 4), result.column_gap);
-    try std.testing.expectEqual(@as(f32, 4), result.row_gap);
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 4 }), result.gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 4 }), result.column_gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 4 }), result.row_gap));
 
     try applyAttribute(&result, "column-gap", "0");
-    try std.testing.expectEqual(@as(f32, 0), result.gap);
-    try std.testing.expectEqual(@as(f32, 0), result.column_gap);
-    try std.testing.expectEqual(@as(f32, 4), result.row_gap);
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 0 }), result.gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 0 }), result.column_gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 4 }), result.row_gap));
 
     try applyAttribute(&result, "row-gap", "6px");
-    try std.testing.expectEqual(@as(f32, 0), result.gap);
-    try std.testing.expectEqual(@as(f32, 0), result.column_gap);
-    try std.testing.expectEqual(@as(f32, 6), result.row_gap);
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 0 }), result.gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 0 }), result.column_gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 6 }), result.row_gap));
 
     var reordered: style.Style = .{};
     try applyAttribute(&reordered, "row-gap", "3px");
     try applyAttribute(&reordered, "column-gap", "2px");
     try applyAttribute(&reordered, "gap", "1px");
-    try std.testing.expectEqual(@as(f32, 1), reordered.gap);
-    try std.testing.expectEqual(@as(f32, 1), reordered.column_gap);
-    try std.testing.expectEqual(@as(f32, 1), reordered.row_gap);
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 1 }), reordered.gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 1 }), reordered.column_gap));
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 1 }), reordered.row_gap));
 }
 
 test "fixture justify content maps represented values and flex aliases" {
@@ -1559,7 +1559,6 @@ test "fixture unsupported alignment values stay explicit" {
         value: []const u8,
     }{
         .{ .name = "justify-content", .value = "baseline" },
-        .{ .name = "column-gap", .value = "normal" },
         .{ .name = "aspect-ratio", .value = "1 / 2" },
         .{ .name = "text-align", .value = "diagonal" },
     };
@@ -2006,7 +2005,7 @@ test "fixture grid templates parse auto-fit and auto-fill repeat patterns" {
 
     var result: style.Style = .{};
     result.size.width = .{ .length = 200 };
-    result.grid_column_gap = 10;
+    result.grid_column_gap = .{ .length = 10 };
     try applyAttributeWithResources(
         &fixture_tree.resources,
         &result,
@@ -2290,12 +2289,24 @@ test "fixture grid alignment and gaps populate grid fields" {
     try std.testing.expectEqual(style.AlignSelf.unsafe_center, result.grid_align_self);
 
     try applyAttributeWithResources(&fixture_tree.resources, &result, "gap", "4px");
-    try std.testing.expectEqual(@as(f32, 4), result.grid_column_gap);
-    try std.testing.expectEqual(@as(f32, 4), result.grid_row_gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 4 }),
+        result.grid_column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 4 }),
+        result.grid_row_gap,
+    ));
     try applyAttributeWithResources(&fixture_tree.resources, &result, "column-gap", "2px");
     try applyAttributeWithResources(&fixture_tree.resources, &result, "row-gap", "3px");
-    try std.testing.expectEqual(@as(f32, 2), result.grid_column_gap);
-    try std.testing.expectEqual(@as(f32, 3), result.grid_row_gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 2 }),
+        result.grid_column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 3 }),
+        result.grid_row_gap,
+    ));
 }
 
 test "fixture grid representation gaps stay explicitly unsupported" {
@@ -2458,14 +2469,14 @@ fn applyGap(result: *style.Style, value: []const u8) CaseError!void {
 }
 
 fn applyColumnGap(result: *style.Style, value: []const u8) CaseError!void {
-    result.gap = 0;
+    result.gap = .{ .length = 0 };
     const gap = try parseGap(value);
     result.column_gap = gap;
     result.grid_column_gap = gap;
 }
 
 fn applyRowGap(result: *style.Style, value: []const u8) CaseError!void {
-    result.gap = 0;
+    result.gap = .{ .length = 0 };
     const gap = try parseGap(value);
     result.row_gap = gap;
     result.grid_row_gap = gap;
@@ -2683,6 +2694,13 @@ const RepeatSpec = struct {
     body: []const u8,
 };
 
+fn isTypedZero(value: style.LengthPercentage) bool {
+    return switch (value) {
+        .length => |number| number == 0,
+        .percent => |fraction| fraction == 0,
+    };
+}
+
 fn trackTokenEstimatedSize(token: []const u8, available_size: ?f32) f32 {
     const track = parseGridTrackToken(token) catch return 0;
     return switch (track) {
@@ -2705,7 +2723,11 @@ fn trackTokenEstimatedSize(token: []const u8, available_size: ?f32) f32 {
     };
 }
 
-fn parseRepeatHeader(token: []const u8, available_size: ?f32, gap: f32) CaseError!RepeatSpec {
+fn parseRepeatHeader(
+    token: []const u8,
+    available_size: ?f32,
+    gap: style.LengthPercentage,
+) CaseError!RepeatSpec {
     if (!std.mem.endsWith(u8, token, ")")) return error.Unsupported;
     const inner = token[7 .. token.len - 1];
     var comma: ?usize = null;
@@ -2741,9 +2763,10 @@ fn parseRepeatHeader(token: []const u8, available_size: ?f32, gap: f32) CaseErro
             inner_count += 1;
         }
         if (inner_count == 0) return error.InvalidFixture;
+        const resolved_gap = gap.resolve(available_size) orelse 0;
         const count: usize = if (available_size) |avail| blk: {
-            if (avail > 0 and (pattern_size + gap) > 0) {
-                const raw = @floor((avail + gap) / (pattern_size + gap));
+            if (avail > 0 and (pattern_size + resolved_gap) > 0) {
+                const raw = @floor((avail + resolved_gap) / (pattern_size + resolved_gap));
                 break :blk @max(@as(usize, 1), @as(usize, @intFromFloat(raw)));
             }
             break :blk 1;
@@ -2760,7 +2783,11 @@ fn parseRepeatHeader(token: []const u8, available_size: ?f32, gap: f32) CaseErro
     return .{ .count = count, .body = body };
 }
 
-fn countRepeatTracks(token: []const u8, available_size: ?f32, gap: f32) CaseError!usize {
+fn countRepeatTracks(
+    token: []const u8,
+    available_size: ?f32,
+    gap: style.LengthPercentage,
+) CaseError!usize {
     const repeat_spec = try parseRepeatHeader(token, available_size, gap);
     var cursor: usize = 0;
     var inner_count: usize = 0;
@@ -2781,7 +2808,7 @@ fn parseGridTemplate(
     resources: *FixtureResources,
     value: []const u8,
     available_size: ?f32,
-    gap: f32,
+    gap: style.LengthPercentage,
 ) CaseError![]const style.GridTrack {
     const count = try countGridTracks(value, available_size, gap);
     const owned = try resources.allocator.alloc(style.GridTrack, count);
@@ -2810,7 +2837,11 @@ fn parseGridTemplate(
     return owned;
 }
 
-fn countGridTracks(value: []const u8, available_size: ?f32, gap: f32) CaseError!usize {
+fn countGridTracks(
+    value: []const u8,
+    available_size: ?f32,
+    gap: style.LengthPercentage,
+) CaseError!usize {
     var cursor: usize = 0;
     var count: usize = 0;
     while (try nextGridTrackToken(value, &cursor)) |token| {
@@ -3060,15 +3091,10 @@ fn isNamedGridLine(value: []const u8) bool {
     return has_name_character;
 }
 
-fn parseGap(value: []const u8) CaseError!f32 {
-    if (std.mem.eql(u8, value, "normal")) return error.Unsupported;
-    if (std.mem.endsWith(u8, value, "%")) {
-        const percentage = try parseNumber(value[0 .. value.len - 1]);
-        if (percentage < 0) return error.InvalidFixture;
-        return error.Unsupported;
-    }
+fn parseGap(value: []const u8) CaseError!style.LengthPercentage {
     if (std.mem.indexOfAny(u8, value, " \t\n\r") != null) return error.Unsupported;
-    return parseNonnegativeLength(value);
+    if (std.mem.eql(u8, value, "normal")) return .{ .length = 0 };
+    return parseLengthPercentage(value);
 }
 
 fn setDimension(target: *style.Dimension, value: style.Dimension) void {
@@ -3303,4 +3329,91 @@ fn validSha256(value: []const u8) bool {
         if (!decimal and !lowercase_hex) return false;
     }
     return true;
+}
+
+test "fixture gap percentages retain typed tags across all mirrors" {
+    var result: style.Style = .{};
+    try applyAttribute(&result, "gap", "50%");
+
+    const expected: style.LengthPercentage = .{ .percent = 0.5 };
+    try std.testing.expect(std.meta.eql(expected, result.gap));
+    try std.testing.expect(std.meta.eql(expected, result.column_gap));
+    try std.testing.expect(std.meta.eql(expected, result.row_gap));
+    try std.testing.expect(std.meta.eql(expected, result.grid_column_gap));
+    try std.testing.expect(std.meta.eql(expected, result.grid_row_gap));
+}
+
+test "fixture column percentage gap clears generic fallback" {
+    var result: style.Style = .{};
+    try applyAttribute(&result, "gap", "4px");
+    try applyAttribute(&result, "column-gap", "25%");
+
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 0 }),
+        result.gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .percent = 0.25 }),
+        result.column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .percent = 0.25 }),
+        result.grid_column_gap,
+    ));
+}
+
+test "fixture normal gaps map to typed zero and whitespace stays unsupported" {
+    const zero: style.LengthPercentage = .{ .length = 0 };
+
+    var generic: style.Style = .{};
+    try applyAttribute(&generic, "gap", "normal");
+    try std.testing.expect(std.meta.eql(zero, generic.gap));
+    try std.testing.expect(std.meta.eql(zero, generic.column_gap));
+    try std.testing.expect(std.meta.eql(zero, generic.row_gap));
+    try std.testing.expect(std.meta.eql(zero, generic.grid_column_gap));
+    try std.testing.expect(std.meta.eql(zero, generic.grid_row_gap));
+
+    var row: style.Style = .{};
+    try applyAttribute(&row, "row-gap", "normal");
+    try std.testing.expect(std.meta.eql(zero, row.gap));
+    try std.testing.expect(std.meta.eql(zero, row.row_gap));
+    try std.testing.expect(std.meta.eql(zero, row.grid_row_gap));
+
+    try std.testing.expectError(
+        error.Unsupported,
+        applyAttribute(&row, "gap", " 50%"),
+    );
+}
+
+test "fixture auto-fill resolves percentage gap only with definite basis" {
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
+    defer fixture_tree.deinit(std.testing.allocator);
+
+    var definite: style.Style = .{};
+    definite.size.width = .{ .length = 200 };
+    try applyAttribute(&definite, "column-gap", "10%");
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &definite,
+        "grid-template-columns",
+        "repeat(auto-fill, 60px)",
+    );
+    try std.testing.expectEqual(@as(usize, 2), definite.grid_template_columns.len);
+    for (definite.grid_template_columns) |track| {
+        try std.testing.expect(std.meta.eql(
+            @as(style.GridTrack, .{ .fixed = 60 }),
+            track,
+        ));
+    }
+
+    var indefinite: style.Style = .{};
+    indefinite.size.width = .{ .percent = 0.5 };
+    try applyAttribute(&indefinite, "column-gap", "10%");
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &indefinite,
+        "grid-template-columns",
+        "repeat(auto-fill, 60px)",
+    );
+    try std.testing.expectEqual(@as(usize, 1), indefinite.grid_template_columns.len);
 }

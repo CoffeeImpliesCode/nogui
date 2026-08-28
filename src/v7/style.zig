@@ -603,9 +603,9 @@ pub const Style = struct {
     align_content: AlignContent = .stretch,
     align_self: AlignSelf = .auto,
     text_align: TextAlign = .start,
-    gap: f32 = 0,
-    column_gap: f32 = 0,
-    row_gap: f32 = 0,
+    gap: LengthPercentage = .{ .length = 0 },
+    column_gap: LengthPercentage = .{ .length = 0 },
+    row_gap: LengthPercentage = .{ .length = 0 },
 
     /// Grid container track definitions. Slices must have frame-stable
     /// storage, such as static option data or the frame arena.
@@ -614,8 +614,8 @@ pub const Style = struct {
     grid_auto_columns: GridTrack = .auto,
     grid_auto_rows: GridTrack = .auto,
     grid_auto_flow: GridAutoFlow = .row,
-    grid_column_gap: f32 = 0,
-    grid_row_gap: f32 = 0,
+    grid_column_gap: LengthPercentage = .{ .length = 0 },
+    grid_row_gap: LengthPercentage = .{ .length = 0 },
     grid_justify_content: Justify = .normal,
     grid_align_content: AlignContent = .stretch,
     grid_justify_items: Align = .stretch,
@@ -915,16 +915,16 @@ pub const StyleOverride = struct {
     align_content: ?AlignContent = null,
     align_self: ?AlignSelf = null,
     text_align: ?TextAlign = null,
-    gap: ?f32 = null,
-    column_gap: ?f32 = null,
-    row_gap: ?f32 = null,
+    gap: ?LengthPercentage = null,
+    column_gap: ?LengthPercentage = null,
+    row_gap: ?LengthPercentage = null,
     grid_template_columns: ?[]const GridTrack = null,
     grid_template_rows: ?[]const GridTrack = null,
     grid_auto_columns: ?GridTrack = null,
     grid_auto_rows: ?GridTrack = null,
     grid_auto_flow: ?GridAutoFlow = null,
-    grid_column_gap: ?f32 = null,
-    grid_row_gap: ?f32 = null,
+    grid_column_gap: ?LengthPercentage = null,
+    grid_row_gap: ?LengthPercentage = null,
     grid_justify_content: ?Justify = null,
     grid_align_content: ?AlignContent = null,
     grid_justify_items: ?Align = null,
@@ -1028,10 +1028,13 @@ pub const ComponentDefaults = struct {
 
 test "ComponentDefaults keeps layout and paint scopes independently optional" {
     const defaults: ComponentDefaults = .{
-        .style = .{ .gap = 16 },
+        .style = .{ .gap = .{ .length = 16 } },
         .paint = .{ .layer = 3 },
     };
-    try std.testing.expectEqual(@as(?f32, 16), defaults.style.?.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .length = 16 }),
+        defaults.style.?.gap,
+    ));
     try std.testing.expectEqual(@as(?Layer, 3), defaults.paint.?.layer);
     const empty: ComponentDefaults = .{};
     try std.testing.expectEqual(@as(?Style, null), empty.style);
@@ -1046,14 +1049,17 @@ test "Style text alignment defaults to logical start" {
 test "Style resolution retains component defaults" {
     const defaults: Style = .{
         .direction = .row,
-        .gap = 12,
+        .gap = .{ .length = 12 },
         .grow = 3,
         .padding = .{ .left = 8, .right = 8 },
     };
     const resolved = Style.resolve(defaults, .{ .justify = .center });
 
     try std.testing.expectEqual(FlexDirection.row, resolved.direction);
-    try std.testing.expectEqual(@as(f32, 12), resolved.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .length = 12 }),
+        resolved.gap,
+    ));
     try std.testing.expectEqual(@as(f32, 3), resolved.grow);
     try std.testing.expectEqual(Sides{ .left = 8, .right = 8 }, resolved.padding);
     try std.testing.expectEqual(Justify.center, resolved.justify);
@@ -1129,7 +1135,7 @@ test "Style scrollbar width resolves fieldwise and maps physical gutters" {
 test "layout values do not inherit from a parent style" {
     const parent = Style.resolve(.{}, .{
         .direction = .row,
-        .gap = 20,
+        .gap = .{ .length = 20 },
         .grow = 4,
         .margin = .{ .left = 7 },
     });
@@ -1137,7 +1143,10 @@ test "layout values do not inherit from a parent style" {
 
     try std.testing.expectEqual(FlexDirection.row, parent.direction);
     try std.testing.expectEqual(FlexDirection.column, child.direction);
-    try std.testing.expectEqual(@as(f32, 0), child.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .length = 0 }),
+        child.gap,
+    ));
     try std.testing.expectEqual(@as(f32, 0), child.grow);
     try std.testing.expectEqual(Sides{}, child.margin);
     try std.testing.expectEqual(Sides{ .top = 3 }, child.padding);
@@ -1298,12 +1307,15 @@ test "grid style types and overrides retain typed placement" {
             .start = .{ .line = 1 },
             .end = .{ .span = 2 },
         },
-        .grid_row_gap = 6,
+        .grid_row_gap = .{ .length = 6 },
     });
     try std.testing.expectEqual(Display.grid, resolved.display);
     try std.testing.expectEqual(@as(usize, 2), resolved.grid_template_columns.len);
     try std.testing.expectEqual(GridAutoFlow.row_dense, resolved.grid_auto_flow);
-    try std.testing.expectEqual(@as(f32, 6), resolved.grid_row_gap);
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .length = 6 }),
+        resolved.grid_row_gap,
+    ));
     try std.testing.expect(std.meta.eql(
         @as(GridPlacement, .{ .span = 2 }),
         resolved.grid_column.end,
@@ -1383,4 +1395,46 @@ test "calc preserves percentage presence when direct terms cancel" {
         error.IndefinitePercentage,
         Calc.add(positive, negative).resolve(null),
     );
+}
+
+test "Style gap defaults are typed zero lengths" {
+    const defaults: Style = .{};
+    const zero: LengthPercentage = .{ .length = 0 };
+
+    try std.testing.expect(std.meta.eql(zero, defaults.gap));
+    try std.testing.expect(std.meta.eql(zero, defaults.column_gap));
+    try std.testing.expect(std.meta.eql(zero, defaults.row_gap));
+    try std.testing.expect(std.meta.eql(zero, defaults.grid_column_gap));
+    try std.testing.expect(std.meta.eql(zero, defaults.grid_row_gap));
+}
+
+test "Style gap overrides retain typed values and percentage tags" {
+    const resolved = Style.resolve(.{}, .{
+        .gap = .{ .percent = 0.1 },
+        .column_gap = .{ .length = 2 },
+        .row_gap = .{ .percent = 0.3 },
+        .grid_column_gap = .{ .length = 4 },
+        .grid_row_gap = .{ .percent = 0.5 },
+    });
+
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .percent = 0.1 }),
+        resolved.gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .length = 2 }),
+        resolved.column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .percent = 0.3 }),
+        resolved.row_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .length = 4 }),
+        resolved.grid_column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(LengthPercentage, .{ .percent = 0.5 }),
+        resolved.grid_row_gap,
+    ));
 }

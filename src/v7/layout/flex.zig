@@ -44,10 +44,12 @@ fn childNaturalRequest(
 ) layout_context.Request {
     const width_definite = naturalAxisDefinite(
         parent_node.style.size.width,
+        parent.intrinsic_width,
         parent.percentage_basis.width,
     );
     const height_definite = naturalAxisDefinite(
         parent_node.style.size.height,
+        parent.intrinsic_height,
         parent.percentage_basis.height,
     );
     return .{
@@ -63,12 +65,14 @@ fn childNaturalRequest(
 
 fn naturalAxisDefinite(
     dimension: style.Dimension,
+    intrinsic: bool,
     percentage_basis: ?f32,
 ) bool {
     return switch (dimension) {
         .length => true,
         .percent => percentage_basis != null,
-        .auto, .min_content, .max_content, .fit_content => false,
+        .auto => !intrinsic,
+        .min_content, .max_content, .fit_content => false,
     };
 }
 
@@ -139,6 +143,7 @@ pub fn layoutPreparedContainer(
         index,
         options.available,
         size,
+        forced_border != null,
         options,
         cache.items,
         tree.nodes.items.len,
@@ -304,8 +309,8 @@ fn validateTree(
         .row, .column => {},
         else => return error.InvalidStyle,
     }
+    try validateGaps(node);
 }
-
 fn markHidden(
     tree: *widget.WidgetTree,
     index: usize,
@@ -512,8 +517,30 @@ fn measureContainerContent(
         .height = @max(0, measured_border.height - edges.vertical),
     };
     const available_main = axisMain(axes, available);
-    const main_gap = try gapMain(node, axes);
-    const cross_gap = try gapCross(node, axes);
+    const width_definite = naturalAxisDefinite(
+        node.style.size.width,
+        request.intrinsic_width,
+        request.percentage_basis.width,
+    );
+    const height_definite = naturalAxisDefinite(
+        node.style.size.height,
+        request.intrinsic_height,
+        request.percentage_basis.height,
+    );
+    const gap_basis: style.Size(?f32) = .{
+        .width = if (width_definite) available.width else null,
+        .height = if (height_definite) available.height else null,
+    };
+    const main_gap = try gapMain(
+        node,
+        axes,
+        if (axes.horizontal) gap_basis.width else gap_basis.height,
+    );
+    const cross_gap = try gapCross(
+        node,
+        axes,
+        if (axes.horizontal) gap_basis.height else gap_basis.width,
+    );
     const auto_main = dimensionAuto(if (axes.horizontal)
         node.style.size.width
     else
@@ -594,6 +621,7 @@ fn layoutFlex(
     index: usize,
     containing: widget.Size,
     border_size: widget.Size,
+    size_forced: bool,
     options: Options,
     cache: []Natural,
     depth: usize,
@@ -631,8 +659,38 @@ fn layoutFlex(
     const axes = axesFor(node.style);
     const main_size = axisMain(axes, content);
     const cross_size = axisCross(axes, content);
-    const main_gap = try gapMain(node, axes);
-    const cross_gap = try gapCross(node, axes);
+    const cross_definite = size_forced or naturalAxisDefinite(
+        if (axes.horizontal) node.style.size.height else node.style.size.width,
+        if (axes.horizontal) options.intrinsic_height else options.intrinsic_width,
+        if (axes.horizontal) containing.height else containing.width,
+    );
+    const main_dimension = if (axes.horizontal)
+        node.style.size.width
+    else
+        node.style.size.height;
+    const main_intrinsic = if (axes.horizontal)
+        options.intrinsic_width
+    else
+        options.intrinsic_height;
+    const main_gap_value = gapMainValue(node, axes);
+    const main_gap_is_percentage = switch (main_gap_value) {
+        .length => false,
+        .percent => true,
+    };
+    const main_gap = try resolveGap(main_gap_value, main_size);
+    // Intrinsic auto main sizing treats percentage gaps as zero. Preserve those
+    // lines and flex sizes when the final percentage basis becomes definite.
+    const cyclic_wrapped_main_gap = !size_forced and
+        main_intrinsic and
+        dimensionAuto(main_dimension) and
+        effectiveWrap(node.style) != .nowrap and
+        main_gap_is_percentage;
+    const line_gap = if (cyclic_wrapped_main_gap) 0 else main_gap;
+    const cross_gap = try gapCross(
+        node,
+        axes,
+        if (cross_definite) @as(?f32, cross_size) else null,
+    );
 
     var items: std.ArrayList(Item) = .empty;
     defer items.deinit(options.allocator);
@@ -654,13 +712,13 @@ fn layoutFlex(
         items.items,
         effectiveWrap(node.style),
         main_size,
-        main_gap,
+        line_gap,
     );
     for (lines.items) |line| {
         try resolveLine(
             items.items[line.start .. line.start + line.count],
             main_size,
-            main_gap,
+            line_gap,
         );
     }
     if (options.context) |context| {
@@ -709,6 +767,7 @@ fn layoutFlex(
                 item.index,
                 content,
                 child_border,
+                true,
                 options,
                 cache,
                 depth - 1,
@@ -767,6 +826,7 @@ fn layoutFlex(
             item.index,
             content,
             .{ .width = child.rect.w, .height = child.rect.h },
+            true,
             options,
             cache,
             depth - 1,
@@ -971,7 +1031,10 @@ fn constraintsFor(
         input.min_main == null and
         preserves_automatic_minimum)
     {
-        result.main.min = @max(result.main.min, axisMain(axes, natural_border));
+        const main_content_edges = if (axes.horizontal) edges.horizontal else edges.vertical;
+        const preferred_main = axisMain(axes, natural_border);
+        const content_main = try add(axisMain(axes, intrinsic), main_content_edges);
+        result.main.min = @max(result.main.min, @min(preferred_main, content_main));
     }
     if (input.min_main) |minimum| {
         result.main.min = @max(result.main.min, try nonNegative(minimum));
@@ -1511,7 +1574,16 @@ fn placeAbsolute(
                     continue;
                 }
             }
-            try layoutFlex(tree, child_index, content, size, options, cache, depth);
+            try layoutFlex(
+                tree,
+                child_index,
+                content,
+                size,
+                true,
+                options,
+                cache,
+                depth,
+            );
         }
     }
 }
@@ -2073,38 +2145,75 @@ fn effectiveWrap(input: style.Style) style.FlexWrap {
     return if (input.flex_wrap != .nowrap) input.flex_wrap else input.wrap;
 }
 
-fn gapMain(node: *const widget.WidgetNode, axes: Axes) sizing.Error!f32 {
-    const general = if (node.style.gap != 0)
-        node.style.gap
-    else switch (node.kind) {
-        .row => |value| value.gap,
-        .column => |value| value.gap,
-        else => 0,
-    };
-    const selected = if (axes.horizontal and node.style.column_gap != 0)
-        node.style.column_gap
-    else if (!axes.horizontal and node.style.row_gap != 0)
-        node.style.row_gap
-    else
-        general;
-    return nonNegative(selected);
+fn validateGaps(node: *const widget.WidgetNode) sizing.Error!void {
+    _ = try resolveGap(node.style.gap, null);
+    _ = try resolveGap(node.style.column_gap, null);
+    _ = try resolveGap(node.style.row_gap, null);
+    switch (node.kind) {
+        .row => |value| _ = try nonNegative(value.gap),
+        .column => |value| _ = try nonNegative(value.gap),
+        else => {},
+    }
 }
 
-fn gapCross(node: *const widget.WidgetNode, axes: Axes) sizing.Error!f32 {
-    const general = if (node.style.gap != 0)
-        node.style.gap
-    else switch (node.kind) {
+fn gapSpecified(value: style.LengthPercentage) bool {
+    return switch (value) {
+        .length => |number| number != 0,
+        .percent => true,
+    };
+}
+
+fn selectAxisGap(
+    axis: style.LengthPercentage,
+    generic: style.LengthPercentage,
+) style.LengthPercentage {
+    return if (gapSpecified(axis)) axis else generic;
+}
+
+fn genericGap(node: *const widget.WidgetNode) style.LengthPercentage {
+    if (gapSpecified(node.style.gap)) return node.style.gap;
+    const legacy = switch (node.kind) {
         .row => |value| value.gap,
         .column => |value| value.gap,
         else => 0,
     };
-    const selected = if (axes.horizontal and node.style.row_gap != 0)
-        node.style.row_gap
-    else if (!axes.horizontal and node.style.column_gap != 0)
-        node.style.column_gap
-    else
-        general;
-    return nonNegative(selected);
+    return .{ .length = legacy };
+}
+
+fn resolveGap(value: style.LengthPercentage, basis: ?f32) sizing.Error!f32 {
+    return switch (value) {
+        .length => |number| nonNegative(number),
+        .percent => |fraction| blk: {
+            const validated_fraction = try nonNegative(fraction);
+            const percentage_basis = basis orelse break :blk 0;
+            break :blk nonNegative(validated_fraction * try nonNegative(percentage_basis));
+        },
+    };
+}
+
+fn gapMainValue(
+    node: *const widget.WidgetNode,
+    axes: Axes,
+) style.LengthPercentage {
+    const axis = if (axes.horizontal) node.style.column_gap else node.style.row_gap;
+    return selectAxisGap(axis, genericGap(node));
+}
+
+fn gapMain(
+    node: *const widget.WidgetNode,
+    axes: Axes,
+    basis: ?f32,
+) sizing.Error!f32 {
+    return resolveGap(gapMainValue(node, axes), basis);
+}
+
+fn gapCross(
+    node: *const widget.WidgetNode,
+    axes: Axes,
+    basis: ?f32,
+) sizing.Error!f32 {
+    const axis = if (axes.horizontal) node.style.row_gap else node.style.column_gap;
+    return resolveGap(selectAxisGap(axis, genericGap(node)), basis);
 }
 
 fn axisMain(axes: Axes, value: widget.Size) f32 {

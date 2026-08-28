@@ -37,16 +37,26 @@ const Natural = struct {
     border: widget.Size,
 };
 
+const grid_tracks_max: usize = 10_000;
+const grid_cells_max: usize = 10_000;
+
 const Track = struct {
     spec: style.GridTrack,
     size: f32,
+    intrinsic_growth_limit: ?f32 = null,
     planned_increase: f32 = 0,
+    can_stretch_in_alignment: bool = true,
 };
 
 const AxisPlacement = struct {
+    /// Resolved zero-based track indices. These are filled after implicit
+    /// prepend tracks have been added.
     start: usize = 0,
     end: usize = 1,
     definite: bool = false,
+    /// CSS line coordinates before the implicit-grid origin is shifted.
+    logical_start: i32 = 0,
+    logical_end: i32 = 1,
 };
 
 const FlowItem = struct {
@@ -228,11 +238,11 @@ fn validateStyle(input: style.Style) Error!void {
     try validateTrackSlice(input.grid_template_rows);
     try validateTrack(input.grid_auto_columns);
     try validateTrack(input.grid_auto_rows);
-    _ = try finiteNonNegative(input.gap);
-    _ = try finiteNonNegative(input.column_gap);
-    _ = try finiteNonNegative(input.row_gap);
-    _ = try finiteNonNegative(input.grid_column_gap);
-    _ = try finiteNonNegative(input.grid_row_gap);
+    try validateLengthPercentage(input.gap, false);
+    try validateLengthPercentage(input.column_gap, false);
+    try validateLengthPercentage(input.row_gap, false);
+    try validateLengthPercentage(input.grid_column_gap, false);
+    try validateLengthPercentage(input.grid_row_gap, false);
     _ = try finiteNonNegative(input.grow);
     _ = try finiteNonNegative(input.shrink);
     _ = try finite(input.basis);
@@ -490,7 +500,7 @@ fn measureGridContent(
 
     var occupied: std.AutoHashMapUnmanaged(Cell, void) = .empty;
     defer occupied.deinit(options.allocator);
-    try placeItems(
+    _ = try placeItems(
         options.allocator,
         &columns,
         &rows,
@@ -503,8 +513,16 @@ fn measureGridContent(
         &occupied,
     );
 
-    const column_gap = try gridGap(input, .columns);
-    const row_gap = try gridGap(input, .rows);
+    const column_gap = try gridGap(
+        input,
+        .columns,
+        if (width_definite) child_available.width else null,
+    );
+    const row_gap = try gridGap(
+        input,
+        .rows,
+        if (height_definite) child_available.height else null,
+    );
 
     try growTrackItems(
         columns.items,
@@ -682,6 +700,7 @@ fn layoutGridNode(
 ) Error!void {
     if (depth == 0 or index >= tree.nodes.items.len) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
+    node.first_baseline = null;
     if (node.layout_hidden or node.style.display == .none) return;
     if (node.style.display != .grid) return error.InvalidStyle;
     const natural = try measureNode(
@@ -735,7 +754,7 @@ fn layoutGridNode(
     try collectItems(tree, node, concreteRequest(content), options, depth - 1, &items);
     var occupied: std.AutoHashMapUnmanaged(Cell, void) = .empty;
     defer occupied.deinit(options.allocator);
-    try placeItems(
+    const placement_origins = try placeItems(
         options.allocator,
         &columns,
         &rows,
@@ -767,21 +786,36 @@ fn layoutGridNode(
     );
     const width_definite = forced_border != null or !width_auto or width_clamped;
     const height_definite = forced_border != null or !height_auto or height_clamped;
-    try sizeTracks(options.allocator, &columns, &rows, items.items, content, node, width_definite, height_definite);
+    const intrinsic_auto_height = height_auto and forced_border == null and !height_clamped;
+    const column_gap = try gridGap(node.style, .columns, content.width);
+    var row_gap = try gridGap(
+        node.style,
+        .rows,
+        if (intrinsic_auto_height) null else content.height,
+    );
+    try sizeTracks(
+        &columns,
+        &rows,
+        items.items,
+        content,
+        column_gap,
+        row_gap,
+        width_definite,
+        height_definite,
+    );
 
     var column_offsets: std.ArrayList(f32) = .empty;
     defer column_offsets.deinit(options.allocator);
     var row_offsets: std.ArrayList(f32) = .empty;
     defer row_offsets.deinit(options.allocator);
-    const column_gap = try gridGap(node.style, .columns);
-    const row_gap = try gridGap(node.style, .rows);
     var column_total = try trackTotal(columns.items, column_gap);
-    const row_total = try trackTotal(rows.items, row_gap);
     var final_content_height = content.height;
-    if (height_auto and forced_border == null and !height_clamped) {
-        final_content_height = row_total;
-        node.rect.h = try add(row_total, edges.vertical);
+    if (intrinsic_auto_height) {
+        final_content_height = try trackTotal(rows.items, row_gap);
+        node.rect.h = try add(final_content_height, edges.vertical);
+        row_gap = try gridGap(node.style, .rows, final_content_height);
     }
+    const row_total = try trackTotal(rows.items, row_gap);
     const justify_content = effectiveJustifyContent(node.style);
     const align_content = effectiveAlignContent(node.style);
     if (node.style.grid_justify_content == .normal and justify_content == .normal and width_definite) {
@@ -789,14 +823,20 @@ fn layoutGridNode(
         if (inline_free > 0) {
             var stretch_count: usize = 0;
             for (columns.items) |track| {
-                if (trackCanStretch(track.spec) and trackHasAutoMaximum(track.spec)) {
+                if (track.can_stretch_in_alignment and
+                    trackCanStretch(track.spec) and
+                    trackHasAutoMaximum(track.spec))
+                {
                     stretch_count += 1;
                 }
             }
             if (stretch_count != 0) {
                 const addition = inline_free / @as(f32, @floatFromInt(stretch_count));
                 for (columns.items) |*track| {
-                    if (trackCanStretch(track.spec) and trackHasAutoMaximum(track.spec)) {
+                    if (track.can_stretch_in_alignment and
+                        trackCanStretch(track.spec) and
+                        trackHasAutoMaximum(track.spec))
+                    {
                         track.size = try add(track.size, addition);
                     }
                 }
@@ -833,13 +873,13 @@ fn layoutGridNode(
     if (align_distribution.stretch > 0) {
         var stretch_count: usize = 0;
         for (rows.items) |track| {
-            if (trackCanStretch(track.spec)) stretch_count += 1;
+            if (track.can_stretch_in_alignment and trackCanStretch(track.spec)) stretch_count += 1;
         }
         if (stretch_count != 0) {
             const addition = align_distribution.stretch * @as(f32, @floatFromInt(rows.items.len)) /
                 @as(f32, @floatFromInt(stretch_count));
             for (rows.items) |*track| {
-                if (trackCanStretch(track.spec)) {
+                if (track.can_stretch_in_alignment and trackCanStretch(track.spec)) {
                     track.size = try add(track.size, addition);
                     if (try trackMaximum(track.spec, content.height)) |maximum| {
                         track.size = @min(track.size, maximum);
@@ -986,12 +1026,14 @@ fn layoutGridNode(
             try finite(content.width - logical_track_x - area_width)
         else
             logical_track_x;
+        const alignment_offset = alignOffset(justify_self, free_width, directions_match, true);
+        const physical_alignment_offset = if (node.style.writing_direction == .rtl)
+            free_width - alignment_offset
+        else
+            alignment_offset;
         const x = try add(
             track_x,
-            try add(
-                margins.value.left,
-                alignOffset(justify_self, free_width, directions_match, true),
-            ),
+            try add(margins.value.left, physical_alignment_offset),
         );
         var y_offset: f32 = 0;
         if (align_self == .baseline) {
@@ -1062,10 +1104,14 @@ fn layoutGridNode(
             try layoutGridNode(tree, item.index, content, child_size, options, depth - 1);
         }
     }
+    try writeGridBaseline(tree, node, items.items, content, edges);
+
     try placeAbsolute(
         tree,
         node,
         .{ .width = content.width, .height = final_content_height },
+        edges,
+        placement_origins,
         columns.items,
         rows.items,
         column_offsets.items,
@@ -1162,42 +1208,85 @@ fn gridLineFor(input: style.Style, axis: TrackAxis) style.GridLine {
 }
 
 fn placementFor(line: style.GridLine, explicit_count: usize) Error!AxisPlacement {
+    if (explicit_count > grid_tracks_max) return error.InvalidStyle;
+
     const start_line = try placementLine(line.start, explicit_count);
     const end_line = try placementLine(line.end, explicit_count);
-    const start_span = placementSpan(line.start);
-    const end_span = placementSpan(line.end);
+    const start_span = try placementSpan(line.start);
+    const end_span = try placementSpan(line.end);
+
+    var logical_start: i32 = 0;
+    var logical_end: i32 = 1;
     if (start_line) |start| {
-        var end = if (end_line) |value| value else start + end_span;
-        if (end <= start) end = start + 1;
-        return .{ .start = start, .end = end, .definite = true };
+        logical_start = start;
+        logical_end = if (end_line) |end|
+            end
+        else
+            try addLineSpan(start, end_span);
+    } else if (end_line) |end| {
+        logical_end = end;
+        logical_start = try subtractLineSpan(end, start_span);
+    } else {
+        logical_end = @intCast(start_span);
     }
-    if (end_line) |end| {
-        const start = if (end >= start_span) end - start_span else return error.InvalidStyle;
-        return .{ .start = start, .end = @max(end, start + 1), .definite = true };
+
+    if (logical_end < logical_start) {
+        const old_start = logical_start;
+        logical_start = logical_end;
+        logical_end = old_start;
     }
-    return .{ .start = 0, .end = start_span, .definite = false };
+    if (logical_end == logical_start) {
+        logical_end = try addLineSpan(logical_start, 1);
+    }
+
+    return .{
+        .definite = start_line != null or end_line != null,
+        .logical_start = logical_start,
+        .logical_end = logical_end,
+    };
 }
 
-fn placementLine(value: style.GridPlacement, explicit_count: usize) Error!?usize {
+fn placementLine(value: style.GridPlacement, explicit_count: usize) Error!?i32 {
     return switch (value) {
         .auto, .span => null,
         .line => |line| blk: {
             if (line == 0) break :blk error.InvalidStyle;
-            const line_index: i32 = if (line > 0)
-                @as(i32, line) - 1
-            else
-                @as(i32, @intCast(explicit_count + 1)) + @as(i32, line);
-            if (line_index < 0) break :blk error.InvalidStyle;
-            break :blk @as(usize, @intCast(line_index));
+            const explicit_line_count: i32 = @intCast(explicit_count + 1);
+            if (line > 0) {
+                break :blk @as(i32, line) - 1;
+            }
+            break :blk explicit_line_count + @as(i32, line);
         },
     };
 }
 
-fn placementSpan(value: style.GridPlacement) usize {
+fn placementSpan(value: style.GridPlacement) Error!usize {
     return switch (value) {
-        .span => |span| @max(@as(usize, 1), @as(usize, span)),
+        .span => |span| blk: {
+            const result = @max(@as(usize, 1), @as(usize, span));
+            if (result > grid_tracks_max) break :blk error.InvalidStyle;
+            break :blk result;
+        },
         .auto, .line => 1,
     };
+}
+
+fn addLineSpan(line: i32, span: usize) Error!i32 {
+    if (span > grid_tracks_max) return error.InvalidStyle;
+    const result = @as(i64, line) + @as(i64, @intCast(span));
+    if (result < -@as(i64, grid_tracks_max) or result > @as(i64, grid_tracks_max)) {
+        return error.InvalidStyle;
+    }
+    return @intCast(result);
+}
+
+fn subtractLineSpan(line: i32, span: usize) Error!i32 {
+    if (span > grid_tracks_max) return error.InvalidStyle;
+    const result = @as(i64, line) - @as(i64, @intCast(span));
+    if (result < -@as(i64, grid_tracks_max) or result > @as(i64, grid_tracks_max)) {
+        return error.InvalidStyle;
+    }
+    return @intCast(result);
 }
 
 fn initTracks(
@@ -1207,6 +1296,7 @@ fn initTracks(
     auto_track: style.GridTrack,
     basis: ?f32,
 ) Error!void {
+    if (explicit.len > grid_tracks_max) return error.InvalidStyle;
     if (explicit.len == 0) {
         tracks.append(
             allocator,
@@ -1229,12 +1319,105 @@ fn ensureTracks(
     auto_track: style.GridTrack,
     basis: ?f32,
 ) Error!void {
-    while (tracks.items.len < count) {
+    if (count > grid_tracks_max or tracks.items.len > grid_tracks_max) {
+        return error.InvalidStyle;
+    }
+    const needed = count -| tracks.items.len;
+    if (needed > grid_tracks_max - tracks.items.len) return error.InvalidStyle;
+    var added: usize = 0;
+    while (added < needed and added < grid_tracks_max) : (added += 1) {
         tracks.append(
             allocator,
             .{ .spec = auto_track, .size = try trackMinimum(auto_track, basis) },
         ) catch return error.InvalidStyle;
     }
+    if (tracks.items.len < count) return error.InvalidStyle;
+}
+
+const PlacementOrigins = struct {
+    column_prepend: usize = 0,
+    row_prepend: usize = 0,
+};
+
+fn prependTracks(
+    allocator: std.mem.Allocator,
+    tracks: *std.ArrayList(Track),
+    count: usize,
+    auto_track: style.GridTrack,
+    basis: ?f32,
+) Error!void {
+    if (count > grid_tracks_max or tracks.items.len > grid_tracks_max - count) {
+        return error.InvalidStyle;
+    }
+    if (count == 0) return;
+
+    const implicit_track: Track = .{
+        .spec = auto_track,
+        .size = try trackMinimum(auto_track, basis),
+    };
+    tracks.ensureUnusedCapacity(allocator, count) catch return error.InvalidStyle;
+    const old_count = tracks.items.len;
+    tracks.items.len = old_count + count;
+    @memmove(tracks.items[count..], tracks.items[0..old_count]);
+    @memset(tracks.items[0..count], implicit_track);
+}
+
+fn shiftPlacementIndices(
+    placement: *AxisPlacement,
+    prepend: usize,
+) Error!void {
+    if (!placement.definite) {
+        const span_i32 = placement.logical_end - placement.logical_start;
+        if (span_i32 <= 0) return error.InvalidStyle;
+        const span: usize = @intCast(span_i32);
+        if (span > grid_tracks_max) return error.InvalidStyle;
+        placement.start = 0;
+        placement.end = span;
+        return;
+    }
+    placement.start = try shiftedLineIndex(placement.logical_start, prepend);
+    placement.end = try shiftedLineIndex(placement.logical_end, prepend);
+    if (placement.end <= placement.start) return error.InvalidStyle;
+}
+
+fn shiftedLineIndex(line: i32, prepend: usize) Error!usize {
+    const shifted = @as(i64, line) + @as(i64, @intCast(prepend));
+    if (shifted < 0 or shifted > @as(i64, grid_tracks_max)) {
+        return error.InvalidStyle;
+    }
+    return @intCast(shifted);
+}
+
+fn normalizeAxisPlacements(
+    allocator: std.mem.Allocator,
+    tracks: *std.ArrayList(Track),
+    items: []FlowItem,
+    axis: TrackAxis,
+    auto_track: style.GridTrack,
+    basis: ?f32,
+) Error!usize {
+    var minimum_start: i32 = 0;
+    for (items) |item| {
+        const placement = switch (axis) {
+            .columns => item.column,
+            .rows => item.row,
+        };
+        if (placement.definite and placement.logical_start < minimum_start) {
+            minimum_start = placement.logical_start;
+        }
+    }
+    const prepend: usize = if (minimum_start < 0)
+        @intCast(-@as(i64, minimum_start))
+    else
+        0;
+    try prependTracks(allocator, tracks, prepend, auto_track, basis);
+    for (items) |*item| {
+        switch (axis) {
+            .columns => try shiftPlacementIndices(&item.column, prepend),
+            .rows => try shiftPlacementIndices(&item.row, prepend),
+        }
+    }
+    return prepend;
 }
 
 fn placeItems(
@@ -1248,13 +1431,39 @@ fn placeItems(
     column_basis: ?f32,
     row_basis: ?f32,
     occupied: *std.AutoHashMapUnmanaged(Cell, void),
-) Error!void {
-    var cursor_row: usize = 0;
-    var cursor_column: usize = 0;
-    const row_flow = flow == .row or flow == .row_dense;
+) Error!PlacementOrigins {
+    const origins: PlacementOrigins = .{
+        .column_prepend = try normalizeAxisPlacements(
+            allocator,
+            columns,
+            items.items,
+            .columns,
+            auto_column,
+            column_basis,
+        ),
+        .row_prepend = try normalizeAxisPlacements(
+            allocator,
+            rows,
+            items.items,
+            .rows,
+            auto_row,
+            row_basis,
+        ),
+    };
     const dense = flow == .row_dense or flow == .column_dense;
+    const row_flow = flow == .row or flow == .row_dense;
+    var partial_primary_cursors: [grid_tracks_max]u16 = undefined;
+    const PartialCursorSet = std.StaticBitSet(grid_tracks_max);
+    var partial_cursor_set: PartialCursorSet = undefined;
+    if (!dense) partial_cursor_set = PartialCursorSet.initEmpty();
+    var scan_cells_remaining = grid_cells_max;
+
+    // Fully definite items reserve their cells first, independent of source order.
     for (items.items) |*item| {
         if (!item.row.definite or !item.column.definite) continue;
+        const row_span = try placementSpanIndices(item.row);
+        const column_span = try placementSpanIndices(item.column);
+        const cell_count = try gridCellCount(row_span, column_span);
         try ensureTracks(allocator, rows, item.row.end, auto_row, row_basis);
         try ensureTracks(allocator, columns, item.column.end, auto_column, column_basis);
         try markArea(
@@ -1262,98 +1471,326 @@ fn placeItems(
             occupied,
             item.row.start,
             item.column.start,
-            item.row.end - item.row.start,
-            item.column.end - item.column.start,
+            row_span,
+            column_span,
+            cell_count,
         );
     }
+
+    // Phase 2 places only items locked to the secondary axis.
     for (items.items) |*item| {
-        if (item.row.definite and item.column.definite) continue;
-
-        var candidate_row: usize = if (item.row.definite) item.row.start else if (dense) 0 else cursor_row;
-        var candidate_column: usize = if (item.column.definite) item.column.start else if (dense) 0 else cursor_column;
-        while (true) {
-            const row_span = item.row.end - item.row.start;
-            const column_span = item.column.end - item.column.start;
-            if (row_span == 0 or column_span == 0) return error.InvalidStyle;
-
-            if (row_flow and !item.column.definite and candidate_column + column_span > columns.items.len) {
-                if (item.row.definite or column_span > columns.items.len) {
-                    try ensureTracks(allocator, columns, candidate_column + column_span, auto_column, column_basis);
-                } else {
-                    candidate_row += 1;
-                    candidate_column = 0;
-                    continue;
-                }
-            }
-            if (!row_flow and !item.row.definite and candidate_row + row_span > rows.items.len) {
-                if (item.column.definite or row_span > rows.items.len) {
-                    try ensureTracks(allocator, rows, candidate_row + row_span, auto_row, row_basis);
-                } else {
-                    candidate_column += 1;
-                    candidate_row = 0;
-                    continue;
-                }
-            }
-            if (candidate_row + row_span > rows.items.len) {
-                try ensureTracks(allocator, rows, candidate_row + row_span, auto_row, row_basis);
-            }
-            if (candidate_column + column_span > columns.items.len) {
-                try ensureTracks(allocator, columns, candidate_column + column_span, auto_column, column_basis);
-            }
-
-            if (areaFree(occupied, candidate_row, candidate_column, row_span, column_span)) {
-                item.row.start = candidate_row;
-                item.row.end = candidate_row + row_span;
-                item.column.start = candidate_column;
-                item.column.end = candidate_column + column_span;
-                try markArea(allocator, occupied, candidate_row, candidate_column, row_span, column_span);
-                if (!dense) {
-                    if (row_flow) {
-                        cursor_row = candidate_row;
-                        cursor_column = candidate_column + column_span;
-                        if (!item.column.definite and cursor_column >= columns.items.len) {
-                            cursor_row += 1;
-                            cursor_column = 0;
-                        }
-                    } else {
-                        cursor_column = candidate_column;
-                        cursor_row = candidate_row + row_span;
-                        if (!item.row.definite and cursor_row >= rows.items.len) {
-                            cursor_column += 1;
-                            cursor_row = 0;
-                        }
-                    }
-                }
-                break;
-            }
-
+        if (item.row.definite == item.column.definite) continue;
+        const secondary_axis_definite = if (row_flow) item.row.definite else item.column.definite;
+        if (!secondary_axis_definite) continue;
+        const secondary_start = if (row_flow) item.row.start else item.column.start;
+        if (secondary_start >= grid_tracks_max) return error.InvalidStyle;
+        var cursor_row: usize = 0;
+        var cursor_column: usize = 0;
+        if (!dense and partial_cursor_set.isSet(secondary_start)) {
+            const primary_cursor: usize = partial_primary_cursors[secondary_start];
             if (row_flow) {
-                if (item.column.definite) {
-                    candidate_row += 1;
-                } else if (item.row.definite) {
-                    candidate_column += 1;
-                } else {
-                    candidate_column += 1;
-                    if (candidate_column >= columns.items.len) {
-                        candidate_column = 0;
-                        candidate_row += 1;
-                    }
-                }
+                cursor_column = primary_cursor;
             } else {
-                if (item.row.definite) {
-                    candidate_column += 1;
-                } else if (item.column.definite) {
-                    candidate_row += 1;
-                } else {
-                    candidate_row += 1;
-                    if (candidate_row >= rows.items.len) {
-                        candidate_row = 0;
-                        candidate_column += 1;
-                    }
+                cursor_row = primary_cursor;
+            }
+        }
+        try placeItem(
+            allocator,
+            columns,
+            rows,
+            item,
+            flow,
+            dense,
+            auto_column,
+            auto_row,
+            column_basis,
+            row_basis,
+            occupied,
+            &scan_cells_remaining,
+            &cursor_row,
+            &cursor_column,
+        );
+        if (!dense) {
+            const primary_end = if (row_flow) item.column.end else item.row.end;
+            const secondary_end = if (row_flow) item.row.end else item.column.end;
+            if (primary_end > grid_tracks_max or primary_end > std.math.maxInt(u16)) {
+                return error.InvalidStyle;
+            }
+            if (secondary_end <= secondary_start or secondary_end > grid_tracks_max) {
+                return error.InvalidStyle;
+            }
+            const bounded_primary_end: u16 = @intCast(primary_end);
+            for (secondary_start..secondary_end) |secondary_index| {
+                if (!partial_cursor_set.isSet(secondary_index) or
+                    partial_primary_cursors[secondary_index] < bounded_primary_end)
+                {
+                    partial_primary_cursors[secondary_index] = bounded_primary_end;
+                    partial_cursor_set.set(secondary_index);
                 }
             }
         }
     }
+
+    // Phase 3 fixes the primary-axis extent before the shared cursor places
+    // the remaining items.
+    if (row_flow) {
+        try preSizePrimaryTracks(
+            allocator,
+            columns,
+            items.items,
+            .columns,
+            auto_column,
+            column_basis,
+        );
+    } else {
+        try preSizePrimaryTracks(
+            allocator,
+            rows,
+            items.items,
+            .rows,
+            auto_row,
+            row_basis,
+        );
+    }
+
+    // Phase 4 shares one cursor across main-axis-definite and fully-auto
+    // items, preserving their source order.
+    var auto_cursor_row: usize = 0;
+    var auto_cursor_column: usize = 0;
+    for (items.items) |*item| {
+        if (item.row.definite and item.column.definite) continue;
+        const secondary_axis_definite = if (row_flow) item.row.definite else item.column.definite;
+        if (secondary_axis_definite) continue;
+        try placeItem(
+            allocator,
+            columns,
+            rows,
+            item,
+            flow,
+            dense,
+            auto_column,
+            auto_row,
+            column_basis,
+            row_basis,
+            occupied,
+            &scan_cells_remaining,
+            &auto_cursor_row,
+            &auto_cursor_column,
+        );
+    }
+    return origins;
+}
+
+fn placementSpanIndices(placement: AxisPlacement) Error!usize {
+    if (placement.end <= placement.start) return error.InvalidStyle;
+    const span = placement.end - placement.start;
+    if (span > grid_tracks_max) return error.InvalidStyle;
+    return span;
+}
+
+fn preSizePrimaryTracks(
+    allocator: std.mem.Allocator,
+    tracks: *std.ArrayList(Track),
+    items: []const FlowItem,
+    axis: TrackAxis,
+    auto_track: style.GridTrack,
+    basis: ?f32,
+) Error!void {
+    if (tracks.items.len > grid_tracks_max) return error.InvalidStyle;
+    var required = tracks.items.len;
+    for (items) |item| {
+        const placement = switch (axis) {
+            .columns => item.column,
+            .rows => item.row,
+        };
+        const span = try placementSpanIndices(placement);
+        const extent = if (placement.definite) placement.end else span;
+        if (extent > grid_tracks_max) return error.InvalidStyle;
+        required = @max(required, extent);
+    }
+    try ensureTracks(allocator, tracks, required, auto_track, basis);
+}
+
+fn placeItem(
+    allocator: std.mem.Allocator,
+    columns: *std.ArrayList(Track),
+    rows: *std.ArrayList(Track),
+    item: *FlowItem,
+    flow: style.GridAutoFlow,
+    dense: bool,
+    auto_column: style.GridTrack,
+    auto_row: style.GridTrack,
+    column_basis: ?f32,
+    row_basis: ?f32,
+    occupied: *std.AutoHashMapUnmanaged(Cell, void),
+    scan_cells_remaining: *usize,
+    cursor_row: *usize,
+    cursor_column: *usize,
+) Error!void {
+    const row_flow = flow == .row or flow == .row_dense;
+    const row_span = try placementSpanIndices(item.row);
+    const column_span = try placementSpanIndices(item.column);
+    const cell_count = try gridCellCount(row_span, column_span);
+    var candidate_row: usize = if (item.row.definite)
+        item.row.start
+    else if (dense)
+        0
+    else
+        cursor_row.*;
+    var candidate_column: usize = if (item.column.definite)
+        item.column.start
+    else if (dense)
+        0
+    else
+        cursor_column.*;
+    if (!dense) {
+        if (row_flow and item.column.definite and !item.row.definite and
+            candidate_column < cursor_column.*)
+        {
+            try incrementIndex(&candidate_row);
+        } else if (!row_flow and item.row.definite and !item.column.definite and
+            candidate_row < cursor_row.*)
+        {
+            try incrementIndex(&candidate_column);
+        }
+    }
+
+    var attempts: usize = 0;
+    while (attempts < grid_cells_max) : (attempts += 1) {
+        const candidate_row_end = try indexAdd(candidate_row, row_span);
+        const candidate_column_end = try indexAdd(candidate_column, column_span);
+
+        if (row_flow and !item.column.definite and candidate_column_end > columns.items.len) {
+            if (item.row.definite or column_span > columns.items.len) {
+                try ensureTracks(
+                    allocator,
+                    columns,
+                    candidate_column_end,
+                    auto_column,
+                    column_basis,
+                );
+            } else {
+                try incrementIndex(&candidate_row);
+                candidate_column = 0;
+                continue;
+            }
+        }
+        if (!row_flow and !item.row.definite and candidate_row_end > rows.items.len) {
+            if (item.column.definite or row_span > rows.items.len) {
+                try ensureTracks(
+                    allocator,
+                    rows,
+                    candidate_row_end,
+                    auto_row,
+                    row_basis,
+                );
+            } else {
+                try incrementIndex(&candidate_column);
+                candidate_row = 0;
+                continue;
+            }
+        }
+
+        if (candidate_row_end > rows.items.len) {
+            try ensureTracks(allocator, rows, candidate_row_end, auto_row, row_basis);
+        }
+        if (candidate_column_end > columns.items.len) {
+            try ensureTracks(
+                allocator,
+                columns,
+                candidate_column_end,
+                auto_column,
+                column_basis,
+            );
+        }
+
+        if (try areaFree(
+            occupied,
+            candidate_row,
+            candidate_column,
+            row_span,
+            column_span,
+            cell_count,
+            scan_cells_remaining,
+        )) {
+            item.row.start = candidate_row;
+            item.row.end = candidate_row_end;
+            item.column.start = candidate_column;
+            item.column.end = candidate_column_end;
+            try markArea(
+                allocator,
+                occupied,
+                candidate_row,
+                candidate_column,
+                row_span,
+                column_span,
+                cell_count,
+            );
+            if (!dense) {
+                if (row_flow) {
+                    cursor_row.* = candidate_row;
+                    cursor_column.* = candidate_column_end;
+                    if (!item.column.definite and cursor_column.* >= columns.items.len) {
+                        try incrementIndex(cursor_row);
+                        cursor_column.* = 0;
+                    }
+                } else {
+                    cursor_column.* = candidate_column;
+                    cursor_row.* = candidate_row_end;
+                    if (!item.row.definite and cursor_row.* >= rows.items.len) {
+                        try incrementIndex(cursor_column);
+                        cursor_row.* = 0;
+                    }
+                }
+            }
+            return;
+        }
+
+        if (row_flow) {
+            if (item.column.definite) {
+                try incrementIndex(&candidate_row);
+            } else if (item.row.definite) {
+                try incrementIndex(&candidate_column);
+            } else {
+                try incrementIndex(&candidate_column);
+                if (candidate_column >= columns.items.len) {
+                    candidate_column = 0;
+                    try incrementIndex(&candidate_row);
+                }
+            }
+        } else {
+            if (item.row.definite) {
+                try incrementIndex(&candidate_column);
+            } else if (item.column.definite) {
+                try incrementIndex(&candidate_row);
+            } else {
+                try incrementIndex(&candidate_row);
+                if (candidate_row >= rows.items.len) {
+                    candidate_row = 0;
+                    try incrementIndex(&candidate_column);
+                }
+            }
+        }
+    }
+    return error.InvalidStyle;
+}
+
+fn gridCellCount(row_span: usize, column_span: usize) Error!usize {
+    if (row_span == 0 or column_span == 0) return error.InvalidStyle;
+    if (column_span > grid_cells_max) return error.InvalidStyle;
+    if (row_span > grid_cells_max / column_span) return error.InvalidStyle;
+    return row_span * column_span;
+}
+
+fn indexAdd(start: usize, span: usize) Error!usize {
+    if (span == 0 or span > grid_tracks_max) return error.InvalidStyle;
+    if (start > grid_tracks_max - span) return error.InvalidStyle;
+    return start + span;
+}
+
+fn incrementIndex(index: *usize) Error!void {
+    if (index.* >= grid_tracks_max) return error.InvalidStyle;
+    index.* += 1;
 }
 
 fn areaFree(
@@ -1362,9 +1799,17 @@ fn areaFree(
     column: usize,
     row_span: usize,
     column_span: usize,
-) bool {
-    for (row..row + row_span) |row_index| {
-        for (column..column + column_span) |column_index| {
+    cell_count: usize,
+    scan_cells_remaining: *usize,
+) Error!bool {
+    if (cell_count == 0 or cell_count > grid_cells_max) return error.InvalidStyle;
+    const row_end = try indexAdd(row, row_span);
+    const column_end = try indexAdd(column, column_span);
+
+    for (row..row_end) |row_index| {
+        for (column..column_end) |column_index| {
+            if (scan_cells_remaining.* == 0) return error.InvalidStyle;
+            scan_cells_remaining.* -= 1;
             if (occupied.contains(.{ .row = row_index, .column = column_index })) return false;
         }
     }
@@ -1378,10 +1823,29 @@ fn markArea(
     column: usize,
     row_span: usize,
     column_span: usize,
+    cell_count: usize,
 ) Error!void {
-    for (row..row + row_span) |row_index| {
-        for (column..column + column_span) |column_index| {
-            occupied.put(allocator, .{ .row = row_index, .column = column_index }, {}) catch return error.InvalidStyle;
+    if (cell_count == 0 or cell_count > grid_cells_max) return error.InvalidStyle;
+    if (occupied.count() > grid_cells_max) return error.InvalidStyle;
+    const row_end = try indexAdd(row, row_span);
+    const column_end = try indexAdd(column, column_span);
+    const cells_available = grid_cells_max - occupied.count();
+
+    if (cell_count > cells_available) {
+        var cells_new: usize = 0;
+        for (row..row_end) |row_index| {
+            for (column..column_end) |column_index| {
+                if (occupied.contains(.{ .row = row_index, .column = column_index })) continue;
+                if (cells_new >= cells_available) return error.InvalidStyle;
+                cells_new += 1;
+            }
+        }
+    }
+
+    for (row..row_end) |row_index| {
+        for (column..column_end) |column_index| {
+            occupied.put(allocator, .{ .row = row_index, .column = column_index }, {}) catch
+                return error.InvalidStyle;
         }
     }
 }
@@ -1393,8 +1857,10 @@ fn growTrackItems(
     gap: f32,
     basis: ?f32,
 ) Error!void {
+    if (tracks.len > grid_tracks_max) return error.InvalidStyle;
+    const axis_has_flexible_track = spanHasFlexible(tracks, 0, tracks.len);
     var span: usize = 1;
-    while (span <= tracks.len) : (span += 1) {
+    while (span <= tracks.len and span <= grid_tracks_max) : (span += 1) {
         clearTrackPlans(tracks);
         for (items) |item| {
             const placement = switch (axis) {
@@ -1423,6 +1889,9 @@ fn growTrackItems(
             );
         }
         try flushTrackPlans(tracks, basis);
+        if (span == 1 and axis_has_flexible_track) {
+            try recordSingleSpanGrowthLimits(tracks, items, axis, basis);
+        }
     }
 
     clearTrackPlans(tracks);
@@ -1455,7 +1924,9 @@ fn growTrackItems(
 }
 
 fn clearTrackPlans(tracks: []Track) void {
-    for (tracks) |*track| track.planned_increase = 0;
+    for (tracks) |*track| {
+        track.planned_increase = 0;
+    }
 }
 
 fn flushTrackPlans(tracks: []Track, basis: ?f32) Error!void {
@@ -1475,6 +1946,69 @@ fn flushTrackPlans(tracks: []Track, basis: ?f32) Error!void {
         track.planned_increase = 0;
     }
 }
+fn recordSingleSpanGrowthLimits(
+    tracks: []Track,
+    items: []const FlowItem,
+    axis: TrackAxis,
+    basis: ?f32,
+) Error!void {
+    for (items) |item| {
+        const placement = switch (axis) {
+            .columns => item.column,
+            .rows => item.row,
+        };
+        if (placement.end <= placement.start or placement.end > tracks.len) {
+            return error.InvalidStyle;
+        }
+        if (placement.end - placement.start != 1) continue;
+        const track = &tracks[placement.start];
+        if (trackIsFlexible(track.spec)) continue;
+        if (!trackAllowsIntrinsicContribution(track.spec)) continue;
+        if ((try trackMaximum(track.spec, basis)) != null) continue;
+        const need = switch (axis) {
+            .columns => try add(
+                item.natural.border.width,
+                item.margins.value.left + item.margins.value.right,
+            ),
+            .rows => try add(
+                item.natural.border.height,
+                item.margins.value.top + item.margins.value.bottom,
+            ),
+        };
+        const limit = try finiteNonNegative(@max(track.size, need));
+        if (track.intrinsic_growth_limit) |current| {
+            track.intrinsic_growth_limit = @max(current, limit);
+        } else {
+            track.intrinsic_growth_limit = limit;
+        }
+    }
+}
+
+fn trackGrowthLimit(track: Track, basis: ?f32) Error!?f32 {
+    const specified = try trackMaximum(track.spec, basis);
+    if (specified) |maximum| {
+        const finite_maximum = try finiteNonNegative(maximum);
+        if (track.intrinsic_growth_limit) |intrinsic| {
+            return @min(finite_maximum, try finiteNonNegative(intrinsic));
+        }
+        return finite_maximum;
+    }
+    if (track.intrinsic_growth_limit) |intrinsic| {
+        return @as(?f32, try finiteNonNegative(intrinsic));
+    }
+    return null;
+}
+
+fn intrinsicOverflowTrack(track: Track, basis: ?f32) Error!bool {
+    if (!trackParticipatesInIntrinsicSizing(track.spec)) return false;
+    if (!trackAllowsIntrinsicContribution(track.spec)) return false;
+    return (try trackMaximum(track.spec, basis)) == null;
+}
+
+fn planTrackIncreaseBeyondLimit(track: *Track, increase: f32) Error!void {
+    const planned = try finiteNonNegative(increase);
+    if (planned > track.planned_increase) track.planned_increase = planned;
+}
 
 fn spanHasFlexible(tracks: []const Track, start: usize, end: usize) bool {
     for (tracks[start..end]) |track| {
@@ -1484,18 +2018,15 @@ fn spanHasFlexible(tracks: []const Track, start: usize, end: usize) bool {
 }
 
 fn sizeTracks(
-    allocator: std.mem.Allocator,
     columns: *std.ArrayList(Track),
     rows: *std.ArrayList(Track),
     items: []const FlowItem,
     content: widget.Size,
-    container: *const widget.WidgetNode,
+    column_gap: f32,
+    row_gap: f32,
     width_definite: bool,
     height_definite: bool,
 ) Error!void {
-    _ = allocator;
-    const column_gap = try gridGap(container.style, .columns);
-    const row_gap = try gridGap(container.style, .rows);
     try growTrackItems(
         columns.items,
         items,
@@ -1549,7 +2080,7 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
     for (tracks[start..end]) |track| {
         if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
         if (!trackAllowsIntrinsicContribution(track.spec)) continue;
-        if (try trackMaximum(track.spec, basis)) |maximum| {
+        if (try trackGrowthLimit(track, basis)) |maximum| {
             const capacity = @max(0, maximum - track.size);
             if (capacity > 0) {
                 non_fr_bounded_capacity = try add(non_fr_bounded_capacity, capacity);
@@ -1559,40 +2090,15 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
         }
     }
 
-    if (!suppress_non_flex) {
-        if (non_fr_unbounded > 0) {
-            if (non_fr_bounded_capacity > 0) {
-                const to_bounded = @min(deficit, non_fr_bounded_capacity);
-                for (tracks[start..end]) |*track| {
-                    if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
-                    if (!trackAllowsIntrinsicContribution(track.spec)) continue;
-                    if (try trackMaximum(track.spec, basis)) |maximum| {
-                        const capacity = @max(0, maximum - track.size);
-                        if (capacity > 0) {
-                            const share = to_bounded * capacity / non_fr_bounded_capacity;
-                            try planTrackIncrease(track, share, basis);
-                        }
-                    }
-                }
-                deficit -= to_bounded;
-            }
-            if (deficit > 0) {
-                const share = deficit / @as(f32, @floatFromInt(non_fr_unbounded));
-                for (tracks[start..end]) |*track| {
-                    if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
-                    if (!trackAllowsIntrinsicContribution(track.spec)) continue;
-                    if ((try trackMaximum(track.spec, basis)) == null) {
-                        try planTrackIncrease(track, share, basis);
-                    }
-                }
-                deficit = 0;
-            }
-        } else if (non_fr_bounded_capacity > 0) {
+    if (suppress_non_flex) return;
+
+    if (non_fr_unbounded > 0) {
+        if (non_fr_bounded_capacity > 0) {
             const to_bounded = @min(deficit, non_fr_bounded_capacity);
             for (tracks[start..end]) |*track| {
                 if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
                 if (!trackAllowsIntrinsicContribution(track.spec)) continue;
-                if (try trackMaximum(track.spec, basis)) |maximum| {
+                if (try trackGrowthLimit(track.*, basis)) |maximum| {
                     const capacity = @max(0, maximum - track.size);
                     if (capacity > 0) {
                         const share = to_bounded * capacity / non_fr_bounded_capacity;
@@ -1602,16 +2108,57 @@ fn growTracks(tracks: []Track, start: usize, end: usize, need: f32, gap: f32, ba
             }
             deficit -= to_bounded;
         }
-
         if (deficit > 0) {
-            if (try distributeIntrinsicFlexDeficit(tracks[start..end], deficit, basis)) {
-                deficit = 0;
+            const share = deficit / @as(f32, @floatFromInt(non_fr_unbounded));
+            for (tracks[start..end]) |*track| {
+                if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+                if (!trackAllowsIntrinsicContribution(track.spec)) continue;
+                if ((try trackGrowthLimit(track.*, basis)) == null) {
+                    try planTrackIncrease(track, share, basis);
+                }
+            }
+            deficit = 0;
+        }
+    } else if (non_fr_bounded_capacity > 0) {
+        const to_bounded = @min(deficit, non_fr_bounded_capacity);
+        for (tracks[start..end]) |*track| {
+            if (!trackParticipatesInIntrinsicSizing(track.spec)) continue;
+            if (!trackAllowsIntrinsicContribution(track.spec)) continue;
+            if (try trackGrowthLimit(track.*, basis)) |maximum| {
+                const capacity = @max(0, maximum - track.size);
+                if (capacity > 0) {
+                    const share = to_bounded * capacity / non_fr_bounded_capacity;
+                    try planTrackIncrease(track, share, basis);
+                }
+            }
+        }
+        deficit -= to_bounded;
+    }
+
+    if (deficit > 0) {
+        if (try distributeIntrinsicFlexDeficit(tracks[start..end], deficit, basis)) {
+            deficit = 0;
+        }
+    }
+
+    if (deficit > 0) {
+        var overflow_track_count: usize = 0;
+        for (tracks[start..end]) |track| {
+            if (try intrinsicOverflowTrack(track, basis)) overflow_track_count += 1;
+        }
+        if (overflow_track_count > 0) {
+            const share = deficit / @as(f32, @floatFromInt(overflow_track_count));
+            for (tracks[start..end]) |*track| {
+                if (try intrinsicOverflowTrack(track.*, basis)) {
+                    try planTrackIncreaseBeyondLimit(track, share);
+                }
             }
         }
     }
 }
 
 fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!void {
+    if (tracks.len > grid_tracks_max) return error.InvalidStyle;
     const total_gaps = if (tracks.len > 1) gap * @as(f32, @floatFromInt(tracks.len - 1)) else 0;
 
     var bounded_capacity: f32 = 0;
@@ -1655,14 +2202,15 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
     }
 
     var free_space = @max(0, try finite(content_size - non_fr_used));
-    var frozen = [_]bool{false} ** 1024;
-    if (tracks.len > 1024) return error.InvalidStyle;
-    var bases: [1024]f32 = undefined;
+    var frozen: [grid_tracks_max]bool = undefined;
+    @memset(frozen[0..tracks.len], false);
+    var bases: [grid_tracks_max]f32 = undefined;
     for (tracks, 0..) |track, i| {
         bases[i] = track.size;
     }
 
-    while (true) {
+    var iterations: usize = 0;
+    while (iterations <= grid_tracks_max) : (iterations += 1) {
         var unfrozen_fr_sum: f32 = 0;
         var unfrozen_fr_count: usize = 0;
         for (tracks, 0..) |track, i| {
@@ -1728,6 +2276,7 @@ fn resolveFlexibleTracks(tracks: []Track, content_size: f32, gap: f32) Error!voi
         }
         break;
     }
+    if (iterations > grid_tracks_max) return error.InvalidStyle;
 }
 
 fn nodeFirstBaseline(
@@ -1737,6 +2286,7 @@ fn nodeFirstBaseline(
     child_edges: Edges,
 ) f32 {
     const node = &tree.nodes.items[child_index];
+    if (node.first_baseline) |baseline| return baseline;
     switch (node.kind) {
         .label => {
             const font_size = if (node.font_size > 0) node.font_size else 16.0;
@@ -1777,6 +2327,53 @@ fn nodeFirstBaseline(
             }
             return child_size.height;
         },
+    }
+}
+fn writeGridBaseline(
+    tree: *widget.WidgetTree,
+    container: *widget.WidgetNode,
+    items: []const FlowItem,
+    content: widget.Size,
+    edges: Edges,
+) Error!void {
+    if (items.len == 0) {
+        container.first_baseline = null;
+        return;
+    }
+    var first_row: usize = grid_tracks_max;
+    for (items) |item| {
+        if (item.row.start < first_row) first_row = item.row.start;
+    }
+    var donor: ?FlowItem = null;
+    for (items) |item| {
+        if (item.row.start != first_row) continue;
+        const child = &tree.nodes.items[item.index];
+        const directions_match = child.style.writing_direction == container.style.writing_direction;
+        const alignment = alignValue(
+            child.style.grid_align_self,
+            effectiveAlignItems(container.style),
+            directions_match,
+            false,
+        );
+        if (donor == null) donor = item;
+        if (alignment == .baseline) {
+            donor = item;
+            break;
+        }
+    }
+    if (donor) |item| {
+        const child = &tree.nodes.items[item.index];
+        const child_edges = try resolveEdges(child.style, content.width);
+        const child_baseline = nodeFirstBaseline(
+            tree,
+            item.index,
+            .{ .width = child.rect.w, .height = child.rect.h },
+            child_edges,
+        );
+        container.first_baseline = try add(
+            try add(edges.border.top, edges.padding.top),
+            try add(child.rect.y, child_baseline),
+        );
     }
 }
 
@@ -1924,9 +2521,8 @@ fn trackHasIntrinsicMinimum(track: style.GridTrack) bool {
 
 fn planTrackIncrease(track: *Track, increase: f32, basis: ?f32) Error!void {
     var planned = try finiteNonNegative(increase);
-    if (try trackMaximum(track.spec, basis)) |maximum| {
-        const finite_maximum = try finiteNonNegative(maximum);
-        const capacity = @max(0, finite_maximum - track.size);
+    if (try trackGrowthLimit(track.*, basis)) |maximum| {
+        const capacity = @max(0, maximum - track.size);
         planned = @min(planned, capacity);
     }
     if (planned > track.planned_increase) track.planned_increase = planned;
@@ -1989,22 +2585,33 @@ fn trackMinimumSum(tracks: []const style.GridTrack, basis: ?f32) Error!f32 {
     return result;
 }
 
-fn gridGap(input: style.Style, axis: TrackAxis) Error!f32 {
-    const value = switch (axis) {
-        .columns => if (input.grid_column_gap != 0)
-            input.grid_column_gap
-        else if (input.column_gap != 0)
-            input.column_gap
-        else
-            input.gap,
-        .rows => if (input.grid_row_gap != 0)
-            input.grid_row_gap
-        else if (input.row_gap != 0)
-            input.row_gap
-        else
-            input.gap,
+fn gapSpecified(value: style.LengthPercentage) bool {
+    return switch (value) {
+        .length => |number| number != 0,
+        .percent => true,
     };
-    return finiteNonNegative(value);
+}
+
+fn selectAxisGap(
+    axis: style.LengthPercentage,
+    generic: style.LengthPercentage,
+) style.LengthPercentage {
+    return if (gapSpecified(axis)) axis else generic;
+}
+
+fn gridGap(input: style.Style, axis: TrackAxis, basis: ?f32) Error!f32 {
+    const value = switch (axis) {
+        .columns => selectAxisGap(
+            input.grid_column_gap,
+            selectAxisGap(input.column_gap, input.gap),
+        ),
+        .rows => selectAxisGap(
+            input.grid_row_gap,
+            selectAxisGap(input.row_gap, input.gap),
+        ),
+    };
+    try validateLengthPercentage(value, false);
+    return finiteNonNegative(value.resolve(basis) orelse 0);
 }
 
 fn trackTotal(tracks: []const Track, gap: f32) Error!f32 {
@@ -2160,10 +2767,227 @@ fn alignOffset(
     };
 }
 
+const AbsoluteArea = struct {
+    start: f32,
+    end: f32,
+
+    fn width(self: AbsoluteArea) Error!f32 {
+        return nonNegative(self.end - self.start);
+    }
+};
+const AbsoluteBoundary = enum { start, end };
+
+fn absoluteAreaFor(
+    line: style.GridLine,
+    explicit_count: usize,
+    prepend: usize,
+    tracks: []const Track,
+    offsets: []const f32,
+    gap: f32,
+    extra_gap: f32,
+    content_extent: f32,
+    frame_start: f32,
+    frame_end: f32,
+    reverse: bool,
+) Error!AbsoluteArea {
+    const start_line = try placementLine(line.start, explicit_count);
+    const end_line = try placementLine(line.end, explicit_count);
+    const start_span: ?usize = if (line.start == .span)
+        placementSpan(line.start) catch null
+    else
+        null;
+    const end_span: ?usize = if (line.end == .span)
+        placementSpan(line.end) catch null
+    else
+        null;
+
+    // Resolve each side before converting it to the final track index. A
+    // span that cannot be resolved leaves only its opposite side definite.
+    var logical_start: ?i32 = start_line;
+    if (logical_start == null and line.start == .span) {
+        if (end_line) |end| {
+            if (start_span) |span| {
+                logical_start = subtractLineSpan(end, span) catch null;
+            }
+        }
+    }
+    var logical_end: ?i32 = end_line;
+    if (logical_end == null and line.end == .span) {
+        if (start_line) |start| {
+            if (end_span) |span| {
+                logical_end = addLineSpan(start, span) catch null;
+            }
+        }
+    }
+
+    // Grid placement normalizes reversed lines and expands equal lines.
+    if (logical_start != null and logical_end != null) {
+        if (logical_end.? < logical_start.?) {
+            const old_start = logical_start.?;
+            logical_start = logical_end;
+            logical_end = old_start;
+        }
+        if (logical_end.? == logical_start.?) {
+            logical_end = addLineSpan(logical_start.?, 1) catch null;
+        }
+    }
+
+    const start_index: ?usize = if (logical_start) |logical| blk: {
+        const index = shiftedLineIndex(logical, prepend) catch break :blk null;
+        if (index > tracks.len) break :blk null;
+        break :blk index;
+    } else null;
+    const end_index: ?usize = if (logical_end) |logical| blk: {
+        const index = shiftedLineIndex(logical, prepend) catch break :blk null;
+        if (index > tracks.len) break :blk null;
+        break :blk index;
+    } else null;
+
+    if (start_index != null and end_index != null) {
+        const logical_start_offset = try absoluteBoundaryOffset(
+            start_index.?,
+            tracks,
+            offsets,
+            gap,
+            extra_gap,
+            .start,
+        );
+        const logical_end_offset = try absoluteBoundaryOffset(
+            end_index.?,
+            tracks,
+            offsets,
+            gap,
+            extra_gap,
+            .end,
+        );
+        return if (reverse)
+            .{
+                .start = try finite(content_extent - logical_end_offset),
+                .end = try finite(content_extent - logical_start_offset),
+            }
+        else
+            .{ .start = logical_start_offset, .end = logical_end_offset };
+    }
+
+    if (start_index) |index| {
+        const logical_start_offset = try absoluteBoundaryOffset(
+            index,
+            tracks,
+            offsets,
+            gap,
+            extra_gap,
+            .start,
+        );
+        return if (reverse)
+            .{
+                .start = frame_start,
+                .end = try finite(content_extent - logical_start_offset),
+            }
+        else
+            .{ .start = logical_start_offset, .end = frame_end };
+    }
+
+    if (end_index) |index| {
+        const logical_end_offset = try absoluteBoundaryOffset(
+            index,
+            tracks,
+            offsets,
+            gap,
+            extra_gap,
+            .end,
+        );
+        return if (reverse)
+            .{
+                .start = try finite(content_extent - logical_end_offset),
+                .end = frame_end,
+            }
+        else
+            .{ .start = frame_start, .end = logical_end_offset };
+    }
+
+    return .{ .start = frame_start, .end = frame_end };
+}
+
+fn absoluteBoundaryOffset(
+    index: usize,
+    tracks: []const Track,
+    offsets: []const f32,
+    gap: f32,
+    extra_gap: f32,
+    boundary: AbsoluteBoundary,
+) Error!f32 {
+    if (index > tracks.len) return error.InvalidStyle;
+    if (boundary == .start) {
+        if (index < offsets.len) return finite(offsets[index]);
+        if (index > 0 and index - 1 < offsets.len) {
+            return add(offsets[index - 1], tracks[index - 1].size);
+        }
+    } else {
+        if (index == 0) {
+            if (offsets.len > 0) return finite(offsets[0]);
+        } else if (index - 1 < offsets.len) {
+            return add(offsets[index - 1], tracks[index - 1].size);
+        }
+    }
+
+    const preceding_track = boundary == .end and index > 0;
+    const start_index = if (preceding_track) index - 1 else index;
+    var result: f32 = 0;
+    for (tracks, 0..) |track, track_index| {
+        if (track_index >= start_index) break;
+        result = try add(result, track.size);
+        if (track_index + 1 < start_index) {
+            result = try add(result, gap + extra_gap);
+        }
+    }
+    if (preceding_track) {
+        result = try add(result, tracks[index - 1].size);
+    }
+    return finite(result);
+}
+fn absoluteSizeFromInsets(
+    available: f32,
+    start: f32,
+    end: f32,
+    margin_start: f32,
+    margin_end: f32,
+) Error!f32 {
+    return @max(0, try finite(available - start - end - margin_start - margin_end));
+}
+
+fn distributeAbsoluteAutoMargins(
+    start: *f32,
+    end: *f32,
+    start_auto: bool,
+    end_auto: bool,
+    available: f32,
+    size: f32,
+    start_inset: f32,
+    end_inset: f32,
+) Error!void {
+    if (!start_auto and !end_auto) return;
+    const fixed_start = if (start_auto) 0 else start.*;
+    const fixed_end = if (end_auto) 0 else end.*;
+    const remaining = try finite(
+        available - start_inset - end_inset - size - fixed_start - fixed_end,
+    );
+    const distributed = @max(0, remaining);
+    if (start_auto and end_auto) {
+        start.* = distributed / 2;
+        end.* = distributed / 2;
+    } else if (start_auto) {
+        start.* = distributed;
+    } else {
+        end.* = distributed;
+    }
+}
+
 fn placeAbsolute(
     tree: *widget.WidgetTree,
     container: *widget.WidgetNode,
     content: widget.Size,
+    container_edges: Edges,
+    placement_origins: PlacementOrigins,
     columns: []const Track,
     rows: []const Track,
     column_offsets: []const f32,
@@ -2180,60 +3004,41 @@ fn placeAbsolute(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position != .absolute) continue;
+        const frame_start_x = try finite(-container_edges.padding.left);
+        const frame_end_x = try add(content.width, container_edges.padding.right);
+        const column_area = try absoluteAreaFor(
+            gridLineFor(child.style, .columns),
+            @max(@as(usize, 1), container.style.grid_template_columns.len),
+            placement_origins.column_prepend,
+            columns,
+            column_offsets,
+            column_gap,
+            column_extra_gap,
+            content.width,
+            frame_start_x,
+            frame_end_x,
+            writing_direction == .rtl,
+        );
+        const area_x = column_area.start;
+        const area_width = try column_area.width();
 
-        const col_line = gridLineFor(child.style, .columns);
-        const col_placement = try placementFor(col_line, columns.len);
-        var area_x: f32 = 0;
-        var area_width: f32 = content.width;
-        if (col_placement.definite and columns.len > 0 and column_offsets.len > 0) {
-            const col_start = @min(col_placement.start, columns.len);
-            const col_end = @min(col_placement.end, columns.len);
-            if (col_start < column_offsets.len) {
-                area_x = column_offsets[col_start];
-                if (col_end > col_start) {
-                    var width: f32 = 0;
-                    for (columns[col_start..col_end]) |track| {
-                        width = try add(width, track.size);
-                    }
-                    if (col_end - col_start > 1) {
-                        const span_f: f32 = @floatFromInt(col_end - col_start - 1);
-                        width = try add(width, (column_gap + column_extra_gap) * span_f);
-                    }
-                    area_width = width;
-                } else {
-                    area_width = 0;
-                }
-            }
-        }
-        if (writing_direction == .rtl and col_placement.definite) {
-            area_x = try finite(content.width - area_x - area_width);
-        }
-
-        const row_line = gridLineFor(child.style, .rows);
-        const row_placement = try placementFor(row_line, rows.len);
-        var area_y: f32 = 0;
-        var area_height: f32 = content.height;
-        if (row_placement.definite and rows.len > 0 and row_offsets.len > 0) {
-            const row_start = @min(row_placement.start, rows.len);
-            const row_end = @min(row_placement.end, rows.len);
-            if (row_start < row_offsets.len) {
-                area_y = row_offsets[row_start];
-                if (row_end > row_start) {
-                    var height: f32 = 0;
-                    for (rows[row_start..row_end]) |track| {
-                        height = try add(height, track.size);
-                    }
-                    if (row_end - row_start > 1) {
-                        const span_f: f32 = @floatFromInt(row_end - row_start - 1);
-                        height = try add(height, (row_gap + row_extra_gap) * span_f);
-                    }
-                    area_height = height;
-                } else {
-                    area_height = 0;
-                }
-            }
-        }
-
+        const frame_start_y = try finite(-container_edges.padding.top);
+        const frame_end_y = try add(content.height, container_edges.padding.bottom);
+        const row_area = try absoluteAreaFor(
+            gridLineFor(child.style, .rows),
+            @max(@as(usize, 1), container.style.grid_template_rows.len),
+            placement_origins.row_prepend,
+            rows,
+            row_offsets,
+            row_gap,
+            row_extra_gap,
+            content.height,
+            frame_start_y,
+            frame_end_y,
+            false,
+        );
+        const area_y = row_area.start;
+        const area_height = try row_area.width();
         const natural = try measureNode(
             tree,
             child_index,
@@ -2244,61 +3049,138 @@ fn placeAbsolute(
         );
         const edges = try resolveEdges(child.style, area_width);
         child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
-        const margins = try resolveMargins(child.style, area_width);
-        var child_size = try usedSize(
-            child.style,
+        var margins = try resolveMargins(child.style, area_width);
+        const left = try resolveInset(child.style.inset.left, area_width);
+        const right = try resolveInset(child.style.inset.right, area_width);
+        const top = try resolveInset(child.style.inset.top, area_height);
+        const bottom = try resolveInset(child.style.inset.bottom, area_height);
+        const all_insets_definite = left != null and right != null and top != null and bottom != null;
+        const has_aspect_ratio = child.style.aspect_ratio != null;
+        const full_inset_aspect_ratio = child.style.size.width == .auto and
+            child.style.size.height == .auto and
+            has_aspect_ratio and
+            all_insets_definite;
+        var sizing_style = child.style;
+        if (dimensionAuto(child.style.size.width) and left != null and right != null and
+            !(has_aspect_ratio and !dimensionAuto(child.style.size.height)))
+        {
+            const inset_width = try absoluteSizeFromInsets(
+                area_width,
+                left.?,
+                right.?,
+                margins.value.left,
+                margins.value.right,
+            );
+            sizing_style.size.width = .{ .length = try borderToSizing(
+                inset_width,
+                edges.box_horizontal,
+                child.style.box_sizing,
+            ) };
+        }
+        if (dimensionAuto(child.style.size.height) and top != null and bottom != null and
+            !full_inset_aspect_ratio and
+            !(has_aspect_ratio and !dimensionAuto(child.style.size.width)))
+        {
+            const inset_height = try absoluteSizeFromInsets(
+                area_height,
+                top.?,
+                bottom.?,
+                margins.value.top,
+                margins.value.bottom,
+            );
+            sizing_style.size.height = .{ .length = try borderToSizing(
+                inset_height,
+                edges.box_vertical,
+                child.style.box_sizing,
+            ) };
+        }
+        const child_size = try usedSize(
+            sizing_style,
             .{ .width = area_width, .height = area_height },
             natural.content,
             edges,
             null,
         );
-        const left = try resolveInset(child.style.inset.left, area_width);
-        const right = try resolveInset(child.style.inset.right, area_width);
-        const top = try resolveInset(child.style.inset.top, area_height);
-        const bottom = try resolveInset(child.style.inset.bottom, area_height);
-        if (dimensionAuto(child.style.size.width) and left != null and right != null) {
-            child_size.width = try clampAxisSize(
-                child.style,
-                .horizontal,
-                @max(
-                    0,
-                    area_width - left.? - right.? - margins.value.left - margins.value.right,
-                ),
-                .{ .width = area_width, .height = area_height },
-                natural.content,
-                edges,
+
+        const directions_match = child.style.writing_direction == writing_direction;
+        const justify_items = effectiveJustifyItems(container.style);
+        const align_items = effectiveAlignItems(container.style);
+        const justify_self = alignValue(
+            child.style.grid_justify_self,
+            justify_items,
+            directions_match,
+            true,
+        );
+        const align_self = alignValue(
+            child.style.grid_align_self,
+            align_items,
+            directions_match,
+            false,
+        );
+
+        if (left == null and right == null) {
+            const start_inset = left orelse 0;
+            const end_inset = right orelse 0;
+            try distributeAbsoluteAutoMargins(
+                &margins.value.left,
+                &margins.value.right,
+                margins.left_auto,
+                margins.right_auto,
+                area_width,
+                child_size.width,
+                start_inset,
+                end_inset,
             );
         }
-        if (dimensionAuto(child.style.size.height) and top != null and bottom != null) {
-            child_size.height = try clampAxisSize(
-                child.style,
-                .vertical,
-                @max(
-                    0,
-                    area_height - top.? - bottom.? - margins.value.top - margins.value.bottom,
-                ),
-                .{ .width = area_width, .height = area_height },
-                natural.content,
-                edges,
+        if (top == null and bottom == null) {
+            const start_inset = top orelse 0;
+            const end_inset = bottom orelse 0;
+            try distributeAbsoluteAutoMargins(
+                &margins.value.top,
+                &margins.value.bottom,
+                margins.top_auto,
+                margins.bottom_auto,
+                area_height,
+                child_size.height,
+                start_inset,
+                end_inset,
             );
         }
-        const x = if (left) |value|
-            try add(area_x, try add(value, margins.value.left))
+
+        const left_wins = left != null and (right == null or writing_direction == .ltr);
+        const x = if (left_wins)
+            try add(area_x, try add(left.?, margins.value.left))
         else if (right) |value|
             try finite(area_x + area_width - value - margins.value.right - child_size.width)
-        else if (writing_direction == .rtl) blk: {
-            const static_end = if (col_placement.definite)
-                try add(area_x, area_width)
-            else
-                content.width;
+        else if (writing_direction == .rtl and child.style.grid_justify_self == .auto and
+            justify_items == .stretch)
+        blk: {
+            const static_end = try add(area_x, area_width);
             break :blk try finite(static_end - margins.value.right - child_size.width);
-        } else try add(area_x, margins.value.left);
-        const y = if (top) |value|
-            try add(area_y, try add(value, margins.value.top))
+        } else blk: {
+            const free_width = try finite(
+                area_width - child_size.width - margins.value.left - margins.value.right,
+            );
+            const alignment_offset = alignOffset(justify_self, free_width, directions_match, true);
+            const physical_alignment_offset = if (writing_direction == .rtl)
+                free_width - alignment_offset
+            else
+                alignment_offset;
+            break :blk try add(area_x, try add(margins.value.left, physical_alignment_offset));
+        };
+
+        const top_wins = top != null;
+        const y = if (top_wins)
+            try add(area_y, try add(top.?, margins.value.top))
         else if (bottom) |value|
             try finite(area_y + area_height - value - margins.value.bottom - child_size.height)
-        else
-            try add(area_y, margins.value.top);
+        else blk: {
+            const free_height = try finite(
+                area_height - child_size.height - margins.value.top - margins.value.bottom,
+            );
+            const offset = alignOffset(align_self, free_height, directions_match, false);
+            break :blk try add(area_y, try add(margins.value.top, offset));
+        };
         child.rect = .{ .x = x, .y = y, .w = child_size.width, .h = child_size.height };
         try checkRect(child.rect);
         child.natural_main = child_size.width;

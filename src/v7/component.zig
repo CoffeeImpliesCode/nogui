@@ -211,7 +211,7 @@ test "make: on_event and deinit are null when the type omits them" {
 test "make: typed default adapters are present only for declared values" {
     const WithDefaults = struct {
         const Self = @This();
-        pub const default_style: Style = .{ .direction = .row, .gap = 11 };
+        pub const default_style: Style = .{ .direction = .row, .gap = .{ .length = 11 } };
         pub const default_paint: PaintStyle = .{ .layer = 4 };
 
         fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {

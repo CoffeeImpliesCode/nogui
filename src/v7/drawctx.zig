@@ -162,6 +162,12 @@ fn asLegacySide(value: anytype) f32 {
         .percent => 0,
     };
 }
+fn asLegacyGap(value: style.LengthPercentage) f32 {
+    return switch (value) {
+        .length => |length| length,
+        .percent => 0,
+    };
+}
 fn asFixedLength(value: anytype) ?f32 {
     return switch (style.lengthPercentageAutoFrom(value)) {
         .auto, .percent => null,
@@ -230,9 +236,9 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
     if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
     if (@hasField(T, "text_align")) local.text_align = @as(style.TextAlign, opts.text_align);
-    if (@hasField(T, "gap")) local.gap = opts.gap;
-    if (@hasField(T, "column_gap")) local.column_gap = opts.column_gap;
-    if (@hasField(T, "row_gap")) local.row_gap = opts.row_gap;
+    if (@hasField(T, "gap")) local.gap = style.lengthPercentageFrom(opts.gap);
+    if (@hasField(T, "column_gap")) local.column_gap = style.lengthPercentageFrom(opts.column_gap);
+    if (@hasField(T, "row_gap")) local.row_gap = style.lengthPercentageFrom(opts.row_gap);
     if (@hasField(T, "grid_template_columns")) {
         local.grid_template_columns = opts.grid_template_columns;
     }
@@ -242,8 +248,12 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     if (@hasField(T, "grid_auto_columns")) local.grid_auto_columns = opts.grid_auto_columns;
     if (@hasField(T, "grid_auto_rows")) local.grid_auto_rows = opts.grid_auto_rows;
     if (@hasField(T, "grid_auto_flow")) local.grid_auto_flow = @as(style.GridAutoFlow, opts.grid_auto_flow);
-    if (@hasField(T, "grid_column_gap")) local.grid_column_gap = opts.grid_column_gap;
-    if (@hasField(T, "grid_row_gap")) local.grid_row_gap = opts.grid_row_gap;
+    if (@hasField(T, "grid_column_gap")) {
+        local.grid_column_gap = style.lengthPercentageFrom(opts.grid_column_gap);
+    }
+    if (@hasField(T, "grid_row_gap")) {
+        local.grid_row_gap = style.lengthPercentageFrom(opts.grid_row_gap);
+    }
     if (@hasField(T, "grid_justify_content")) {
         local.grid_justify_content = @as(Justify, opts.grid_justify_content);
     }
@@ -521,7 +531,7 @@ pub const DrawCtx = struct {
     pub fn column(self: *DrawCtx, opts: anytype) !Id {
         const resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
         const id = try self.create(
-            .{ .column = .{ .gap = resolved_style.gap } },
+            .{ .column = .{ .gap = asLegacyGap(resolved_style.gap) } },
             resolved_style,
             paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
@@ -535,7 +545,7 @@ pub const DrawCtx = struct {
     pub fn row(self: *DrawCtx, opts: anytype) !Id {
         const resolved_style = styleFromOpts(opts, self.component_defaults.style, .row);
         const id = try self.create(
-            .{ .row = .{ .gap = resolved_style.gap } },
+            .{ .row = .{ .gap = asLegacyGap(resolved_style.gap) } },
             resolved_style,
             paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
@@ -567,7 +577,7 @@ pub const DrawCtx = struct {
         if (!@hasField(T, "grid_align_items") and @hasField(T, "align"))
             resolved_style.grid_align_items = resolved_style.@"align";
         const id = try self.create(
-            .{ .column = .{ .gap = resolved_style.gap } },
+            .{ .column = .{ .gap = asLegacyGap(resolved_style.gap) } },
             resolved_style,
             paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
@@ -1039,7 +1049,7 @@ test "DrawCtx: component defaults apply before local overrides and restore" {
         const Self = @This();
         pub const default_style: Style = .{
             .direction = .row,
-            .gap = 12,
+            .gap = .{ .length = 12 },
         };
         pub const default_paint: PaintStyle = .{
             .fill = .{ 1, 0, 0, 1 },
@@ -1063,14 +1073,23 @@ test "DrawCtx: component defaults apply before local overrides and restore" {
     const first = tree.node(styled.first).?;
     const second = tree.node(styled.second).?;
     try std.testing.expectEqual(FlexDirection.row, first.style.direction);
-    try std.testing.expectEqual(@as(f32, 12), first.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 12 }),
+        first.style.gap,
+    ));
     try std.testing.expectEqual([4]f32{ 1, 0, 0, 1 }, first.paint.fill);
-    try std.testing.expectEqual(@as(f32, 3), second.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 3 }),
+        second.style.gap,
+    ));
     try std.testing.expectEqual([4]f32{ 0, 1, 0, 1 }, second.paint.fill);
 
     const after = try ctx.label(.{ .text = "after" });
     try std.testing.expectEqual(FlexDirection.column, tree.node(after).?.style.direction);
-    try std.testing.expectEqual(@as(f32, 0), tree.node(after).?.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 0 }),
+        tree.node(after).?.style.gap,
+    ));
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, tree.node(after).?.paint.fill);
     try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
     try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);
@@ -1085,7 +1104,7 @@ test "DrawCtx: component default scope restores after draw error" {
 
     const Failing = struct {
         const Self = @This();
-        pub const default_style: Style = .{ .gap = 8 };
+        pub const default_style: Style = .{ .gap = .{ .length = 8 } };
 
         pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
             _ = self;
@@ -1101,7 +1120,10 @@ test "DrawCtx: component default scope restores after draw error" {
     );
     try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
     const after = try ctx.label(.{ .text = "after-error" });
-    try std.testing.expectEqual(@as(f32, 0), tree.node(after).?.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 0 }),
+        tree.node(after).?.style.gap,
+    ));
 }
 
 test "DrawCtx: nested component defaults replace and isolate parent scope" {
@@ -1123,7 +1145,7 @@ test "DrawCtx: nested component defaults replace and isolate parent scope" {
         const Self = @This();
         pub const default_style: Style = .{
             .direction = .column,
-            .gap = 5,
+            .gap = .{ .length = 5 },
         };
         pub const default_paint: PaintStyle = .{ .fill = .{ 0, 0, 1, 1 } };
         bare: *Bare,
@@ -1138,7 +1160,7 @@ test "DrawCtx: nested component defaults replace and isolate parent scope" {
         const Self = @This();
         pub const default_style: Style = .{
             .direction = .row,
-            .gap = 20,
+            .gap = .{ .length = 20 },
         };
         pub const default_paint: PaintStyle = .{ .fill = .{ 1, 0, 0, 1 } };
         child: *Child,
@@ -1162,15 +1184,27 @@ test "DrawCtx: nested component defaults replace and isolate parent scope" {
     const bare_label = tree.node(bare.label_id).?;
     const after = tree.node(parent.after_id).?;
     try std.testing.expectEqual(FlexDirection.row, before.style.direction);
-    try std.testing.expectEqual(@as(f32, 20), before.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 20 }),
+        before.style.gap,
+    ));
     try std.testing.expectEqual(FlexDirection.column, child_label.style.direction);
-    try std.testing.expectEqual(@as(f32, 5), child_label.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 5 }),
+        child_label.style.gap,
+    ));
     try std.testing.expectEqual([4]f32{ 0, 0, 1, 1 }, child_label.paint.fill);
     try std.testing.expectEqual(FlexDirection.column, bare_label.style.direction);
-    try std.testing.expectEqual(@as(f32, 0), bare_label.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 0 }),
+        bare_label.style.gap,
+    ));
     try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, bare_label.paint.fill);
     try std.testing.expectEqual(FlexDirection.row, after.style.direction);
-    try std.testing.expectEqual(@as(f32, 20), after.style.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 20 }),
+        after.style.gap,
+    ));
     try std.testing.expectEqual([4]f32{ 1, 0, 0, 1 }, after.paint.fill);
     try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
     try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);
@@ -1717,6 +1751,77 @@ test "DrawCtx: grid constructor translates tracks placement and gaps" {
     const resolved = tree.node(id).?.style;
     try std.testing.expectEqual(style.Display.grid, resolved.display);
     try std.testing.expectEqual(@as(usize, 2), resolved.grid_template_columns.len);
-    try std.testing.expectEqual(@as(f32, 4), resolved.grid_column_gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 4 }),
+        resolved.grid_column_gap,
+    ));
     try std.testing.expectEqual(style.GridAutoFlow.column, resolved.grid_auto_flow);
+}
+
+test "DrawCtx numeric gap options become typed lengths" {
+    const resolved = styleFromOpts(.{
+        .gap = 12,
+        .column_gap = 13,
+        .row_gap = 14,
+        .grid_column_gap = 15,
+        .grid_row_gap = 16,
+    }, null, .column);
+
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 12 }),
+        resolved.gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 13 }),
+        resolved.column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 14 }),
+        resolved.row_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 15 }),
+        resolved.grid_column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 16 }),
+        resolved.grid_row_gap,
+    ));
+}
+
+test "DrawCtx typed percentage gap survives override and resolution" {
+    const resolved = styleFromOpts(.{
+        .gap = style.LengthPercentage{ .percent = 0.1 },
+    }, null, .column);
+
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .percent = 0.1 }),
+        resolved.gap,
+    ));
+}
+
+test "DrawCtx WidgetKind gap mirror stays fixed for percentage options" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const fixed = try ctx.column(.{ .gap = 12 });
+    ctx.pop();
+    const percentage = try ctx.column(.{
+        .gap = style.LengthPercentage{ .percent = 0.1 },
+    });
+    ctx.pop();
+
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 12 }),
+        tree.node(fixed).?.style.gap,
+    ));
+    try std.testing.expectEqual(@as(f32, 12), tree.node(fixed).?.kind.column.gap);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .percent = 0.1 }),
+        tree.node(percentage).?.style.gap,
+    ));
+    try std.testing.expectEqual(@as(f32, 0), tree.node(percentage).?.kind.column.gap);
 }

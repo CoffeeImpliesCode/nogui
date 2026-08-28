@@ -2635,3 +2635,465 @@ test "row cross axis self start ignores inline direction mismatch" {
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
     try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
 }
+
+test "percentage column gap distributes flexible row in both directions" {
+    const scenarios = [_]struct {
+        writing_direction: style.Direction,
+        expected: [3]Rect,
+    }{
+        .{
+            .writing_direction = .ltr,
+            .expected = .{
+                .{ .x = 0, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 36.666666, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 73.333333, .y = 0, .w = 26.666666, .h = 100 },
+            },
+        },
+        .{
+            .writing_direction = .rtl,
+            .expected = .{
+                .{ .x = 73.333333, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 36.666666, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 0, .y = 0, .w = 26.666666, .h = 100 },
+            },
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_ids = [_]Id{
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        };
+        const container_id: Id = @enumFromInt(4);
+
+        var child_style = growingItem(0, 100);
+        child_style.writing_direction = scenario.writing_direction;
+        for (child_ids) |child_id| {
+            try appendNode(&tree, child_id, container_id, child_style);
+        }
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .writing_direction = scenario.writing_direction,
+            .@"align" = .stretch,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+            .column_gap = .{ .percent = 0.1 },
+        });
+        for (child_ids) |child_id| {
+            try tree.appendChild(container_id, child_id);
+        }
+
+        try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+        for (child_ids, scenario.expected) |child_id, expected| {
+            try expectRelative(&tree, child_id, expected);
+        }
+    }
+}
+
+test "cyclic percentage gap uses intrinsic width before final flexing" {
+    const scenarios = [_]struct {
+        shrink: f32,
+        writing_direction: style.Direction,
+        expected: [3]Rect,
+    }{
+        .{
+            .shrink = 1,
+            .writing_direction = .ltr,
+            .expected = .{
+                .{ .x = 0, .y = 0, .w = 12, .h = 40 },
+                .{ .x = 24, .y = 0, .w = 12, .h = 40 },
+                .{ .x = 48, .y = 0, .w = 12, .h = 40 },
+            },
+        },
+        .{
+            .shrink = 1,
+            .writing_direction = .rtl,
+            .expected = .{
+                .{ .x = 48, .y = 0, .w = 12, .h = 40 },
+                .{ .x = 24, .y = 0, .w = 12, .h = 40 },
+                .{ .x = 0, .y = 0, .w = 12, .h = 40 },
+            },
+        },
+        .{
+            .shrink = 0,
+            .writing_direction = .ltr,
+            .expected = .{
+                .{ .x = 0, .y = 0, .w = 20, .h = 40 },
+                .{ .x = 32, .y = 0, .w = 20, .h = 40 },
+                .{ .x = 64, .y = 0, .w = 20, .h = 40 },
+            },
+        },
+        .{
+            .shrink = 0,
+            .writing_direction = .rtl,
+            .expected = .{
+                .{ .x = 40, .y = 0, .w = 20, .h = 40 },
+                .{ .x = 8, .y = 0, .w = 20, .h = 40 },
+                .{ .x = -24, .y = 0, .w = 20, .h = 40 },
+            },
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_ids = [_]Id{
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        };
+        const container_id: Id = @enumFromInt(4);
+
+        var child_style = fixedItem(20, 40);
+        child_style.shrink = scenario.shrink;
+        child_style.writing_direction = scenario.writing_direction;
+        for (child_ids) |child_id| {
+            try appendNode(&tree, child_id, container_id, child_style);
+        }
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .writing_direction = scenario.writing_direction,
+            .@"align" = .stretch,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .auto,
+                .height = .{ .length = 40 },
+            },
+            .column_gap = .{ .percent = 0.2 },
+        });
+        for (child_ids) |child_id| {
+            try tree.appendChild(container_id, child_id);
+        }
+
+        try flex.layoutContainer(&tree, container_id, .{
+            .allocator = std.testing.allocator,
+            .available = .{ .width = 100, .height = 40 },
+            .measure = null,
+            .intrinsic_width = true,
+        });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 60, .h = 40 });
+        for (child_ids, scenario.expected) |child_id, expected| {
+            try expectRelative(&tree, child_id, expected);
+        }
+    }
+}
+
+test "percentage row gap is zero while wrapped cross size is indefinite" {
+    const scenarios = [_]struct {
+        writing_direction: style.Direction,
+        expected: [9]Rect,
+    }{
+        .{
+            .writing_direction = .ltr,
+            .expected = .{
+                .{ .x = 0, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 30, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 60, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 0, .y = 20, .w = 20, .h = 20 },
+                .{ .x = 30, .y = 20, .w = 20, .h = 20 },
+                .{ .x = 60, .y = 20, .w = 20, .h = 20 },
+                .{ .x = 0, .y = 40, .w = 20, .h = 20 },
+                .{ .x = 30, .y = 40, .w = 20, .h = 20 },
+                .{ .x = 60, .y = 40, .w = 20, .h = 20 },
+            },
+        },
+        .{
+            .writing_direction = .rtl,
+            .expected = .{
+                .{ .x = 60, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 30, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 0, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 60, .y = 20, .w = 20, .h = 20 },
+                .{ .x = 30, .y = 20, .w = 20, .h = 20 },
+                .{ .x = 0, .y = 20, .w = 20, .h = 20 },
+                .{ .x = 60, .y = 40, .w = 20, .h = 20 },
+                .{ .x = 30, .y = 40, .w = 20, .h = 20 },
+                .{ .x = 0, .y = 40, .w = 20, .h = 20 },
+            },
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_ids = [_]Id{
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+            @enumFromInt(4),
+            @enumFromInt(5),
+            @enumFromInt(6),
+            @enumFromInt(7),
+            @enumFromInt(8),
+            @enumFromInt(9),
+        };
+        const container_id: Id = @enumFromInt(10);
+
+        var child_style = fixedItem(20, 20);
+        child_style.writing_direction = scenario.writing_direction;
+        for (child_ids) |child_id| {
+            try appendNode(&tree, child_id, container_id, child_style);
+        }
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .writing_direction = scenario.writing_direction,
+            .wrap = .wrap,
+            .flex_wrap = .wrap,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 80 },
+                .height = .auto,
+            },
+            .column_gap = .{ .length = 10 },
+            .row_gap = .{ .percent = 0.1 },
+        });
+        for (child_ids) |child_id| {
+            try tree.appendChild(container_id, child_id);
+        }
+
+        try flex.layoutContainer(&tree, container_id, .{
+            .allocator = std.testing.allocator,
+            .available = .{ .width = 80, .height = 100 },
+            .measure = null,
+            .intrinsic_height = true,
+        });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 80, .h = 60 });
+        for (child_ids, scenario.expected) |child_id, expected| {
+            try expectRelative(&tree, child_id, expected);
+        }
+    }
+}
+
+test "percentage column gap uses the final content box after padding" {
+    const scenarios = [_]struct {
+        box_sizing: style.BoxSizing,
+        writing_direction: style.Direction,
+        expected_container: Rect,
+        expected_children: [3]Rect,
+    }{
+        .{
+            .box_sizing = .border_box,
+            .writing_direction = .ltr,
+            .expected_container = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
+            .expected_children = .{
+                .{ .x = 0, .y = 0, .w = 21.333333, .h = 80 },
+                .{ .x = 29.333333, .y = 0, .w = 21.333333, .h = 80 },
+                .{ .x = 58.666666, .y = 0, .w = 21.333333, .h = 80 },
+            },
+        },
+        .{
+            .box_sizing = .content_box,
+            .writing_direction = .ltr,
+            .expected_container = .{ .x = 0, .y = 0, .w = 120, .h = 120 },
+            .expected_children = .{
+                .{ .x = 0, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 36.666666, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 73.333333, .y = 0, .w = 26.666666, .h = 100 },
+            },
+        },
+        .{
+            .box_sizing = .border_box,
+            .writing_direction = .rtl,
+            .expected_container = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
+            .expected_children = .{
+                .{ .x = 58.666666, .y = 0, .w = 21.333333, .h = 80 },
+                .{ .x = 29.333333, .y = 0, .w = 21.333333, .h = 80 },
+                .{ .x = 0, .y = 0, .w = 21.333333, .h = 80 },
+            },
+        },
+        .{
+            .box_sizing = .content_box,
+            .writing_direction = .rtl,
+            .expected_container = .{ .x = 0, .y = 0, .w = 120, .h = 120 },
+            .expected_children = .{
+                .{ .x = 73.333333, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 36.666666, .y = 0, .w = 26.666666, .h = 100 },
+                .{ .x = 0, .y = 0, .w = 26.666666, .h = 100 },
+            },
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_ids = [_]Id{
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        };
+        const container_id: Id = @enumFromInt(4);
+
+        var child_style = growingItem(0, 0);
+        child_style.size.height = .auto;
+        child_style.writing_direction = scenario.writing_direction;
+        for (child_ids) |child_id| {
+            try appendNode(&tree, child_id, container_id, child_style);
+        }
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .writing_direction = scenario.writing_direction,
+            .@"align" = .stretch,
+            .box_sizing = scenario.box_sizing,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+            .padding = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 },
+            .padding_inset = .{
+                .top = .{ .length = 10 },
+                .right = .{ .length = 10 },
+                .bottom = .{ .length = 10 },
+                .left = .{ .length = 10 },
+            },
+            .column_gap = .{ .percent = 0.1 },
+        });
+        for (child_ids) |child_id| {
+            try tree.appendChild(container_id, child_id);
+        }
+
+        try layoutContainer(&tree, container_id, .{
+            .width = scenario.expected_container.w,
+            .height = scenario.expected_container.h,
+        });
+
+        try expectRelative(&tree, container_id, scenario.expected_container);
+        for (child_ids, scenario.expected_children) |child_id, expected| {
+            try expectRelative(&tree, child_id, expected);
+        }
+    }
+}
+
+test "normal gap maps to typed zero spacing in both directions" {
+    const scenarios = [_]struct {
+        writing_direction: style.Direction,
+        expected: [3]Rect,
+    }{
+        .{
+            .writing_direction = .ltr,
+            .expected = .{
+                .{ .x = 0, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 20, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 40, .y = 0, .w = 20, .h = 20 },
+            },
+        },
+        .{
+            .writing_direction = .rtl,
+            .expected = .{
+                .{ .x = 80, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 60, .y = 0, .w = 20, .h = 20 },
+                .{ .x = 40, .y = 0, .w = 20, .h = 20 },
+            },
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_ids = [_]Id{
+            @enumFromInt(1),
+            @enumFromInt(2),
+            @enumFromInt(3),
+        };
+        const container_id: Id = @enumFromInt(4);
+
+        var child_style = fixedItem(20, 20);
+        child_style.writing_direction = scenario.writing_direction;
+        for (child_ids) |child_id| {
+            try appendNode(&tree, child_id, container_id, child_style);
+        }
+        try appendNode(&tree, container_id, .root, .{
+            .display = .flex,
+            .direction = .row,
+            .writing_direction = scenario.writing_direction,
+            .justify = .start,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 20 },
+            },
+            .gap = .{ .length = 0 },
+        });
+        for (child_ids) |child_id| {
+            try tree.appendChild(container_id, child_id);
+        }
+
+        try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 });
+
+        try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+        for (child_ids, scenario.expected) |child_id, expected| {
+            try expectRelative(&tree, child_id, expected);
+        }
+    }
+}
+
+test "cyclic percentage gap keeps intrinsic line grouping after final resolution" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_ids = [_]Id{
+        @enumFromInt(1),
+        @enumFromInt(2),
+        @enumFromInt(3),
+    };
+    const container_id: Id = @enumFromInt(4);
+
+    var child_style = fixedItem(30, 20);
+    child_style.shrink = 0;
+    for (child_ids) |child_id| {
+        try appendNode(&tree, child_id, container_id, child_style);
+    }
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .wrap = .wrap,
+        .flex_wrap = .wrap,
+        .justify = .start,
+        .@"align" = .start,
+        .align_content = .start,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .column_gap = .{ .percent = 0.2 },
+    });
+    for (child_ids) |child_id| {
+        try tree.appendChild(container_id, child_id);
+    }
+
+    try flex.layoutContainer(&tree, container_id, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = null,
+        .intrinsic_width = true,
+        .intrinsic_height = true,
+    });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 90, .h = 20 });
+    const expected = [_]Rect{
+        .{ .x = 0, .y = 0, .w = 30, .h = 20 },
+        .{ .x = 48, .y = 0, .w = 30, .h = 20 },
+        .{ .x = 96, .y = 0, .w = 30, .h = 20 },
+    };
+    for (child_ids, expected) |child_id, child_rect| {
+        try expectRelative(&tree, child_id, child_rect);
+    }
+}

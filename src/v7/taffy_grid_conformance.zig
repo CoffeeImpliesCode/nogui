@@ -1,11 +1,7 @@
 //! Geometry conformance cases selected from Taffy's upstream grid fixtures.
-//!
-//! `main/test_fixtures/grid/grid_out_of_order_items.html` and
-//! `main/test_fixtures/grid/grid_placement_definite_primary.html` are not
-//! included because their partial explicit placement is not supported.
 const std = @import("std");
 
-const flex = @import("flex.zig");
+const layout = @import("layout/root.zig");
 const Id = @import("id.zig").Id;
 const style = @import("style.zig");
 const widget = @import("widget.zig");
@@ -68,8 +64,12 @@ const Fixture = struct {
         fixture.* = undefined;
     }
 
-    fn run(fixture: *Fixture, available: widget.Size) void {
-        flex.layout(&fixture.tree, available);
+    fn run(fixture: *Fixture, available: widget.Size) !void {
+        try layout.layoutTree(&fixture.tree, .{
+            .allocator = testing.allocator,
+            .available = available,
+            .measure = null,
+        });
     }
 
     fn rootRect(fixture: *const Fixture) Rect {
@@ -87,11 +87,23 @@ const Fixture = struct {
     }
 };
 
+fn roundedRect(rect: Rect) Rect {
+    const x = @round(rect.x);
+    const y = @round(rect.y);
+    return .{
+        .x = x,
+        .y = y,
+        .w = @round(rect.x + rect.w) - x,
+        .h = @round(rect.y + rect.h) - y,
+    };
+}
+
 fn expectRect(expected: Rect, actual: Rect) !void {
-    try testing.expectApproxEqAbs(expected.x, actual.x, epsilon);
-    try testing.expectApproxEqAbs(expected.y, actual.y, epsilon);
-    try testing.expectApproxEqAbs(expected.w, actual.w, epsilon);
-    try testing.expectApproxEqAbs(expected.h, actual.h, epsilon);
+    const rounded = roundedRect(actual);
+    try testing.expectApproxEqAbs(expected.x, rounded.x, epsilon);
+    try testing.expectApproxEqAbs(expected.y, rounded.y, epsilon);
+    try testing.expectApproxEqAbs(expected.w, rounded.w, epsilon);
+    try testing.expectApproxEqAbs(expected.h, rounded.h, epsilon);
 }
 
 fn expectFixture(
@@ -144,7 +156,7 @@ test "main/test_fixtures/grid/grid_basic.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 120, .height = 120 });
+    try fixture.run(.{ .width = 120, .height = 120 });
 
     try expectFixture(&fixture, .{ .w = 120, .h = 120 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
@@ -159,6 +171,122 @@ test "main/test_fixtures/grid/grid_basic.html" {
     });
 }
 
+test "main/test_fixtures/grid/grid_out_of_order_items.html" {
+    const tracks = [_]style.GridTrack{
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+        .{ .fixed = 40 },
+    };
+    var grid_style = fixedGridStyle(120, 120);
+    grid_style.grid_template_columns = &tracks;
+    grid_style.grid_template_rows = &tracks;
+    grid_style.grid_auto_flow = .row_dense;
+    grid_style.writing_direction = .ltr;
+    grid_style.box_sizing = .border_box;
+    const child_styles = [_]Style{
+        .{ .display = .block, .box_sizing = .border_box },
+        .{ .display = .block, .box_sizing = .border_box },
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 35 },
+                .height = .{ .length = 35 },
+            },
+            .grid_column = .{ .start = .{ .line = 1 } },
+        },
+        .{ .display = .block, .box_sizing = .border_box },
+        .{ .display = .block, .box_sizing = .border_box },
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 20 },
+                .height = .{ .length = 20 },
+            },
+            .grid_column = .{ .start = .{ .line = 1 } },
+            .grid_row = .{ .start = .{ .line = 1 } },
+        },
+        .{ .display = .block, .box_sizing = .border_box },
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 10 },
+                .height = .{ .length = 10 },
+            },
+            .grid_row = .{ .start = .{ .line = 1 } },
+        },
+        .{ .display = .block, .box_sizing = .border_box },
+    };
+
+    var fixture = try Fixture.init(grid_style, &child_styles);
+    defer fixture.deinit();
+    try fixture.run(.{ .width = 120, .height = 120 });
+
+    try expectFixture(&fixture, .{ .w = 120, .h = 120 }, &.{
+        .{ .x = 80, .y = 0, .w = 40, .h = 40 },
+        .{ .x = 0, .y = 40, .w = 40, .h = 40 },
+        .{ .x = 0, .y = 80, .w = 35, .h = 35 },
+        .{ .x = 40, .y = 40, .w = 40, .h = 40 },
+        .{ .x = 80, .y = 40, .w = 40, .h = 40 },
+        .{ .x = 0, .y = 0, .w = 20, .h = 20 },
+        .{ .x = 40, .y = 80, .w = 40, .h = 40 },
+        .{ .x = 40, .y = 0, .w = 10, .h = 10 },
+        .{ .x = 80, .y = 80, .w = 40, .h = 40 },
+    });
+}
+
+test "main/test_fixtures/grid/grid_placement_definite_primary.html" {
+    const columns = [_]style.GridTrack{
+        .{ .percent = 0.33 },
+        .{ .percent = 0.74 },
+    };
+    var grid_style = fixedGridStyle(200, 200);
+    grid_style.grid_template_columns = &columns;
+    grid_style.writing_direction = .ltr;
+    grid_style.box_sizing = .border_box;
+    const child_styles = [_]Style{
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .grid_column = .{ .start = .{ .line = 1 } },
+        },
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .grid_column = .{ .start = .{ .line = 2 } },
+        },
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .grid_column = .{ .start = .{ .line = 1 } },
+        },
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .grid_column = .{ .start = .{ .line = 2 } },
+        },
+        .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .grid_column = .{ .start = .{ .line = 1 } },
+        },
+    };
+
+    var fixture = try Fixture.init(grid_style, &child_styles);
+    defer fixture.deinit();
+    try fixture.run(.{ .width = 200, .height = 200 });
+
+    try expectFixture(&fixture, .{ .w = 200, .h = 200 }, &.{
+        .{ .x = 0, .y = 0, .w = 66, .h = 67 },
+        .{ .x = 66, .y = 0, .w = 148, .h = 67 },
+        .{ .x = 0, .y = 67, .w = 66, .h = 66 },
+        .{ .x = 66, .y = 67, .w = 148, .h = 66 },
+        .{ .x = 0, .y = 133, .w = 66, .h = 67 },
+    });
+}
+
 test "main/test_fixtures/grid/grid_gap.html" {
     const columns = [_]style.GridTrack{
         .{ .fixed = 40 },
@@ -169,13 +297,13 @@ test "main/test_fixtures/grid/grid_gap.html" {
     var grid_style = fixedGridStyle(200, 200);
     grid_style.grid_template_columns = &columns;
     grid_style.grid_template_rows = &rows;
-    grid_style.grid_column_gap = 40;
-    grid_style.grid_row_gap = 40;
+    grid_style.grid_column_gap = .{ .length = 40 };
+    grid_style.grid_row_gap = .{ .length = 40 };
     const child_styles = [_]Style{.{}} ** 9;
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 200, .height = 200 });
+    try fixture.run(.{ .width = 200, .height = 200 });
 
     try expectFixture(&fixture, .{ .w = 200, .h = 200 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
@@ -207,7 +335,7 @@ test "main/test_fixtures/grid/grid_percent_tracks_definite_overflow.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 120, .height = 60 });
+    try fixture.run(.{ .width = 120, .height = 60 });
 
     try expectFixture(&fixture, .{ .w = 120, .h = 60 }, &.{
         .{ .x = 0, .y = 0, .w = 48, .h = 30 },
@@ -249,7 +377,7 @@ test "main/test_fixtures/grid/grid_auto_single_item.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 180, .height = 120 });
+    try fixture.run(.{ .width = 180, .height = 120 });
 
     try expectFixture(&fixture, .{ .w = 180, .h = 120 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
@@ -282,7 +410,7 @@ test "main/test_fixtures/grid/grid_minmax_column_fixed_width_below_range.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 90, .height = 120 });
+    try fixture.run(.{ .width = 90, .height = 120 });
 
     try expectFixture(&fixture, .{ .w = 90, .h = 120 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
@@ -315,18 +443,18 @@ test "main/test_fixtures/grid/grid_minmax_column_fixed_width_within_range.html" 
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 110, .height = 120 });
+    try fixture.run(.{ .width = 110, .height = 120 });
 
     try expectFixture(&fixture, .{ .w = 110, .h = 120 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
-        .{ .x = 40, .y = 0, .w = 20, .h = 40 },
-        .{ .x = 60, .y = 0, .w = 40, .h = 40 },
+        .{ .x = 40, .y = 0, .w = 30, .h = 40 },
+        .{ .x = 70, .y = 0, .w = 40, .h = 40 },
         .{ .x = 0, .y = 40, .w = 40, .h = 40 },
-        .{ .x = 40, .y = 40, .w = 20, .h = 40 },
-        .{ .x = 60, .y = 40, .w = 40, .h = 40 },
+        .{ .x = 40, .y = 40, .w = 30, .h = 40 },
+        .{ .x = 70, .y = 40, .w = 40, .h = 40 },
         .{ .x = 0, .y = 80, .w = 40, .h = 40 },
-        .{ .x = 40, .y = 80, .w = 20, .h = 40 },
-        .{ .x = 60, .y = 80, .w = 40, .h = 40 },
+        .{ .x = 40, .y = 80, .w = 30, .h = 40 },
+        .{ .x = 70, .y = 80, .w = 40, .h = 40 },
     });
 }
 
@@ -343,11 +471,11 @@ test "main/test_fixtures/grid/grid_minmax_column_with_fr_fixed.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 60, .height = 40 });
+    try fixture.run(.{ .width = 60, .height = 40 });
 
     try expectFixture(&fixture, .{ .w = 60, .h = 40 }, &.{
-        .{ .x = 0, .y = 0, .w = 20, .h = 40 },
-        .{ .x = 20, .y = 0, .w = 40, .h = 40 },
+        .{ .x = 0, .y = 0, .w = 40, .h = 40 },
+        .{ .x = 40, .y = 0, .w = 20, .h = 40 },
     });
 }
 
@@ -375,18 +503,18 @@ test "main/test_fixtures/grid/grid_fr_fixed_size_single_item.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 200, .height = 200 });
+    try fixture.run(.{ .width = 200, .height = 200 });
 
     try expectFixture(&fixture, .{ .w = 200, .h = 200 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
-        .{ .x = 40, .y = 0, .w = 80, .h = 40 },
-        .{ .x = 120, .y = 0, .w = 80, .h = 40 },
+        .{ .x = 40, .y = 0, .w = 100, .h = 40 },
+        .{ .x = 140, .y = 0, .w = 60, .h = 40 },
         .{ .x = 0, .y = 40, .w = 40, .h = 80 },
         .{ .x = 40, .y = 40, .w = 100, .h = 80 },
-        .{ .x = 120, .y = 40, .w = 80, .h = 80 },
+        .{ .x = 140, .y = 40, .w = 60, .h = 80 },
         .{ .x = 0, .y = 120, .w = 40, .h = 80 },
-        .{ .x = 40, .y = 120, .w = 80, .h = 80 },
-        .{ .x = 120, .y = 120, .w = 80, .h = 80 },
+        .{ .x = 40, .y = 120, .w = 100, .h = 80 },
+        .{ .x = 140, .y = 120, .w = 60, .h = 80 },
     });
 }
 
@@ -409,7 +537,7 @@ test "main/test_fixtures/grid/grid_fr_span_2_proportion.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 60, .height = 80 });
+    try fixture.run(.{ .width = 60, .height = 80 });
 
     try expectFixture(&fixture, .{ .w = 60, .h = 80 }, &.{
         .{ .x = 0, .y = 0, .w = 60, .h = 40 },
@@ -438,7 +566,7 @@ test "main/test_fixtures/grid/grid_basic_implicit_tracks.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 40, .height = 75 });
+    try fixture.run(.{ .width = 40, .height = 75 });
 
     try expectFixture(&fixture, .{ .w = 40, .h = 75 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
@@ -461,7 +589,7 @@ test "main/test_fixtures/grid/grid_align_content_center.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 200, .height = 200 });
+    try fixture.run(.{ .width = 200, .height = 200 });
 
     try expectFixture(&fixture, .{ .w = 200, .h = 200 }, &.{
         .{ .x = 0, .y = 40, .w = 40, .h = 40 },
@@ -491,7 +619,7 @@ test "main/test_fixtures/grid/grid_align_content_end.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 200, .height = 200 });
+    try fixture.run(.{ .width = 200, .height = 200 });
 
     try expectFixture(&fixture, .{ .w = 200, .h = 200 }, &.{
         .{ .x = 0, .y = 80, .w = 40, .h = 40 },
@@ -521,7 +649,7 @@ test "main/test_fixtures/grid/grid_align_content_space_between.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 200, .height = 200 });
+    try fixture.run(.{ .width = 200, .height = 200 });
 
     try expectFixture(&fixture, .{ .w = 200, .h = 200 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
@@ -580,7 +708,7 @@ test "main/test_fixtures/grid/grid_align_items_sized_start.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 120, .height = 120 });
+    try fixture.run(.{ .width = 120, .height = 120 });
 
     try expectFixture(&fixture, .{ .w = 120, .h = 120 }, &.{
         .{ .x = 0, .y = 0, .w = 20, .h = 20 },
@@ -632,7 +760,7 @@ test "main/test_fixtures/grid/grid_justify_items_sized_start.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 120, .height = 120 });
+    try fixture.run(.{ .width = 120, .height = 120 });
 
     try expectFixture(&fixture, .{ .w = 120, .h = 120 }, &.{
         .{ .x = 0, .y = 0, .w = 20, .h = 20 },
@@ -657,7 +785,7 @@ test "main/test_fixtures/grid/grid_basic_with_padding.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 180, .height = 160 });
+    try fixture.run(.{ .width = 180, .height = 160 });
 
     try expectFixture(&fixture, .{ .w = 180, .h = 160 }, &.{
         .{ .x = 0, .y = 0, .w = 40, .h = 40 },
@@ -723,7 +851,7 @@ test "main/test_fixtures/grid/grid_absolute_container_left_right.html" {
 
     var fixture = try Fixture.init(grid_style, &child_styles);
     defer fixture.deinit();
-    fixture.run(.{ .width = 180, .height = 160 });
+    try fixture.run(.{ .width = 180, .height = 160 });
 
     try expectFixture(&fixture, .{ .w = 180, .h = 160 }, &.{
         .{ .x = 5, .y = 0, .w = 113, .h = 0 },

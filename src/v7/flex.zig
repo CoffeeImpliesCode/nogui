@@ -324,6 +324,56 @@ fn flexAxes(node: *const WidgetNode) FlexAxes {
         .cross_reverse = (effectiveWrap(node) == .wrap_reverse) != cross_inline_reverse,
     };
 }
+fn isTypedZero(value: style.LengthPercentage) bool {
+    return switch (value) {
+        .length => |number| number == 0,
+        .percent => false,
+    };
+}
+
+fn selectAxisGap(axis: style.LengthPercentage, generic: style.LengthPercentage) style.LengthPercentage {
+    return if (isTypedZero(axis)) generic else axis;
+}
+
+fn resolveGap(value: style.LengthPercentage, basis: ?f32) f32 {
+    return @max(0, value.resolve(basis) orelse 0);
+}
+
+fn flexMainGap(node: *const WidgetNode, basis: ?f32) f32 {
+    const value = if (directionIsColumn(node.style.direction))
+        selectAxisGap(node.style.row_gap, node.style.gap)
+    else
+        selectAxisGap(node.style.column_gap, node.style.gap);
+    return resolveGap(value, basis);
+}
+
+fn flexCrossGap(node: *const WidgetNode, basis: ?f32) f32 {
+    const value = if (directionIsColumn(node.style.direction))
+        selectAxisGap(node.style.column_gap, node.style.gap)
+    else
+        selectAxisGap(node.style.row_gap, node.style.gap);
+    return resolveGap(value, basis);
+}
+
+fn gridColumnGap(node: *const WidgetNode, basis: ?f32) f32 {
+    return resolveGap(
+        selectAxisGap(
+            node.style.grid_column_gap,
+            selectAxisGap(node.style.column_gap, node.style.gap),
+        ),
+        basis,
+    );
+}
+
+fn gridRowGap(node: *const WidgetNode, basis: ?f32) f32 {
+    return resolveGap(
+        selectAxisGap(
+            node.style.grid_row_gap,
+            selectAxisGap(node.style.row_gap, node.style.gap),
+        ),
+        basis,
+    );
+}
 
 fn effectiveMarginInset(
     value: style.LengthPercentageAuto,
@@ -1073,7 +1123,6 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         if (p.style.display == .block or p.style.display == .flow_root or p.style.display == .grid) return;
         const dir: Direction = p.style.direction;
         const main_is_column = directionIsColumn(dir);
-        const gap: f32 = p.style.gap;
         const justify = p.style.justify;
         const edges = legacyMathBoxEdges(p);
         const own_border_main = if (main_is_column)
@@ -1091,6 +1140,9 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
             .height = @max(0, p.rect.h - edges.border.top - edges.border.bottom -
                 edges.padding.top - edges.padding.bottom),
         };
+        const container_main = if (main_is_column) p.rect.h else p.rect.w;
+        const container_content_main = container_main - inset_main;
+        const gap = flexMainGap(p, container_content_main);
 
         const count = p.children.items.len;
         var mains = tree.allocator.alloc(f32, count) catch @panic("layout scratch allocation failed");
@@ -1132,8 +1184,6 @@ fn finalizeMainLegacy(tree: *WidgetTree, parent_id: Id, available: Size) void {
         if (flow_count > 1) content += gap * @as(f32, @floatFromInt(flow_count - 1));
 
         // Free space in the container's FINAL content box.
-        const container_main = if (main_is_column) p.rect.h else p.rect.w;
-        const container_content_main = container_main - inset_main;
         const free = container_content_main - content;
         const grew = free > 0 and total_grow > 0;
         const shrank = free < 0 and total_shrink > 0;
@@ -1503,7 +1553,6 @@ fn layoutAdvancedFlexContainer(
     const main_reverse = axes.main_reverse;
     const wrap = effectiveWrap(node);
     const cross_reverse = axes.cross_reverse;
-    const gap = @max(0, node.style.gap);
     const edges = legacyMathBoxEdges(node);
     const inset_cross = if (main_is_column)
         edges.border.left + edges.border.right + edges.padding.left + edges.padding.right
@@ -1517,6 +1566,8 @@ fn layoutAdvancedFlexContainer(
     };
     const available_main = if (main_is_column) content.height else content.width;
     var available_cross = if (main_is_column) content.width else content.height;
+    const main_gap = flexMainGap(node, available_main);
+    const cross_gap = flexCrossGap(node, available_cross);
 
     const child_count = node.children.items.len;
     var flow_indices = tree.allocator.alloc(usize, child_count) catch @panic("layout scratch allocation failed");
@@ -1591,8 +1642,8 @@ fn layoutAdvancedFlexContainer(
         }
         var line = &lines[line_count - 1];
         if (wrap != .nowrap and line.flow_count > 0 and
-            lineFitted(line.*, item_mains, main_leads, main_trails, gap) +
-                (if (line.flow_count > 0) gap else 0) + item_extent > available_main)
+            lineFitted(line.*, item_mains, main_leads, main_trails, main_gap) +
+                (if (line.flow_count > 0) main_gap else 0) + item_extent > available_main)
         {
             lines[line_count] = .{ .first_flow = flow_count, .flow_count = 0 };
             line_count += 1;
@@ -1618,7 +1669,7 @@ fn layoutAdvancedFlexContainer(
             lines[line_index],
             direction,
             available_main,
-            gap,
+            main_gap,
             flow_indices,
             item_mains,
             main_leads,
@@ -1629,7 +1680,7 @@ fn layoutAdvancedFlexContainer(
     var line_cross_total: f32 = 0;
     for (0..line_count) |line_index| {
         line_cross_total += lines[line_index].cross_size;
-        if (line_index + 1 < line_count) line_cross_total += gap;
+        if (line_index + 1 < line_count) line_cross_total += cross_gap;
     }
     const recompute_cross = shouldRecomputeAdvancedCross(tree, node, direction);
     if (recompute_cross and line_cross_total > available_cross) {
@@ -1654,10 +1705,10 @@ fn layoutAdvancedFlexContainer(
         signed_cross_free,
         line_count,
         cross_reverse,
-        gap,
+        cross_gap,
     );
     var line_offset = cross_distribution.offset;
-    const line_gap = gap + cross_distribution.extra_gap;
+    const line_gap = cross_gap + cross_distribution.extra_gap;
     if (cross_distribution.stretch > 0) {
         for (0..line_count) |line_index|
             lines[line_index].cross_size += cross_distribution.stretch;
@@ -1671,7 +1722,7 @@ fn layoutAdvancedFlexContainer(
             item_mains,
             main_leads,
             main_trails,
-            gap,
+            main_gap,
         );
         var main_free = @max(0, signed_main_free);
         var auto_main_count: usize = 0;
@@ -1766,7 +1817,7 @@ fn layoutAdvancedFlexContainer(
                     cross_position;
             }
             main_offset = main_position + item_mains[flow_index] + main_trails[flow_index] +
-                if (offset + 1 < line.flow_count) gap + extra_gap else 0;
+                if (offset + 1 < line.flow_count) main_gap + extra_gap else 0;
         }
         line_offset += line.cross_size + line_gap;
     }
@@ -2386,7 +2437,7 @@ fn placeContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) void {
     const axes = flexAxes(node);
     const main_reverse = axes.main_reverse;
     const cross_reverse = axes.cross_reverse;
-    const gap: f32 = node.style.gap;
+    const gap = flexMainGap(node, null);
     const justify = node.style.justify;
     const cross = node.style.@"align";
     const advanced = needsAdvancedFlex(tree, node);
@@ -3305,18 +3356,8 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
     for (0..column_count) |index| column_sizes[index] = gridTrackMin(columns[index], width_containing);
     for (0..row_count) |index| row_sizes[index] = gridTrackMin(rows[index], height_containing);
 
-    const intrinsic_column_gap = if (node.style.grid_column_gap != 0)
-        node.style.grid_column_gap
-    else if (node.style.column_gap != 0)
-        node.style.column_gap
-    else
-        node.style.gap;
-    const intrinsic_row_gap = if (node.style.grid_row_gap != 0)
-        node.style.grid_row_gap
-    else if (node.style.row_gap != 0)
-        node.style.row_gap
-    else
-        node.style.gap;
+    const intrinsic_column_gap = gridColumnGap(node, width_containing);
+    const intrinsic_row_gap = gridRowGap(node, height_containing);
     for (0..flow_count) |index| {
         const child = tree.node(flow_ids[index]) orelse continue;
         const margin = child.style.margin;
@@ -3360,18 +3401,8 @@ fn layoutGridContainer(tree: *WidgetTree, node: *WidgetNode, available: Size) vo
             row_sizes[index] = @min(row_sizes[index], maximum);
     }
 
-    const column_gap = @max(0, if (node.style.grid_column_gap != 0)
-        node.style.grid_column_gap
-    else if (node.style.column_gap != 0)
-        node.style.column_gap
-    else
-        node.style.gap);
-    const row_gap = @max(0, if (node.style.grid_row_gap != 0)
-        node.style.grid_row_gap
-    else if (node.style.row_gap != 0)
-        node.style.row_gap
-    else
-        node.style.gap);
+    const column_gap = gridColumnGap(node, width_containing);
+    const row_gap = gridRowGap(node, height_containing);
     const column_gap_total = if (column_count > 1)
         column_gap * @as(f32, @floatFromInt(column_count - 1))
     else
@@ -3565,11 +3596,11 @@ fn appendNode(tree: *WidgetTree, id: Id, parent: Id, kind: WidgetKind) !void {
     switch (kind) {
         .column => |container| {
             node.style.direction = .column;
-            node.style.gap = container.gap;
+            node.style.gap = .{ .length = container.gap };
         },
         .row => |container| {
             node.style.direction = .row;
-            node.style.gap = container.gap;
+            node.style.gap = .{ .length = container.gap };
         },
         .button => {
             node.style.direction = .row;
@@ -4569,7 +4600,7 @@ test "wrapped row forms lines and applies cross gap" {
     try appendNode(&tree, row, .root, .{ .row = .{} });
     try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap;
-    tree.node(row).?.style.gap = 10;
+    tree.node(row).?.style.gap = .{ .length = 10 };
     tree.node(row).?.style.size = .{
         .width = .{ .length = 70 },
         .height = .{ .length = 70 },
@@ -4619,7 +4650,7 @@ test "wrap reverse reverses the cross-axis line stack" {
     try appendNode(&tree, row, .root, .{ .row = .{} });
     try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap_reverse;
-    tree.node(row).?.style.gap = 10;
+    tree.node(row).?.style.gap = .{ .length = 10 };
     tree.node(row).?.style.size = .{
         .width = .{ .length = 70 },
         .height = .{ .length = 70 },
@@ -4743,7 +4774,7 @@ test "wrapped lines distribute grow independently" {
     try appendNode(&tree, row, .root, .{ .row = .{} });
     try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap;
-    tree.node(row).?.style.gap = 10;
+    tree.node(row).?.style.gap = .{ .length = 10 };
     tree.node(row).?.style.size = .{
         .width = .{ .length = 100 },
         .height = .{ .length = 100 },
@@ -4823,7 +4854,7 @@ test "wrapped flex excludes absolute children from line formation" {
     try appendNode(&tree, row, .root, .{ .row = .{} });
     try wireChildren(&tree);
     tree.node(row).?.style.wrap = .wrap;
-    tree.node(row).?.style.gap = 10;
+    tree.node(row).?.style.gap = .{ .length = 10 };
     tree.node(row).?.style.size = .{
         .width = .{ .length = 70 },
         .height = .{ .length = 40 },
@@ -4961,7 +4992,7 @@ test "grid gaps separate tracks without changing item border sizes" {
         },
         .grid_template_columns = columns[0..],
         .grid_template_rows = &[_]style.GridTrack{.{ .fixed = 10 }},
-        .grid_column_gap = 5,
+        .grid_column_gap = .{ .length = 5 },
     };
     layout(&tree, .{ .width = 60, .height = 40 });
     try testing.expectEqual(@as(f32, 20), tree.node(first).?.rect.w);
@@ -5234,4 +5265,132 @@ test "cross-axis aspect-ratio transfers cross constraints into main size" {
     layout(&tree, .{ .width = 300, .height = 60 });
 
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 120, .h = 60 }, tree.node(item).?.rect);
+}
+test "row percent-zero column gap overrides generic gap" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const row: Id = @enumFromInt(3);
+
+    try appendNode(&tree, first, row, .{ .label = .{ .text = "first" } });
+    try appendNode(&tree, second, row, .{ .label = .{ .text = "second" } });
+    try appendNode(&tree, row, .root, .{ .row = .{ .gap = 10 } });
+    try wireChildren(&tree);
+
+    const row_node = tree.node(row).?;
+    row_node.style.size = .{
+        .width = .{ .length = 40 },
+        .height = .{ .length = 20 },
+    };
+    row_node.style.gap = .{ .length = 10 };
+    row_node.style.column_gap = .{ .percent = 0 };
+    row_node.style.@"align" = .start;
+
+    for ([_]Id{ first, second }) |id| {
+        const child = tree.node(id).?;
+        child.style.size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 20 },
+        };
+        child.style.grow = 0;
+        child.style.shrink = 0;
+    }
+
+    layout(&tree, .{ .width = 40, .height = 20 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 20 }, row_node.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 20, .h = 20 }, tree.node(first).?.rect);
+    try testing.expectEqual(Rect{ .x = 20, .y = 0, .w = 20, .h = 20 }, tree.node(second).?.rect);
+}
+
+test "column percent-zero row gap overrides generic gap" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const column: Id = @enumFromInt(3);
+
+    try appendNode(&tree, first, column, .{ .label = .{ .text = "first" } });
+    try appendNode(&tree, second, column, .{ .label = .{ .text = "second" } });
+    try appendNode(&tree, column, .root, .{ .column = .{ .gap = 10 } });
+    try wireChildren(&tree);
+
+    const column_node = tree.node(column).?;
+    column_node.style.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 40 },
+    };
+    column_node.style.gap = .{ .length = 10 };
+    column_node.style.row_gap = .{ .percent = 0 };
+    column_node.style.@"align" = .start;
+
+    for ([_]Id{ first, second }) |id| {
+        const child = tree.node(id).?;
+        child.style.size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 20 },
+        };
+        child.style.grow = 0;
+        child.style.shrink = 0;
+    }
+
+    layout(&tree, .{ .width = 20, .height = 40 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 20, .h = 40 }, column_node.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 20, .h = 20 }, tree.node(first).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 20, .w = 20, .h = 20 }, tree.node(second).?.rect);
+}
+
+test "grid percent-zero axis gaps override generic gap" {
+    var tree = WidgetTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const first: Id = @enumFromInt(1);
+    const second: Id = @enumFromInt(2);
+    const third: Id = @enumFromInt(3);
+    const fourth: Id = @enumFromInt(4);
+    const grid: Id = @enumFromInt(5);
+    const columns = [_]widget.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
+    const rows = [_]widget.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
+
+    for ([_]Id{ first, second, third, fourth }) |id| {
+        try appendNode(&tree, id, grid, .{ .label = .{ .text = "item" } });
+    }
+    try appendNode(&tree, grid, .root, .{ .column = .{ .gap = 10 } });
+    try wireChildren(&tree);
+
+    const grid_node = tree.node(grid).?;
+    grid_node.style.display = .grid;
+    grid_node.style.size = .{
+        .width = .{ .length = 40 },
+        .height = .{ .length = 40 },
+    };
+    grid_node.style.gap = .{ .length = 10 };
+    grid_node.style.column_gap = .{ .percent = 0 };
+    grid_node.style.row_gap = .{ .percent = 0 };
+    grid_node.style.grid_template_columns = columns[0..];
+    grid_node.style.grid_template_rows = rows[0..];
+    grid_node.style.grid_justify_content = .start;
+    grid_node.style.grid_align_content = .start;
+    grid_node.style.grid_justify_items = .start;
+    grid_node.style.grid_align_items = .start;
+
+    for ([_]Id{ first, second, third, fourth }) |id| {
+        const child = tree.node(id).?;
+        child.style.size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 20 },
+        };
+    }
+
+    layout(&tree, .{ .width = 40, .height = 40 });
+
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 40 }, grid_node.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 20, .h = 20 }, tree.node(first).?.rect);
+    try testing.expectEqual(Rect{ .x = 20, .y = 0, .w = 20, .h = 20 }, tree.node(second).?.rect);
+    try testing.expectEqual(Rect{ .x = 0, .y = 20, .w = 20, .h = 20 }, tree.node(third).?.rect);
+    try testing.expectEqual(Rect{ .x = 20, .y = 20, .w = 20, .h = 20 }, tree.node(fourth).?.rect);
 }

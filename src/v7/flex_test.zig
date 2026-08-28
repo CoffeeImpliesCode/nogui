@@ -26,11 +26,11 @@ fn appendNode(tree: *WidgetTree, id: Id, parent: Id, kind: WidgetKind) !void {
     switch (kind) {
         .column => |container| {
             node.style.direction = .column;
-            node.style.gap = container.gap;
+            node.style.gap = .{ .length = container.gap };
         },
         .row => |container| {
             node.style.direction = .row;
-            node.style.gap = container.gap;
+            node.style.gap = .{ .length = container.gap };
         },
         .button => {
             node.style.direction = .row;

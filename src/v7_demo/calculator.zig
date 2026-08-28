@@ -94,7 +94,7 @@ pub const CalculatorApp = struct {
 
         pub const default_style: Style = .{
             .direction = .row,
-            .gap = 8,
+            .gap = .{ .length = 8 },
             .justify = .center,
             .@"align" = .center,
         };
@@ -152,7 +152,7 @@ pub const CalculatorApp = struct {
             }
         }
     };
-    pub const default_style: Style = .{ .direction = .column, .gap = 12 };
+    pub const default_style: Style = .{ .direction = .column, .gap = .{ .length = 12 } };
 
     // ── Interaction (also the unit-test surface) ──
     pub fn digit(self: *CalculatorApp, d: u8) void {

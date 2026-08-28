@@ -95,7 +95,7 @@ test "fixed block root forces auto-height flex width and keeps natural height" {
     var flex_style = autoStyle(.flex);
     flex_style.direction = .row;
     flex_style.@"align" = .start;
-    flex_style.gap = 5;
+    flex_style.gap = .{ .length = 5 };
     try appendNode(&tree, flex_id, root_id, flex_style, .{ .row = .{} });
     var root_style = fixedStyle(.flow_root, 120, 60);
     root_style.size.height = .auto;
@@ -190,7 +190,7 @@ test "fixed flex root uses auto grid tracks and gap as natural size" {
     var grid_style = autoStyle(.grid);
     grid_style.grid_template_columns = columns[0..];
     grid_style.grid_template_rows = rows[0..];
-    grid_style.grid_column_gap = 10;
+    grid_style.grid_column_gap = .{ .length = 10 };
     grid_style.grid_justify_items = .start;
     grid_style.grid_align_items = .start;
     try appendNode(&tree, grid_id, root_id, grid_style, .{ .column = .{} });
