@@ -1227,7 +1227,7 @@ test "DrawCtx: justify and align flow into the node's Style" {
     try std.testing.expectEqual(Justify.space_between, tree.node(jcol).?.style.justify);
     try std.testing.expectEqual(Align.center, tree.node(acol).?.style.@"align");
     // Defaults stay when the opts omit the fields.
-    try std.testing.expectEqual(Justify.start, tree.node(plain).?.style.justify);
+    try std.testing.expectEqual(Justify.normal, tree.node(plain).?.style.justify);
     try std.testing.expectEqual(Align.stretch, tree.node(plain).?.style.@"align");
 }
 

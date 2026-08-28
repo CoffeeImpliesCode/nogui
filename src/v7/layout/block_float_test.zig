@@ -102,7 +102,7 @@ test "flow root clears a left float before the following block" {
     try expectRelative(&tree, clear_id, .{ .x = 0, .y = 20, .w = 40, .h = 10 });
 }
 
-test "absolute child uses containing content box without advancing block flow" {
+test "absolute child uses containing padding box without advancing block flow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -151,10 +151,10 @@ test "absolute child uses containing content box without advancing block flow" {
 
     try layoutContainer(&tree, root_id, 100, 30);
 
-    try expectRelative(&tree, absolute_id, .{ .x = 7, .y = 9, .w = 10, .h = 8 });
+    try expectRelative(&tree, absolute_id, .{ .x = 2, .y = 5, .w = 10, .h = 8 });
     try expectRelative(&tree, normal_id, .{ .x = 0, .y = 0, .w = 20, .h = 6 });
     try expectRect(
-        .{ .x = 15, .y = 15, .w = 10, .h = 8 },
+        .{ .x = 10, .y = 11, .w = 10, .h = 8 },
         widget.absoluteRect(&tree, absolute_id),
     );
 }

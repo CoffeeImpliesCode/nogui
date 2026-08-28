@@ -116,7 +116,7 @@ test "measureNatural scopes intrinsic height to auto-sized flex container" {
     try expectSize(.{ .width = 20, .height = 100 }, measured.border);
 }
 
-test "measureNatural rejects percentage margins below intrinsic auto width" {
+test "measureNatural defers percentage margins below intrinsic auto width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -141,17 +141,17 @@ test "measureNatural rejects percentage margins below intrinsic auto width" {
         .layout_node = unreachableLayoutNode,
     };
     const outer = tree.nodeConst(outer_id).?;
-    try std.testing.expectError(
-        error.InvalidStyle,
-        flex.measureNatural(
-            &tree,
-            outer,
-            .{
-                .available = .{ .width = 100, .height = 10 },
-                .percentage_basis = .{ .width = 200, .height = 10 },
-                .intrinsic_width = true,
-            },
-            &context,
-        ),
+    const measured = try flex.measureNatural(
+        &tree,
+        outer,
+        .{
+            .available = .{ .width = 100, .height = 10 },
+            .percentage_basis = .{ .width = 200, .height = 10 },
+            .intrinsic_width = true,
+        },
+        &context,
     );
+
+    try expectSize(.{ .width = 10, .height = 10 }, measured.content);
+    try expectSize(.{ .width = 10, .height = 10 }, measured.border);
 }
