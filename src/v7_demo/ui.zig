@@ -29,7 +29,6 @@ const App = nogui.App;
 const Id = nogui.Id;
 const Event = nogui.Event;
 const MandelbrotComponent = @import("mandelbrot_component.zig").MandelbrotComponent;
-const layout = nogui.flex;
 
 /// The demo texture's bindless heap index, set by the window backend after
 /// it creates + registers the procedural texture (the demo UI cannot touch
@@ -107,7 +106,7 @@ pub const TigerApp = struct {
                     _ = try ctx.row(.{});
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
-                        .basis = 480,
+                        .flex_basis = 480,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = c_border,
@@ -126,7 +125,7 @@ pub const TigerApp = struct {
                     defer ctx.pop();
                     _ = try ctx.column(.{
                         .texture = tiger_ref_idx,
-                        .basis = 480,
+                        .flex_basis = 480,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
@@ -173,7 +172,7 @@ pub const TestStrokesApp = struct {
                     _ = try ctx.row(.{});
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
-                        .basis = 620,
+                        .flex_basis = 620,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = c_border,
@@ -260,7 +259,12 @@ const PaddedLabel = struct {
         .gap = .{ .length = 0 },
         .justify = .start,
         .@"align" = .stretch,
-        .padding = .{ .left = 6, .right = 6 },
+        .padding_inset = .{
+            .top = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 6 },
+            .right = .{ .length = 6 },
+        },
     };
 
     pub fn draw(self: *Self, ctx: *DrawCtx) !void {
@@ -289,7 +293,12 @@ const ShowcaseLabel = struct {
         .gap = .{ .length = 0 },
         .justify = .start,
         .@"align" = .stretch,
-        .padding = .{ .left = 6, .right = 6 },
+        .padding_inset = .{
+            .top = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 6 },
+            .right = .{ .length = 6 },
+        },
     };
 
     pub fn draw(self: *Self, ctx: *DrawCtx) !void {
@@ -321,8 +330,18 @@ const Card = struct {
     pub const default_style: Style = .{
         .direction = .column,
         .gap = .{ .length = 8 },
-        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
+        .border_inset = .{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 1 },
+            .bottom = .{ .length = 1 },
+            .left = .{ .length = 1 },
+        },
+        .padding_inset = .{
+            .top = .{ .length = 12 },
+            .right = .{ .length = 12 },
+            .bottom = .{ .length = 12 },
+            .left = .{ .length = 12 },
+        },
     };
     pub const default_paint: PaintStyle = .{
         .border_color = c_border,
@@ -337,8 +356,18 @@ const GhostButton = struct {
         .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
-        .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
-        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .padding_inset = .{
+            .left = .{ .length = 12 },
+            .right = .{ .length = 12 },
+            .top = .{ .length = 5 },
+            .bottom = .{ .length = 5 },
+        },
+        .border_inset = .{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 1 },
+            .bottom = .{ .length = 1 },
+            .left = .{ .length = 1 },
+        },
     };
     pub const default_paint: PaintStyle = .{
         .border_color = c_border_strong,
@@ -354,8 +383,18 @@ const PrimaryButton = struct {
         .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
-        .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 5 },
-        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .padding_inset = .{
+            .left = .{ .length = 12 },
+            .right = .{ .length = 12 },
+            .top = .{ .length = 5 },
+            .bottom = .{ .length = 5 },
+        },
+        .border_inset = .{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 1 },
+            .bottom = .{ .length = 1 },
+            .left = .{ .length = 1 },
+        },
     };
     pub const default_paint: PaintStyle = .{
         .border_color = c_accent,
@@ -371,7 +410,12 @@ const ActivePill = struct {
         .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
-        .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
+        .padding_inset = .{
+            .top = .{ .length = 3 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 3 },
+            .left = .{ .length = 10 },
+        },
     };
     pub const default_paint: PaintStyle = .{
         .radius = .{ .top = 9, .right = 9, .bottom = 9, .left = 9 },
@@ -386,8 +430,18 @@ const InactivePill = struct {
         .gap = .{ .length = 0 },
         .justify = .center,
         .@"align" = .center,
-        .padding = .{ .top = 3, .right = 10, .bottom = 3, .left = 10 },
-        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
+        .padding_inset = .{
+            .top = .{ .length = 3 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 3 },
+            .left = .{ .length = 10 },
+        },
+        .border_inset = .{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 1 },
+            .bottom = .{ .length = 1 },
+            .left = .{ .length = 1 },
+        },
     };
     pub const default_paint: PaintStyle = .{
         .border_color = c_border,
@@ -456,10 +510,10 @@ fn card(comptime grow: bool, ctx: *DrawCtx, clip: bool) !Id {
         .gap = style.gap,
         .grow = if (grow) 1 else 0,
         .clip = clip,
-        .border = style.border,
+        .border = style.border_inset,
         .border_color = paint.border_color,
         .radius = paint.radius,
-        .padding = style.padding,
+        .padding = style.padding_inset,
         .shadow = paint.shadow,
     });
 }
@@ -478,8 +532,8 @@ fn btn(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
         .gap = style.gap,
         .justify = style.justify,
         .@"align" = style.@"align",
-        .padding = style.padding,
-        .border = style.border,
+        .padding = style.padding_inset,
+        .border = style.border_inset,
         .border_color = paint.border_color,
         .radius = paint.radius,
         .fill = paint.fill,
@@ -503,8 +557,8 @@ fn btnPrimary(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
         .gap = style.gap,
         .justify = style.justify,
         .@"align" = style.@"align",
-        .padding = style.padding,
-        .border = style.border,
+        .padding = style.padding_inset,
+        .border = style.border_inset,
         .border_color = paint.border_color,
         .radius = paint.radius,
         .fill = paint.fill,
@@ -526,7 +580,7 @@ fn pill(ctx: *DrawCtx, text: []const u8, on: bool, on_click: anytype) !Id {
             .gap = style.gap,
             .justify = style.justify,
             .@"align" = style.@"align",
-            .padding = style.padding,
+            .padding = style.padding_inset,
             .radius = paint.radius,
             .fill = paint.fill,
             .gradient = paint.gradient,
@@ -542,8 +596,8 @@ fn pill(ctx: *DrawCtx, text: []const u8, on: bool, on_click: anytype) !Id {
         .gap = style.gap,
         .justify = style.justify,
         .@"align" = style.@"align",
-        .padding = style.padding,
-        .border = style.border,
+        .padding = style.padding_inset,
+        .border = style.border_inset,
         .border_color = paint.border_color,
         .radius = paint.radius,
         .fill = paint.fill,
@@ -604,7 +658,12 @@ const Showcase = struct {
         .gap = .{ .length = 10 },
         .justify = .space_between,
         .@"align" = .center,
-        .padding = .{ .left = 12, .right = 12 },
+        .padding_inset = .{
+            .top = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 12 },
+            .right = .{ .length = 12 },
+        },
     };
 
     pub fn draw(self: *Showcase, ctx: *DrawCtx) !void {
@@ -670,24 +729,24 @@ pub const TodoApp = struct {
         // z=0 drawable regardless of the bag position, so the badge paints
         // over the title/header below it (the layout overlap is real: the
         // badge's rect covers the showcase's pad label and the header's
-        // title). Layout sleight: basis 44 pins the badge's height and the
+        // title). Layout sleight: flex basis 44 pins the badge's height and the
         // negative bottom margin cancels it exactly (the next root node
         // advances by zero), so the tree below lays out byte-identically
         // to the pre-layer shot and ONLY the badge region differs.
         _ = try ctx.column(.{
             .gap = 0,
             .layer = 1,
-            .basis = 44,
+            .flex_basis = 44,
             .box_sizing = .border_box,
             // shrink 0: the demo tree overflows the 1160px surface, so the
-            // overflow shrink pass would otherwise crush the 44px basis and
+            // overflow shrink pass would otherwise crush the 44px flex basis and
             // break the -44 bottom-margin cancellation below.
             .shrink = 0,
             .margin = .{ .left = 20, .bottom = -44, .right = 880 }, // 200px chip, top-left of the 1100px surface
-            .border = badge_style.border,
+            .border = badge_style.border_inset,
             .border_color = badge_paint.border_color,
             .radius = badge_paint.radius,
-            .padding = badge_style.padding,
+            .padding = badge_style.padding_inset,
             .fill = c_accent_dim,
             .gradient = srgbToOklab(c_accent_dim),
             .shadow = badge_paint.shadow,
@@ -912,7 +971,7 @@ pub const TodoApp = struct {
                     _ = try ctx.row(.{ .direction = .row });
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
-                        .basis = 190, // fixed width — the same height as the mandelbrot's box
+                        .flex_basis = 190, // fixed width — the same height as the mandelbrot's box
                         .gap = 0,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
@@ -1034,7 +1093,7 @@ fn freeTree() void {
     test_arena = null;
 }
 
-// The badge's exact-cancellation invariant: basis 44 + the -44 bottom
+// The badge's exact-cancellation invariant: flex basis 44 + the -44 bottom
 // margin pin the badge to y=0..44 AND advance the next root node by zero,
 // so the tree below lays out byte-identically to a shot without the badge
 // (the runShot's diff is confined to the badge region).
@@ -1057,18 +1116,22 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
     }
     try std.testing.expect(caption_has_layer);
 
-    // Layout: the badge is a 44px (basis) x 200px (20 + 880 margins on the
+    // Layout: the badge is a 44px (flex basis) x 200px (20 + 880 margins on the
     // 1100px surface) chip at y=0; its -44 bottom margin cancels the
     // advance exactly, so the Showcase row starts at y=0 and the root
     // column follows it directly — no badge-induced offset anywhere.
     const Rect = nogui.Rect;
     const Size = nogui.Size;
     const fakeMeasure = struct {
-        fn f(_: []const u8, _: f32, _: u8) Size {
+        fn f(_: []const u8, _: nogui.layout.MeasureInput) Size {
             return .{ .width = 40, .height = 24 };
         }
     }.f;
-    layout.layoutWith(&tree, .{ .width = 1100, .height = 1160 }, fakeMeasure);
+    try nogui.layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 1100, .height = 1160 },
+        .measure = fakeMeasure,
+    });
 
     try std.testing.expectEqual(Rect{ .x = 20, .y = 0, .w = 200, .h = 44 }, badge_col.rect);
     try std.testing.expectEqual(@as(f32, 0), roots_buf[1].rect.y); // Showcase row, unchanged

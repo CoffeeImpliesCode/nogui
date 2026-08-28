@@ -201,8 +201,18 @@ test "mixed border boxes stay parent-content-relative" {
     var flex_style = fixedStyle(.flex, 30, 20);
     flex_style.direction = .row;
     flex_style.@"align" = .start;
-    flex_style.border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 };
-    flex_style.padding = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 };
+    flex_style.border_inset = .{
+        .top = .{ .length = 1 },
+        .right = .{ .length = 1 },
+        .bottom = .{ .length = 1 },
+        .left = .{ .length = 1 },
+    };
+    flex_style.padding_inset = .{
+        .top = .{ .length = 2 },
+        .right = .{ .length = 2 },
+        .bottom = .{ .length = 2 },
+        .left = .{ .length = 2 },
+    };
     try tree.appendNode(.{
         .id = flex_id,
         .kind = .{ .row = .{} },
@@ -210,8 +220,18 @@ test "mixed border boxes stay parent-content-relative" {
         .style = flex_style,
     });
     var root_style = fixedStyle(.flow_root, 60, 40);
-    root_style.border = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 };
-    root_style.padding = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
+    root_style.border_inset = .{
+        .top = .{ .length = 2 },
+        .right = .{ .length = 2 },
+        .bottom = .{ .length = 2 },
+        .left = .{ .length = 2 },
+    };
+    root_style.padding_inset = .{
+        .top = .{ .length = 3 },
+        .right = .{ .length = 3 },
+        .bottom = .{ .length = 3 },
+        .left = .{ .length = 3 },
+    };
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },

@@ -2,8 +2,7 @@
 //!
 //! The direct dispatcher tests exercise the natural-measurement bridge and the
 //! forced border passed back into the selected layout engine. The facade test
-//! verifies that the public root chooses this path instead of its legacy
-//! fallback.
+//! verifies that the public root routes through this dispatcher path.
 
 const std = @import("std");
 const Id = @import("../id.zig").Id;
@@ -88,8 +87,7 @@ test "dispatcher gives an auto-height mixed flex root its natural grid height" {
     var grid_style = autoStyle(.grid);
     grid_style.grid_template_columns = columns[0..];
     grid_style.grid_template_rows = rows[0..];
-    grid_style.grid_row_gap = .{ .length = 4 };
-    grid_style.grid_justify_content = .start;
+    grid_style.row_gap = .{ .length = 4 };
     grid_style.grid_align_content = .start;
     grid_style.grid_justify_items = .start;
     grid_style.grid_align_items = .start;

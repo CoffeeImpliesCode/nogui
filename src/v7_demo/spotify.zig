@@ -6,7 +6,6 @@ const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
 const widget = nogui.widget;
 const WidgetTree = widget.WidgetTree;
-const flex = nogui.flex;
 const headless = nogui.headless;
 const measure_cpu = @import("measure_cpu.zig");
 const theme = @import("spotify_theme.zig");
@@ -280,21 +279,22 @@ pub const SpotifyApp = struct {
         const spec = spotify_layout.forSurface(ctx.surface);
         const workspace_tracks = [_]widget.ColumnTrack{
             .{
-                .basis = spec.sidebar_width,
+                .flex_basis = .{ .length = spec.sidebar_width },
                 .grow = 0,
                 .shrink = 0,
-                .min_main = spec.sidebar_width,
+                .min_width = .{ .length = spec.sidebar_width },
             },
             .{
+                .flex_basis = .{ .length = 0 },
                 .grow = 1,
                 .shrink = 1,
-                .min_main = 360,
+                .min_width = .{ .length = 360 },
             },
             .{
-                .basis = spec.now_playing_width,
+                .flex_basis = .{ .length = spec.now_playing_width },
                 .grow = 0,
                 .shrink = 0,
-                .min_main = if (spec.show_now_playing) 220 else 0,
+                .min_width = .{ .length = if (spec.show_now_playing) 220 else 0 },
             },
         };
         const workspace_columns: widget.SharedColumns = .{
@@ -319,7 +319,7 @@ pub const SpotifyApp = struct {
                 .gap = 8,
                 .grow = 1,
                 .shrink = 1,
-                .min_main = 0,
+                .min_height = 0,
                 .clip = true,
             });
             defer ctx.pop();
@@ -329,10 +329,10 @@ pub const SpotifyApp = struct {
 
             if (spec.show_now_playing) {
                 _ = try ctx.row(.{
-                    .basis = spec.now_playing_width,
+                    .flex_basis = spec.now_playing_width,
                     .grow = 0,
                     .shrink = 0,
-                    .min_main = spec.now_playing_width,
+                    .min_width = spec.now_playing_width,
                     .box_sizing = .border_box,
                     .clip = true,
                 });
@@ -400,7 +400,11 @@ fn verifySpotifyLayout(surface: widget.Size, expect_center_priority: bool) !void
     var app: SpotifyApp = .{};
     try app.draw(&ctx);
 
-    flex.layoutWith(&tree, surface, measure_cpu.measure);
+    try nogui.layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = surface,
+        .measure = measure_cpu.measure,
+    });
     const report = try headless.verifyLayout(
         std.testing.allocator,
         &tree,
@@ -462,7 +466,11 @@ test "Spotify compact generated sidebar labels use the final button width" {
 
     var app: SpotifyApp = .{};
     try app.draw(&ctx);
-    flex.layoutWith(&tree, surface, measure_cpu.measure);
+    try nogui.layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = surface,
+        .measure = measure_cpu.measure,
+    });
 
     // Compact sidebar buttons give each generated label a 36 px minimum.
     // The final main pass must recalculate centering after that minimum applies.
@@ -485,7 +493,7 @@ test "Spotify compact generated sidebar labels use the final button width" {
     try std.testing.expectEqual(@as(usize, 10), compact_label_count);
 }
 
-test "Spotify seek slider keeps legacy minimum on its parent axis" {
+test "Spotify seek slider keeps minimum on its parent axis" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
@@ -498,7 +506,11 @@ test "Spotify seek slider keeps legacy minimum on its parent axis" {
 
     var app: SpotifyApp = .{};
     try app.draw(&ctx);
-    flex.layout(&tree, .{ .width = 1100, .height = 1160 });
+    try nogui.layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = .{ .width = 1100, .height = 1160 },
+        .measure = null,
+    });
 
     var seek: ?*const widget.WidgetNode = null;
     for (tree.nodes.items) |*node| {
@@ -513,9 +525,14 @@ test "Spotify seek slider keeps legacy minimum on its parent axis" {
         }
     }
     const seek_node = seek orelse return error.SeekSliderNotFound;
-    try std.testing.expectEqual(@as(f32, 100), seek_node.style.basis);
-    try std.testing.expectEqual(@as(?f32, 100), seek_node.style.min_main);
-    try std.testing.expectEqual(@as(?f32, null), seek_node.resolved_constraints.min_height);
+    try std.testing.expect(std.meta.eql(
+        @as(nogui.Dimension, .{ .length = 100 }),
+        seek_node.style.flex_basis,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(nogui.Dimension, .{ .length = 100 }),
+        seek_node.style.min_size.width,
+    ));
     try std.testing.expect(seek_node.rect.h < 100);
     try std.testing.expect(seek_node.rect.w >= 100);
 }
@@ -564,7 +581,11 @@ test "SpotifyApp generated album label stays inside its button at 1100x1160" {
 
     var app: SpotifyApp = .{};
     try app.draw(&ctx);
-    flex.layoutWith(&tree, surface, measure_cpu.measure);
+    try nogui.layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = surface,
+        .measure = measure_cpu.measure,
+    });
 
     const expected_text = "Hurry Up, We're Dreaming";
     var generated_label: ?*const widget.WidgetNode = null;

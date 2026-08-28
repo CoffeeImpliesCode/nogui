@@ -5,7 +5,7 @@
 //! component) and a single ArenaAllocator reused across frames. Every frame
 //! resets the arena at its START, builds a FRESH WidgetTree + DrawCtx from
 //! the arena (never reuse a tree across a reset — see drawctx.zig), draws
-//! the root component, runs flex layout at 800x600, and serializes the tree
+//! the root component, runs canonical layout, and serializes the tree
 //! to JSON (gpa-allocated, outlives the frame). Because the reset happens at
 //! the start of the *next* frame, the previous frame's tree stays valid
 //! until then — FrameOutput.tree documents this lifetime, and it is the
@@ -20,11 +20,11 @@ const ComponentEntry = @import("component.zig").ComponentEntry;
 const ComponentRegistry = @import("component.zig").ComponentRegistry;
 const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
 const GpuFrame = @import("runtime.zig").GpuFrame;
-const WidgetTree = @import("widget.zig").WidgetTree;
-const Size = @import("widget.zig").Size;
+const widget = @import("widget.zig");
+const WidgetTree = widget.WidgetTree;
+const Size = widget.Size;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
 const ScrollState = @import("widget.zig").ScrollState;
-const flex = @import("flex.zig");
 const layout = @import("layout/root.zig");
 const Event = @import("event.zig").Event;
 const KeyEvent = @import("event.zig").KeyEvent;
@@ -59,10 +59,10 @@ pub const App = struct {
     current: u32 = 0,
     /// The most recently built tree (in arenas[current]).
     tree_ptr: ?*WidgetTree = null,
-    /// Optional host text measurer for flex (e.g. demo-side FreeType
-    /// advances). Null keeps the baked approximation. Pure pointer: the
-    /// v7 core never calls into the host otherwise.
-    measure: ?flex.MeasureFn = null,
+    /// Optional host text measurer for the canonical layout dispatcher
+    /// (for example, demo-side FreeType advances). Null disables host text
+    /// measurement; the v7 core otherwise has no host callback.
+    measure: ?layout.MeasureFn = null,
     /// The previous frame's state directory — pointers into the arena that
     /// is NOT being rebuilt this frame, so they stay valid while the new
     /// frame builds. state() seeds from these. Swapped to the new frame's
@@ -196,7 +196,7 @@ pub const App = struct {
 
     /// Run one frame: swap to the other arena, build a fresh tree + DrawCtx
     /// with `component_id` = the registered root (id 1), draw the root
-    /// component, flex-layout at 800x600, serialize to JSON.
+    /// component, lays out for the current surface, and serializes to JSON.
     ///
     /// Double-buffer lifetime: the returned FrameOutput.tree lives in
     /// arenas[1-current] and stays valid until the frame AFTER next (its
@@ -587,7 +587,11 @@ pub const App = struct {
         // pointer register() stored, so click dispatch targets it too.
         try root_component.vtable.draw(root, &ctx);
 
-        try layout.layoutTree(tree, .{ .allocator = arena_alloc, .available = surface, .measure = self.measure });
+        try layout.layoutTree(tree, .{
+            .allocator = arena_alloc,
+            .available = surface,
+            .measure = self.measure,
+        });
         defer self.unmountStaleGpuComponents();
         if (gpu_frame) |active_gpu_frame| {
             try self.dispatchGpuFrame(active_gpu_frame);
@@ -945,33 +949,47 @@ test "App: driver — hover, click and slider drag through handle()" {
     const out1 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
-    // The layout: column at (0,0,200,?): slider (h 20) then button (h 32).
-    // Hover the button center: (20, 36) -> out.hover = the button id.
-    _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = 20, .y = 36 } });
+    const button_id = firstButton(out1.tree).?;
+    const button_rect = widget.absoluteRect(out1.tree, button_id);
+    try std.testing.expect(button_rect.w > 0);
+    try std.testing.expect(button_rect.h > 0);
+    const button_x = button_rect.x + button_rect.w * 0.1;
+    const button_y = button_rect.y + button_rect.h / 2;
+
+    _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = button_x, .y = button_y } });
     const out2 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    const button_id = blk: {
-        for (out2.tree.nodes.items) |*n| {
-            if (n.kind == .button) break :blk n.id;
+    try std.testing.expectEqual(button_id, out2.hover.?);
+
+    // Click the button through the current laid-out hit box.
+    _ = try app.handle(Widgets, &widgets, .{ .mouse_down = .{ .button = .left, .x = button_x, .y = button_y } });
+    _ = try app.handle(Widgets, &widgets, .{ .mouse_up = .{ .button = .left, .x = button_x, .y = button_y } });
+    try std.testing.expectEqual(@as(u32, 1), widgets.clicks);
+
+    const slider_id = blk: {
+        for (out1.tree.nodes.items) |*node| {
+            if (node.kind == .slider) break :blk node.id;
         }
         unreachable;
     };
-    try std.testing.expectEqual(button_id, out2.hover.?);
+    const slider_rect = widget.absoluteRect(out1.tree, slider_id);
+    try std.testing.expect(slider_rect.w > 0);
+    try std.testing.expect(slider_rect.h > 0);
+    const slider_y = slider_rect.y + slider_rect.h / 2;
+    const slider_start_x = slider_rect.x + slider_rect.w * 0.05;
+    const slider_value_x = slider_rect.x + slider_rect.w * 0.3;
 
-    // Click the button: dispatch happens against the presented tree.
-    _ = try app.handle(Widgets, &widgets, .{ .mouse_down = .{ .button = .left, .x = 20, .y = 36 } });
-    _ = try app.handle(Widgets, &widgets, .{ .mouse_up = .{ .button = .left, .x = 20, .y = 36 } });
-    try std.testing.expectEqual(@as(u32, 1), widgets.clicks);
-
-    // Drag the slider: down on the track (10, 10) -> drag starts; move to
-    // (60, 10) -> value = 0.5 * 60/100... the slider is stretched to the
-    // column width 200: t = 50/200 = 0.25.
-    _ = try app.handle(Widgets, &widgets, .{ .mouse_down = .{ .button = .left, .x = 10, .y = 10 } });
-    _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = 60, .y = 10 } });
-    try std.testing.expectEqual(@as(f32, 0.3), widgets.volume); // 60/200
-    _ = try app.handle(Widgets, &widgets, .{ .mouse_up = .{ .button = .left, .x = 60, .y = 10 } });
+    _ = try app.handle(Widgets, &widgets, .{ .mouse_down = .{ .button = .left, .x = slider_start_x, .y = slider_y } });
+    _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = slider_value_x, .y = slider_y } });
+    try std.testing.expectEqual(@as(f32, 0.3), widgets.volume);
+    _ = try app.handle(Widgets, &widgets, .{ .mouse_up = .{ .button = .left, .x = slider_value_x, .y = slider_y } });
     // The drag ended: further moves do nothing.
-    _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = 180, .y = 10 } });
+    _ = try app.handle(Widgets, &widgets, .{
+        .mouse_move = .{
+            .x = slider_rect.x + slider_rect.w * 0.9,
+            .y = slider_y,
+        },
+    });
     try std.testing.expectEqual(@as(f32, 0.3), widgets.volume);
 }
 test "App: mouse wheel scrolls the nearest ancestor and clamps offset" {
@@ -982,7 +1000,7 @@ test "App: mouse wheel scrolls the nearest ancestor and clamps offset" {
 
         pub fn draw(self: *Self, ctx: *DrawCtx) !void {
             _ = try ctx.column(.{
-                .basis = 100,
+                .flex_basis = 100,
                 .scroll_state = &self.state,
                 .scroll_axis = .vertical,
             });
@@ -1304,12 +1322,14 @@ test "App: mouse_leave clears pressed and drag_slider without a mouse_up" {
     const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
-    // Press the button (layout: slider h 20 at y 0..20, button h 20 at
-    // y 20..40 — hit at (5, 30)).
-    _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = 5, .y = 30 } });
+    const button_id = firstButton(out1.tree).?;
+    const button_rect = widget.absoluteRect(out1.tree, button_id);
+    const button_x = button_rect.x + button_rect.w * 0.1;
+    const button_y = button_rect.y + button_rect.h / 2;
+    _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = button_x, .y = button_y } });
     const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expect(out2.pressed != null);
+    try std.testing.expectEqual(button_id, out2.pressed.?);
 
     // The pointer leaves the window with the button still held; no mouse_up
     // ever arrives (Alt-Tab, WM grab, release outside). pressed clears.
@@ -1318,13 +1338,22 @@ test "App: mouse_leave clears pressed and drag_slider without a mouse_up" {
     defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?Id, null), out3.pressed);
 
-    // Same for a slider drag: leaving the window ends the drag, and a
-    // later move must not keep moving the value.
-    _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = 10, .y = 10 } });
-    _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = 60, .y = 10 } });
-    try std.testing.expectEqual(@as(f32, 0.3), comp.volume); // 60/200
+    const slider_id = blk: {
+        for (out3.tree.nodes.items) |*node| {
+            if (node.kind == .slider) break :blk node.id;
+        }
+        unreachable;
+    };
+    const slider_rect = widget.absoluteRect(out3.tree, slider_id);
+    const slider_y = slider_rect.y + slider_rect.h / 2;
+    const slider_value_x = slider_rect.x + slider_rect.w * 0.3;
+
+    // Leaving the window also ends an active slider drag.
+    _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = slider_value_x, .y = slider_y } });
+    _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = slider_value_x, .y = slider_y } });
+    try std.testing.expectEqual(@as(f32, 0.3), comp.volume);
     _ = try app.handle(Comp, &comp, .{ .mouse_leave = {} });
-    _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = 180, .y = 10 } });
+    _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = slider_rect.x + slider_rect.w * 0.9, .y = slider_y } });
     try std.testing.expectEqual(@as(f32, 0.3), comp.volume);
 }
 

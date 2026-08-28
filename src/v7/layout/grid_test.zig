@@ -25,7 +25,7 @@ fn unreachableLayoutNode(
     _: *layout_context.LayoutContext,
     _: *WidgetTree,
     _: *widget.WidgetNode,
-    _: layout_context.Request,
+    _: layout_context.LayoutRequest,
 ) layout_context.LayoutError!void {
     unreachable;
 }
@@ -115,7 +115,7 @@ fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
     try expectRect(expected, tree.nodeConst(id).?.rect);
 }
 
-fn measureLabel(text: []const u8, _: f32, _: u8) widget.Size {
+fn measureLabel(text: []const u8, _: layout_context.MeasureInput) widget.Size {
     if (std.mem.eql(u8, text, "intrinsic")) {
         return .{ .width = 30, .height = 12 };
     }
@@ -139,8 +139,8 @@ test "grid fixed two by two tracks preserve gaps" {
     try appendLeaf(&tree, third_id, container_id, leafStyle(), .{ .spacer = .{} });
     try appendLeaf(&tree, fourth_id, container_id, leafStyle(), .{ .spacer = .{} });
     var container = fixedContainer(75, 33, columns[0..], rows[0..]);
-    container.grid_column_gap = .{ .length = 5 };
-    container.grid_row_gap = .{ .length = 3 };
+    container.column_gap = .{ .length = 5 };
+    container.row_gap = .{ .length = 3 };
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
     try tree.appendChild(container_id, second_id);
@@ -271,7 +271,7 @@ test "nested auto-sized grid includes track gaps in intrinsic size" {
     try appendLeaf(&tree, second_id, nested_id, leafStyle(), .{ .spacer = .{} });
     var nested = fixedContainer(0, 0, nested_columns[0..], nested_rows[0..]);
     nested.size = .{ .width = .auto, .height = .auto };
-    nested.grid_column_gap = .{ .length = 10 };
+    nested.column_gap = .{ .length = 10 };
     nested.grid_align_self = .start;
     try appendContainer(&tree, nested_id, outer_id, nested);
     var outer = fixedContainer(100, 20, outer_columns[0..], outer_rows[0..]);
@@ -295,13 +295,14 @@ test "grid auto placement grows more than thirty two implicit tracks" {
     const item_count: usize = 40;
     const columns = [_]style.GridTrack{.{ .fixed = 10 }};
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
+    const auto_columns = [_]style.GridTrack{.{ .fixed = 10 }};
 
     for (0..item_count) |index| {
         const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
         try appendLeaf(&tree, id, container_id, spacerStyle(), .{ .spacer = .{ .size = 10 } });
     }
     var container = fixedContainer(400, 10, columns[0..], rows[0..]);
-    container.grid_auto_columns = .{ .fixed = 10 };
+    container.grid_auto_columns = auto_columns[0..];
     container.grid_auto_flow = .column;
     try appendContainer(&tree, container_id, .root, container);
     for (0..item_count) |index| {
@@ -466,7 +467,6 @@ test "grid absolute insets and nested scroll geometry remain relative" {
     try tree.appendChild(inner_id, absolute_id);
 
     var outer = fixedContainer(140, 100, outer_columns[0..], outer_rows[0..]);
-    outer.padding = .{ .top = 8, .right = 10, .bottom = 8, .left = 10 };
     outer.padding_inset = .{
         .top = .{ .length = 8 },
         .right = .{ .length = 10 },
@@ -572,7 +572,7 @@ test "grid indefinite fr track sizing scales proportionally to max fr contributi
 
     var container = fixedContainer(0, 0, columns[0..], rows[0..]);
     container.size = .{ .width = .auto, .height = .auto };
-    container.grid_column_gap = .{ .length = 10 };
+    container.column_gap = .{ .length = 10 };
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
     try tree.appendChild(container_id, second_id);
@@ -616,7 +616,7 @@ test "grid multi-track span includes track gaps when comparing item size" {
 
     var container = fixedContainer(0, 0, columns[0..], rows[0..]);
     container.size = .{ .width = .auto, .height = .auto };
-    container.grid_column_gap = .{ .length = 10 };
+    container.column_gap = .{ .length = 10 };
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
     try tree.appendChild(container_id, second_id);
@@ -625,11 +625,11 @@ test "grid multi-track span includes track gaps when comparing item size" {
     try layoutContainer(&tree, container_id, .{ .width = 200, .height = 60 }, null);
 
     // Tracks initially: 20, 30, 0 + 2*10 gap = 70. Deficit = 100 - 70 = 30.
-    // 30 is divided among 3 auto tracks (+10 each) -> Tracks become 30, 40, 10.
-    // Total width = 30 + 10 + 40 + 10 + 10 = 100.
+    // 30 is assigned to the empty unbounded auto track -> Tracks become 20, 30, 30.
+    // Total width = 20 + 10 + 30 + 10 + 30 = 100.
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 40 });
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
-    try expectRelative(&tree, second_id, .{ .x = 40, .y = 0, .w = 30, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 30, .y = 0, .w = 30, .h = 20 });
     try expectRelative(&tree, spanning_id, .{ .x = 0, .y = 20, .w = 100, .h = 20 });
 }
 
@@ -656,7 +656,7 @@ test "grid track minmax expands non-fr tracks up to max limit before fr tracks" 
 
     var container = fixedContainer(0, 0, columns[0..], rows[0..]);
     container.size = .{ .width = .auto, .height = .auto };
-    container.grid_column_gap = .{ .length = 10 };
+    container.column_gap = .{ .length = 10 };
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, spanning_id);
 
@@ -699,7 +699,7 @@ test "grid item auto margins absorb space under stretch alignment" {
     try expectRelative(&tree, child_id, .{ .x = 40, .y = 10, .w = 20, .h = 20 });
 }
 
-test "grid fit-content track clamps content growth to limit" {
+test "grid fit-content limit does not undercut automatic minimum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -712,7 +712,7 @@ test "grid fit-content track clamps content growth to limit" {
     };
     const rows = [_]style.GridTrack{.{ .fixed = 30 }};
 
-    // First item has width 30 (< 50 limit), second item has width 80 (> 50 limit)
+    // The fit-content limit caps growth, but never reduces an item's minimum contribution.
     var first = leafStyle();
     first.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 30 } };
     first.grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
@@ -731,10 +731,10 @@ test "grid fit-content track clamps content growth to limit" {
 
     try layoutContainer(&tree, container_id, .{ .width = 200, .height = 30 }, null);
 
-    // Column 0: 30 (unclamped). Column 1: 50 (track clamped at 50, item retains explicit 80).
+    // The 80px second-item minimum exceeds its 50px fit-content limit.
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 30, .h = 30 });
     try expectRelative(&tree, second_id, .{ .x = 30, .y = 0, .w = 80, .h = 30 });
-    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 80, .h = 30 });
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 110, .h = 30 });
 }
 
 test "grid fit-content percentage caps track against definite axis" {
@@ -769,11 +769,10 @@ test "grid fit-content percentage caps track against definite axis" {
 
     try layoutContainer(&tree, container_id, .{ .width = 60, .height = 20 }, null);
 
-    // The 50% limit resolves against the definite 60px width. The marker starts
-    // at the resulting 30px boundary, which proves the first track was capped.
+    // The 30px limit cannot undercut the item's 40px automatic minimum.
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 60, .h = 20 });
-    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 30, .h = 20 });
-    try expectRelative(&tree, marker_id, .{ .x = 30, .y = 0, .w = 30, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 40, .h = 20 });
+    try expectRelative(&tree, marker_id, .{ .x = 40, .y = 0, .w = 30, .h = 20 });
 }
 
 test "grid minmax fit-content maximum does not undercut fixed minimum" {
@@ -872,13 +871,14 @@ test "grid measureNatural treats indefinite fit-content percentage as unbounded"
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
+    defer context.deinit();
     const measured = try grid.measureNatural(
         &tree,
         tree.nodeConst(container_id).?,
         .{
             .available = .{ .width = 60, .height = 20 },
             .percentage_basis = .{ .width = null, .height = 20 },
-            .intrinsic_width = true,
+            .width_mode = .max_content,
         },
         &context,
     );
@@ -978,7 +978,7 @@ test "grid multi-track span grows minmax non-fr tracks to max before fr tracks" 
 
     var container = fixedContainer(0, 0, columns[0..], rows[0..]);
     container.size = .{ .width = .auto, .height = .auto };
-    container.grid_column_gap = .{ .length = 10 };
+    container.column_gap = .{ .length = 10 };
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, spanning_id);
 
@@ -1008,7 +1008,6 @@ test "grid justify-content space distribution accounts for item margins and gaps
 
     var first = leafStyle();
     first.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 30 } };
-    first.margin = .{ .left = 10, .right = 0, .top = 0, .bottom = 0 };
     first.margin_inset = .{
         .left = .{ .length = 10 },
         .right = .{ .length = 0 },
@@ -1019,7 +1018,6 @@ test "grid justify-content space distribution accounts for item margins and gaps
 
     var second = leafStyle();
     second.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 30 } };
-    second.margin = .{ .left = 5, .right = 0, .top = 0, .bottom = 0 };
     second.margin_inset = .{
         .left = .{ .length = 5 },
         .right = .{ .length = 0 },
@@ -1029,7 +1027,7 @@ test "grid justify-content space distribution accounts for item margins and gaps
     try appendLeaf(&tree, second_id, container_id, second, .{ .spacer = .{} });
 
     var container = fixedContainer(300, 30, columns[0..], rows[0..]);
-    container.grid_column_gap = .{ .length = 20 };
+    container.column_gap = .{ .length = 20 };
     container.grid_justify_content = .space_between;
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
@@ -1126,7 +1124,7 @@ test "grid absolute item positioned in grid area defined by grid-column 2 / 4 wi
     try appendLeaf(&tree, absolute_id, container_id, absolute_style, .{ .spacer = .{} });
 
     var container = fixedContainer(230, 80, columns[0..], rows[0..]);
-    container.grid_column_gap = .{ .length = 10 };
+    container.column_gap = .{ .length = 10 };
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, in_flow_id);
     try tree.appendChild(container_id, absolute_id);
@@ -1267,14 +1265,12 @@ test "grid min-width clamp makes post-clamp 1fr track definite" {
     var container = fixedContainer(0, 20, columns[0..], rows[0..]);
     container.size.width = .auto;
     container.min_size.width = .{ .length = 200 };
-    container.border = .{ .left = 1, .right = 1 };
     container.border_inset = .{
         .top = .{ .length = 0 },
         .right = .{ .length = 1 },
         .bottom = .{ .length = 0 },
         .left = .{ .length = 1 },
     };
-    container.padding = .{ .left = 10, .right = 10 };
     container.padding_inset = .{
         .top = .{ .length = 0 },
         .right = .{ .length = 10 },
@@ -1362,7 +1358,6 @@ test "grid RTL absolute auto insets use physical end static position" {
 
     var container = fixedContainer(200, 160, columns[0..], rows[0..]);
     container.writing_direction = .rtl;
-    container.padding = .{ .left = 10, .right = 10 };
     container.padding_inset = .{
         .top = .{ .length = 0 },
         .right = .{ .length = 10 },
@@ -1672,7 +1667,7 @@ test "grid center content alignment preserves signed overflow offset" {
     try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
     try appendLeaf(&tree, third_id, container_id, leafStyle(), .{ .spacer = .{} });
     var container = fixedContainer(20, 120, columns[0..], rows[0..]);
-    container.grid_row_gap = .{ .length = 10 };
+    container.row_gap = .{ .length = 10 };
     container.grid_align_content = .center;
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
@@ -1705,7 +1700,7 @@ test "grid distributed content alignment falls back to start on overflow" {
     try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
     try appendLeaf(&tree, third_id, container_id, leafStyle(), .{ .spacer = .{} });
     var container = fixedContainer(20, 120, columns[0..], rows[0..]);
-    container.grid_row_gap = .{ .length = 10 };
+    container.row_gap = .{ .length = 10 };
     container.grid_align_content = .space_between;
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
@@ -1743,7 +1738,7 @@ test "negative grid inline free space distinguishes safe and unsafe center" {
         const container_id: Id = @enumFromInt(2);
         try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
         var container = fixedContainer(120, 40, columns[0..], rows[0..]);
-        container.grid_column_gap = .{ .length = 10 };
+        container.column_gap = .{ .length = 10 };
         container.grid_justify_content = scenario.justify_content;
         container.grid_align_content = .start;
         try appendContainer(&tree, container_id, .root, container);
@@ -1784,7 +1779,7 @@ test "negative grid block free space distinguishes safe and unsafe center" {
         const container_id: Id = @enumFromInt(2);
         try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
         var container = fixedContainer(40, 120, columns[0..], rows[0..]);
-        container.grid_row_gap = .{ .length = 10 };
+        container.row_gap = .{ .length = 10 };
         container.grid_justify_content = .start;
         container.grid_align_content = scenario.align_content;
         try appendContainer(&tree, container_id, .root, container);
@@ -2009,8 +2004,8 @@ test "positive grid free space makes all center safety variants equivalent" {
         try appendLeaf(&tree, second_id, container_id, second, .{ .spacer = .{} });
 
         var container = fixedContainer(160, 160, columns[0..], rows[0..]);
-        container.grid_column_gap = .{ .length = 10 };
-        container.grid_row_gap = .{ .length = 10 };
+        container.column_gap = .{ .length = 10 };
+        container.row_gap = .{ .length = 10 };
         container.grid_justify_content = scenario.justify_content;
         container.grid_align_content = scenario.align_content;
         container.grid_justify_items = scenario.justify_items;
@@ -2089,7 +2084,6 @@ test "grid intrinsic cross spans batch non-flexible items before cross-flex item
     }
 
     var container = fixedContainer(50, 50, tracks[0..], tracks[0..]);
-    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
     container.border_inset = .{
         .top = .{ .length = 3 },
         .right = .{ .length = 3 },
@@ -2262,7 +2256,6 @@ test "grid zero fr absorbs cross-span intrinsic deficit before auto track" {
     try appendLeaf(&tree, second_marker_id, container_id, second_marker, .{ .spacer = .{} });
 
     var container = fixedContainer(50, 50, tracks[0..], tracks[0..]);
-    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
     container.border_inset = .{
         .top = .{ .length = 3 },
         .right = .{ .length = 3 },
@@ -2312,7 +2305,6 @@ test "grid zero fr cross-span intrinsic deficit falls back to equal growth" {
     try appendLeaf(&tree, second_marker_id, container_id, second_marker, .{ .spacer = .{} });
 
     var container = fixedContainer(60, 60, tracks[0..], tracks[0..]);
-    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
     container.border_inset = .{
         .top = .{ .length = 3 },
         .right = .{ .length = 3 },
@@ -2368,7 +2360,6 @@ test "grid minmax zero fr cross-span deficit leaves auto track at zero" {
     try appendLeaf(&tree, second_marker_id, container_id, second_marker, .{ .spacer = .{} });
 
     var container = fixedContainer(50, 50, tracks[0..], tracks[0..]);
-    container.border = .{ .top = 3, .right = 3, .bottom = 3, .left = 3 };
     container.border_inset = .{
         .top = .{ .length = 3 },
         .right = .{ .length = 3 },
@@ -3013,6 +3004,7 @@ test "grid positive line beyond 1024 creates an implicit auto track" {
     const child_id: Id = @enumFromInt(1);
     const container_id: Id = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
+    const auto_rows = [_]style.GridTrack{.{ .fixed = 0 }};
 
     var child = leafStyle();
     child.size = .{
@@ -3024,7 +3016,7 @@ test "grid positive line beyond 1024 creates an implicit auto track" {
     try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
 
     var container = fixedContainer(20, 0, columns[0..], &.{});
-    container.grid_auto_rows = .{ .fixed = 0 };
+    container.grid_auto_rows = auto_rows[0..];
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, child_id);
 
@@ -3042,6 +3034,7 @@ test "grid negative line beyond 1024 prepends an implicit auto track" {
     const container_id: Id = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
     const rows: []const style.GridTrack = &.{};
+    const auto_rows = [_]style.GridTrack{.{ .fixed = 0 }};
 
     var child = leafStyle();
     child.size = .{
@@ -3053,7 +3046,7 @@ test "grid negative line beyond 1024 prepends an implicit auto track" {
     try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
 
     var container = fixedContainer(20, 0, columns[0..], rows);
-    container.grid_auto_rows = .{ .fixed = 0 };
+    container.grid_auto_rows = auto_rows[0..];
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, child_id);
 
@@ -3199,7 +3192,6 @@ test "grid absolute placement uses the parent padding and border frame" {
     third.inset = zero_insets;
     third.inset.right = .auto;
     third.inset.bottom = .auto;
-    third.margin = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 };
     third.margin_inset = .{
         .top = .{ .length = 10 },
         .right = .{ .length = 10 },
@@ -3214,7 +3206,6 @@ test "grid absolute placement uses the parent padding and border frame" {
     fourth.inset = zero_insets;
     fourth.inset.left = .auto;
     fourth.inset.top = .auto;
-    fourth.margin = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 };
     fourth.margin_inset = .{
         .top = .{ .length = 10 },
         .right = .{ .length = 10 },
@@ -3224,14 +3215,12 @@ test "grid absolute placement uses the parent padding and border frame" {
     try appendLeaf(&tree, fourth_id, container_id, fourth, .{ .spacer = .{} });
 
     var container = fixedContainer(100, 100, empty_tracks, empty_tracks);
-    container.border = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 };
     container.border_inset = .{
         .top = .{ .length = 10 },
         .right = .{ .length = 10 },
         .bottom = .{ .length = 10 },
         .left = .{ .length = 10 },
     };
-    container.padding = .{ .top = 10, .right = 10, .bottom = 10, .left = 10 };
     container.padding_inset = .{
         .top = .{ .length = 10 },
         .right = .{ .length = 10 },
@@ -3282,7 +3271,6 @@ test "grid absolute column start defaults its opposite side to the padding frame
     try appendLeaf(&tree, absolute_id, container_id, absolute, .{ .spacer = .{} });
 
     var container = fixedContainer(180, 160, columns[0..], rows[0..]);
-    container.padding = .{ .top = 10, .right = 20, .bottom = 30, .left = 40 };
     container.padding_inset = .{
         .top = .{ .length = 10 },
         .right = .{ .length = 20 },
@@ -3429,8 +3417,8 @@ test "grid negative align-content distribution preserves signed row offsets in R
 
         var inner = fixedContainer(120, 120, columns[0..], rows[0..]);
         inner.writing_direction = .rtl;
-        inner.grid_column_gap = .{ .length = 10 };
-        inner.grid_row_gap = .{ .length = 10 };
+        inner.column_gap = .{ .length = 10 };
+        inner.row_gap = .{ .length = 10 };
         inner.grid_align_content = scenario.align_content;
         inner.grid_justify_content = .center;
         try appendContainer(&tree, inner_id, outer_id, inner);
@@ -3442,7 +3430,6 @@ test "grid negative align-content distribution preserves signed row offsets in R
         var outer = fixedContainer(240, 240, empty_tracks, empty_tracks);
         outer.box_sizing = .content_box;
         outer.writing_direction = .rtl;
-        outer.border = .{ .top = 60, .right = 60, .bottom = 60, .left = 60 };
         outer.border_inset = .{
             .top = .{ .length = 60 },
             .right = .{ .length = 60 },
@@ -3466,7 +3453,7 @@ test "grid negative align-content distribution preserves signed row offsets in R
             const row_index = child_index / 3;
             const column_index = child_index % 3;
             const expected_y = scenario.first_row_y + @as(f32, @floatFromInt(row_index * 50));
-            const expected_x = @as(f32, @floatFromInt(80 - column_index * 30));
+            const expected_x: f32 = @floatFromInt(80 - column_index * 30);
             try expectRelative(&tree, child_id, .{
                 .x = expected_x,
                 .y = expected_y,
@@ -3591,8 +3578,8 @@ test "grid definite percentage column gap expands max-content span tracks" {
     }
 
     var container = fixedContainer(100, 120, columns[0..], rows[0..]);
-    container.grid_column_gap = .{ .percent = 0.2 };
-    container.grid_row_gap = .{ .length = 0 };
+    container.column_gap = .{ .percent = 0.2 };
+    container.row_gap = .{ .length = 0 };
     try appendContainer(&tree, container_id, .root, container);
     for (0..9) |index| {
         const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
@@ -3651,8 +3638,8 @@ test "grid indefinite percentage gap stays zero intrinsically then resolves at f
 
     var container = fixedContainer(0, 0, columns[0..], rows[0..]);
     container.size = .{ .width = .auto, .height = .auto };
-    container.grid_column_gap = .{ .percent = 0.2 };
-    container.grid_row_gap = .{ .length = 0 };
+    container.column_gap = .{ .percent = 0.2 };
+    container.row_gap = .{ .length = 0 };
     try appendContainer(&tree, container_id, .root, container);
     for (0..9) |index| {
         const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
@@ -3978,7 +3965,7 @@ test "grid cyclic percentage row gap resolves after intrinsic auto height" {
 
     var container = fixedContainer(100, 0, columns[0..], rows[0..]);
     container.size.height = .auto;
-    container.grid_row_gap = .{ .percent = 0.1 };
+    container.row_gap = .{ .percent = 0.1 };
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
     try tree.appendChild(container_id, second_id);
@@ -3990,7 +3977,52 @@ test "grid cyclic percentage row gap resolves after intrinsic auto height" {
     try expectRelative(&tree, second_id, .{ .x = 0, .y = 48, .w = 100, .h = 40 });
 }
 
-test "grid bounded occupancy rejects a two by ten-thousand definite span" {
+test "definite Grid availability does not define an auto percentage axis" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const second_id: Id = @enumFromInt(2);
+    const container_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{.{ .fixed = 10 }};
+    const rows = [_]style.GridTrack{ .{ .fixed = 10 }, .{ .fixed = 10 } };
+
+    try appendLeaf(&tree, first_id, container_id, leafStyle(), .{ .spacer = .{} });
+    try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
+
+    var container = fixedContainer(10, 0, columns[0..], rows[0..]);
+    container.size.height = .auto;
+    container.row_gap = .{ .percent = 0.5 };
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    var context: layout_context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = null,
+        .measure_node = unreachableMeasureNode,
+        .layout_node = unreachableLayoutNode,
+    };
+    defer context.deinit();
+
+    const measured = try grid.measureNatural(
+        &tree,
+        tree.nodeConst(container_id).?,
+        .{
+            .available = .{ .width = 10, .height = 200 },
+            .percentage_basis = .{ .width = 10, .height = null },
+            .height_mode = .definite,
+        },
+        &context,
+    );
+
+    // Definite availability constrains auto height; it does not provide the
+    // percentage basis needed to resolve the cyclic 50% gap.
+    try std.testing.expectEqual(@as(f32, 20), measured.content.height);
+    try std.testing.expectEqual(@as(f32, 20), measured.border.height);
+}
+
+test "grid bounded occupancy lays out a two by ten-thousand definite span" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -4021,14 +4053,16 @@ test "grid bounded occupancy rejects a two by ten-thousand definite span" {
     try tree.appendChild(container_id, definite_id);
     try tree.appendChild(container_id, auto_id);
 
-    // The definite span covers 20,000 cells. Reject it before materializing all cells.
-    try std.testing.expectError(
-        error.InvalidStyle,
-        layoutContainer(&tree, container_id, .{ .width = 10_000, .height = 2 }, null),
-    );
+    try layoutContainer(&tree, container_id, .{ .width = 10_000, .height = 2 }, null);
+
+    // The 20,000-cell definite area remains bounded and finite. Row-major
+    // auto-placement wraps to the first column of the implicit third row.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 10_000, .h = 2 });
+    try expectRelative(&tree, definite_id, .{ .x = 0, .y = 0, .w = 10_000, .h = 2 });
+    try expectRelative(&tree, auto_id, .{ .x = 0, .y = 2, .w = 1, .h = 0 });
 }
 
-test "grid scan budget charges only inspected cells" {
+test "grid sparse occupancy jumps past collision rectangles" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -4108,6 +4142,8 @@ test "grid phase three pre-sizes implicit columns before auto placement" {
     const container_id: Id = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows: []const style.GridTrack = &.{};
+    const auto_columns = [_]style.GridTrack{.{ .fixed = 20 }};
+    const auto_rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
     try appendLeaf(&tree, first_id, container_id, leafStyle(), .{ .spacer = .{} });
 
@@ -4119,8 +4155,8 @@ test "grid phase three pre-sizes implicit columns before auto placement" {
     try appendLeaf(&tree, spanning_id, container_id, spanning, .{ .spacer = .{} });
 
     var container = fixedContainer(60, 40, columns[0..], rows);
-    container.grid_auto_columns = .{ .fixed = 20 };
-    container.grid_auto_rows = .{ .fixed = 20 };
+    container.grid_auto_columns = auto_columns[0..];
+    container.grid_auto_rows = auto_rows[0..];
     container.grid_auto_flow = .row;
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, first_id);
@@ -4221,7 +4257,6 @@ test "grid RTL absolute static position uses padding box end" {
 
     var container = fixedContainer(120, 20, columns[0..], rows[0..]);
     container.writing_direction = .rtl;
-    container.padding = .{ .right = 20 };
     container.padding_inset = .{
         .top = .{ .length = 0 },
         .right = .{ .length = 20 },
@@ -4342,3 +4377,1146 @@ test "grid sparse phase four wraps decreasing definite columns" {
     try expectRelative(&tree, later_column_id, .{ .x = 40, .y = 0, .w = 20, .h = 20 });
     try expectRelative(&tree, earlier_column_id, .{ .x = 0, .y = 20, .w = 20, .h = 20 });
 }
+
+test "grid contribution phases separate minima and growth limits across fit and flex span" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const growth_id: Id = @enumFromInt(1);
+    const fit_id: Id = @enumFromInt(2);
+    const spanning_id: Id = @enumFromInt(3);
+    const first_marker_id: Id = @enumFromInt(4);
+    const second_marker_id: Id = @enumFromInt(5);
+    const third_marker_id: Id = @enumFromInt(6);
+    const container_id: Id = @enumFromInt(7);
+    const columns = [_]style.GridTrack{
+        .{ .minmax = .{
+            .min = .auto,
+            .max = .max_content,
+        } },
+        .{ .fit_content = .{ .length = 30 } },
+        .{ .fr = 1 },
+    };
+    const rows = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
+
+    var growth_item = leafStyle();
+    growth_item.size.height = .{ .length = 20 };
+    growth_item.min_size.width = .{ .length = 0 };
+    growth_item.grid_justify_self = .start;
+    growth_item.grid_align_self = .start;
+    growth_item.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    growth_item.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(
+        &tree,
+        growth_id,
+        container_id,
+        growth_item,
+        .{ .spacer = .{ .size = 80 } },
+    );
+
+    var fit_item = leafStyle();
+    fit_item.size.height = .{ .length = 20 };
+    fit_item.min_size.width = .{ .length = 0 };
+    fit_item.grid_justify_self = .start;
+    fit_item.grid_align_self = .start;
+    fit_item.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 3 },
+    };
+    fit_item.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(
+        &tree,
+        fit_id,
+        container_id,
+        fit_item,
+        .{ .spacer = .{ .size = 20 } },
+    );
+
+    var spanning_item = leafStyle();
+    spanning_item.size.height = .{ .length = 20 };
+    spanning_item.min_size.width = .{ .length = 20 };
+    spanning_item.grid_justify_self = .start;
+    spanning_item.grid_align_self = .start;
+    spanning_item.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 4 },
+    };
+    spanning_item.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(
+        &tree,
+        spanning_id,
+        container_id,
+        spanning_item,
+        .{ .spacer = .{ .size = 70 } },
+    );
+
+    const marker_ids = [_]Id{ first_marker_id, second_marker_id, third_marker_id };
+    for (marker_ids, 0..) |marker_id, index| {
+        var marker = leafStyle();
+        marker.grid_column = .{
+            .start = .{ .line = @intCast(index + 1) },
+            .end = .{ .line = @intCast(index + 2) },
+        };
+        marker.grid_row = .{
+            .start = .{ .line = 2 },
+            .end = .{ .line = 3 },
+        };
+        try appendLeaf(&tree, marker_id, container_id, marker, .{ .spacer = .{} });
+    }
+
+    var container = fixedContainer(100, 40, columns[0..], rows[0..]);
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, growth_id);
+    try tree.appendChild(container_id, fit_id);
+    try tree.appendChild(container_id, spanning_id);
+    for (marker_ids) |marker_id| try tree.appendChild(container_id, marker_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 40 }, null);
+
+    // The first item has a zero minimum and an 80px min/max-content contribution.
+    // The fit track has a 20px min/max-content contribution and a 30px fit-content cap.
+    // The spanning item has a 20px minimum and a 70px min-content contribution.
+    // These values must be applied in separate base-size and growth-limit phases.
+    try expectRelative(&tree, growth_id, .{ .x = 0, .y = 0, .w = 80, .h = 20 });
+    try expectRelative(&tree, fit_id, .{ .x = 60, .y = 0, .w = 20, .h = 20 });
+    try expectRelative(&tree, spanning_id, .{ .x = 60, .y = 0, .w = 70, .h = 20 });
+    try expectRelative(
+        &tree,
+        first_marker_id,
+        .{ .x = 0, .y = 20, .w = 60, .h = 20 },
+    );
+    try expectRelative(
+        &tree,
+        second_marker_id,
+        .{ .x = 60, .y = 20, .w = 20, .h = 20 },
+    );
+    try expectRelative(
+        &tree,
+        third_marker_id,
+        .{ .x = 80, .y = 20, .w = 20, .h = 20 },
+    );
+}
+
+test "grid auto-fit repeat collapses empty track and adjacent gutter" {
+    const repeated_track = [_]style.GridTrack{.{ .fixed = 40 }};
+    const auto_fill_columns = [_]style.GridTrack{
+        .{ .repeat = .{
+            .kind = .auto_fill,
+            .tracks = repeated_track[0..],
+        } },
+    };
+    const auto_fit_columns = [_]style.GridTrack{
+        .{ .repeat = .{
+            .kind = .auto_fit,
+            .tracks = repeated_track[0..],
+        } },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+    const scenarios = [_]struct {
+        columns: []const style.GridTrack,
+        trailing_x: f32,
+    }{
+        .{ .columns = auto_fill_columns[0..], .trailing_x = 100 },
+        .{ .columns = auto_fit_columns[0..], .trailing_x = 50 },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const first_id: Id = @enumFromInt(1);
+        const trailing_id: Id = @enumFromInt(2);
+        const container_id: Id = @enumFromInt(3);
+
+        var first = leafStyle();
+        first.grid_column = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        first.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(&tree, first_id, container_id, first, .{ .spacer = .{} });
+
+        var trailing = leafStyle();
+        trailing.grid_column = .{
+            .start = .{ .line = 3 },
+            .end = .{ .line = 4 },
+        };
+        trailing.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(&tree, trailing_id, container_id, trailing, .{ .spacer = .{} });
+
+        var container = fixedContainer(140, 20, scenario.columns, rows[0..]);
+        container.column_gap = .{ .length = 10 };
+        container.grid_justify_content = .start;
+        try appendContainer(&tree, container_id, .root, container);
+        try tree.appendChild(container_id, first_id);
+        try tree.appendChild(container_id, trailing_id);
+        try layoutContainer(&tree, container_id, .{ .width = 140, .height = 20 }, null);
+
+        // Auto-fill retains the empty middle track and both gutters.
+        // Auto-fit collapses that track and its adjacent gutters.
+        try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 40, .h = 20 });
+        try expectRelative(
+            &tree,
+            trailing_id,
+            .{ .x = scenario.trailing_x, .y = 0, .w = 40, .h = 20 },
+        );
+    }
+}
+
+test "grid cyclic implicit list representation gap preserves source order on both sides" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const negative_ids = [_]Id{
+        @enumFromInt(1),
+        @enumFromInt(2),
+        @enumFromInt(3),
+    };
+    const explicit_id: Id = @enumFromInt(4);
+    const positive_ids = [_]Id{
+        @enumFromInt(5),
+        @enumFromInt(6),
+        @enumFromInt(7),
+    };
+    const container_id: Id = @enumFromInt(8);
+    const negative_lines = [_]i16{ -5, -4, -3 };
+    const positive_lines = [_]i16{ 2, 3, 4 };
+    const auto_columns = [_]style.GridTrack{
+        .{ .fixed = 10 },
+        .{ .fixed = 20 },
+        .{ .fixed = 30 },
+    };
+    const explicit_columns = [_]style.GridTrack{.{ .fixed = 40 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    for (negative_ids, negative_lines) |id, line| {
+        var child = leafStyle();
+        child.grid_column = .{
+            .start = .{ .line = line },
+            .end = .auto,
+        };
+        child.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(&tree, id, container_id, child, .{ .spacer = .{} });
+    }
+
+    var explicit = leafStyle();
+    explicit.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    explicit.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, explicit_id, container_id, explicit, .{ .spacer = .{} });
+
+    for (positive_ids, positive_lines) |id, line| {
+        var child = leafStyle();
+        child.grid_column = .{
+            .start = .{ .line = line },
+            .end = .auto,
+        };
+        child.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(&tree, id, container_id, child, .{ .spacer = .{} });
+    }
+
+    var container = fixedContainer(160, 20, explicit_columns[0..], rows[0..]);
+    container.grid_auto_columns = auto_columns[0..];
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    for (negative_ids) |id| try tree.appendChild(container_id, id);
+    try tree.appendChild(container_id, explicit_id);
+    for (positive_ids) |id| try tree.appendChild(container_id, id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 160, .height = 20 }, null);
+
+    const negative_expected = [_]Rect{
+        .{ .x = 0, .y = 0, .w = 10, .h = 20 },
+        .{ .x = 10, .y = 0, .w = 20, .h = 20 },
+        .{ .x = 30, .y = 0, .w = 30, .h = 20 },
+    };
+    const positive_expected = [_]Rect{
+        .{ .x = 100, .y = 0, .w = 10, .h = 20 },
+        .{ .x = 110, .y = 0, .w = 20, .h = 20 },
+        .{ .x = 130, .y = 0, .w = 30, .h = 20 },
+    };
+    for (negative_ids, negative_expected) |id, expected| {
+        try expectRelative(&tree, id, expected);
+    }
+    try expectRelative(&tree, explicit_id, .{ .x = 60, .y = 0, .w = 40, .h = 20 });
+    for (positive_ids, positive_expected) |id, expected| {
+        try expectRelative(&tree, id, expected);
+    }
+}
+
+test "grid overlarge line and span saturate at ten-thousand-track repeat boundary" {
+    {
+        var columns = try std.testing.allocator.alloc(style.GridTrack, 10_000);
+        defer std.testing.allocator.free(columns);
+        for (columns) |*track| track.* = .{ .fixed = 1 };
+        const rows = [_]style.GridTrack{.{ .fixed = 1 }};
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+        var child = leafStyle();
+        child.grid_column = .{
+            .start = .{ .line = std.math.maxInt(i16) },
+            .end = .auto,
+        };
+        child.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+        try appendContainer(
+            &tree,
+            container_id,
+            .root,
+            fixedContainer(10_000, 1, columns[0..], rows[0..]),
+        );
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 10_000, .height = 1 }, null);
+
+        // The oversized positive line resolves to the final bounded track.
+        try expectRelative(&tree, child_id, .{ .x = 9_999, .y = 0, .w = 1, .h = 1 });
+    }
+
+    {
+        var columns = try std.testing.allocator.alloc(style.GridTrack, 10_000);
+        defer std.testing.allocator.free(columns);
+        for (columns) |*track| track.* = .{ .fixed = 1 };
+        const rows = [_]style.GridTrack{.{ .fixed = 1 }};
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const child_id: Id = @enumFromInt(1);
+        const container_id: Id = @enumFromInt(2);
+        var child = leafStyle();
+        child.grid_column = .{
+            .start = .{ .line = 1 },
+            .end = .{ .span = std.math.maxInt(u16) },
+        };
+        child.grid_row = .{
+            .start = .{ .line = 1 },
+            .end = .{ .line = 2 },
+        };
+        try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+        try appendContainer(
+            &tree,
+            container_id,
+            .root,
+            fixedContainer(10_000, 1, columns[0..], rows[0..]),
+        );
+        try tree.appendChild(container_id, child_id);
+
+        try layoutContainer(&tree, container_id, .{ .width = 10_000, .height = 1 }, null);
+
+        // The oversized span saturates at the ten-thousand-track bound.
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 10_000, .h = 1 });
+    }
+}
+
+test "grid percentage margins defer in an indefinite intrinsic axis then resolve in area" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.max_content};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.size.height = .{ .length = 20 };
+    child.margin_inset = .{
+        .top = .{ .length = 0 },
+        .right = .{ .percent = 0.25 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .percent = 0.25 },
+    };
+    child.grid_justify_self = .start;
+    child.grid_align_self = .start;
+    child.grid_column = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    child.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{ .size = 40 } });
+
+    var container = fixedContainer(0, 20, columns[0..], rows[0..]);
+    container.size.width = .auto;
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 200, .height = 20 }, null);
+
+    // Indefinite intrinsic sizing treats both percentages as zero, producing
+    // a 40px area. Final layout resolves each margin to 25% of that area.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 40, .h = 20 });
+    try expectRelative(&tree, child_id, .{ .x = 10, .y = 0, .w = 40, .h = 20 });
+}
+
+test "grid border-box leaf measurement reports content-box known width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fixed = 100 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 20 },
+    };
+    child.padding_inset = .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 10 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 10 },
+    };
+    try appendLeaf(
+        &tree,
+        child_id,
+        container_id,
+        child,
+        .{ .label = .{ .text = "content-box probe" } },
+    );
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(100, 20, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, child_id);
+
+    ContentBoxMeasureProbe.reset();
+    try layoutContainer(
+        &tree,
+        container_id,
+        .{ .width = 100, .height = 20 },
+        ContentBoxMeasureProbe.measure,
+    );
+
+    try std.testing.expect(ContentBoxMeasureProbe.known_width != null);
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 80),
+        ContentBoxMeasureProbe.known_width.?,
+        @as(f32, 0.001),
+    );
+}
+
+test "grid auto-fill reserves suffix tracks when counting repeats" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const suffix_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const repeated_tracks = [_]style.GridTrack{.{ .fixed = 20 }};
+    const columns = [_]style.GridTrack{
+        .{ .repeat = .{
+            .kind = .auto_fill,
+            .tracks = repeated_tracks[0..],
+        } },
+        .{ .fixed = 40 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var suffix = leafStyle();
+    suffix.grid_column = .{
+        .start = .{ .line = 4 },
+        .end = .{ .line = 5 },
+    };
+    suffix.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, suffix_id, container_id, suffix, .{ .spacer = .{} });
+
+    var container = fixedContainer(100, 20, columns[0..], rows[0..]);
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, suffix_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 20 }, null);
+
+    // Three 20px repeats consume the space before the 40px suffix.
+    try expectRelative(&tree, suffix_id, .{ .x = 60, .y = 0, .w = 40, .h = 20 });
+}
+
+test "grid auto-fill uses definite minmax maximum for repeat count" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const suffix_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const repeated_tracks = [_]style.GridTrack{.{ .minmax = .{
+        .min = .{ .fixed = 100 },
+        .max = .{ .fixed = 200 },
+    } }};
+    const columns = [_]style.GridTrack{
+        .{ .repeat = .{
+            .kind = .auto_fill,
+            .tracks = repeated_tracks[0..],
+        } },
+        .{ .fixed = 20 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var suffix = leafStyle();
+    suffix.grid_column = .{
+        .start = .{ .line = 3 },
+        .end = .{ .line = 4 },
+    };
+    suffix.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, suffix_id, container_id, suffix, .{ .spacer = .{} });
+
+    var container = fixedContainer(500, 20, columns[0..], rows[0..]);
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, suffix_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 500, .height = 20 }, null);
+
+    // The 200px definite maximum permits two repeats before the suffix.
+    try expectRelative(&tree, suffix_id, .{ .x = 400, .y = 0, .w = 20, .h = 20 });
+}
+
+test "grid auto-fill counts against a nonbinding maximum size" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const repeated_tracks = [_]style.GridTrack{.{ .fixed = 100 }};
+    const columns = [_]style.GridTrack{.{ .repeat = .{
+        .kind = .auto_fill,
+        .tracks = repeated_tracks[0..],
+    } }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.grid_column = .{
+        .start = .{ .line = -2 },
+        .end = .{ .line = -1 },
+    };
+    child.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+
+    var container = fixedContainer(0, 20, columns[0..], rows[0..]);
+    container.size.width = .auto;
+    container.max_size.width = .{ .length = 250 };
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 500, .height = 20 }, null);
+
+    try expectRelative(&tree, child_id, .{ .x = 100, .y = 0, .w = 100, .h = 20 });
+}
+
+test "grid auto-fill min-only size creates repetitions that overflow minimum" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const repeated_tracks = [_]style.GridTrack{.{ .fixed = 100 }};
+    const columns = [_]style.GridTrack{.{ .repeat = .{
+        .kind = .auto_fill,
+        .tracks = repeated_tracks[0..],
+    } }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.grid_column = .{
+        .start = .{ .line = -2 },
+        .end = .{ .line = -1 },
+    };
+    child.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+
+    var container = fixedContainer(0, 20, columns[0..], rows[0..]);
+    container.size.width = .auto;
+    container.min_size.width = .{ .length = 250 };
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 500, .height = 20 }, null);
+
+    // Min-only sizing uses ceil: three 100px repeats are required to exceed 250px.
+    try expectRelative(&tree, child_id, .{ .x = 200, .y = 0, .w = 100, .h = 20 });
+}
+
+test "grid zero-size auto-fill saturates before suffix truncation" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const repeated_tracks = [_]style.GridTrack{.{ .fixed = 0 }};
+    const columns = [_]style.GridTrack{
+        .{ .repeat = .{
+            .kind = .auto_fill,
+            .tracks = repeated_tracks[0..],
+        } },
+        .{ .fixed = 1 },
+    };
+    const rows = [_]style.GridTrack{.{ .fixed = 1 }};
+
+    var child = leafStyle();
+    child.grid_column = .{
+        .start = .{ .line = 2 },
+        .end = .{ .line = 3 },
+    };
+    child.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+
+    var container = fixedContainer(10_000, 1, columns[0..], rows[0..]);
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(
+        &tree,
+        container_id,
+        .{ .width = 10_000, .height = 1 },
+        null,
+    );
+
+    // Saturation at 10,000 tracks truncates the one-pixel suffix.
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 0, .h = 1 });
+}
+
+test "grid negative explicit line resolves after auto-fill expansion" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const repeated_tracks = [_]style.GridTrack{.{ .fixed = 100 }};
+    const columns = [_]style.GridTrack{.{ .repeat = .{
+        .kind = .auto_fill,
+        .tracks = repeated_tracks[0..],
+    } }};
+    const rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var child = leafStyle();
+    child.size = .{
+        .width = .{ .length = 10 },
+        .height = .{ .length = 20 },
+    };
+    child.grid_justify_self = .start;
+    child.grid_column = .{
+        .start = .{ .line = -1 },
+        .end = .auto,
+    };
+    child.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+
+    var container = fixedContainer(500, 20, columns[0..], rows[0..]);
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 500, .height = 20 }, null);
+
+    // Five 100px repeats make -1 the sixth line, at the 500px edge.
+    try expectRelative(&tree, child_id, .{ .x = 500, .y = 0, .w = 10, .h = 20 });
+}
+
+test "grid direct relayout clears a subtree hidden after first layout" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var scroll_state: widget.ScrollState = .{};
+    const overflowing_id: Id = @enumFromInt(1);
+    const inner_id: Id = @enumFromInt(2);
+    const outer_id: Id = @enumFromInt(3);
+    const inner_columns = [_]style.GridTrack{.{ .fixed = 40 }};
+    const inner_rows = [_]style.GridTrack{.{ .fixed = 20 }};
+    const outer_columns = [_]style.GridTrack{.{ .fixed = 80 }};
+    const outer_rows = [_]style.GridTrack{.{ .fixed = 20 }};
+
+    var overflowing = leafStyle();
+    overflowing.size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 20 },
+    };
+    try appendLeaf(
+        &tree,
+        overflowing_id,
+        inner_id,
+        overflowing,
+        .{ .spacer = .{} },
+    );
+
+    var inner = fixedContainer(40, 20, inner_columns[0..], inner_rows[0..]);
+    inner.overflow.width = .scroll;
+    inner.scrollbar_width = 10;
+    try appendContainer(&tree, inner_id, outer_id, inner);
+    tree.node(inner_id).?.scroll = .{
+        .state = &scroll_state,
+        .axis = .horizontal,
+    };
+    try tree.appendChild(inner_id, overflowing_id);
+
+    try appendContainer(
+        &tree,
+        outer_id,
+        .root,
+        fixedContainer(80, 20, outer_columns[0..], outer_rows[0..]),
+    );
+    try tree.appendChild(outer_id, inner_id);
+
+    try layoutContainer(&tree, outer_id, .{ .width = 80, .height = 20 }, null);
+
+    try std.testing.expect(tree.nodeConst(inner_id).?.resolved_box_edges != null);
+    try std.testing.expect(tree.nodeConst(inner_id).?.layout_content_size.width > 0);
+    try std.testing.expect(tree.nodeConst(inner_id).?.first_baseline != null);
+    try std.testing.expect(scroll_state.max_offset[0] > 0);
+
+    tree.node(inner_id).?.style.display = .none;
+    try layoutContainer(&tree, outer_id, .{ .width = 80, .height = 20 }, null);
+
+    try expectRelative(&tree, inner_id, .{});
+    try expectRelative(&tree, overflowing_id, .{});
+    try std.testing.expectEqual(widget.Size{ .width = 0, .height = 0 }, tree.nodeConst(inner_id).?.layout_content_size);
+    try std.testing.expectEqual(@as(?widget.ResolvedBoxEdges, null), tree.nodeConst(inner_id).?.resolved_box_edges);
+    try std.testing.expectEqual(@as(?f32, null), tree.nodeConst(inner_id).?.first_baseline);
+    try std.testing.expectEqual([2]f32{ 0, 0 }, scroll_state.max_offset);
+}
+
+test "grid nested intrinsic measurement stays within finite mode bound" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const nesting_depth: usize = 6;
+    const leaf_id: Id = @enumFromInt(1);
+    const columns = [_]style.GridTrack{.{ .fixed = 10 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 10 }};
+
+    try appendLeaf(
+        &tree,
+        leaf_id,
+        @enumFromInt(2),
+        leafStyle(),
+        .{ .label = .{ .text = "nested intrinsic probe" } },
+    );
+
+    var child_id = leaf_id;
+    for (0..nesting_depth) |level| {
+        const grid_id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
+        const parent_id: Id = if (level + 1 == nesting_depth)
+            .root
+        else
+            @enumFromInt(@as(u32, @intCast(level + 3)));
+        const is_outer = level + 1 == nesting_depth;
+        var grid_style = if (is_outer)
+            fixedContainer(100, 20, columns[0..], rows[0..])
+        else
+            fixedContainer(10, 10, columns[0..], rows[0..]);
+        if (!is_outer) {
+            grid_style.size = .{ .width = .auto, .height = .auto };
+        }
+        grid_style.grid_justify_content = .start;
+        grid_style.grid_align_content = .start;
+        try appendContainer(&tree, grid_id, parent_id, grid_style);
+        try tree.appendChild(grid_id, child_id);
+        child_id = grid_id;
+    }
+
+    NestedMeasureCounter.reset();
+    try layoutContainer(
+        &tree,
+        child_id,
+        .{ .width = 100, .height = 20 },
+        NestedMeasureCounter.measure,
+    );
+
+    const request_mode_count: usize = 3 * 3;
+    const leaf_queries_per_request: usize = 5;
+    const callback_limit = tree.nodes.items.len * request_mode_count * leaf_queries_per_request;
+    try std.testing.expect(NestedMeasureCounter.calls <= callback_limit);
+}
+
+test "grid content sizing ignores root constraints and stays on the target" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.max_content};
+    const rows = [_]style.GridTrack{.max_content};
+
+    try appendLeaf(
+        &tree,
+        child_id,
+        container_id,
+        leafStyle(),
+        .{ .label = .{ .text = "content child" } },
+    );
+
+    var container = fixedContainer(200, 100, columns[0..], rows[0..]);
+    container.min_size = .{
+        .width = .{ .length = 150 },
+        .height = .{ .length = 150 },
+    };
+    container.max_size = .{
+        .width = .{ .length = 300 },
+        .height = .{ .length = 300 },
+    };
+    container.aspect_ratio = 3;
+    container.padding_inset = .{
+        .top = .{ .length = 4 },
+        .right = .{ .length = 4 },
+        .bottom = .{ .length = 4 },
+        .left = .{ .length = 4 },
+    };
+    try appendContainer(&tree, container_id, .root, container);
+    try tree.appendChild(container_id, child_id);
+
+    ContentRootChildProbe.reset();
+    var context: layout_context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = ContentRootChildProbe.measure,
+        .measure_node = unreachableMeasureNode,
+        .layout_node = unreachableLayoutNode,
+    };
+    defer context.deinit();
+
+    const measured = try grid.measureNatural(
+        &tree,
+        tree.nodeConst(container_id).?,
+        .{
+            .available = .{ .width = 300, .height = 300 },
+            .percentage_basis = .{ .width = 300, .height = 300 },
+            .width_mode = .min_content,
+            .height_mode = .definite,
+            .sizing_mode = .content,
+            .known_border = .{ .width = null, .height = 5 },
+        },
+        &context,
+    );
+
+    try std.testing.expectEqual(@as(f32, 20), measured.border.width);
+    try std.testing.expectEqual(@as(f32, 8), measured.border.height);
+    try std.testing.expect(ContentRootChildProbe.calls > 0);
+    try std.testing.expect(!ContentRootChildProbe.saw_known_width);
+    try std.testing.expect(!ContentRootChildProbe.saw_known_height);
+}
+
+test "grid content sizing does not leak through nested grid children" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const leaf_id: Id = @enumFromInt(1);
+    const inner_id: Id = @enumFromInt(2);
+    const outer_id: Id = @enumFromInt(3);
+    const columns = [_]style.GridTrack{.max_content};
+    const rows = [_]style.GridTrack{.max_content};
+
+    try appendLeaf(
+        &tree,
+        leaf_id,
+        inner_id,
+        leafStyle(),
+        .{ .label = .{ .text = "nested content child" } },
+    );
+    try appendContainer(
+        &tree,
+        inner_id,
+        outer_id,
+        fixedContainer(50, 50, columns[0..], rows[0..]),
+    );
+    try appendContainer(
+        &tree,
+        outer_id,
+        .root,
+        fixedContainer(200, 100, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(inner_id, leaf_id);
+    try tree.appendChild(outer_id, inner_id);
+
+    ContentRootChildProbe.reset();
+    var context: layout_context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = ContentRootChildProbe.measure,
+        .measure_node = unreachableMeasureNode,
+        .layout_node = unreachableLayoutNode,
+    };
+    defer context.deinit();
+
+    _ = try grid.measureNatural(
+        &tree,
+        tree.nodeConst(outer_id).?,
+        .{
+            .available = .{ .width = 300, .height = 300 },
+            .percentage_basis = .{ .width = 300, .height = 300 },
+            .sizing_mode = .content,
+            .known_border = .{ .width = null, .height = 5 },
+        },
+        &context,
+    );
+
+    try std.testing.expect(ContentRootChildProbe.calls > 0);
+    try std.testing.expect(!ContentRootChildProbe.saw_known_width);
+    try std.testing.expect(!ContentRootChildProbe.saw_known_height);
+}
+
+test "grid content sizing converts known border only at the leaf callback" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const leaf_id: Id = @enumFromInt(1);
+    var leaf = leafStyle();
+    leaf.display = .grid;
+    leaf.size = .{
+        .width = .{ .length = 200 },
+        .height = .{ .length = 300 },
+    };
+    leaf.min_size = .{
+        .width = .{ .length = 100 },
+        .height = .{ .length = 100 },
+    };
+    leaf.max_size = .{
+        .width = .{ .length = 400 },
+        .height = .{ .length = 400 },
+    };
+    leaf.aspect_ratio = 2;
+    leaf.padding_inset = .{
+        .top = .{ .length = 5 },
+        .right = .{ .length = 10 },
+        .bottom = .{ .length = 5 },
+        .left = .{ .length = 10 },
+    };
+    try appendLeaf(
+        &tree,
+        leaf_id,
+        .root,
+        leaf,
+        .{ .label = .{ .text = "content root" } },
+    );
+
+    ContentRootLeafProbe.reset();
+    var context: layout_context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = ContentRootLeafProbe.measure,
+        .measure_node = unreachableMeasureNode,
+        .layout_node = unreachableLayoutNode,
+    };
+    defer context.deinit();
+
+    const measured = try grid.measureNatural(
+        &tree,
+        tree.nodeConst(leaf_id).?,
+        .{
+            .available = .{ .width = 300, .height = 300 },
+            .percentage_basis = .{ .width = 300, .height = 300 },
+            .width_mode = .min_content,
+            .height_mode = .definite,
+            .sizing_mode = .content,
+            .known_border = .{ .width = null, .height = 40 },
+        },
+        &context,
+    );
+
+    try std.testing.expect(!ContentRootLeafProbe.saw_known_width);
+    try std.testing.expectEqual(@as(?f32, 30), ContentRootLeafProbe.known_height);
+    try std.testing.expectEqual(@as(f32, 37), measured.border.width);
+    try std.testing.expectEqual(@as(f32, 40), measured.border.height);
+}
+
+test "grid measurement cache identifies the complete sizing request" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const leaf_id: Id = @enumFromInt(1);
+    var leaf = leafStyle();
+    leaf.display = .grid;
+    leaf.size = .{
+        .width = .{ .length = 20 },
+        .height = .{ .length = 10 },
+    };
+    try appendLeaf(
+        &tree,
+        leaf_id,
+        .root,
+        leaf,
+        .{ .label = .{ .text = "cache identity" } },
+    );
+
+    CacheIdentityProbe.reset();
+    var context: layout_context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = CacheIdentityProbe.measure,
+        .measure_node = unreachableMeasureNode,
+        .layout_node = unreachableLayoutNode,
+    };
+    defer context.deinit();
+
+    const requests = [_]layout_context.Request{
+        .{
+            .available = .{ .width = 100, .height = 100 },
+            .percentage_basis = .{ .width = 100, .height = 100 },
+        },
+        .{
+            .available = .{ .width = 100, .height = 100 },
+            .percentage_basis = .{ .width = 100, .height = 100 },
+            .known_border = .{ .width = 20, .height = null },
+        },
+        .{
+            .available = .{ .width = 100, .height = 100 },
+            .percentage_basis = .{ .width = 100, .height = 100 },
+            .known_border = .{ .width = null, .height = 10 },
+        },
+        .{
+            .available = .{ .width = 100, .height = 100 },
+            .percentage_basis = .{ .width = 100, .height = 100 },
+            .sizing_mode = .content,
+            .known_border = .{ .width = 20, .height = 10 },
+        },
+    };
+
+    for (requests) |request| {
+        const calls_before = CacheIdentityProbe.calls;
+        _ = try grid.measureNatural(
+            &tree,
+            tree.nodeConst(leaf_id).?,
+            request,
+            &context,
+        );
+        const calls_after = CacheIdentityProbe.calls;
+        try std.testing.expect(calls_after > calls_before);
+
+        _ = try grid.measureNatural(
+            &tree,
+            tree.nodeConst(leaf_id).?,
+            request,
+            &context,
+        );
+        try std.testing.expectEqual(calls_after, CacheIdentityProbe.calls);
+    }
+}
+
+const ContentRootChildProbe = struct {
+    var calls: usize = 0;
+    var saw_known_width: bool = false;
+    var saw_known_height: bool = false;
+
+    fn reset() void {
+        calls = 0;
+        saw_known_width = false;
+        saw_known_height = false;
+    }
+
+    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+        calls += 1;
+        saw_known_width = saw_known_width or input.known_dimensions.width != null;
+        saw_known_height = saw_known_height or input.known_dimensions.height != null;
+        return .{ .width = 12, .height = 12 };
+    }
+};
+
+const ContentRootLeafProbe = struct {
+    var saw_known_width: bool = false;
+    var known_height: ?f32 = null;
+
+    fn reset() void {
+        saw_known_width = false;
+        known_height = null;
+    }
+
+    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+        saw_known_width = saw_known_width or input.known_dimensions.width != null;
+        if (input.known_dimensions.height) |height| known_height = height;
+        return .{ .width = 17, .height = 13 };
+    }
+};
+
+const CacheIdentityProbe = struct {
+    var calls: usize = 0;
+
+    fn reset() void {
+        calls = 0;
+    }
+
+    fn measure(_: []const u8, _: layout_context.MeasureInput) widget.Size {
+        calls += 1;
+        return .{ .width = 20, .height = 10 };
+    }
+};
+
+const ContentBoxMeasureProbe = struct {
+    var known_width: ?f32 = null;
+
+    fn reset() void {
+        known_width = null;
+    }
+
+    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+        if (input.known_dimensions.width) |width| known_width = width;
+        return .{ .width = 0, .height = 0 };
+    }
+};
+
+const NestedMeasureCounter = struct {
+    var calls: usize = 0;
+
+    fn reset() void {
+        calls = 0;
+    }
+
+    fn measure(_: []const u8, _: layout_context.MeasureInput) widget.Size {
+        calls += 1;
+        return .{ .width = 10, .height = 10 };
+    }
+};

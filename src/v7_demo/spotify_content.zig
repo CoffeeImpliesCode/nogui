@@ -8,8 +8,8 @@ const theme = @import("spotify_theme.zig");
 const tracks = @import("spotify_tracks.zig");
 
 const header_tracks = [_]widget.ColumnTrack{
-    .{ .basis = 520, .grow = 1, .min_main = 180 },
-    .{ .basis = 100, .min_main = 76 },
+    .{ .flex_basis = .{ .length = 520 }, .grow = 1, .min_width = .{ .length = 180 } },
+    .{ .flex_basis = .{ .length = 100 }, .min_width = .{ .length = 76 } },
 };
 const header_columns: widget.SharedColumns = .{ .tracks = &header_tracks };
 const hero_content_max_width: f32 = 360;
@@ -48,14 +48,14 @@ fn drawCircleButton(
     const paint = CircleButton.default_paint;
     const bordered: bool = if (@hasField(@TypeOf(options), "bordered")) options.bordered else false;
     const has_on_click = @hasField(@TypeOf(options), "on_click");
-    const half: f32 = options.basis * 0.5;
+    const half: f32 = options.flex_basis * 0.5;
     const border: f32 = if (bordered) 1 else 0;
     if (has_on_click) {
         _ = try ctx.button(.{
             .direction = style.direction,
             .label = label,
             .on_click = options.on_click,
-            .basis = options.basis,
+            .flex_basis = options.flex_basis,
             .shrink = style.shrink,
             .box_sizing = style.box_sizing,
             .color = color,
@@ -71,7 +71,7 @@ fn drawCircleButton(
     _ = try ctx.button(.{
         .direction = style.direction,
         .label = label,
-        .basis = options.basis,
+        .flex_basis = options.flex_basis,
         .shrink = style.shrink,
         .box_sizing = style.box_sizing,
         .color = color,
@@ -104,12 +104,12 @@ fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec
         defer ctx.pop();
 
         try drawCircleButton(ctx, "<", theme.c_text, 14, .{
-            .basis = 26,
+            .flex_basis = 26,
             .fill = theme.c_card_elevated,
         });
         if (spec.mode != .compact) {
             try drawCircleButton(ctx, ">", theme.c_text, 14, .{
-                .basis = 26,
+                .flex_basis = 26,
                 .fill = theme.c_card_elevated,
             });
         }
@@ -118,7 +118,7 @@ fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec
             .on_click = App.selectNavSearch,
             .grow = 1,
             .shrink = 1,
-            .min_main = 0,
+            .min_width = 0,
             .max_width = 240,
             .text_overflow = .ellipsis,
             .justify = .start,
@@ -169,7 +169,7 @@ fn drawProfilePill(ctx: *DrawCtx, name: []const u8) !void {
     defer ctx.pop();
 
     try drawCircleButton(ctx, "J", theme.c_bg, 12, .{
-        .basis = 20,
+        .flex_basis = 20,
         .fill = theme.c_accent,
     });
     _ = try ctx.label(.{
@@ -205,7 +205,7 @@ fn drawHero(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     _ = try ctx.column(.{
         .grow = 1,
         .shrink = 1,
-        .min_main = 0,
+        .min_width = 0,
         .box_sizing = .border_box,
         .gap = 7,
     });
@@ -214,7 +214,7 @@ fn drawHero(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     _ = try ctx.label(.{
         .text = "PUBLIC PLAYLIST",
         .shrink = 1,
-        .min_main = 0,
+        .min_height = 0,
         .max_width = hero_content_max_width,
         .text_overflow = .ellipsis,
         .color = theme.c_text_sec,
@@ -223,7 +223,7 @@ fn drawHero(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     _ = try ctx.label(.{
         .text = "Cyberpunk Ambient 2026",
         .shrink = 1,
-        .min_main = 0,
+        .min_height = 0,
         .max_width = hero_content_max_width,
         .text_overflow = .ellipsis,
         .color = theme.c_text,
@@ -232,7 +232,7 @@ fn drawHero(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     _ = try ctx.label(.{
         .text = "Nocturnal synths, retro-futuristic soundscapes and deep focus beats.",
         .shrink = 1,
-        .min_main = 0,
+        .min_height = 0,
         .max_width = hero_content_max_width,
         .text_overflow = .ellipsis,
         .color = theme.c_text_sec,
@@ -241,7 +241,7 @@ fn drawHero(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     _ = try ctx.label(.{
         .text = "Spotify • 1,482,910 saves • 7 songs, 32 min 8 sec",
         .shrink = 1,
-        .min_main = 0,
+        .min_height = 0,
         .max_width = hero_content_max_width,
         .text_overflow = .ellipsis,
         .color = theme.c_text,
@@ -270,7 +270,7 @@ fn drawActions(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spe
     _ = try ctx.button(.{
         .label = if (app.is_playing) "||" else ">",
         .on_click = App.togglePlay,
-        .basis = 48,
+        .flex_basis = 48,
         .shrink = 0,
         .box_sizing = .border_box,
         .color = theme.c_bg,
@@ -285,10 +285,10 @@ fn drawActions(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spe
         if (app.playlist_saved) "♥" else "+",
         if (app.playlist_saved) theme.c_accent else theme.c_text_sec,
         15,
-        .{ .basis = 32, .fill = theme.c_bg, .on_click = App.togglePlaylistSaved },
+        .{ .flex_basis = 32, .fill = theme.c_bg, .on_click = App.togglePlaylistSaved },
     );
     try drawCircleButton(ctx, "...", theme.c_text_sec, 14, .{
-        .basis = 32,
+        .flex_basis = 32,
         .fill = theme.c_bg,
     });
 }

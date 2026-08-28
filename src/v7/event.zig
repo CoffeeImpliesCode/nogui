@@ -329,7 +329,20 @@ test "sliderSet: resolves the absolute rect through a padded+bordered parent" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 200, .h = 200 },
-        .style = .{ .padding = .{ .left = 10, .top = 10 }, .border = .{ .left = 2 } },
+        .style = .{
+            .padding_inset = .{
+                .top = .{ .length = 10 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 10 },
+            },
+            .border_inset = .{
+                .top = .{ .length = 0 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 2 },
+            },
+        },
     });
     try tree.appendChild(col_id, slider_id);
 

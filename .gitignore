@@ -13,3 +13,5 @@ graphify-out/
 *.json
 
 coverage-*.zcov
+__pycache__/
+*.py[cod]

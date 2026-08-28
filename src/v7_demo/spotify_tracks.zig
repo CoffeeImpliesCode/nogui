@@ -18,29 +18,37 @@ const track_album_text_width_max = theme.track_album_text_width_max;
 
 const desktop_columns: widget.SharedColumns = .{
     .tracks = &.{
-        .{ .basis = 32, .shrink = 0 },
-        .{ .grow = 6, .basis = 240, .min_main = theme.track_identity_width_min },
-        .{ .grow = 2, .basis = 120, .min_main = 70 },
-        .{ .grow = 1, .basis = 90, .min_main = 60 },
-        .{ .basis = 32, .shrink = 0 },
-        .{ .basis = 50, .shrink = 0 },
+        .{ .flex_basis = .{ .length = 32 }, .shrink = 0 },
+        .{
+            .grow = 6,
+            .flex_basis = .{ .length = 240 },
+            .min_width = .{ .length = theme.track_identity_width_min },
+        },
+        .{ .grow = 2, .flex_basis = .{ .length = 120 }, .min_width = .{ .length = 70 } },
+        .{ .grow = 1, .flex_basis = .{ .length = 90 }, .min_width = .{ .length = 60 } },
+        .{ .flex_basis = .{ .length = 32 }, .shrink = 0 },
+        .{ .flex_basis = .{ .length = 50 }, .shrink = 0 },
     },
 };
 const medium_columns: widget.SharedColumns = .{
     .tracks = &.{
-        .{ .basis = 32, .shrink = 0 },
-        .{ .grow = 6, .basis = 240, .min_main = theme.track_identity_width_min },
-        .{ .grow = 2, .basis = 120, .min_main = 70 },
-        .{ .basis = 32, .shrink = 0 },
-        .{ .basis = 50, .shrink = 0 },
+        .{ .flex_basis = .{ .length = 32 }, .shrink = 0 },
+        .{
+            .grow = 6,
+            .flex_basis = .{ .length = 240 },
+            .min_width = .{ .length = theme.track_identity_width_min },
+        },
+        .{ .grow = 2, .flex_basis = .{ .length = 120 }, .min_width = .{ .length = 70 } },
+        .{ .flex_basis = .{ .length = 32 }, .shrink = 0 },
+        .{ .flex_basis = .{ .length = 50 }, .shrink = 0 },
     },
 };
 const compact_columns: widget.SharedColumns = .{
     .tracks = &.{
-        .{ .basis = 32, .shrink = 0 },
-        .{ .grow = 1, .basis = 160, .min_main = 0 },
-        .{ .basis = 32, .shrink = 0 },
-        .{ .basis = 50, .shrink = 0 },
+        .{ .flex_basis = .{ .length = 32 }, .shrink = 0 },
+        .{ .grow = 1, .flex_basis = .{ .length = 160 }, .min_width = .{ .length = 0 } },
+        .{ .flex_basis = .{ .length = 32 }, .shrink = 0 },
+        .{ .flex_basis = .{ .length = 50 }, .shrink = 0 },
     },
 };
 
@@ -55,7 +63,7 @@ fn columnsFor(spec: layout.Spec) *const widget.SharedColumns {
 fn constrainIdentityText(tree: *widget.WidgetTree, id: Id, max_width: ?f32) void {
     const node = tree.node(id).?;
     node.style.shrink = 1;
-    node.style.min_main = 0;
+    node.style.min_size.width = .{ .length = 0 };
     node.text_overflow = .ellipsis;
     if (max_width) |width| node.text_max_width = width;
 }
@@ -139,7 +147,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .gap = 0,
                 .clip = true,
                 .@"align" = .center,
-                .basis = track_row_height,
+                .flex_basis = track_row_height,
                 .box_sizing = .border_box,
                 .padding = .{ .left = theme.table_gutter, .right = theme.table_gutter },
                 .radius = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 },
@@ -152,7 +160,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .gap = 0,
                 .clip = true,
                 .@"align" = .center,
-                .basis = track_row_height,
+                .flex_basis = track_row_height,
                 .box_sizing = .border_box,
                 .padding = .{ .left = theme.table_gutter, .right = theme.table_gutter },
                 .radius = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 },
@@ -191,7 +199,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 _ = try ctx.column(.{
                     .grow = 1,
                     .shrink = 1,
-                    .min_main = 0,
+                    .min_width = 0,
                     .gap = track_text_gap,
                     .clip = true,
                     .justify = .start,
@@ -208,9 +216,9 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                     .on_click_with_data = select_track,
                     .color = if (is_active) theme.c_accent else theme.c_text,
                     .font_size = 13,
-                    .basis = track_title_slot_height,
+                    .flex_basis = track_title_slot_height,
                     .shrink = 1,
-                    .min_main = 0,
+                    .min_height = 0,
                     .justify = .start,
                     .transparent = !is_active,
                     .text_overflow = .ellipsis,
@@ -222,9 +230,9 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                     .text = track.artist,
                     .color = theme.c_text_sec,
                     .font_size = 11,
-                    .basis = track_artist_slot_height,
+                    .flex_basis = track_artist_slot_height,
                     .shrink = 1,
-                    .min_main = 0,
+                    .min_height = 0,
                     .text_overflow = .ellipsis,
                 });
                 constrainIdentityText(ctx.tree, artist_label, identity_text_max_width);
@@ -238,7 +246,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .color = theme.c_text_sec,
                 .font_size = 12,
                 .shrink = 1,
-                .min_main = 0,
+                .min_width = 0,
                 .max_width = track_album_text_width_max,
                 .justify = .start,
                 .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
@@ -261,7 +269,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .color = theme.c_text_muted,
                 .font_size = 12,
                 .shrink = 1,
-                .min_main = 0,
+                .min_width = 0,
                 .max_width = theme.track_date_text_width_max,
                 .justify = .start,
                 .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },

@@ -4,6 +4,7 @@ const layout_context = @import("context.zig");
 const sizing = @import("sizing.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
+const overflow = @import("overflow.zig");
 
 pub const MeasureFn = layout_context.MeasureFn;
 pub const Options = struct {
@@ -11,6 +12,7 @@ pub const Options = struct {
     available: widget.Size,
     measure: ?MeasureFn,
     context: ?*layout_context.LayoutContext = null,
+    measurement_cache: ?*layout_context.MeasurementCache = null,
     intrinsic_width: bool = false,
     intrinsic_height: bool = false,
 };
@@ -21,8 +23,10 @@ fn initialRequest(available: widget.Size, options: Options) layout_context.Reque
             .width = available.width,
             .height = available.height,
         },
-        .intrinsic_width = options.intrinsic_width,
-        .intrinsic_height = options.intrinsic_height,
+        .width_mode = if (options.intrinsic_width) .max_content else .definite,
+        .height_mode = if (options.intrinsic_height) .max_content else .definite,
+        .sizing_mode = .inherent,
+        .known_border = .{ .width = null, .height = null },
     };
 }
 
@@ -33,6 +37,8 @@ fn concreteRequest(available: widget.Size) layout_context.Request {
             .width = available.width,
             .height = available.height,
         },
+        .sizing_mode = .inherent,
+        .known_border = .{ .width = null, .height = null },
     };
 }
 
@@ -41,38 +47,114 @@ fn childNaturalRequest(
     parent_node: *const widget.WidgetNode,
     child: *const widget.WidgetNode,
     available: widget.Size,
+    percentage_basis: style.Size(?f32),
 ) layout_context.Request {
-    const width_definite = naturalAxisDefinite(
-        parent_node.style.size.width,
-        parent.intrinsic_width,
-        parent.percentage_basis.width,
-    );
-    const height_definite = naturalAxisDefinite(
-        parent_node.style.size.height,
-        parent.intrinsic_height,
-        parent.percentage_basis.height,
-    );
+    const width_available_definite = if (parent.known_border.width != null)
+        true
+    else if (parent.sizing_mode == .content)
+        false
+    else
+        naturalAxisDefinite(
+            parent_node.style.size.width,
+            parent.width_mode,
+            parent.percentage_basis.width,
+        );
+    const height_available_definite = if (parent.known_border.height != null)
+        true
+    else if (parent.sizing_mode == .content)
+        false
+    else
+        naturalAxisDefinite(
+            parent_node.style.size.height,
+            parent.height_mode,
+            parent.percentage_basis.height,
+        );
+    const width_basis_definite = parent.known_border.width != null or
+        (parent.sizing_mode == .inherent and
+            preferredAxisDefinite(
+                parent_node.style.size.width,
+                parent.percentage_basis.width,
+            ));
+    const height_basis_definite = parent.known_border.height != null or
+        (parent.sizing_mode == .inherent and
+            preferredAxisDefinite(
+                parent_node.style.size.height,
+                parent.percentage_basis.height,
+            ));
+    const width_basis = if (parent.width_mode == .min_content and
+        parent.known_border.width == null)
+        null
+    else if (width_basis_definite)
+        percentage_basis.width
+    else
+        null;
+    const height_basis = if (parent.height_mode == .min_content and
+        parent.known_border.height == null)
+        null
+    else if (height_basis_definite)
+        percentage_basis.height
+    else
+        null;
+    const width_mode: layout_context.MeasureMode = if (parent.width_mode == .min_content)
+        .min_content
+    else if (width_available_definite and dimensionAuto(child.style.size.width))
+        .definite
+    else if (dimensionNeedsIntrinsicMeasurement(child.style.size.width, width_basis))
+        .max_content
+    else
+        .definite;
+    const height_mode: layout_context.MeasureMode = if (parent.height_mode == .min_content)
+        .min_content
+    else if (height_available_definite and dimensionAuto(child.style.size.height))
+        .definite
+    else if (dimensionNeedsIntrinsicMeasurement(child.style.size.height, height_basis))
+        .max_content
+    else
+        .definite;
     return .{
         .available = available,
         .percentage_basis = .{
-            .width = if (width_definite) @as(?f32, available.width) else null,
-            .height = if (height_definite) @as(?f32, available.height) else null,
+            .width = width_basis,
+            .height = height_basis,
         },
-        .intrinsic_width = !width_definite and dimensionAuto(child.style.size.width),
-        .intrinsic_height = !height_definite and dimensionAuto(child.style.size.height),
+        .width_mode = width_mode,
+        .height_mode = height_mode,
+        .sizing_mode = .inherent,
+        .known_border = .{ .width = null, .height = null },
     };
 }
 
 fn naturalAxisDefinite(
     dimension: style.Dimension,
-    intrinsic: bool,
+    mode: layout_context.MeasureMode,
     percentage_basis: ?f32,
 ) bool {
     return switch (dimension) {
         .length => true,
         .percent => percentage_basis != null,
-        .auto => !intrinsic,
+        .auto => mode == .definite,
         .min_content, .max_content, .fit_content => false,
+    };
+}
+
+fn preferredAxisDefinite(
+    dimension: style.Dimension,
+    percentage_basis: ?f32,
+) bool {
+    return switch (dimension) {
+        .length => true,
+        .percent => percentage_basis != null,
+        .auto, .min_content, .max_content, .fit_content => false,
+    };
+}
+fn dimensionNeedsIntrinsicMeasurement(
+    value: style.Dimension,
+    percentage_basis: ?f32,
+) bool {
+    return switch (value) {
+        .auto, .min_content, .max_content, .fit_content => true,
+        .percent => percentage_basis == null,
+        .length => false,
     };
 }
 
@@ -102,18 +184,28 @@ pub fn layoutPreparedContainer(
 
     var cache: std.ArrayList(Natural) = .empty;
     defer cache.deinit(options.allocator);
-    cache.resize(options.allocator, tree.nodes.items.len) catch return error.InvalidStyle;
+    try cache.resize(options.allocator, tree.nodes.items.len);
     for (cache.items) |*entry| entry.* = .{
         .content = .{ .width = 0, .height = 0 },
         .border = .{ .width = 0, .height = 0 },
     };
+    var local_measurement_cache: layout_context.MeasurementCache = .{};
+    const measurement_cache = options.measurement_cache orelse
+        if (options.context) |context|
+            &context.flex_measure_cache
+        else
+            &local_measurement_cache;
+    const owns_measurement_cache = options.measurement_cache == null and options.context == null;
+    defer if (owns_measurement_cache) local_measurement_cache.deinit(options.allocator);
+    var prepared_options = options;
+    prepared_options.measurement_cache = measurement_cache;
 
     const request = initialRequest(options.available, options);
     const intrinsic = try measureNode(
         tree,
         index,
         request,
-        options,
+        prepared_options,
         cache.items,
         tree.nodes.items.len,
         null,
@@ -144,7 +236,7 @@ pub fn layoutPreparedContainer(
         options.available,
         size,
         forced_border != null,
-        options,
+        prepared_options,
         cache.items,
         tree.nodes.items.len,
     );
@@ -161,13 +253,11 @@ pub fn measureNatural(
 ) sizing.Error!layout_context.Measured {
     const index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
     if (&tree.nodes.items[index] != node) return error.InvalidStyle;
-    var natural_request = request;
-    natural_request.forced_border = null;
-    try layout_context.validateNaturalRequest(tree, node, natural_request);
+    try layout_context.validateNaturalRequest(tree, node, request);
 
     var cache: std.ArrayList(Natural) = .empty;
     defer cache.deinit(context.allocator);
-    cache.resize(context.allocator, tree.nodes.items.len) catch return error.InvalidStyle;
+    try cache.resize(context.allocator, tree.nodes.items.len);
     for (cache.items) |*entry| entry.* = .{
         .content = .{ .width = 0, .height = 0 },
         .border = .{ .width = 0, .height = 0 },
@@ -176,12 +266,13 @@ pub fn measureNatural(
     const natural = try measureNode(
         tree,
         index,
-        natural_request,
+        request,
         .{
             .allocator = context.allocator,
             .available = request.available,
             .measure = context.measure,
             .context = context,
+            .measurement_cache = &context.flex_measure_cache,
         },
         cache.items,
         tree.nodes.items.len,
@@ -196,6 +287,7 @@ pub fn measureNatural(
 const Edges = struct {
     border: style.Sides,
     padding: style.Sides,
+    raw_padding: style.Sides,
     box_horizontal: f32,
     box_vertical: f32,
     horizontal: f32,
@@ -221,26 +313,39 @@ const Natural = struct {
     border: widget.Size,
 };
 
-const Constraint = struct {
-    min: f32,
+const AxisConstraints = struct {
+    min: ?f32,
     max: ?f32,
 };
 
 const Constraints = struct {
-    main: Constraint,
-    cross: Constraint,
+    main: AxisConstraints,
+    cross: AxisConstraints,
+};
+
+const ResolvedConstraints = struct {
+    style: Constraints,
+    transferred: Constraints,
+    minimum_main: f32,
 };
 
 const Item = struct {
     index: usize,
-    base: f32,
-    size: f32,
-    proposed: f32,
+    flex_basis: f32,
+    inner_flex_basis: f32,
+    hypothetical_main: f32,
+    hypothetical_outer: f32,
+    target: f32,
+    provisional: f32,
+    violation: f32,
+    main_floor: f32,
     cross: f32,
     main_min: f32,
     main_max: ?f32,
     cross_min: f32,
     cross_max: ?f32,
+    hypothetical_cross_min: f32,
+    hypothetical_cross_max: ?f32,
     margin_start: f32,
     margin_end: f32,
     cross_margin_start: f32,
@@ -309,7 +414,7 @@ fn validateTree(
         .row, .column => {},
         else => return error.InvalidStyle,
     }
-    try validateGaps(node);
+    try validateGaps(node.style);
 }
 fn markHidden(
     tree: *widget.WidgetTree,
@@ -322,8 +427,11 @@ fn markHidden(
     if (hidden) {
         tree.nodes.items[index].first_baseline = null;
         tree.nodes.items[index].rect = .{};
-        tree.nodes.items[index].natural_main = 0;
         tree.nodes.items[index].resolved_box_edges = null;
+        tree.nodes.items[index].layout_content_size = .{ .width = 0, .height = 0 };
+        if (tree.nodes.items[index].scroll) |scroll| {
+            scroll.state.max_offset = .{ 0, 0 };
+        }
     }
     for (tree.nodes.items[index].children.items) |child_id| {
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
@@ -339,6 +447,49 @@ fn measureNode(
     depth: usize,
     parent_display: ?style.Display,
 ) sizing.Error!Natural {
+    if (depth == 0 or index >= tree.nodes.items.len) return error.InvalidStyle;
+    const cache_key = layout_context.MeasurementCache.key(
+        index,
+        request,
+        parent_display,
+    );
+    if (options.measurement_cache) |measurement_cache| {
+        if (measurement_cache.lookup(cache_key)) |cached| {
+            const natural: Natural = .{
+                .content = cached.content,
+                .border = cached.border,
+            };
+            cache[index] = natural;
+            return natural;
+        }
+    }
+    const measured = try measureNodeUncached(
+        tree,
+        index,
+        request,
+        options,
+        cache,
+        depth,
+        parent_display,
+    );
+    if (options.measurement_cache) |measurement_cache| {
+        try measurement_cache.insert(options.allocator, cache_key, .{
+            .content = measured.content,
+            .border = measured.border,
+        });
+    }
+    cache[index] = measured;
+    return measured;
+}
+fn measureNodeUncached(
+    tree: *widget.WidgetTree,
+    index: usize,
+    request: layout_context.Request,
+    options: Options,
+    cache: []Natural,
+    depth: usize,
+    parent_display: ?style.Display,
+) sizing.Error!Natural {
     if (depth == 0) return error.InvalidStyle;
     const node = &tree.nodes.items[index];
     if (node.layout_hidden) return .{
@@ -346,15 +497,15 @@ fn measureNode(
         .border = .{ .width = 0, .height = 0 },
     };
     if (node.children.items.len == 0) {
-        const content = try measureLeaf(node, options.measure);
         const edges = try resolveEdges(node.style, request.percentage_basis.width);
-        const border = try usedSize(
+        const content = try measureLeaf(node, request, edges, options.measure);
+        const border = try usedSizeForRequest(
             node.style,
             request.available,
             request.percentage_basis,
             content,
             edges,
-            null,
+            request,
         );
         cache[index] = .{
             .content = content,
@@ -385,13 +536,13 @@ fn measureNode(
         cache,
         depth - 1,
     );
-    const border = try usedSize(
+    const border = try usedSizeForRequest(
         node.style,
         request.available,
         request.percentage_basis,
         content,
         edges,
-        null,
+        request,
     );
     cache[index] = .{
         .content = content,
@@ -400,39 +551,355 @@ fn measureNode(
     return cache[index];
 }
 
-fn measureLeaf(node: *const widget.WidgetNode, measure: ?MeasureFn) sizing.Error!widget.Size {
+fn measureAutomaticMinimum(
+    tree: *widget.WidgetTree,
+    child_index: usize,
+    child: *widget.WidgetNode,
+    request: layout_context.Request,
+    axes: Axes,
+    options: Options,
+    cache: []Natural,
+    depth: usize,
+    parent_display: style.Display,
+    intrinsic: widget.Size,
+    edges: Edges,
+    stretch_cross: bool,
+) sizing.Error!Natural {
+    const preferred_size = try resolvePreferredSize(
+        child.style,
+        request.available,
+        request.percentage_basis,
+        intrinsic,
+        edges,
+    );
+    const bounds = try resolveConstraintBounds(
+        child.style,
+        request.available,
+        request.percentage_basis,
+        intrinsic,
+        edges,
+    );
+    const preferred_cross = if (axes.horizontal)
+        preferred_size.height
+    else
+        preferred_size.width;
+    const transferred_cross_min = if (axes.horizontal)
+        bounds.transferred_min.height
+    else
+        bounds.transferred_min.width;
+    const transferred_cross_max = if (axes.horizontal)
+        bounds.transferred_max.height
+    else
+        bounds.transferred_max.width;
+    const known_cross = if (preferred_cross) |cross|
+        try clamp(
+            cross,
+            transferred_cross_min orelse 0,
+            transferred_cross_max,
+        )
+    else if (stretch_cross)
+        try clamp(
+            if (axes.horizontal) request.available.height else request.available.width,
+            transferred_cross_min orelse 0,
+            transferred_cross_max,
+        )
+    else
+        null;
+
+    var min_request = request;
+    min_request.sizing_mode = .content;
+    min_request.known_border = .{ .width = null, .height = null };
+    if (axes.horizontal) {
+        min_request.width_mode = .min_content;
+        min_request.percentage_basis.width = null;
+        min_request.known_border.height = known_cross;
+    } else {
+        min_request.height_mode = .min_content;
+        min_request.percentage_basis.height = null;
+        min_request.known_border.width = known_cross;
+    }
+    return measureNode(
+        tree,
+        child_index,
+        min_request,
+        options,
+        cache,
+        depth,
+        parent_display,
+    );
+}
+
+fn measureLeaf(
+    node: *const widget.WidgetNode,
+    request: layout_context.Request,
+    edges: Edges,
+    measure: ?MeasureFn,
+) sizing.Error!widget.Size {
+    const font_size = try finite(node.font_size);
+    if (font_size < 0) return error.InvalidStyle;
+    const known_dimensions = try measureKnownDimensions(node.style, request, edges);
+    const available_space: sizing.AvailableSize = .{
+        .width = try measureAvailableSpace(
+            node.style.size.width,
+            known_dimensions.width,
+            request.available.width,
+            edges.horizontal,
+            request.width_mode,
+        ),
+        .height = try measureAvailableSpace(
+            node.style.size.height,
+            known_dimensions.height,
+            request.available.height,
+            edges.vertical,
+            request.height_mode,
+        ),
+    };
     var result: widget.Size = switch (node.kind) {
-        .label => |label| if (measure) |callback| callback(
-            label.text,
-            node.font_size,
-            node.font_id,
-        ) else blk: {
-            const font_size = try finite(node.font_size);
-            if (font_size < 0) return error.InvalidStyle;
-            const scale: f32 = if (font_size > 0) font_size / 20 else 1;
-            const length: f32 = @floatFromInt(@min(label.text.len, 1 << 24));
-            break :blk .{ .width = length * 10 * scale, .height = 20 * scale };
-        },
+        .label => |label| try layout_context.measureText(measure, label.text, .{
+            .known_dimensions = known_dimensions,
+            .available_space = available_space,
+            .font_size = font_size,
+            .font_id = node.font_id,
+        }, node.text_overflow, node.text_max_width),
         .spacer => |spacer| .{ .width = spacer.size, .height = spacer.size },
         .button => |button| .{
             .width = if (button.visual_label) |text|
-                if (text.len == 0) 100 else @floatFromInt(text.len * 10 + 16)
+                if (text.len == 0) 100 else try countToF32(text.len * 10 + 16)
             else
                 100,
             .height = 32,
         },
-        .slider => .{ .width = 100, .height = widget.slider_rail_height },
+        .slider => try layout_context.measureSliderContent(measure, node, .{
+            .known_dimensions = known_dimensions,
+            .available_space = available_space,
+            .font_size = font_size,
+            .font_id = node.font_id,
+        }),
         .row, .column => .{ .width = 0, .height = 0 },
     };
     result.width = try nonNegative(result.width);
     result.height = try nonNegative(result.height);
-    if (node.text_max_width) |maximum| {
-        if (node.text_overflow != .visible) result.width = @min(
-            result.width,
-            try nonNegative(maximum),
-        );
-    }
     return result;
+}
+
+fn measureKnownDimensions(
+    input: style.Style,
+    request: layout_context.Request,
+    edges: Edges,
+) sizing.Error!sizing.OptionalSize {
+    const content_sizing = request.sizing_mode == .content;
+    const width_override = request.known_border.width != null;
+    const height_override = request.known_border.height != null;
+    var width = if (request.known_border.width) |border|
+        try nonNegative(border)
+    else if (content_sizing)
+        null
+    else
+        try knownBorderDimension(
+            input.size.width,
+            .horizontal,
+            input,
+            request,
+            edges,
+        );
+    var height = if (request.known_border.height) |border|
+        try nonNegative(border)
+    else if (content_sizing)
+        null
+    else
+        try knownBorderDimension(
+            input.size.height,
+            .vertical,
+            input,
+            request,
+            edges,
+        );
+    if (!content_sizing) {
+        if (width) |value| {
+            if (!width_override) {
+                width = try clampSize(
+                    input,
+                    .horizontal,
+                    value,
+                    request.available,
+                    request.percentage_basis,
+                    .{ .width = 0, .height = 0 },
+                    edges,
+                );
+            }
+        }
+        if (height) |value| {
+            if (!height_override) {
+                height = try clampSize(
+                    input,
+                    .vertical,
+                    value,
+                    request.available,
+                    request.percentage_basis,
+                    .{ .width = 0, .height = 0 },
+                    edges,
+                );
+            }
+        }
+        if (input.aspect_ratio) |aspect_ratio| {
+            const aspect = try ratio(aspect_ratio);
+            if (width != null and height == null) {
+                const sizing_width = try borderToSizing(
+                    width.?,
+                    edges.box_horizontal,
+                    input.box_sizing,
+                );
+                height = try sizingToBorder(
+                    try finite(sizing_width / aspect),
+                    edges.box_vertical,
+                    input.box_sizing,
+                );
+            } else if (height != null and width == null) {
+                const sizing_height = try borderToSizing(
+                    height.?,
+                    edges.box_vertical,
+                    input.box_sizing,
+                );
+                width = try sizingToBorder(
+                    try finite(sizing_height * aspect),
+                    edges.box_horizontal,
+                    input.box_sizing,
+                );
+            }
+        }
+    }
+    return .{
+        .width = if (width) |value| @max(0, try finite(value - edges.horizontal)) else null,
+        .height = if (height) |value| @max(0, try finite(value - edges.vertical)) else null,
+    };
+}
+
+fn knownBorderDimension(
+    dimension: style.Dimension,
+    axis: PhysicalAxis,
+    input: style.Style,
+    request: layout_context.Request,
+    edges: Edges,
+) sizing.Error!?f32 {
+    switch (dimension) {
+        .auto, .min_content, .max_content, .fit_content => return null,
+        .percent => {
+            const basis = if (axis == .horizontal)
+                request.percentage_basis.width
+            else
+                request.percentage_basis.height;
+            if (basis == null) return null;
+        },
+        .length => {},
+    }
+    const containing = if (axis == .horizontal) request.available.width else request.available.height;
+    const basis = if (axis == .horizontal)
+        request.percentage_basis.width
+    else
+        request.percentage_basis.height;
+    return resolveDimensionBorder(
+        dimension,
+        containing,
+        basis,
+        0,
+        if (axis == .horizontal) edges.box_horizontal else edges.box_vertical,
+        if (axis == .horizontal) edges.horizontal else edges.vertical,
+        input.box_sizing,
+    );
+}
+
+fn measureAvailableSpace(
+    dimension: style.Dimension,
+    known: ?f32,
+    available_border: f32,
+    edge_sum: f32,
+    mode: layout_context.MeasureMode,
+) sizing.Error!sizing.AvailableSpace {
+    if (known) |value| {
+        const definite = try nonNegative(value);
+        return .{ .definite = definite };
+    }
+    const available_content = @max(0, try finite(available_border - edge_sum));
+    return switch (dimension) {
+        .min_content => .min_content,
+        .max_content => .max_content,
+        .fit_content => |limit| blk: {
+            const definite = if (limit) |value|
+                @min(available_content, try nonNegative(value))
+            else
+                available_content;
+            break :blk .{ .definite = definite };
+        },
+        .auto, .length, .percent => switch (mode) {
+            .definite => .{ .definite = available_content },
+            .min_content => .min_content,
+            .max_content => .max_content,
+        },
+    };
+}
+
+fn naturalBaseline(
+    tree: *widget.WidgetTree,
+    index: usize,
+    request: layout_context.Request,
+    natural: Natural,
+    options: Options,
+    cache: []Natural,
+    depth: usize,
+) sizing.Error!f32 {
+    if (depth == 0) return error.InvalidStyle;
+    const node = &tree.nodes.items[index];
+    if (node.children.items.len == 0) return natural.border.height;
+
+    const axes = axesFor(node.style);
+    if (!axes.horizontal) return natural.border.height;
+
+    const edges = try resolveEdges(node.style, request.percentage_basis.width);
+    const content: widget.Size = .{
+        .width = @max(0, try finite(natural.border.width - edges.horizontal)),
+        .height = @max(0, try finite(natural.border.height - edges.vertical)),
+    };
+    for (node.children.items) |child_id| {
+        const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
+        const child = &tree.nodes.items[child_index];
+        if (child.layout_hidden or child.style.position == .absolute) continue;
+        const child_request = childNaturalRequest(request, node, child, content, .{
+            .width = if (naturalAxisDefinite(
+                node.style.size.width,
+                request.width_mode,
+                request.percentage_basis.width,
+            )) @as(?f32, content.width) else null,
+            .height = if (naturalAxisDefinite(
+                node.style.size.height,
+                request.height_mode,
+                request.percentage_basis.height,
+            )) @as(?f32, content.height) else null,
+        });
+        const child_natural = try measureNode(
+            tree,
+            child_index,
+            child_request,
+            options,
+            cache,
+            depth - 1,
+            node.style.display,
+        );
+        const margins = try resolveMargins(child.style, child_request.percentage_basis.width);
+        const border_padding_top = try add(edges.border.top, edges.padding.top);
+        const child_baseline = try naturalBaseline(
+            tree,
+            child_index,
+            child_request,
+            child_natural,
+            options,
+            cache,
+            depth - 1,
+        );
+        const margin_baseline = try add(margins.value.top, child_baseline);
+        const baseline = try add(border_padding_top, margin_baseline);
+        return baseline;
+    }
+    return natural.border.height;
 }
 
 fn measureContainerContent(
@@ -446,111 +913,236 @@ fn measureContainerContent(
 ) sizing.Error!widget.Size {
     const node = &tree.nodes.items[index];
     const axes = axesFor(node.style);
-    const preferred_width = try resolveDimensionBorder(
-        node.style.size.width,
-        request.available.width,
-        request.percentage_basis.width,
-        0,
-        edges.box_horizontal,
-        edges.horizontal,
-        node.style.box_sizing,
-    );
-    const preferred_height = try resolveDimensionBorder(
-        node.style.size.height,
-        request.available.height,
-        request.percentage_basis.height,
-        0,
-        edges.box_vertical,
-        edges.vertical,
-        node.style.box_sizing,
-    );
-    const minimum_width = (try resolveDimensionBorder(
-        node.style.min_size.width,
-        request.available.width,
-        request.percentage_basis.width,
-        0,
-        edges.box_horizontal,
-        edges.horizontal,
-        node.style.box_sizing,
-    )) orelse 0;
-    const minimum_height = (try resolveDimensionBorder(
-        node.style.min_size.height,
-        request.available.height,
-        request.percentage_basis.height,
-        0,
-        edges.box_vertical,
-        edges.vertical,
-        node.style.box_sizing,
-    )) orelse 0;
-    const maximum_width = try resolveDimensionBorder(
-        node.style.max_size.width,
-        request.available.width,
-        request.percentage_basis.width,
-        0,
-        edges.box_horizontal,
-        edges.horizontal,
-        node.style.box_sizing,
-    );
-    const maximum_height = try resolveDimensionBorder(
-        node.style.max_size.height,
-        request.available.height,
-        request.percentage_basis.height,
-        0,
-        edges.box_vertical,
-        edges.vertical,
-        node.style.box_sizing,
-    );
+    const content_sizing = request.sizing_mode == .content;
+    const preferred_width = if (content_sizing)
+        null
+    else
+        try resolveDimensionBorder(
+            node.style.size.width,
+            request.available.width,
+            request.percentage_basis.width,
+            0,
+            edges.box_horizontal,
+            edges.horizontal,
+            node.style.box_sizing,
+        );
+    const preferred_height = if (content_sizing)
+        null
+    else
+        try resolveDimensionBorder(
+            node.style.size.height,
+            request.available.height,
+            request.percentage_basis.height,
+            0,
+            edges.box_vertical,
+            edges.vertical,
+            node.style.box_sizing,
+        );
+    const minimum_width = if (content_sizing)
+        0
+    else
+        (try resolveDimensionBorder(
+            node.style.min_size.width,
+            request.available.width,
+            request.percentage_basis.width,
+            0,
+            edges.box_horizontal,
+            edges.horizontal,
+            node.style.box_sizing,
+        )) orelse 0;
+    const minimum_height = if (content_sizing)
+        0
+    else
+        (try resolveDimensionBorder(
+            node.style.min_size.height,
+            request.available.height,
+            request.percentage_basis.height,
+            0,
+            edges.box_vertical,
+            edges.vertical,
+            node.style.box_sizing,
+        )) orelse 0;
+    const maximum_width = if (content_sizing)
+        null
+    else
+        try resolveDimensionBorder(
+            node.style.max_size.width,
+            request.available.width,
+            request.percentage_basis.width,
+            0,
+            edges.box_horizontal,
+            edges.horizontal,
+            node.style.box_sizing,
+        );
+    const maximum_height = if (content_sizing)
+        null
+    else
+        try resolveDimensionBorder(
+            node.style.max_size.height,
+            request.available.height,
+            request.percentage_basis.height,
+            0,
+            edges.box_vertical,
+            edges.vertical,
+            node.style.box_sizing,
+        );
     const measured_border: widget.Size = .{
-        .width = try clamp(
-            preferred_width orelse request.available.width,
-            minimum_width,
-            maximum_width,
-        ),
-        .height = try clamp(
-            preferred_height orelse request.available.height,
-            minimum_height,
-            maximum_height,
-        ),
+        .width = if (request.known_border.width) |known|
+            @max(try nonNegative(known), edges.horizontal)
+        else if (content_sizing)
+            try nonNegative(request.available.width)
+        else
+            try clamp(
+                preferred_width orelse request.available.width,
+                minimum_width,
+                maximum_width,
+            ),
+        .height = if (request.known_border.height) |known|
+            @max(try nonNegative(known), edges.vertical)
+        else if (content_sizing)
+            try nonNegative(request.available.height)
+        else
+            try clamp(
+                preferred_height orelse request.available.height,
+                minimum_height,
+                maximum_height,
+            ),
     };
     const available: widget.Size = .{
         .width = @max(0, measured_border.width - edges.horizontal),
         .height = @max(0, measured_border.height - edges.vertical),
     };
     const available_main = axisMain(axes, available);
-    const width_definite = naturalAxisDefinite(
-        node.style.size.width,
-        request.intrinsic_width,
-        request.percentage_basis.width,
-    );
-    const height_definite = naturalAxisDefinite(
-        node.style.size.height,
-        request.intrinsic_height,
-        request.percentage_basis.height,
-    );
+    const main_gap_value = gapMainValue(node, axes);
+    const cross_gap_value = if (axes.horizontal)
+        selectAxisGap(node.style.row_gap, node.style.gap)
+    else
+        selectAxisGap(node.style.column_gap, node.style.gap);
+    const main_gap_is_percentage = switch (main_gap_value) {
+        .length => false,
+        .percent => true,
+    };
+    const cross_gap_is_percentage = switch (cross_gap_value) {
+        .length => false,
+        .percent => true,
+    };
+    const width_definite_base = if (request.known_border.width != null)
+        true
+    else if (content_sizing)
+        false
+    else
+        naturalAxisDefinite(
+            node.style.size.width,
+            request.width_mode,
+            request.percentage_basis.width,
+        );
+    const height_definite_base = if (request.known_border.height != null)
+        true
+    else if (content_sizing)
+        false
+    else
+        naturalAxisDefinite(
+            node.style.size.height,
+            request.height_mode,
+            request.percentage_basis.height,
+        );
+    const width_definite = width_definite_base and
+        !(request.known_border.width == null and
+            dimensionAuto(node.style.size.width) and
+            ((!axes.horizontal and cross_gap_is_percentage) or
+                (axes.horizontal and main_gap_is_percentage)));
+    const height_definite = height_definite_base and
+        !(request.known_border.height == null and
+            dimensionAuto(node.style.size.height) and
+            ((axes.horizontal and cross_gap_is_percentage) or
+                (!axes.horizontal and main_gap_is_percentage)));
     const gap_basis: style.Size(?f32) = .{
         .width = if (width_definite) available.width else null,
         .height = if (height_definite) available.height else null,
     };
-    const main_gap = try gapMain(
-        node,
-        axes,
+    const main_gap = try resolveGap(
+        main_gap_value,
         if (axes.horizontal) gap_basis.width else gap_basis.height,
     );
-    const cross_gap = try gapCross(
-        node,
-        axes,
+    const cross_gap = try resolveGap(
+        cross_gap_value,
         if (axes.horizontal) gap_basis.height else gap_basis.width,
     );
-    const auto_main = dimensionAuto(if (axes.horizontal)
+    const main_dimension = if (axes.horizontal)
         node.style.size.width
     else
-        node.style.size.height);
-    const intrinsic_main = auto_main and (if (axes.horizontal)
-        request.intrinsic_width
+        node.style.size.height;
+    const main_known = if (axes.horizontal)
+        request.known_border.width
     else
-        request.intrinsic_height);
+        request.known_border.height;
+    const main_mode = if (axes.horizontal) request.width_mode else request.height_mode;
+    const auto_main = if (content_sizing and main_known == null)
+        true
+    else
+        dimensionAuto(main_dimension);
+    const intrinsic_main = if (content_sizing and main_known == null)
+        true
+    else
+        auto_main and main_mode != .definite;
+    const main_percentage_basis = if (axes.horizontal)
+        request.percentage_basis.width
+    else
+        request.percentage_basis.height;
+    const main_definite = if (main_known != null)
+        true
+    else if (content_sizing)
+        false
+    else
+        naturalAxisDefinite(
+            main_dimension,
+            main_mode,
+            main_percentage_basis,
+        );
+    const main_edge_sum = if (axes.horizontal) edges.horizontal else edges.vertical;
+    const minimum_main_border = if (content_sizing)
+        0
+    else if (axes.horizontal)
+        minimum_width
+    else
+        minimum_height;
+    const minimum_main_content = @max(
+        0,
+        try finite(minimum_main_border - main_edge_sum),
+    );
+    const maximum_main_dimension = if (axes.horizontal)
+        node.style.max_size.width
+    else
+        node.style.max_size.height;
+    const maximum_main_border = if (axes.horizontal) maximum_width else maximum_height;
+    const maximum_main_content: ?f32 = if (content_sizing or
+        dimensionNeedsIntrinsicMeasurement(
+            maximum_main_dimension,
+            main_percentage_basis,
+        ))
+        null
+    else
+        @max(
+            minimum_main_content,
+            @max(0, try finite((maximum_main_border orelse 0) - main_edge_sum)),
+        );
+    const line_mode: layout_context.MeasureMode = if (main_definite or
+        maximum_main_content != null)
+        .definite
+    else
+        main_mode;
+    const line_capacity = if (maximum_main_content) |maximum|
+        @max(
+            if (main_definite) available_main else maximum,
+            minimum_main_content,
+        )
+    else
+        available_main;
     var line_main: f32 = 0;
     var line_cross: f32 = 0;
+    var line_max_baseline: f32 = 0;
+    var line_max_descent: f32 = 0;
+    var line_baseline_count: usize = 0;
     var total_main: f32 = 0;
     var total_cross: f32 = 0;
     var unwrapped_main: f32 = 0;
@@ -561,7 +1153,84 @@ fn measureContainerContent(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position == .absolute) continue;
-        const child_request = childNaturalRequest(request, node, child, available);
+        const child_edges = try resolveEdges(
+            child.style,
+            gap_basis.width,
+        );
+        const child_bounds = try resolveConstraintBounds(
+            child.style,
+            available,
+            gap_basis,
+            .{ .width = 0, .height = 0 },
+            child_edges,
+        );
+        const child_cross_min_opt = if (axes.horizontal)
+            child_bounds.transferred_min.height
+        else
+            child_bounds.transferred_min.width;
+        const child_cross_max_opt = if (axes.horizontal)
+            child_bounds.transferred_max.height
+        else
+            child_bounds.transferred_max.width;
+        const child_style_cross_min_opt = if (axes.horizontal)
+            child_bounds.style_min.height
+        else
+            child_bounds.style_min.width;
+        const child_style_cross_max_opt = if (axes.horizontal)
+            child_bounds.style_max.height
+        else
+            child_bounds.style_max.width;
+        const child_cross_min = child_cross_min_opt orelse 0;
+        const child_cross_max = child_cross_max_opt;
+        const margins = try resolveMargins(child.style, gap_basis.width);
+        var child_available = available;
+        const child_cross_floor = if (axes.horizontal)
+            child_edges.box_vertical
+        else
+            child_edges.box_horizontal;
+        if (axes.horizontal)
+            child_available.height = @max(
+                child_cross_floor,
+                try clamp(
+                    @max(
+                        0,
+                        try finite(
+                            available.height - margins.value.top - margins.value.bottom,
+                        ),
+                    ),
+                    child_cross_min,
+                    child_cross_max,
+                ),
+            )
+        else
+            child_available.width = @max(
+                child_cross_floor,
+                try clamp(
+                    @max(
+                        0,
+                        try finite(
+                            available.width - margins.value.left - margins.value.right,
+                        ),
+                    ),
+                    child_cross_min,
+                    child_cross_max,
+                ),
+            );
+        var child_request = childNaturalRequest(request, node, child, child_available, gap_basis);
+        const parent_cross_mode = if (axes.horizontal) request.height_mode else request.width_mode;
+        if (axes.horizontal) {
+            child_request.height_mode = switch (parent_cross_mode) {
+                .min_content => if (child_cross_min_opt != null) .definite else child_request.height_mode,
+                .max_content => if (child_cross_max_opt != null) .definite else child_request.height_mode,
+                .definite => .definite,
+            };
+        } else {
+            child_request.width_mode = switch (parent_cross_mode) {
+                .min_content => if (child_cross_min_opt != null) .definite else child_request.width_mode,
+                .max_content => if (child_cross_max_opt != null) .definite else child_request.width_mode,
+                .definite => .definite,
+            };
+        }
         const natural = try measureNode(
             tree,
             child_index,
@@ -571,46 +1240,305 @@ fn measureContainerContent(
             depth,
             node.style.display,
         );
-        const margins = try resolveMargins(child.style, child_request.percentage_basis.width);
+        const contribution_natural = if (intrinsic_main and
+            (child_style_cross_min_opt != child_cross_min_opt or
+                child_style_cross_max_opt != child_cross_max_opt))
+        blk: {
+            var contribution_available = available;
+            if (axes.horizontal) {
+                contribution_available.height = @max(
+                    child_cross_floor,
+                    try clamp(
+                        @max(
+                            0,
+                            try finite(
+                                available.height - margins.value.top - margins.value.bottom,
+                            ),
+                        ),
+                        child_style_cross_min_opt orelse 0,
+                        child_style_cross_max_opt,
+                    ),
+                );
+            } else {
+                contribution_available.width = @max(
+                    child_cross_floor,
+                    try clamp(
+                        @max(
+                            0,
+                            try finite(
+                                available.width - margins.value.left - margins.value.right,
+                            ),
+                        ),
+                        child_style_cross_min_opt orelse 0,
+                        child_style_cross_max_opt,
+                    ),
+                );
+            }
+            var contribution_request = childNaturalRequest(
+                request,
+                node,
+                child,
+                contribution_available,
+                gap_basis,
+            );
+            if (axes.horizontal) {
+                contribution_request.height_mode = switch (parent_cross_mode) {
+                    .min_content => if (child_style_cross_min_opt != null)
+                        .definite
+                    else
+                        contribution_request.height_mode,
+                    .max_content => if (child_style_cross_max_opt != null)
+                        .definite
+                    else
+                        contribution_request.height_mode,
+                    .definite => .definite,
+                };
+            } else {
+                contribution_request.width_mode = switch (parent_cross_mode) {
+                    .min_content => if (child_style_cross_min_opt != null)
+                        .definite
+                    else
+                        contribution_request.width_mode,
+                    .max_content => if (child_style_cross_max_opt != null)
+                        .definite
+                    else
+                        contribution_request.width_mode,
+                    .definite => .definite,
+                };
+            }
+            break :blk try measureNode(
+                tree,
+                child_index,
+                contribution_request,
+                options,
+                cache,
+                depth,
+                node.style.display,
+            );
+        } else natural;
+        const minimum_main_dimension = if (axes.horizontal)
+            child.style.min_size.width
+        else
+            child.style.min_size.height;
+        const minimum_main_overflow = if (axes.horizontal)
+            child.style.overflow.width
+        else
+            child.style.overflow.height;
+        const preserves_automatic_minimum = switch (minimum_main_overflow) {
+            .visible, .clip => true,
+            .hidden, .scroll, .auto => false,
+        };
+        const alignment = alignValue(
+            child.style.align_self,
+            node.style.@"align",
+            child.style.writing_direction == node.style.writing_direction,
+            !axes.horizontal,
+        );
+        const child_cross_mode = if (axes.horizontal)
+            child_request.height_mode
+        else
+            child_request.width_mode;
+        const stretch_cross = alignment == .stretch and
+            !crossStartAuto(axes, margins) and
+            !crossEndAuto(axes, margins) and
+            child_cross_mode == .definite;
+        const min_natural = if (dimensionAuto(minimum_main_dimension) and
+            preserves_automatic_minimum)
+            try measureAutomaticMinimum(
+                tree,
+                child_index,
+                child,
+                child_request,
+                axes,
+                options,
+                cache,
+                depth,
+                node.style.display,
+                natural.content,
+                child_edges,
+                stretch_cross,
+            )
+        else
+            natural;
+        const preferred_size = try resolvePreferredSize(
+            child.style,
+            child_request.available,
+            child_request.percentage_basis,
+            contribution_natural.content,
+            child_edges,
+        );
+        const preferred_main = if (axes.horizontal)
+            preferred_size.width
+        else
+            preferred_size.height;
+        const child_constraints = try constraintsFor(
+            child.style,
+            child_request.available,
+            child_request.percentage_basis,
+            natural.content,
+            min_natural,
+            child_edges,
+            axes,
+            preferred_main,
+        );
+        const base_preferred = try flexBaseSize(
+            child.style,
+            child_request.available,
+            child_request.percentage_basis,
+            natural.content,
+            child_edges,
+        );
+        const child_basis = try flexBasis(
+            child.style,
+            axes,
+            available_main,
+            if (axes.horizontal)
+                child_request.percentage_basis.width
+            else
+                child_request.percentage_basis.height,
+            axisMain(axes, base_preferred),
+            natural,
+            child_edges,
+        );
+        const explicit_main_min = child_constraints.style.main.min orelse 0;
+        const explicit_main_max = child_constraints.style.main.max;
+        const explicit_basis = switch (child.style.flex_basis) {
+            .auto => false,
+            else => true,
+        };
+        const clamping_basis = if (preferred_main) |preferred|
+            @max(child_basis, preferred)
+        else
+            child_basis;
+        var contribution_min = @max(
+            child_constraints.style.main.min orelse 0,
+            child_constraints.minimum_main,
+        );
+        if (try nonNegative(child.style.shrink) == 0) {
+            contribution_min = @max(contribution_min, clamping_basis);
+        }
+        var contribution_max = if (explicit_basis)
+            explicit_main_max
+        else
+            child_constraints.style.main.max;
+        if (try nonNegative(child.style.grow) == 0) {
+            contribution_max = if (contribution_max) |maximum|
+                @min(maximum, clamping_basis)
+            else
+                clamping_basis;
+        }
+        const main_overflow = if (axes.horizontal)
+            child.style.overflow.width
+        else
+            child.style.overflow.height;
+        const is_scroll_container = switch (main_overflow) {
+            .hidden, .scroll, .auto => true,
+            .visible, .clip => false,
+        };
+        const contribution_border = if (intrinsic_main)
+            contribution_natural.border
+        else
+            natural.border;
+        const inherent_main = axisMain(axes, contribution_border);
+        const contribution_candidate = if (is_scroll_container)
+            child_basis
+        else if (!axes.horizontal and explicit_basis and explicit_main_min > child_basis)
+            explicit_main_min
+        else if (axes.horizontal)
+            inherent_main
+        else
+            @max(inherent_main, child_basis);
+        const main_contribution = try clamp(
+            contribution_candidate,
+            contribution_min,
+            contribution_max,
+        );
+
         const outer_main = try add(
-            try add(axisMain(axes, natural.border), marginStart(axes, margins)),
+            try add(main_contribution, marginStart(axes, margins)),
             marginEnd(axes, margins),
         );
         const outer_cross = try add(
             try add(axisCross(axes, natural.border), crossStart(axes, margins)),
             crossEnd(axes, margins),
         );
-        unwrapped_main = if (line_items == 0)
-            outer_main
-        else
-            try add(try add(unwrapped_main, main_gap), outer_main);
         const candidate = if (line_items == 0)
             outer_main
         else
             try add(try add(line_main, main_gap), outer_main);
-        if (effectiveWrap(node.style) != .nowrap and
-            line_items != 0 and candidate > available_main)
-        {
+        unwrapped_main = if (line_items == 0)
+            outer_main
+        else
+            try add(try add(unwrapped_main, main_gap), outer_main);
+        const should_wrap = node.style.flex_wrap != .nowrap and
+            line_items != 0 and
+            switch (line_mode) {
+                .max_content => false,
+                .min_content => true,
+                .definite => candidate > line_capacity,
+            };
+        if (should_wrap) {
             total_main = @max(total_main, line_main);
             if (line_count != 0) total_cross = try add(total_cross, cross_gap);
-            total_cross = try add(total_cross, line_cross);
+            const completed_cross = if (axes.horizontal and line_baseline_count > 1)
+                @max(line_cross, try add(line_max_baseline, line_max_descent))
+            else
+                line_cross;
+            total_cross = try add(total_cross, completed_cross);
             line_count += 1;
             line_main = outer_main;
             line_cross = outer_cross;
+            line_max_baseline = 0;
+            line_max_descent = 0;
+            line_baseline_count = 0;
             line_items = 1;
         } else {
             line_main = candidate;
             line_cross = @max(line_cross, outer_cross);
             line_items += 1;
         }
+        const baseline = if (axes.horizontal and
+            alignment == .baseline and
+            !crossStartAuto(axes, margins) and
+            !crossEndAuto(axes, margins))
+            try naturalBaseline(
+                tree,
+                child_index,
+                child_request,
+                natural,
+                options,
+                cache,
+                depth,
+            )
+        else
+            0;
+        if (baseline != 0 or (axes.horizontal and alignment == .baseline)) {
+            const ascent = try add(margins.value.top, baseline);
+            const descent = @max(
+                0,
+                try finite(margins.value.bottom + axisCross(axes, natural.border) - baseline),
+            );
+            line_max_baseline = @max(line_max_baseline, ascent);
+            line_max_descent = @max(line_max_descent, descent);
+            line_baseline_count += 1;
+        }
     }
     if (line_items != 0) {
         total_main = @max(total_main, line_main);
         if (line_count != 0) total_cross = try add(total_cross, cross_gap);
-        total_cross = try add(total_cross, line_cross);
+        const completed_cross = if (axes.horizontal and line_baseline_count > 1)
+            @max(line_cross, try add(line_max_baseline, line_max_descent))
+        else
+            line_cross;
+        total_cross = try add(total_cross, completed_cross);
     }
-    const content_main = if (effectiveWrap(node.style) != .nowrap and auto_main)
-        if (intrinsic_main) unwrapped_main else @min(unwrapped_main, available_main)
+    const content_main = if (node.style.flex_wrap != .nowrap and auto_main)
+        if (line_mode == .min_content)
+            total_main
+        else if (intrinsic_main)
+            unwrapped_main
+        else
+            @min(unwrapped_main, line_capacity)
     else
         total_main;
     return fromAxes(axes, content_main, total_cross);
@@ -631,7 +1559,10 @@ fn layoutFlex(
     node.first_baseline = null;
     if (node.layout_hidden) return;
     if (node.style.display != .flex) return error.InvalidStyle;
-    const edges = try resolveEdges(node.style, containing.width);
+    const edges = try clampEdges(
+        try resolveEdges(node.style, containing.width),
+        border_size,
+    );
     node.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
     node.rect.w = try nonNegative(border_size.width);
     node.rect.h = try nonNegative(border_size.height);
@@ -655,13 +1586,19 @@ fn layoutFlex(
             try finite(pad_box.height - edges.padding.top - edges.padding.bottom),
         ),
     };
-    node.resolveTypedStyle(containing, content);
     const axes = axesFor(node.style);
     const main_size = axisMain(axes, content);
     const cross_size = axisCross(axes, content);
+    const cross_dimension = if (axes.horizontal)
+        node.style.size.height
+    else
+        node.style.size.width;
+    const cross_mode: layout_context.MeasureMode = if (axes.horizontal)
+        if (options.intrinsic_height) .max_content else .definite
+    else if (options.intrinsic_width) .max_content else .definite;
     const cross_definite = size_forced or naturalAxisDefinite(
-        if (axes.horizontal) node.style.size.height else node.style.size.width,
-        if (axes.horizontal) options.intrinsic_height else options.intrinsic_width,
+        cross_dimension,
+        cross_mode,
         if (axes.horizontal) containing.height else containing.width,
     );
     const main_dimension = if (axes.horizontal)
@@ -683,13 +1620,18 @@ fn layoutFlex(
     const cyclic_wrapped_main_gap = !size_forced and
         main_intrinsic and
         dimensionAuto(main_dimension) and
-        effectiveWrap(node.style) != .nowrap and
+        node.style.flex_wrap != .nowrap and
         main_gap_is_percentage;
     const line_gap = if (cyclic_wrapped_main_gap) 0 else main_gap;
+    // A percentage cross gap is cyclic while the cross dimension is auto.
+    // Forced item geometry does not make that container dimension definite.
     const cross_gap = try gapCross(
         node,
         axes,
-        if (cross_definite) @as(?f32, cross_size) else null,
+        if (cross_definite and !dimensionAuto(cross_dimension))
+            @as(?f32, cross_size)
+        else
+            null,
     );
 
     var items: std.ArrayList(Item) = .empty;
@@ -710,7 +1652,7 @@ fn layoutFlex(
         options.allocator,
         &lines,
         items.items,
-        effectiveWrap(node.style),
+        node.style.flex_wrap,
         main_size,
         line_gap,
     );
@@ -726,9 +1668,9 @@ fn layoutFlex(
             const child = &tree.nodes.items[item.index];
             if (child.children.items.len == 0 or child.style.display == .flex) continue;
             const remeasure_available: widget.Size = if (axes.horizontal)
-                .{ .width = item.size, .height = cross_size }
+                .{ .width = item.target, .height = cross_size }
             else
-                .{ .width = cross_size, .height = item.size };
+                .{ .width = cross_size, .height = item.target };
             const measured = try context.measure_node(
                 context,
                 tree,
@@ -739,14 +1681,14 @@ fn layoutFlex(
                         .width = remeasure_available.width,
                         .height = remeasure_available.height,
                     },
-                    .intrinsic_width = false,
-                    .intrinsic_height = false,
+                    .width_mode = .definite,
+                    .height_mode = .definite,
                 },
             );
             item.cross = try clamp(
                 axisCross(axes, measured.border),
-                item.cross_min,
-                item.cross_max,
+                item.hypothetical_cross_min,
+                item.hypothetical_cross_max,
             );
         }
     }
@@ -756,9 +1698,9 @@ fn layoutFlex(
         if (!item.baseline_participates) continue;
 
         const child_border = if (axes.horizontal)
-            widget.Size{ .width = item.size, .height = item.cross }
+            widget.Size{ .width = item.target, .height = item.cross }
         else
-            widget.Size{ .width = item.cross, .height = item.size };
+            widget.Size{ .width = item.cross, .height = item.target };
         if (child.children.items.len == 0) {
             child.first_baseline = child_border.height;
         } else if (child.style.display == .flex) {
@@ -783,25 +1725,46 @@ fn layoutFlex(
                         .width = content.width,
                         .height = content.height,
                     },
-                    .forced_border = child_border,
+                    .border = child_border,
                 },
             );
         } else {
             return error.InvalidStyle;
         }
-        item.laid_out = true;
-        item.baseline = child.first_baseline orelse child_border.height;
+        if (child.children.items.len != 0) item.laid_out = true;
+        item.baseline = baselineForItem(child, child_border);
     }
-    try lineCrossSizes(lines.items, items.items, cross_size, cross_gap, axes);
-    try lineDistribution(lines.items, node.style.align_content, cross_size, cross_gap);
-    try placeItems(tree, node, axes, content, lines.items, items.items, main_gap);
+    try lineCrossSizes(
+        lines.items,
+        items.items,
+        cross_size,
+        cross_gap,
+        axes,
+        node.style.flex_wrap == .nowrap and cross_definite,
+    );
+    try lineDistribution(
+        lines.items,
+        node.style.align_content,
+        cross_size,
+        cross_gap,
+        axes.cross_reverse,
+        !axes.horizontal and node.style.writing_direction == .rtl,
+    );
+    try placeItems(
+        tree,
+        node,
+        axes,
+        content,
+        lines.items,
+        items.items,
+        main_gap,
+    );
 
     for (items.items) |*item| {
         const child = &tree.nodes.items[item.index];
         if (item.laid_out) continue;
-        if (child.children.items.len == 0) continue;
         if (options.context) |context| {
-            if (child.style.display != .flex) {
+            if (child.children.items.len == 0 or child.style.display != .flex) {
                 try context.layout_node(
                     context,
                     tree,
@@ -812,14 +1775,19 @@ fn layoutFlex(
                             .width = content.width,
                             .height = content.height,
                         },
-                        .forced_border = .{
+                        .border = .{
                             .width = child.rect.w,
                             .height = child.rect.h,
                         },
                     },
                 );
+                item.laid_out = true;
                 continue;
             }
+        }
+        if (child.children.items.len == 0) {
+            item.laid_out = true;
+            continue;
         }
         try layoutFlex(
             tree,
@@ -831,9 +1799,10 @@ fn layoutFlex(
             cache,
             depth - 1,
         );
+        item.laid_out = true;
     }
     if (lines.items.len != 0) {
-        const selected_index = if (effectiveWrap(node.style) == .wrap_reverse)
+        const selected_index = if (node.style.flex_wrap == .wrap_reverse)
             lines.items.len - 1
         else
             0;
@@ -861,6 +1830,51 @@ fn layoutFlex(
         }
     }
     try placeAbsolute(tree, node, content, pad_box, edges, options, cache, depth - 1);
+    try publishContentSize(tree, node, pad_box, edges);
+}
+
+fn flexItemCrossAvailable(
+    input: style.Style,
+    axes: Axes,
+    available: widget.Size,
+    percentage_basis: style.Size(?f32),
+    edges: Edges,
+    margins: Margins,
+) sizing.Error!f32 {
+    const bounds = try resolveConstraintBounds(
+        input,
+        available,
+        percentage_basis,
+        .{ .width = 0, .height = 0 },
+        edges,
+    );
+    const minimum = if (axes.horizontal)
+        bounds.transferred_min.height orelse 0
+    else
+        bounds.transferred_min.width orelse 0;
+    const maximum = if (axes.horizontal)
+        bounds.transferred_max.height
+    else
+        bounds.transferred_max.width;
+    const margin_cross_start = if (crossStartAuto(axes, margins))
+        0
+    else
+        crossStart(axes, margins);
+    const margin_cross_end = if (crossEndAuto(axes, margins))
+        0
+    else
+        crossEnd(axes, margins);
+    const margin_sum = try add(margin_cross_start, margin_cross_end);
+    const available_cross = axisCross(axes, available);
+    const cross_floor = if (axes.horizontal) edges.box_vertical else edges.box_horizontal;
+    return @max(
+        cross_floor,
+        try clamp(
+            @max(0, try finite(available_cross - margin_sum)),
+            minimum,
+            maximum,
+        ),
+    );
 }
 
 fn collectItems(
@@ -879,17 +1893,99 @@ fn collectItems(
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position == .absolute) continue;
+        const alignment = alignValue(
+            child.style.align_self,
+            container.style.@"align",
+            child.style.writing_direction == container.style.writing_direction,
+            !axes.horizontal,
+        );
+        const edges = try resolveEdges(child.style, request.percentage_basis.width);
+        child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
+        const margins = try resolveMargins(child.style, content.width);
+        var natural_request = request;
+        const cross_bounds = try resolveConstraintBounds(
+            child.style,
+            content,
+            request.percentage_basis,
+            .{ .width = 0, .height = 0 },
+            edges,
+        );
+        const natural_cross_min = if (axes.horizontal)
+            cross_bounds.transferred_min.height
+        else
+            cross_bounds.transferred_min.width;
+        const natural_cross_max = if (axes.horizontal)
+            cross_bounds.transferred_max.height
+        else
+            cross_bounds.transferred_max.width;
+        const natural_cross_available = try flexItemCrossAvailable(
+            child.style,
+            axes,
+            content,
+            request.percentage_basis,
+            edges,
+            margins,
+        );
+        const parent_cross_mode = if (axes.horizontal) request.height_mode else request.width_mode;
+        const natural_cross_mode: layout_context.MeasureMode = switch (parent_cross_mode) {
+            .min_content => if (natural_cross_min != null) .definite else .min_content,
+            .max_content => if (natural_cross_max != null) .definite else .max_content,
+            .definite => .definite,
+        };
+        if (axes.horizontal) {
+            natural_request.available.height = natural_cross_available;
+            natural_request.height_mode = natural_cross_mode;
+        } else {
+            natural_request.available.width = natural_cross_available;
+            natural_request.width_mode = natural_cross_mode;
+        }
         const natural = try measureNode(
             tree,
             child_index,
-            request,
+            natural_request,
             options,
             cache,
             depth,
             container.style.display,
         );
-        const edges = try resolveEdges(child.style, request.percentage_basis.width);
-        child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
+        const main_dimension = if (axes.horizontal)
+            child.style.size.width
+        else
+            child.style.size.height;
+        const main_percentage_basis = if (axes.horizontal)
+            request.percentage_basis.width
+        else
+            request.percentage_basis.height;
+        const base_natural = if (child.style.flex_basis != .auto or
+            !dimensionNeedsIntrinsicMeasurement(main_dimension, main_percentage_basis))
+            natural
+        else blk: {
+            var base_request = natural_request;
+            const parent_main_min_content = if (axes.horizontal)
+                request.width_mode == .min_content
+            else
+                request.height_mode == .min_content;
+            const base_main_mode: layout_context.MeasureMode = if (parent_main_min_content)
+                .min_content
+            else
+                .max_content;
+            if (axes.horizontal) {
+                base_request.width_mode = base_main_mode;
+                base_request.percentage_basis.width = null;
+            } else {
+                base_request.height_mode = base_main_mode;
+                base_request.percentage_basis.height = null;
+            }
+            break :blk try measureNode(
+                tree,
+                child_index,
+                base_request,
+                options,
+                cache,
+                depth,
+                container.style.display,
+            );
+        };
         const preferred = try usedSize(
             child.style,
             request.available,
@@ -898,48 +1994,150 @@ fn collectItems(
             edges,
             null,
         );
-        const margins = try resolveMargins(child.style, content.width);
+        const base_preferred = try flexBaseSize(
+            child.style,
+            request.available,
+            request.percentage_basis,
+            base_natural.content,
+            edges,
+        );
+        const main_min_dimension = if (axes.horizontal)
+            child.style.min_size.width
+        else
+            child.style.min_size.height;
+        const main_overflow = if (axes.horizontal)
+            child.style.overflow.width
+        else
+            child.style.overflow.height;
+        const preserves_automatic_minimum = switch (main_overflow) {
+            .visible, .clip => true,
+            .hidden, .scroll, .auto => false,
+        };
+        const stretch_cross = alignment == .stretch and
+            !crossStartAuto(axes, margins) and
+            !crossEndAuto(axes, margins) and
+            natural_cross_mode == .definite;
+        const min_natural = if (dimensionAuto(main_min_dimension) and
+            preserves_automatic_minimum)
+            try measureAutomaticMinimum(
+                tree,
+                child_index,
+                child,
+                natural_request,
+                axes,
+                options,
+                cache,
+                depth,
+                container.style.display,
+                natural.content,
+                edges,
+                stretch_cross,
+            )
+        else
+            natural;
+        const preferred_size = try resolvePreferredSize(
+            child.style,
+            request.available,
+            request.percentage_basis,
+            natural.content,
+            edges,
+        );
+        const preferred_main = if (axes.horizontal)
+            preferred_size.width
+        else
+            preferred_size.height;
         const constraints = try constraintsFor(
             child.style,
             request.available,
             request.percentage_basis,
             natural.content,
-            natural.border,
+            min_natural,
             edges,
             axes,
+            preferred_main,
         );
         const basis = try flexBasis(
             child.style,
             axes,
             main_content,
-            axisMain(axes, preferred),
-            natural,
+            if (axes.horizontal)
+                request.percentage_basis.width
+            else
+                request.percentage_basis.height,
+            axisMain(axes, base_preferred),
+            base_natural,
             edges,
-        );
-        const alignment = alignValue(
-            child.style.align_self,
-            container.style.@"align",
-            child.style.writing_direction == container.style.writing_direction,
-            !axes.horizontal,
         );
         const baseline_participates = axes.horizontal and
             alignment == .baseline and
             !crossStartAuto(axes, margins) and
             !crossEndAuto(axes, margins);
+        const box_edge_sum = if (axes.horizontal) edges.box_horizontal else edges.box_vertical;
+        const inner_flex_basis = @max(0, try finite(basis - box_edge_sum));
+        const hypothetical_main_min = @max(
+            @max(
+                constraints.style.main.min orelse 0,
+                constraints.minimum_main,
+            ),
+            constraints.transferred.main.min orelse 0,
+        );
+        const hypothetical_main_max = constraints.transferred.main.max;
+        const cross_floor = if (axes.horizontal) edges.box_vertical else edges.box_horizontal;
+        const hypothetical_cross_min = @max(
+            @max(
+                cross_floor,
+                constraints.style.cross.min orelse 0,
+            ),
+            constraints.transferred.cross.min orelse 0,
+        );
+        const hypothetical_cross_max = constraints.transferred.cross.max;
+        const hypothetical_main = @max(
+            box_edge_sum,
+            try clamp(
+                try flexBasis(
+                    child.style,
+                    axes,
+                    main_content,
+                    if (axes.horizontal)
+                        request.percentage_basis.width
+                    else
+                        request.percentage_basis.height,
+                    axisMain(axes, base_preferred),
+                    natural,
+                    edges,
+                ),
+                hypothetical_main_min,
+                hypothetical_main_max,
+            ),
+        );
+
         const item: Item = .{
             .index = child_index,
-            .base = basis,
-            .size = basis,
-            .proposed = basis,
-            .cross = try clamp(
-                axisCross(axes, preferred),
-                constraints.cross.min,
-                constraints.cross.max,
+            .flex_basis = basis,
+            .inner_flex_basis = inner_flex_basis,
+            .hypothetical_main = hypothetical_main,
+            .hypothetical_outer = try add(
+                try add(hypothetical_main, marginStart(axes, margins)),
+                marginEnd(axes, margins),
             ),
-            .main_min = constraints.main.min,
-            .main_max = constraints.main.max,
-            .cross_min = constraints.cross.min,
-            .cross_max = constraints.cross.max,
+            .target = basis,
+            .provisional = basis,
+            .violation = 0,
+            .main_floor = box_edge_sum,
+            .cross = @max(
+                cross_floor,
+                try clamp(
+                    axisCross(axes, preferred),
+                    hypothetical_cross_min,
+                    hypothetical_cross_max,
+                ),
+            ),
+            .main_min = @max(constraints.style.main.min orelse 0, constraints.minimum_main),
+            .main_max = constraints.style.main.max,
+            .cross_min = @max(cross_floor, constraints.style.cross.min orelse 0),
+            .cross_max = constraints.style.cross.max,
+            .hypothetical_cross_min = hypothetical_cross_min,
+            .hypothetical_cross_max = hypothetical_cross_max,
             .margin_start = marginStart(axes, margins),
             .margin_end = marginEnd(axes, margins),
             .cross_margin_start = crossStart(axes, margins),
@@ -961,9 +2159,157 @@ fn collectItems(
             .physical_bottom_margin = margins.value.bottom,
             .laid_out = false,
         };
-        child.natural_main = axisMain(axes, natural.border);
-        items.append(options.allocator, item) catch return error.InvalidStyle;
+        try items.append(options.allocator, item);
     }
+}
+
+const PhysicalConstraintBounds = struct {
+    style_min: style.Size(?f32),
+    style_max: style.Size(?f32),
+    transferred_min: style.Size(?f32),
+    transferred_max: style.Size(?f32),
+};
+fn resolvePreferredSize(
+    input: style.Style,
+    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
+    intrinsic: widget.Size,
+    edges: Edges,
+) sizing.Error!style.Size(?f32) {
+    var width = try dimensionValue(
+        input.size.width,
+        containing.width,
+        percentage_basis.width,
+        intrinsic.width,
+    );
+    var height = try dimensionValue(
+        input.size.height,
+        containing.height,
+        percentage_basis.height,
+        intrinsic.height,
+    );
+    if (input.aspect_ratio) |aspect| {
+        const ratio_value = try ratio(aspect);
+        if (width == null and height != null) {
+            width = try finite(height.? * ratio_value);
+        } else if (height == null and width != null) {
+            height = try finite(width.? / ratio_value);
+        }
+    }
+    const width_adjustment = if (input.box_sizing == .content_box) edges.box_horizontal else 0;
+    const height_adjustment = if (input.box_sizing == .content_box) edges.box_vertical else 0;
+    return .{
+        .width = if (width) |value|
+            try add(try nonNegative(value), width_adjustment)
+        else
+            null,
+        .height = if (height) |value|
+            try add(try nonNegative(value), height_adjustment)
+        else
+            null,
+    };
+}
+
+fn resolveConstraintDimension(
+    dimension: style.Dimension,
+    containing: f32,
+    percentage_basis: ?f32,
+    intrinsic: f32,
+    box_edges: f32,
+    box_sizing: style.BoxSizing,
+) sizing.Error!?f32 {
+    const value = try dimensionValue(dimension, containing, percentage_basis, intrinsic);
+    if (value) |number| {
+        const non_negative = try nonNegative(number);
+        const adjustment = if (box_sizing == .content_box) box_edges else 0;
+        const adjusted = try add(non_negative, adjustment);
+        return adjusted;
+    }
+    return null;
+}
+
+fn resolveConstraintBounds(
+    input: style.Style,
+    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
+    intrinsic: widget.Size,
+    edges: Edges,
+) sizing.Error!PhysicalConstraintBounds {
+    const style_min: style.Size(?f32) = .{
+        .width = try resolveConstraintDimension(
+            input.min_size.width,
+            containing.width,
+            percentage_basis.width,
+            intrinsic.width,
+            edges.box_horizontal,
+            input.box_sizing,
+        ),
+        .height = try resolveConstraintDimension(
+            input.min_size.height,
+            containing.height,
+            percentage_basis.height,
+            intrinsic.height,
+            edges.box_vertical,
+            input.box_sizing,
+        ),
+    };
+    const style_max: style.Size(?f32) = .{
+        .width = try resolveConstraintDimension(
+            input.max_size.width,
+            containing.width,
+            percentage_basis.width,
+            intrinsic.width,
+            edges.box_horizontal,
+            input.box_sizing,
+        ),
+        .height = try resolveConstraintDimension(
+            input.max_size.height,
+            containing.height,
+            percentage_basis.height,
+            intrinsic.height,
+            edges.box_vertical,
+            input.box_sizing,
+        ),
+    };
+    return .{
+        .style_min = style_min,
+        .style_max = style_max,
+        .transferred_min = try applyAspectRatioToBounds(style_min, input.aspect_ratio),
+        .transferred_max = try applyAspectRatioToBounds(style_max, input.aspect_ratio),
+    };
+}
+
+fn applyAspectRatioToBounds(
+    value: style.Size(?f32),
+    aspect_ratio: ?f32,
+) sizing.Error!style.Size(?f32) {
+    const aspect = if (aspect_ratio) |ratio_value| try ratio(ratio_value) else return value;
+    if (value.width == null and value.height != null) {
+        return .{
+            .width = try finite(value.height.? * aspect),
+            .height = value.height,
+        };
+    }
+    if (value.width != null and value.height == null) {
+        return .{
+            .width = value.width,
+            .height = try finite(value.width.? / aspect),
+        };
+    }
+    return value;
+}
+
+fn axisConstraints(
+    bounds: PhysicalConstraintBounds,
+    axes: Axes,
+    transferred: bool,
+) AxisConstraints {
+    const minimum = if (transferred) bounds.transferred_min else bounds.style_min;
+    const maximum = if (transferred) bounds.transferred_max else bounds.style_max;
+    if (axes.horizontal) {
+        return .{ .min = minimum.width, .max = maximum.width };
+    }
+    return .{ .min = minimum.height, .max = maximum.height };
 }
 
 fn constraintsFor(
@@ -971,110 +2317,110 @@ fn constraintsFor(
     containing: widget.Size,
     percentage_basis: style.Size(?f32),
     intrinsic: widget.Size,
-    natural_border: widget.Size,
+    min_natural: Natural,
     edges: Edges,
     axes: Axes,
-) sizing.Error!Constraints {
-    const min_width = (try resolveDimensionBorder(
-        input.min_size.width,
-        containing.width,
-        percentage_basis.width,
-        intrinsic.width,
-        edges.box_horizontal,
-        edges.horizontal,
-        input.box_sizing,
-    )) orelse 0;
-    const min_height = (try resolveDimensionBorder(
-        input.min_size.height,
-        containing.height,
-        percentage_basis.height,
-        intrinsic.height,
-        edges.box_vertical,
-        edges.vertical,
-        input.box_sizing,
-    )) orelse 0;
-    const max_width = try resolveDimensionBorder(
-        input.max_size.width,
-        containing.width,
-        percentage_basis.width,
-        intrinsic.width,
-        edges.box_horizontal,
-        edges.horizontal,
-        input.box_sizing,
+    preferred_main: ?f32,
+) sizing.Error!ResolvedConstraints {
+    const bounds = try resolveConstraintBounds(
+        input,
+        containing,
+        percentage_basis,
+        intrinsic,
+        edges,
     );
-    const max_height = try resolveDimensionBorder(
-        input.max_size.height,
-        containing.height,
-        percentage_basis.height,
-        intrinsic.height,
-        edges.box_vertical,
-        edges.vertical,
-        input.box_sizing,
-    );
-    var result: Constraints = if (axes.horizontal)
-        Constraints{
-            .main = .{ .min = try nonNegative(min_width), .max = max_width },
-            .cross = .{ .min = try nonNegative(min_height), .max = max_height },
-        }
-    else
-        Constraints{
-            .main = .{ .min = try nonNegative(min_height), .max = max_height },
-            .cross = .{ .min = try nonNegative(min_width), .max = max_width },
-        };
+    const style_constraints: Constraints = .{
+        .main = axisConstraints(bounds, axes, false),
+        .cross = if (axes.horizontal)
+            .{ .min = bounds.style_min.height, .max = bounds.style_max.height }
+        else
+            .{ .min = bounds.style_min.width, .max = bounds.style_max.width },
+    };
+    const transferred_constraints: Constraints = .{
+        .main = axisConstraints(bounds, axes, true),
+        .cross = if (axes.horizontal)
+            .{ .min = bounds.transferred_min.height, .max = bounds.transferred_max.height }
+        else
+            .{ .min = bounds.transferred_min.width, .max = bounds.transferred_max.width },
+    };
     const main_min_dimension = if (axes.horizontal) input.min_size.width else input.min_size.height;
     const main_overflow = if (axes.horizontal) input.overflow.width else input.overflow.height;
     const preserves_automatic_minimum = switch (main_overflow) {
         .visible, .clip => true,
         .hidden, .scroll, .auto => false,
     };
-    if (dimensionAuto(main_min_dimension) and
-        input.min_main == null and
-        preserves_automatic_minimum)
-    {
-        const main_content_edges = if (axes.horizontal) edges.horizontal else edges.vertical;
-        const preferred_main = axisMain(axes, natural_border);
-        const content_main = try add(axisMain(axes, intrinsic), main_content_edges);
-        result.main.min = @max(result.main.min, @min(preferred_main, content_main));
+    var minimum_main: f32 = 0;
+    if (dimensionAuto(main_min_dimension) and preserves_automatic_minimum) {
+        const content_suggestion = try add(
+            axisMain(axes, min_natural.content),
+            if (axes.horizontal) edges.horizontal else edges.vertical,
+        );
+        minimum_main = if (preferred_main) |preferred|
+            @min(preferred, content_suggestion)
+        else
+            content_suggestion;
+        if (transferred_constraints.main.max) |maximum| {
+            minimum_main = @min(minimum_main, maximum);
+        }
+        minimum_main = @max(
+            if (axes.horizontal) edges.box_horizontal else edges.box_vertical,
+            try nonNegative(minimum_main),
+        );
     }
-    if (input.min_main) |minimum| {
-        result.main.min = @max(result.main.min, try nonNegative(minimum));
-    }
-    return result;
+    return .{
+        .style = style_constraints,
+        .transferred = transferred_constraints,
+        .minimum_main = minimum_main,
+    };
+}
+
+fn resolvedFlexBasis(
+    input: style.Style,
+    axes: Axes,
+    containing_main: f32,
+    percentage_basis: ?f32,
+    natural: Natural,
+    edges: Edges,
+) sizing.Error!?f32 {
+    const box_edge_sum = if (axes.horizontal) edges.box_horizontal else edges.box_vertical;
+    const content_edge_sum = if (axes.horizontal) edges.horizontal else edges.vertical;
+    const intrinsic = if (axes.horizontal) natural.content.width else natural.content.height;
+    const dimension = switch (input.flex_basis) {
+        .auto => return null,
+        .length, .percent, .min_content, .max_content, .fit_content => input.flex_basis,
+    };
+    const basis = try resolveDimensionBorder(
+        dimension,
+        containing_main,
+        percentage_basis,
+        intrinsic,
+        box_edge_sum,
+        content_edge_sum,
+        input.box_sizing,
+    );
+    return if (basis) |value| @as(?f32, try nonNegative(value)) else null;
 }
 
 fn flexBasis(
     input: style.Style,
     axes: Axes,
     containing_main: f32,
+    percentage_basis: ?f32,
     preferred: f32,
     natural: Natural,
     edges: Edges,
 ) sizing.Error!f32 {
-    const box_edge_sum = if (axes.horizontal) edges.box_horizontal else edges.box_vertical;
-    const content_edge_sum = if (axes.horizontal) edges.horizontal else edges.vertical;
-    const intrinsic = if (axes.horizontal) natural.content.width else natural.content.height;
-    const basis = switch (input.flex_basis) {
-        .auto => null,
-        .length, .percent, .min_content, .max_content, .fit_content => try resolveDimensionBorder(
-            input.flex_basis,
-            containing_main,
-            containing_main,
-            intrinsic,
-            box_edge_sum,
-            content_edge_sum,
-            input.box_sizing,
-        ),
-    };
-    if (basis) |value| return nonNegative(value);
-    if (input.basis != 0) {
-        return sizingToBorder(
-            try nonNegative(input.basis),
-            explicitEdgeSum(box_edge_sum),
-            input.box_sizing,
-        );
-    }
+    if (try resolvedFlexBasis(
+        input,
+        axes,
+        containing_main,
+        percentage_basis,
+        natural,
+        edges,
+    )) |basis| return basis;
     return nonNegative(preferred);
 }
+
 fn makeLines(
     allocator: std.mem.Allocator,
     lines: *std.ArrayList(Line),
@@ -1087,114 +2433,111 @@ fn makeLines(
     var start: usize = 0;
     var used: f32 = 0;
     for (items, 0..) |item, index| {
-        const outer = try add(
-            try add(try clamp(item.base, item.main_min, item.main_max), item.margin_start),
-            item.margin_end,
-        );
+        const outer = try finite(item.hypothetical_outer);
         const candidate = if (index == start)
             outer
         else
             try add(try add(used, gap), outer);
         if (wrap != .nowrap and index != start and candidate > available) {
-            lines.append(allocator, .{ .start = start, .count = index - start }) catch {
-                return error.InvalidStyle;
-            };
+            try lines.append(allocator, .{ .start = start, .count = index - start });
             start = index;
             used = outer;
         } else {
             used = candidate;
         }
     }
-    lines.append(allocator, .{ .start = start, .count = items.len - start }) catch {
-        return error.InvalidStyle;
-    };
+    try lines.append(allocator, .{ .start = start, .count = items.len - start });
 }
 
 fn resolveLine(items: []Item, available: f32, gap: f32) sizing.Error!void {
-    var hypothetical_used = try gaps(gap, items.len);
-    for (items) |*item| {
-        item.proposed = try clamp(item.base, item.main_min, item.main_max);
-        hypothetical_used = try add(hypothetical_used, item.proposed);
-        hypothetical_used = try add(hypothetical_used, item.margin_start);
-        hypothetical_used = try add(hypothetical_used, item.margin_end);
+    if (items.len == 0) return;
+    const gap_total = try gaps(gap, items.len);
+    var hypothetical_used = gap_total;
+    for (items) |item| {
+        hypothetical_used = try add(hypothetical_used, item.hypothetical_outer);
     }
     const growing = hypothetical_used < available;
-
+    const shrinking = hypothetical_used > available;
     for (items) |*item| {
-        const flex_factor = if (growing) item.grow else item.shrink;
-        const constraint_opposes_flex = if (growing)
-            item.base > item.proposed
-        else
-            item.base < item.proposed;
-        item.frozen = flex_factor == 0 or constraint_opposes_flex;
-        item.size = if (item.frozen) item.proposed else item.base;
+        item.target = item.hypothetical_main;
+        item.provisional = item.target;
+        item.violation = 0;
+        item.frozen = (!growing and !shrinking) or
+            (growing and item.flex_basis > item.hypothetical_main) or
+            (shrinking and item.flex_basis < item.hypothetical_main) or
+            (item.grow == 0 and item.shrink == 0);
     }
 
-    var initial_used = try gaps(gap, items.len);
+    var initial_used = gap_total;
     for (items) |item| {
-        initial_used = try add(initial_used, item.size);
+        const used = if (item.frozen) item.target else item.flex_basis;
+        initial_used = try add(initial_used, used);
         initial_used = try add(initial_used, item.margin_start);
         initial_used = try add(initial_used, item.margin_end);
     }
     const initial_free = try finite(available - initial_used);
-    var iteration: usize = 0;
-    while (iteration <= items.len) : (iteration += 1) {
-        var used = try gaps(gap, items.len);
-        for (items) |item| {
-            used = try add(used, item.size);
-            used = try add(used, item.margin_start);
-            used = try add(used, item.margin_end);
-        }
-        const free = try finite(available - used);
-        if (free == 0) break;
+    while (true) {
+        var used = gap_total;
+        var unfrozen_count: usize = 0;
         var factor_sum: f32 = 0;
         var weight_sum: f32 = 0;
         for (items) |item| {
-            if (item.frozen) continue;
-            const factor = if (growing) item.grow else item.shrink;
-            const weight = if (growing) item.grow else item.shrink * item.base;
-            factor_sum = try add(factor_sum, factor);
-            weight_sum = try add(weight_sum, weight);
-        }
-        if (weight_sum <= 0) break;
-
-        const scaled_free = try finite(
-            initial_free * @min(factor_sum, @as(f32, 1)),
-        );
-        const distributable_free = if (@abs(scaled_free) < @abs(free))
-            scaled_free
-        else
-            free;
-        var total_violation: f32 = 0;
-        for (items) |*item| {
-            if (item.frozen) continue;
-            const weight = if (growing) item.grow else item.shrink * item.base;
-            item.proposed = try finite(
-                item.base + distributable_free * weight / weight_sum,
-            );
-            item.size = try clamp(item.proposed, item.main_min, item.main_max);
-            total_violation = try add(total_violation, item.size - item.proposed);
-        }
-        for (items) |*item| {
-            if (item.frozen) continue;
-            const violation = item.size - item.proposed;
-            const freeze = if (total_violation > 0)
-                violation > 0
-            else if (total_violation < 0)
-                violation < 0
-            else
-                true;
-            if (freeze) {
-                item.frozen = true;
-            } else {
-                item.size = item.base;
+            const contribution = if (item.frozen) item.target else item.flex_basis;
+            used = try add(used, contribution);
+            used = try add(used, item.margin_start);
+            used = try add(used, item.margin_end);
+            if (!item.frozen) {
+                unfrozen_count += 1;
+                const factor = if (growing) item.grow else item.shrink;
+                factor_sum = try add(factor_sum, factor);
+                const weight = if (growing) factor else factor * item.inner_flex_basis;
+                weight_sum = try add(weight_sum, weight);
             }
         }
+        if (unfrozen_count == 0) break;
+        const free = try finite(available - used);
+        for (items) |*item| {
+            if (!item.frozen) item.provisional = item.target;
+        }
+        if (free != 0 and factor_sum > 0 and weight_sum > 0) {
+            const distributable = if (factor_sum < 1) blk: {
+                const scaled = try finite(initial_free * factor_sum - gap_total);
+                break :blk if (growing) @min(scaled, free) else @max(scaled, free);
+            } else free;
+            for (items) |*item| {
+                if (item.frozen) continue;
+                const weight = if (growing) item.grow else item.shrink * item.inner_flex_basis;
+                item.provisional = try finite(item.flex_basis + distributable * weight / weight_sum);
+            }
+        }
+        for (items) |*item| {
+            if (item.frozen) continue;
+            const clamped = @max(
+                item.main_floor,
+                try clamp(@max(0, item.provisional), item.main_min, item.main_max),
+            );
+            item.violation = try finite(clamped - item.provisional);
+            item.target = clamped;
+        }
+        var total_violation: f32 = 0;
+        for (items) |item| {
+            if (!item.frozen) total_violation = try add(total_violation, item.violation);
+        }
+        for (items) |*item| {
+            if (item.frozen) continue;
+            item.frozen = if (total_violation > 0)
+                item.violation > 0
+            else if (total_violation < 0)
+                item.violation < 0
+            else
+                true;
+        }
     }
-    var used = try gaps(gap, items.len);
+
+    var used = gap_total;
     var auto_count: usize = 0;
     for (items) |item| {
-        used = try add(used, item.size);
+        used = try add(used, item.target);
         used = try add(used, item.margin_start);
         used = try add(used, item.margin_end);
         if (item.main_start_auto) auto_count += 1;
@@ -1202,12 +2545,19 @@ fn resolveLine(items: []Item, available: f32, gap: f32) sizing.Error!void {
     }
     const free = @max(0, try finite(available - used));
     if (auto_count != 0 and free > 0) {
-        const share = free / @as(f32, @floatFromInt(auto_count));
+        const share = free / (try countToF32(auto_count));
         for (items) |*item| {
             if (item.main_start_auto) item.margin_start = share;
             if (item.main_end_auto) item.margin_end = share;
         }
     }
+}
+fn baselineForItem(child: *const widget.WidgetNode, border: widget.Size) f32 {
+    if (child.children.items.len == 0) return border.height;
+    return switch (child.style.display) {
+        .block, .flow_root, .none => border.height,
+        .flex, .grid => child.first_baseline orelse border.height,
+    };
 }
 
 fn lineCrossSizes(
@@ -1216,8 +2566,10 @@ fn lineCrossSizes(
     available: f32,
     gap: f32,
     axes: Axes,
+    force_single_line_cross: bool,
 ) sizing.Error!void {
     for (lines) |*line| {
+        line.cross = 0;
         line.max_baseline = 0;
         line.max_descent = 0;
         line.baseline_count = 0;
@@ -1247,7 +2599,7 @@ fn lineCrossSizes(
             );
         }
     }
-    if (lines.len == 1) lines[0].cross = available;
+    if (force_single_line_cross and lines.len == 1) lines[0].cross = available;
     var total = try gaps(gap, lines.len);
     for (lines) |line| total = try add(total, line.cross);
     _ = try finite(total);
@@ -1258,38 +2610,43 @@ fn lineDistribution(
     align_content: style.AlignContent,
     available: f32,
     gap: f32,
+    flex_reverse: bool,
+    writing_reverse: bool,
 ) sizing.Error!void {
     if (lines.len == 0) return;
     var used = try gaps(gap, lines.len);
     for (lines) |line| used = try add(used, line.cross);
     const signed_free = try finite(available - used);
-    var free = @max(0, signed_free);
+    const free = @max(0, signed_free);
+    const start_offset = if (flex_reverse == writing_reverse) 0 else free;
+    const end_offset = if (flex_reverse == writing_reverse) signed_free else 0;
     var offset: f32 = 0;
     var extra: f32 = 0;
     switch (align_content) {
         .stretch => {
             if (free > 0) {
-                const addition = free / @as(f32, @floatFromInt(lines.len));
+                const addition = free / (try countToF32(lines.len));
                 for (lines) |*line| line.cross = try add(line.cross, addition);
-                free = 0;
             }
         },
-        .start, .flex_start => {},
+        .start => offset = start_offset,
+        .flex_start => {},
         .safe_center => offset = free / 2,
         .center, .unsafe_center => offset = signed_free / 2,
-        .end, .flex_end, .unsafe_end => offset = signed_free,
-        .safe_end => offset = free,
+        .end, .unsafe_end => offset = end_offset,
+        .flex_end => offset = signed_free,
+        .safe_end => offset = if (signed_free < 0) 0 else end_offset,
         .space_between => {
             if (lines.len > 1) {
-                extra = free / @as(f32, @floatFromInt(lines.len - 1));
+                extra = free / (try countToF32(lines.len - 1));
             }
         },
         .space_around => {
-            extra = free / @as(f32, @floatFromInt(lines.len));
+            extra = free / (try countToF32(lines.len));
             offset = extra / 2;
         },
         .space_evenly => {
-            extra = free / @as(f32, @floatFromInt(lines.len + 1));
+            extra = free / (try countToF32(lines.len + 1));
             offset = extra;
         },
     }
@@ -1316,7 +2673,7 @@ fn placeItems(
         const line_items = items[line.start .. line.start + line.count];
         var used = try gaps(gap, line_items.len);
         for (line_items) |item| {
-            used = try add(used, item.size);
+            used = try add(used, item.target);
             used = try add(used, item.margin_start);
             used = try add(used, item.margin_end);
         }
@@ -1324,13 +2681,19 @@ fn placeItems(
         const distribution = if (hasAuto(line_items))
             Distribution{ .offset = 0, .gap = 0 }
         else
-            try justify(container.style.justify, free, line_items.len);
+            try justify(
+                container.style.justify,
+                free,
+                line_items.len,
+                axes.reverse,
+                mainWritingReverse(axes, container.style.writing_direction),
+            );
         var cursor = distribution.offset;
 
         for (line_items, 0..) |*item, item_index| {
             cursor = try add(cursor, item.margin_start);
             const logical_main = cursor;
-            cursor = try add(cursor, item.size);
+            cursor = try add(cursor, item.target);
             cursor = try add(cursor, item.margin_end);
             if (item_index + 1 < line_items.len) {
                 cursor = try add(cursor, gap);
@@ -1338,12 +2701,20 @@ fn placeItems(
             }
 
             const child = &tree.nodes.items[item.index];
-            const alignment = alignValue(
+            const resolved_alignment = alignValue(
                 child.style.align_self,
                 container.style.@"align",
                 child.style.writing_direction == container.style.writing_direction,
                 !axes.horizontal,
             );
+            const baseline_column = !axes.horizontal and resolved_alignment == .baseline;
+            const alignment = if (baseline_column)
+                style.Align.flex_start
+            else
+                resolved_alignment;
+            const baseline_column_reverse = baseline_column and
+                axes.cross_reverse and
+                container.style.flex_wrap == .nowrap;
             var cross_start = item.cross_margin_start;
             var cross_end = item.cross_margin_end;
             var cross = item.cross;
@@ -1352,7 +2723,7 @@ fn placeItems(
                 const auto_count = @as(usize, @intFromBool(item.cross_start_auto)) +
                     @as(usize, @intFromBool(item.cross_end_auto));
                 if (auto_count != 0 and cross_free > 0) {
-                    const share = cross_free / @as(f32, @floatFromInt(auto_count));
+                    const share = cross_free / (try countToF32(auto_count));
                     if (item.cross_start_auto) cross_start = share;
                     if (item.cross_end_auto) cross_end = share;
                     cross_free = 0;
@@ -1373,27 +2744,130 @@ fn placeItems(
                 else
                     line.max_baseline - (cross_start + item.baseline)
             else
-                try alignmentOffset(alignment, cross_free);
+                try alignmentOffset(
+                    alignment,
+                    cross_free,
+                    axes.cross_reverse,
+                    !axes.horizontal and container.style.writing_direction == .rtl,
+                );
             const logical_cross = try add(line.position, try add(cross_start, align_offset));
             const physical_main = try position(
                 logical_main,
-                item.size,
+                item.target,
                 main_available,
                 axes.reverse,
             );
-            const physical_cross = try position(
-                logical_cross,
-                cross,
-                cross_available,
-                axes.cross_reverse,
-            );
-            child.rect = if (axes.horizontal)
-                .{ .x = physical_main, .y = physical_cross, .w = item.size, .h = cross }
+            const baseline_wrapped_rtl = baseline_column and
+                axes.cross_reverse and
+                container.style.flex_wrap != .nowrap;
+            const physical_cross = if (baseline_wrapped_rtl)
+                try add(
+                    try finite(cross_available - line.position - line.cross),
+                    try add(cross_start, align_offset),
+                )
             else
-                .{ .x = physical_cross, .y = physical_main, .w = cross, .h = item.size };
-            try relativeInsets(child, content);
+                try position(
+                    logical_cross,
+                    cross,
+                    cross_available,
+                    if (baseline_column) baseline_column_reverse else axes.cross_reverse,
+                );
+            child.rect = if (axes.horizontal)
+                .{ .x = physical_main, .y = physical_cross, .w = item.target, .h = cross }
+            else
+                .{ .x = physical_cross, .y = physical_main, .w = cross, .h = item.target };
+            try relativeInsets(
+                child,
+                content,
+                container.style.writing_direction,
+            );
             try checkRect(child.rect);
         }
+    }
+}
+fn paddingBoxContributionRect(
+    rect: widget.Rect,
+    client_width: f32,
+    raw_padding: style.Sides,
+    direction: style.Direction,
+) sizing.Error!widget.Rect {
+    const physical_x = try add(raw_padding.left, rect.x);
+    const physical_right = try add(physical_x, rect.w);
+    return .{
+        .x = if (direction == .ltr)
+            physical_x
+        else
+            try finite(client_width - physical_right),
+        .y = try add(raw_padding.top, rect.y),
+        .w = rect.w,
+        .h = rect.h,
+    };
+}
+
+fn resolvedGutter(edges: Edges) style.Sides {
+    return .{
+        .top = @max(0, edges.padding.top - edges.raw_padding.top),
+        .right = @max(0, edges.padding.right - edges.raw_padding.right),
+        .bottom = @max(0, edges.padding.bottom - edges.raw_padding.bottom),
+        .left = @max(0, edges.padding.left - edges.raw_padding.left),
+    };
+}
+
+fn publishContentSize(
+    tree: *widget.WidgetTree,
+    container: *widget.WidgetNode,
+    pad_box: widget.Size,
+    edges: Edges,
+) sizing.Error!void {
+    const gutter = resolvedGutter(edges);
+    const client: widget.Size = .{
+        .width = @max(0, try finite(pad_box.width - gutter.left - gutter.right)),
+        .height = @max(0, try finite(pad_box.height - gutter.top - gutter.bottom)),
+    };
+    var inflow_extent: widget.Size = .{ .width = 0, .height = 0 };
+    var absolute_extent: widget.Size = .{ .width = 0, .height = 0 };
+    for (container.children.items) |child_id| {
+        const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
+        const child = &tree.nodes.items[child_index];
+        if (child.layout_hidden) continue;
+        const contribution_rect = try paddingBoxContributionRect(
+            child.rect,
+            client.width,
+            edges.raw_padding,
+            container.style.writing_direction,
+        );
+        const absolute = child.style.position == .absolute;
+        const contribution = if (absolute)
+            try overflow.absoluteFlexContribution(
+                contribution_rect,
+                child.layout_content_size,
+                child.style.overflow,
+                container.style.writing_direction,
+            )
+        else
+            try overflow.contentContribution(
+                contribution_rect,
+                child.layout_content_size,
+                child.style.overflow,
+            );
+        const target = if (absolute) &absolute_extent else &inflow_extent;
+        target.width = @max(target.width, contribution.width);
+        target.height = @max(target.height, contribution.height);
+    }
+    const trailing_width = if (container.style.writing_direction == .rtl)
+        edges.raw_padding.left
+    else
+        edges.raw_padding.right;
+    inflow_extent.width = try add(inflow_extent.width, trailing_width);
+    inflow_extent.height = try add(inflow_extent.height, edges.raw_padding.bottom);
+    const extent: widget.Size = .{
+        .width = @max(inflow_extent.width, absolute_extent.width),
+        .height = @max(inflow_extent.height, absolute_extent.height),
+    };
+    container.layout_content_size = extent;
+
+    if (container.scroll) |scroll| {
+        scroll.state.max_offset = try overflow.maxOffset(extent, client, scroll.axis);
     }
 }
 
@@ -1407,26 +2881,48 @@ fn placeAbsolute(
     cache: []Natural,
     depth: usize,
 ) sizing.Error!void {
+    const gutter = resolvedGutter(container_edges);
+    const inset_box: widget.Size = .{
+        .width = @max(0, try finite(pad_box.width - gutter.left - gutter.right)),
+        .height = @max(0, try finite(pad_box.height - gutter.top - gutter.bottom)),
+    };
     for (container.children.items) |child_id| {
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         const child = &tree.nodes.items[child_index];
         if (child.layout_hidden or child.style.position != .absolute) continue;
+        const edges = try resolveEdges(child.style, inset_box.width);
+        child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
+        const left = try resolveInset(child.style.inset.left, inset_box.width);
+        const right = try resolveInset(child.style.inset.right, inset_box.width);
+        const top = try resolveInset(child.style.inset.top, inset_box.height);
+        const bottom = try resolveInset(child.style.inset.bottom, inset_box.height);
+        const width_intrinsic = (child.style.size.width == .auto or
+            dimensionIntrinsic(child.style.size.width)) and
+            (left == null or right == null);
+        const height_intrinsic = (child.style.size.height == .auto or
+            dimensionIntrinsic(child.style.size.height)) and
+            (top == null or bottom == null);
+        var natural_request = concreteRequest(inset_box);
+        if (width_intrinsic) {
+            natural_request.available.width = 0;
+            natural_request.width_mode = .max_content;
+            natural_request.percentage_basis.width = null;
+        }
+        if (height_intrinsic) {
+            natural_request.available.height = 0;
+            natural_request.height_mode = .max_content;
+            natural_request.percentage_basis.height = null;
+        }
         const natural = try measureNode(
             tree,
             child_index,
-            concreteRequest(content),
+            natural_request,
             options,
             cache,
             depth,
             container.style.display,
         );
-        const edges = try resolveEdges(child.style, content.width);
-        child.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
-        const left = try resolveInset(child.style.inset.left, pad_box.width);
-        const right = try resolveInset(child.style.inset.right, pad_box.width);
-        const top = try resolveInset(child.style.inset.top, pad_box.height);
-        const bottom = try resolveInset(child.style.inset.bottom, pad_box.height);
-        var margins = try resolveMargins(child.style, pad_box.width);
+        var margins = try resolveMargins(child.style, inset_box.width);
         const full_inset_aspect_ratio = child.style.size.width == .auto and
             child.style.size.height == .auto and
             child.style.aspect_ratio != null and
@@ -1437,17 +2933,18 @@ fn placeAbsolute(
         var sizing_style = child.style;
         if (child.style.size.width == .auto and left != null and right != null) {
             const inset_width = try absoluteSizeFromInsets(
-                pad_box.width,
+                inset_box.width,
                 left.?,
                 right.?,
                 margins.value.left,
                 margins.value.right,
             );
-            sizing_style.size.width = .{ .length = try borderToSizing(
+            const inset_sizing_width = try borderToSizing(
                 inset_width,
                 edges.box_horizontal,
                 child.style.box_sizing,
-            ) };
+            );
+            sizing_style.size.width = .{ .length = inset_sizing_width };
         }
         if (!full_inset_aspect_ratio and
             child.style.size.height == .auto and
@@ -1455,22 +2952,23 @@ fn placeAbsolute(
             bottom != null)
         {
             const inset_height = try absoluteSizeFromInsets(
-                pad_box.height,
+                inset_box.height,
                 top.?,
                 bottom.?,
                 margins.value.top,
                 margins.value.bottom,
             );
-            sizing_style.size.height = .{ .length = try borderToSizing(
+            const inset_sizing_height = try borderToSizing(
                 inset_height,
                 edges.box_vertical,
                 child.style.box_sizing,
-            ) };
+            );
+            sizing_style.size.height = .{ .length = inset_sizing_height };
         }
         const size = try usedSize(
             sizing_style,
-            content,
-            .{ .width = content.width, .height = content.height },
+            inset_box,
+            .{ .width = inset_box.width, .height = inset_box.height },
             natural.content,
             edges,
             null,
@@ -1480,7 +2978,7 @@ fn placeAbsolute(
             &margins.value.right,
             margins.left_auto,
             margins.right_auto,
-            pad_box.width,
+            inset_box.width,
             size.width,
             left,
             right,
@@ -1490,7 +2988,7 @@ fn placeAbsolute(
             &margins.value.bottom,
             margins.top_auto,
             margins.bottom_auto,
-            pad_box.height,
+            inset_box.height,
             size.height,
             top,
             bottom,
@@ -1526,11 +3024,26 @@ fn placeAbsolute(
         );
         const static_x = if (axes.horizontal) static_main else static_cross;
         const static_y = if (axes.horizontal) static_cross else static_main;
-        const x = if (left) |value|
-            try finite(value + margins.value.left - container_edges.padding.left)
+        const right_basis = try finite(pad_box.width - gutter.right);
+        const bottom_basis = try finite(pad_box.height - gutter.bottom);
+        const x = if (container.style.writing_direction == .rtl and right != null)
+            try finite(
+                right_basis -
+                    right.? -
+                    margins.value.right -
+                    size.width -
+                    container_edges.padding.left,
+            )
+        else if (left) |value|
+            try finite(
+                value +
+                    margins.value.left +
+                    (if (container.style.writing_direction == .rtl) gutter.left else 0) -
+                    container_edges.padding.left,
+            )
         else if (right) |value|
             try finite(
-                pad_box.width -
+                right_basis -
                     value -
                     margins.value.right -
                     size.width -
@@ -1542,7 +3055,7 @@ fn placeAbsolute(
             try finite(value + margins.value.top - container_edges.padding.top)
         else if (bottom) |value|
             try finite(
-                pad_box.height -
+                bottom_basis -
                     value -
                     margins.value.bottom -
                     size.height -
@@ -1552,32 +3065,32 @@ fn placeAbsolute(
             static_y;
         child.rect = .{ .x = x, .y = y, .w = size.width, .h = size.height };
         try checkRect(child.rect);
-        if (child.children.items.len != 0) {
-            if (options.context) |context| {
-                if (child.style.display != .flex) {
-                    try context.layout_node(
-                        context,
-                        tree,
-                        child,
-                        .{
-                            .available = content,
-                            .percentage_basis = .{
-                                .width = content.width,
-                                .height = content.height,
-                            },
-                            .forced_border = .{
-                                .width = child.rect.w,
-                                .height = child.rect.h,
-                            },
+        if (options.context) |context| {
+            if (child.children.items.len == 0 or child.style.display != .flex) {
+                try context.layout_node(
+                    context,
+                    tree,
+                    child,
+                    .{
+                        .available = inset_box,
+                        .percentage_basis = .{
+                            .width = inset_box.width,
+                            .height = inset_box.height,
                         },
-                    );
-                    continue;
-                }
+                        .border = .{
+                            .width = child.rect.w,
+                            .height = child.rect.h,
+                        },
+                    },
+                );
+                continue;
             }
+        }
+        if (child.children.items.len != 0) {
             try layoutFlex(
                 tree,
                 child_index,
-                content,
+                inset_box,
                 size,
                 true,
                 options,
@@ -1612,11 +3125,13 @@ fn distributeAbsoluteAutoMargins(
     if (!start_auto and !end_auto) return;
     const fixed_start = if (start_auto) 0 else start.*;
     const fixed_end = if (end_auto) 0 else end.*;
-    const remaining = try finite(
-        available - start_inset.? - end_inset.? - size - fixed_start - fixed_end,
-    );
+    const auto_space = try finite(available - start_inset.? - end_inset.?);
+    const remaining = try finite(@max(
+        0,
+        auto_space - size - fixed_start - fixed_end,
+    ));
     if (start_auto and end_auto) {
-        const share = try finite(@max(0, remaining) / 2);
+        const share = try finite(remaining / 2);
         start.* = share;
         end.* = share;
     } else if (start_auto) {
@@ -1701,16 +3216,168 @@ fn staticEndOffset(free: f32, flex_reverse: bool, writing_reverse: bool) f32 {
     return if (flex_reverse == writing_reverse) free else 0;
 }
 
-fn alignmentOffset(value: style.Align, free: f32) sizing.Error!f32 {
+fn alignmentOffset(
+    value: style.Align,
+    free: f32,
+    flex_reverse: bool,
+    writing_reverse: bool,
+) sizing.Error!f32 {
     const distributed_free = @max(0, free);
+    const start_offset = staticStartOffset(free, flex_reverse, writing_reverse);
+    const end_offset = staticEndOffset(free, flex_reverse, writing_reverse);
     return switch (value) {
-        .stretch, .start, .flex_start, .baseline, .self_start => 0,
+        .stretch, .flex_start, .baseline => 0,
+        .start, .self_start => start_offset,
         .safe_center => try finite(distributed_free / 2),
         .center, .unsafe_center => try finite(free / 2),
-        .end, .flex_end, .unsafe_end, .self_end => free,
-        .safe_end => distributed_free,
+        .end, .unsafe_end, .self_end => end_offset,
+        .flex_end => free,
+        .safe_end => if (free < 0) start_offset else end_offset,
     };
 }
+fn flexBaseSize(
+    input: style.Style,
+    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
+    intrinsic: widget.Size,
+    edges: Edges,
+) sizing.Error!widget.Size {
+    var width = try dimensionValue(
+        input.size.width,
+        containing.width,
+        percentage_basis.width,
+        intrinsic.width,
+    );
+    var height = try dimensionValue(
+        input.size.height,
+        containing.height,
+        percentage_basis.height,
+        intrinsic.height,
+    );
+    var width_edge_sum = dimensionEdgeSum(
+        input.size.width,
+        edges.box_horizontal,
+        edges.horizontal,
+    );
+    var height_edge_sum = dimensionEdgeSum(
+        input.size.height,
+        edges.box_vertical,
+        edges.vertical,
+    );
+    const width_auto = width == null;
+    const height_auto = height == null;
+    if (width == null and height != null and input.aspect_ratio != null) {
+        width = try finite(height.? * try ratio(input.aspect_ratio.?));
+        width_edge_sum = explicitEdgeSum(edges.box_horizontal);
+    }
+    if (height == null and width != null and input.aspect_ratio != null) {
+        height = try finite(width.? / try ratio(input.aspect_ratio.?));
+        height_edge_sum = explicitEdgeSum(edges.box_vertical);
+    }
+    if (width == null) {
+        width_edge_sum = edges.horizontal;
+        width = try borderToSizing(
+            try add(intrinsic.width, edges.horizontal),
+            edges.horizontal,
+            input.box_sizing,
+        );
+    }
+    if (height == null) {
+        height_edge_sum = edges.vertical;
+        height = try borderToSizing(
+            try add(intrinsic.height, edges.vertical),
+            edges.vertical,
+            input.box_sizing,
+        );
+    }
+    if (input.aspect_ratio) |aspect| {
+        const ratio_value = try ratio(aspect);
+        if (width_auto and height_auto) {
+            // With two auto dimensions, the intrinsic width establishes the
+            // ratio-constrained base size. Min/max constraints belong to the
+            // hypothetical-size step, not the flex base size.
+            height = try finite(width.? / ratio_value);
+            height_edge_sum = explicitEdgeSum(edges.box_vertical);
+        }
+    }
+    return .{
+        .width = if (dimensionIntrinsic(input.size.width))
+            try add(width.?, edges.horizontal)
+        else
+            try sizingToBorder(width.?, width_edge_sum, input.box_sizing),
+        .height = if (dimensionIntrinsic(input.size.height))
+            try add(height.?, edges.vertical)
+        else
+            try sizingToBorder(height.?, height_edge_sum, input.box_sizing),
+    };
+}
+
+fn usedSizeForRequest(
+    input: style.Style,
+    containing: widget.Size,
+    percentage_basis: style.Size(?f32),
+    intrinsic: widget.Size,
+    edges: Edges,
+    request: layout_context.Request,
+) sizing.Error!widget.Size {
+    return switch (request.sizing_mode) {
+        .content => contentRootUsedSize(intrinsic, edges, request.known_border),
+        .inherent => blk: {
+            var seeded_input = input;
+            if (request.known_border.width) |known| {
+                const sizing_width = try borderToSizing(
+                    known,
+                    edges.box_horizontal,
+                    input.box_sizing,
+                );
+                seeded_input.size.width = .{ .length = sizing_width };
+            }
+            if (request.known_border.height) |known| {
+                const sizing_height = try borderToSizing(
+                    known,
+                    edges.box_vertical,
+                    input.box_sizing,
+                );
+                seeded_input.size.height = .{ .length = sizing_height };
+            }
+            var result = try usedSize(
+                seeded_input,
+                containing,
+                percentage_basis,
+                intrinsic,
+                edges,
+                null,
+            );
+            if (request.known_border.width) |known| {
+                result.width = @max(try nonNegative(known), edges.horizontal);
+            }
+            if (request.known_border.height) |known| {
+                result.height = @max(try nonNegative(known), edges.vertical);
+            }
+            break :blk result;
+        },
+    };
+}
+
+/// Resolve a root's border size while keeping request-owned content sizing out
+/// of descendant style resolution.
+fn contentRootUsedSize(
+    intrinsic: widget.Size,
+    edges: Edges,
+    known_border: sizing.OptionalSize,
+) sizing.Error!widget.Size {
+    return .{
+        .width = if (known_border.width) |known|
+            @max(try nonNegative(known), edges.horizontal)
+        else
+            try add(try nonNegative(intrinsic.width), edges.horizontal),
+        .height = if (known_border.height) |known|
+            @max(try nonNegative(known), edges.vertical)
+        else
+            try add(try nonNegative(intrinsic.height), edges.vertical),
+    };
+}
+
 fn usedSize(
     input: style.Style,
     containing: widget.Size,
@@ -1783,8 +3450,6 @@ fn usedSize(
         else
             try sizingToBorder(height.?, height_edge_sum, input.box_sizing),
     };
-    const width_before_clamp = result.width;
-    const height_before_clamp = result.height;
     result.width = try clampSize(
         input,
         .horizontal,
@@ -1805,46 +3470,114 @@ fn usedSize(
     );
     if (input.aspect_ratio) |aspect_ratio| {
         const ratio_value = try ratio(aspect_ratio);
-        if (height_auto and result.width != width_before_clamp) {
+        if (width_auto and height_auto) {
+            // An aspect-ratio replaces the unconstrained auto pair with one
+            // intrinsic ratio candidate. Clamp that candidate, then transfer
+            // the limiting axis back to the other dimension.
+            const base = try flexBaseSize(
+                input,
+                containing,
+                percentage_basis,
+                intrinsic,
+                edges,
+            );
+            var ratio_result: widget.Size = .{
+                .width = try clampSize(
+                    input,
+                    .horizontal,
+                    base.width,
+                    containing,
+                    percentage_basis,
+                    intrinsic,
+                    edges,
+                ),
+                .height = try clampSize(
+                    input,
+                    .vertical,
+                    base.height,
+                    containing,
+                    percentage_basis,
+                    intrinsic,
+                    edges,
+                ),
+            };
+            if (ratio_result.width != base.width) {
+                const width_sizing = try borderToDimensionValue(
+                    input.size.width,
+                    ratio_result.width,
+                    width_edge_sum,
+                    input.box_sizing,
+                );
+                ratio_result.height = try clampSize(
+                    input,
+                    .vertical,
+                    try sizingToBorder(
+                        try finite(width_sizing / ratio_value),
+                        explicitEdgeSum(edges.box_vertical),
+                        input.box_sizing,
+                    ),
+                    containing,
+                    percentage_basis,
+                    intrinsic,
+                    edges,
+                );
+            } else if (ratio_result.height != base.height) {
+                const height_sizing = try borderToDimensionValue(
+                    input.size.height,
+                    ratio_result.height,
+                    height_edge_sum,
+                    input.box_sizing,
+                );
+                ratio_result.width = try clampSize(
+                    input,
+                    .horizontal,
+                    try sizingToBorder(
+                        try finite(height_sizing * ratio_value),
+                        explicitEdgeSum(edges.box_horizontal),
+                        input.box_sizing,
+                    ),
+                    containing,
+                    percentage_basis,
+                    intrinsic,
+                    edges,
+                );
+            }
+            result = ratio_result;
+        } else if (height_auto) {
             const width_sizing = try borderToDimensionValue(
                 input.size.width,
                 result.width,
                 width_edge_sum,
                 input.box_sizing,
             );
-            const height_sizing = try finite(width_sizing / ratio_value);
-            const height_border = try sizingToBorder(
-                height_sizing,
-                explicitEdgeSum(edges.box_vertical),
-                input.box_sizing,
-            );
             result.height = try clampSize(
                 input,
                 .vertical,
-                height_border,
+                try sizingToBorder(
+                    try finite(width_sizing / ratio_value),
+                    explicitEdgeSum(edges.box_vertical),
+                    input.box_sizing,
+                ),
                 containing,
                 percentage_basis,
                 intrinsic,
                 edges,
             );
-        }
-        if (width_auto and result.height != height_before_clamp) {
+        } else if (width_auto) {
             const height_sizing = try borderToDimensionValue(
                 input.size.height,
                 result.height,
                 height_edge_sum,
                 input.box_sizing,
             );
-            const width_sizing = try finite(height_sizing * ratio_value);
-            const width_border = try sizingToBorder(
-                width_sizing,
-                explicitEdgeSum(edges.box_horizontal),
-                input.box_sizing,
-            );
             result.width = try clampSize(
                 input,
                 .horizontal,
-                width_border,
+                try sizingToBorder(
+                    try finite(height_sizing * ratio_value),
+                    explicitEdgeSum(edges.box_horizontal),
+                    input.box_sizing,
+                ),
                 containing,
                 percentage_basis,
                 intrinsic,
@@ -1853,14 +3586,8 @@ fn usedSize(
         }
     }
     return .{
-        .width = @max(
-            dimensionEdgeSum(input.size.width, edges.box_horizontal, edges.horizontal),
-            result.width,
-        ),
-        .height = @max(
-            dimensionEdgeSum(input.size.height, edges.box_vertical, edges.vertical),
-            result.height,
-        ),
+        .width = @max(edges.box_horizontal, result.width),
+        .height = @max(edges.box_vertical, result.height),
     };
 }
 
@@ -1929,11 +3656,19 @@ fn dimensionValue(
             }
             break :blk non_neg_intrinsic;
         },
-        .length, .percent => sizing.resolveDimension(
+        .length => sizing.resolveDimension(
             dimension,
             .{ .definite = containing },
             percentage_basis,
         ),
+        .percent => if (percentage_basis) |basis|
+            sizing.resolveDimension(
+                dimension,
+                .{ .definite = containing },
+                basis,
+            )
+        else
+            null,
     };
 }
 
@@ -2022,16 +3757,16 @@ fn resolveEdges(input: style.Style, basis: ?f32) sizing.Error!Edges {
     if (scrollbar_width < 0) return error.InvalidStyle;
     const scrollbar_gutter = input.scrollbarGutter();
     const border: style.Sides = .{
-        .top = try edge(input.border_inset.top, input.border.top, basis),
-        .right = try edge(input.border_inset.right, input.border.right, basis),
-        .bottom = try edge(input.border_inset.bottom, input.border.bottom, basis),
-        .left = try edge(input.border_inset.left, input.border.left, basis),
+        .top = try edge(input.border_inset.top, basis),
+        .right = try edge(input.border_inset.right, basis),
+        .bottom = try edge(input.border_inset.bottom, basis),
+        .left = try edge(input.border_inset.left, basis),
     };
     const resolved_padding: style.Sides = .{
-        .top = try edge(input.padding_inset.top, input.padding.top, basis),
-        .right = try edge(input.padding_inset.right, input.padding.right, basis),
-        .bottom = try edge(input.padding_inset.bottom, input.padding.bottom, basis),
-        .left = try edge(input.padding_inset.left, input.padding.left, basis),
+        .top = try edge(input.padding_inset.top, basis),
+        .right = try edge(input.padding_inset.right, basis),
+        .bottom = try edge(input.padding_inset.bottom, basis),
+        .left = try edge(input.padding_inset.left, basis),
     };
     const padding: style.Sides = .{
         .top = try add(resolved_padding.top, scrollbar_gutter.top),
@@ -2042,6 +3777,7 @@ fn resolveEdges(input: style.Style, basis: ?f32) sizing.Error!Edges {
     return .{
         .border = border,
         .padding = padding,
+        .raw_padding = resolved_padding,
         .box_horizontal = try add(
             try add(border.left, border.right),
             try add(resolved_padding.left, resolved_padding.right),
@@ -2060,16 +3796,53 @@ fn resolveEdges(input: style.Style, basis: ?f32) sizing.Error!Edges {
         ),
     };
 }
+fn clampEdges(edges: Edges, border_size: widget.Size) sizing.Error!Edges {
+    var result = edges;
+    const horizontal_room = @max(
+        0,
+        try finite(border_size.width - edges.box_horizontal),
+    );
+    const vertical_room = @max(
+        0,
+        try finite(border_size.height - edges.box_vertical),
+    );
+    const left_gutter = @max(
+        0,
+        try finite(edges.padding.left - edges.raw_padding.left),
+    );
+    const right_gutter = @max(
+        0,
+        try finite(edges.padding.right - edges.raw_padding.right),
+    );
+    const top_gutter = @max(
+        0,
+        try finite(edges.padding.top - edges.raw_padding.top),
+    );
+    const bottom_gutter = @max(
+        0,
+        try finite(edges.padding.bottom - edges.raw_padding.bottom),
+    );
+    const left = @min(left_gutter, horizontal_room);
+    const right = @min(right_gutter, horizontal_room);
+    const top = @min(top_gutter, vertical_room);
+    const bottom = @min(bottom_gutter, vertical_room);
+    result.padding.left = try add(edges.raw_padding.left, left);
+    result.padding.right = try add(edges.raw_padding.right, right);
+    result.padding.top = try add(edges.raw_padding.top, top);
+    result.padding.bottom = try add(edges.raw_padding.bottom, bottom);
+    result.horizontal = try add(edges.box_horizontal, try add(left, right));
+    result.vertical = try add(edges.box_vertical, try add(top, bottom));
+    return result;
+}
 
 fn edge(
     value: style.LengthPercentage,
-    legacy: f32,
     basis: ?f32,
 ) sizing.Error!f32 {
     return switch (value) {
-        .length => |number| nonNegative(if (number == 0 and legacy != 0) legacy else number),
+        .length => |number| nonNegative(number),
         .percent => |fraction| blk: {
-            const percentage_basis = basis orelse return error.InvalidStyle;
+            const percentage_basis = basis orelse break :blk 0;
             break :blk nonNegative(try finite(fraction * percentage_basis));
         },
     };
@@ -2078,10 +3851,10 @@ fn edge(
 fn resolveMargins(input: style.Style, basis: ?f32) sizing.Error!Margins {
     return .{
         .value = .{
-            .top = try margin(input.margin_inset.top, input.margin.top, basis),
-            .right = try margin(input.margin_inset.right, input.margin.right, basis),
-            .bottom = try margin(input.margin_inset.bottom, input.margin.bottom, basis),
-            .left = try margin(input.margin_inset.left, input.margin.left, basis),
+            .top = try margin(input.margin_inset.top, basis),
+            .right = try margin(input.margin_inset.right, basis),
+            .bottom = try margin(input.margin_inset.bottom, basis),
+            .left = try margin(input.margin_inset.left, basis),
         },
         .top_auto = isAuto(input.margin_inset.top),
         .right_auto = isAuto(input.margin_inset.right),
@@ -2092,14 +3865,13 @@ fn resolveMargins(input: style.Style, basis: ?f32) sizing.Error!Margins {
 
 fn margin(
     value: style.LengthPercentageAuto,
-    legacy: f32,
     basis: ?f32,
 ) sizing.Error!f32 {
     return switch (value) {
         .auto => 0,
-        .length => |number| finite(if (number == 0 and legacy != 0) legacy else number),
+        .length => |number| finite(number),
         .percent => |fraction| blk: {
-            const percentage_basis = basis orelse return error.InvalidStyle;
+            const percentage_basis = basis orelse break :blk 0;
             break :blk finite(fraction * percentage_basis);
         },
     };
@@ -2112,22 +3884,32 @@ fn resolveInset(value: style.LengthPercentageAuto, basis: f32) sizing.Error!?f32
         .percent => |fraction| try finite(fraction * basis),
     };
 }
-fn relativeInsets(node: *widget.WidgetNode, containing: widget.Size) sizing.Error!void {
+fn relativeInsets(
+    node: *widget.WidgetNode,
+    containing: widget.Size,
+    writing_direction: style.Direction,
+) sizing.Error!void {
     if (node.style.position != .relative) return;
     const left = try resolveInset(node.style.inset.left, containing.width);
     const right = try resolveInset(node.style.inset.right, containing.width);
     const top = try resolveInset(node.style.inset.top, containing.height);
     const bottom = try resolveInset(node.style.inset.bottom, containing.height);
-    if (left) |value| {
-        node.rect.x = try add(node.rect.x, value);
-    } else if (right) |value| {
-        node.rect.x = try finite(node.rect.x - value);
-    }
-    if (top) |value| {
-        node.rect.y = try add(node.rect.y, value);
-    } else if (bottom) |value| {
-        node.rect.y = try finite(node.rect.y - value);
-    }
+    const horizontal_offset = if (writing_direction == .rtl)
+        if (right) |value| -value else if (left) |value| value else 0
+    else if (left) |value|
+        value
+    else if (right) |value|
+        -value
+    else
+        0;
+    const vertical_offset = if (top) |value|
+        value
+    else if (bottom) |value|
+        -value
+    else
+        0;
+    node.rect.x = try add(node.rect.x, horizontal_offset);
+    node.rect.y = try add(node.rect.y, vertical_offset);
 }
 
 fn axesFor(input: style.Style) Axes {
@@ -2137,23 +3919,14 @@ fn axesFor(input: style.Style) Axes {
     return .{
         .horizontal = horizontal,
         .reverse = style.directionIsReverse(input.direction) != inline_reverse,
-        .cross_reverse = (effectiveWrap(input) == .wrap_reverse) != cross_inline_reverse,
+        .cross_reverse = (input.flex_wrap == .wrap_reverse) != cross_inline_reverse,
     };
 }
 
-fn effectiveWrap(input: style.Style) style.FlexWrap {
-    return if (input.flex_wrap != .nowrap) input.flex_wrap else input.wrap;
-}
-
-fn validateGaps(node: *const widget.WidgetNode) sizing.Error!void {
-    _ = try resolveGap(node.style.gap, null);
-    _ = try resolveGap(node.style.column_gap, null);
-    _ = try resolveGap(node.style.row_gap, null);
-    switch (node.kind) {
-        .row => |value| _ = try nonNegative(value.gap),
-        .column => |value| _ = try nonNegative(value.gap),
-        else => {},
-    }
+fn validateGaps(input: style.Style) sizing.Error!void {
+    _ = try resolveGap(input.gap, null);
+    _ = try resolveGap(input.column_gap, null);
+    _ = try resolveGap(input.row_gap, null);
 }
 
 fn gapSpecified(value: style.LengthPercentage) bool {
@@ -2168,16 +3941,6 @@ fn selectAxisGap(
     generic: style.LengthPercentage,
 ) style.LengthPercentage {
     return if (gapSpecified(axis)) axis else generic;
-}
-
-fn genericGap(node: *const widget.WidgetNode) style.LengthPercentage {
-    if (gapSpecified(node.style.gap)) return node.style.gap;
-    const legacy = switch (node.kind) {
-        .row => |value| value.gap,
-        .column => |value| value.gap,
-        else => 0,
-    };
-    return .{ .length = legacy };
 }
 
 fn resolveGap(value: style.LengthPercentage, basis: ?f32) sizing.Error!f32 {
@@ -2196,7 +3959,7 @@ fn gapMainValue(
     axes: Axes,
 ) style.LengthPercentage {
     const axis = if (axes.horizontal) node.style.column_gap else node.style.row_gap;
-    return selectAxisGap(axis, genericGap(node));
+    return selectAxisGap(axis, node.style.gap);
 }
 
 fn gapMain(
@@ -2206,6 +3969,9 @@ fn gapMain(
 ) sizing.Error!f32 {
     return resolveGap(gapMainValue(node, axes), basis);
 }
+fn mainWritingReverse(axes: Axes, direction: style.Direction) bool {
+    return axes.horizontal and direction == .rtl;
+}
 
 fn gapCross(
     node: *const widget.WidgetNode,
@@ -2213,7 +3979,7 @@ fn gapCross(
     basis: ?f32,
 ) sizing.Error!f32 {
     const axis = if (axes.horizontal) node.style.row_gap else node.style.column_gap;
-    return resolveGap(selectAxisGap(axis, genericGap(node)), basis);
+    return resolveGap(selectAxisGap(axis, node.style.gap), basis);
 }
 
 fn axisMain(axes: Axes, value: widget.Size) f32 {
@@ -2329,20 +4095,26 @@ fn justify(
     value: style.Justify,
     free: f32,
     count: usize,
+    flex_reverse: bool,
+    writing_reverse: bool,
 ) sizing.Error!Distribution {
     if (count == 0) return .{ .offset = 0, .gap = 0 };
-    const count_f: f32 = @floatFromInt(count);
+    const count_f = try countToF32(count);
     const distributed_free = @max(0, free);
+    const start_offset = staticStartOffset(free, flex_reverse, writing_reverse);
+    const end_offset = staticEndOffset(free, flex_reverse, writing_reverse);
     return switch (value) {
-        .normal, .start, .flex_start => .{ .offset = 0, .gap = 0 },
+        .normal, .flex_start => .{ .offset = 0, .gap = 0 },
+        .start => .{ .offset = start_offset, .gap = 0 },
         .safe_center => .{ .offset = try finite(distributed_free / 2), .gap = 0 },
         .center, .unsafe_center => .{ .offset = try finite(free / 2), .gap = 0 },
-        .end, .flex_end, .unsafe_end => .{ .offset = free, .gap = 0 },
-        .safe_end => .{ .offset = distributed_free, .gap = 0 },
+        .end, .unsafe_end => .{ .offset = end_offset, .gap = 0 },
+        .flex_end => .{ .offset = free, .gap = 0 },
+        .safe_end => .{ .offset = if (free < 0) start_offset else end_offset, .gap = 0 },
         .space_between => if (count > 1)
             .{
                 .offset = 0,
-                .gap = try finite(distributed_free / @as(f32, @floatFromInt(count - 1))),
+                .gap = try finite(distributed_free / (try countToF32(count - 1))),
             }
         else
             .{ .offset = 0, .gap = 0 },
@@ -2364,9 +4136,15 @@ fn hasAuto(items: []const Item) bool {
     return false;
 }
 
+fn countToF32(value: usize) sizing.Error!f32 {
+    if (value == 1 << 24) return 16_777_216;
+    const exact: u24 = std.math.cast(u24, value) orelse return error.InvalidStyle;
+    return @floatFromInt(exact);
+}
+
 fn gaps(gap: f32, count: usize) sizing.Error!f32 {
     if (count <= 1) return 0;
-    return finite(gap * @as(f32, @floatFromInt(count - 1)));
+    return finite(gap * (try countToF32(count - 1)));
 }
 
 fn position(logical: f32, size: f32, available: f32, reverse: bool) sizing.Error!f32 {

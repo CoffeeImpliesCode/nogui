@@ -80,7 +80,6 @@ test "block float slot remeasures auto flex subtree at final width" {
     try appendNode(&tree, second_id, inner_id, fixedStyle(.block, 30, 10), .{ .spacer = .{} });
     var inner_style = autoStyle(.flex);
     inner_style.direction = .row;
-    inner_style.wrap = .wrap;
     inner_style.flex_wrap = .wrap;
     inner_style.@"align" = .start;
     inner_style.align_content = .start;

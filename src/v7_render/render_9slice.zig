@@ -30,8 +30,8 @@
 
 const std = @import("std");
 const noapi = @import("noapi");
-/// GPU-facing clip rect (the batch's own type — the widget core's ClipRect
-/// is a distinct module identity; the window converts between them).
+/// GPU-facing clip rect. An extent of -1 disables that axis.
+/// The widget core keeps the same 16-byte field layout and sentinel.
 pub const ClipRect = extern struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -262,8 +262,8 @@ pub const Batch9Slice = struct {
         const bag: [*]SceneRect = @ptrCast(@alignCast(self.bag_buf[slot].cpu));
         @memcpy(bag[0..rects.len], rects);
 
-        // Clip rects → the host-visible clip buffer (the shader's clip
-        // test reads them via pc.indirect + 16 * clip_id).
+        // Clip rects → the host-visible clip buffer. The fragment shader
+        // reads 16-byte entries and treats a -1 extent as an unclipped axis.
         const clips: [*]ClipRect = @ptrCast(@alignCast(self.clip_buf.cpu));
         std.debug.assert(clip_rects.len <= max_clip_rects);
         for (clip_rects, 0..) |c, i| clips[i] = c;

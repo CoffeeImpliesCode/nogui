@@ -18,7 +18,7 @@ PINNED_COMMIT = "45a56299d366ddb383e593a1f0372158d00e8530"
 UPSTREAM_REPOSITORY = "https://github.com/DioxusLabs/taffy"
 UPSTREAM_TAG = "v0.13.0"
 GENERATOR = "tools/import_taffy_v013_fixtures.py"
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 FIXTURE_ROOT_NAME = "test_fixtures"
 XML_ROOT_NAME = "tests/xml"
 VARIANTS = (
@@ -129,21 +129,39 @@ def parse_number(value: str, *, path: Path, attribute: str) -> float:
     return number
 
 
-def parse_viewport(root: ET.Element, path: Path) -> dict[str, float]:
+def parse_viewport(
+    root: ET.Element,
+    path: Path,
+) -> tuple[dict[str, float], dict[str, str]]:
     viewport = root.find("./viewport")
     if viewport is None:
         raise fail(f"missing viewport in {path}")
 
     values: list[float] = []
+    modes: list[str] = []
     for attribute, fallback in zip(("width", "height"), DEFAULT_VIEWPORT):
         raw_value = viewport.get(attribute)
         if raw_value is None:
             values.append(fallback)
-        elif raw_value in {"auto", "min-content", "max-content"}:
+            modes.append("max_content")
+        elif raw_value == "min-content":
             values.append(fallback)
+            modes.append("min_content")
+        elif raw_value == "max-content":
+            values.append(fallback)
+            modes.append("max_content")
+        elif raw_value == "auto":
+            raise fail(
+                f"unsupported viewport {attribute}='auto' in {path}; "
+                "the source generator has no shared viewport mode for auto"
+            )
         else:
             values.append(parse_number(raw_value, path=path, attribute=attribute))
-    return {"width": values[0], "height": values[1]}
+            modes.append("definite")
+    return (
+        {"width": values[0], "height": values[1]},
+        {"width": modes[0], "height": modes[1]},
+    )
 
 
 def parse_rounding(root: ET.Element, path: Path) -> bool:
@@ -173,10 +191,6 @@ def parse_expected(element: ET.Element, path: Path) -> dict[str, float | None]:
     return result
 
 
-def style_value(element: ET.Element, attribute: str) -> str:
-    return element.get(attribute, "0px")
-
-
 def normalize_node(
     input_element: ET.Element,
     expected_element: ET.Element,
@@ -192,13 +206,6 @@ def normalize_node(
         "kind": kind,
         "child_count": len(input_children),
         "attributes": dict(sorted(input_element.attrib.items())),
-        "style": {
-            "direction": input_element.get("direction", "ltr"),
-            "border_top": style_value(input_element, "border-top"),
-            "border_right": style_value(input_element, "border-right"),
-            "border_bottom": style_value(input_element, "border-bottom"),
-            "border_left": style_value(input_element, "border-left"),
-        },
     }
     text = (input_element.text or "").strip()
     if text:
@@ -243,6 +250,7 @@ def parse_xml_case(
     if input_root is None or expected_root is None:
         raise fail(f"missing input or expectations in {xml_path}")
     nodes, expected = normalize_node(input_root, expected_root, xml_path)
+    viewport, viewport_mode = parse_viewport(root, xml_path)
 
     source_id = fixture_relative.removeprefix(f"{FIXTURE_ROOT_NAME}/")
     return {
@@ -252,7 +260,8 @@ def parse_xml_case(
         "variant": variant,
         "grid_feature": fixture_path.stem.startswith("grid"),
         "use_rounding": parse_rounding(root, xml_path),
-        "viewport": parse_viewport(root, xml_path),
+        "viewport": viewport,
+        "viewport_mode": viewport_mode,
         "nodes": nodes,
         "expected": expected,
     }
@@ -330,9 +339,9 @@ def import_fixtures(
                 parse_xml_case(source, relative, digest, selected_variant)
             )
 
-    normalized = {"schema": 1, "cases": cases}
+    normalized = {"schema": 2, "cases": cases}
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "upstream_repository": UPSTREAM_REPOSITORY,
         "upstream_tag": UPSTREAM_TAG,
         "upstream_commit": PINNED_COMMIT,

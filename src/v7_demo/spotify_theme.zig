@@ -174,8 +174,8 @@ pub fn drawArtworkTile(
     const colors = artwork_gradients[index];
     const radius: f32 = if (size <= track_artwork_size) 2.0 else 6.0;
     const tile = try ctx.column(.{
-        .basis = size,
-        .min_main = size,
+        .flex_basis = size,
+        .min_width = size,
         .box_sizing = .border_box,
         .fill = colors[0],
         .gradient = srgbToOklab(colors[1]),

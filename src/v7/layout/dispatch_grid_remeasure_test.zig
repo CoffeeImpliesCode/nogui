@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Id = @import("../id.zig").Id;
-const dispatch = @import("dispatch.zig");
+const layout_api = @import("root.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
@@ -45,12 +45,12 @@ fn appendNode(
     });
 }
 
-fn measureLabel(_: []const u8, _: f32, _: u8) widget.Size {
+fn measureLabel(_: []const u8, _: layout_api.MeasureInput) widget.Size {
     return .{ .width = 0, .height = 0 };
 }
 
 fn layout(tree: *WidgetTree, available: widget.Size) !void {
-    try dispatch.layoutTree(tree, .{
+    try layout_api.layoutTree(tree, .{
         .allocator = std.testing.allocator,
         .available = available,
         .measure = measureLabel,
@@ -84,7 +84,6 @@ test "grid remeasures auto flex child at final area width" {
     try appendNode(&tree, second_id, flex_id, fixedStyle(.block, 40, 10), .{ .spacer = .{} });
     var flex_style = autoStyle(.flex);
     flex_style.direction = .row;
-    flex_style.wrap = .wrap;
     flex_style.flex_wrap = .wrap;
     flex_style.@"align" = .start;
     try appendNode(&tree, flex_id, grid_id, flex_style, .{ .row = .{} });

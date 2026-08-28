@@ -158,7 +158,8 @@ struct PushData {
 
 // Clip rect (framebuffer px), 16 bytes — the CPU writes these verbatim
 // into the host-visible clip buffer; pc.indirect + 16 * clip_id indexes
-// them. 0xFFFFFFFF (vClipId) = no clip: the test is a no-op.
+// them. An extent of -1 disables that axis; 0xFFFFFFFF (vClipId) bypasses
+// the clip lookup and disables both axes.
 struct ClipRect {
     float x;
     float y;
@@ -376,7 +377,9 @@ float4 main(
     // ~0 the test is a no-op — byte-identical to the unclipped draw.
     if (vClipId != 0xFFFFFFFFu) {
         ClipRect c = vk::BufferPointer<ClipRect>(pc.indirect + 16 * uint64_t(vClipId)).Get();
-        if (fragPos.x < c.x || fragPos.y < c.y || fragPos.x > c.x + c.w || fragPos.y > c.y + c.h) {
+        bool outsideX = c.w != -1.0 && (fragPos.x < c.x || fragPos.x >= c.x + c.w);
+        bool outsideY = c.h != -1.0 && (fragPos.y < c.y || fragPos.y >= c.y + c.h);
+        if (outsideX || outsideY) {
             discard;
         }
     }

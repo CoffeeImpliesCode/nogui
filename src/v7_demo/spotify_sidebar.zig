@@ -2,12 +2,8 @@
 
 const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
-const flex = nogui.flex;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
-
-/// Compatibility alias for callers that use the full desktop sidebar width.
-pub const width: f32 = theme.sidebar_width_full;
 
 const NavButton = struct {
     pub const default_style: nogui.Style = .{
@@ -24,10 +20,10 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     const expanded = spec.show_sidebar_labels;
 
     _ = try ctx.column(.{
-        .basis = spec.sidebar_width,
+        .flex_basis = spec.sidebar_width,
         .grow = 0,
         .shrink = 0,
-        .min_main = spec.sidebar_width,
+        .min_width = spec.sidebar_width,
         .gap = theme.sidebar_section_gap,
         .clip = true,
         .padding = .{
@@ -61,7 +57,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     _ = try ctx.column(.{
         .grow = 1,
         .shrink = 1,
-        .min_main = 0,
+        .min_height = 0,
         .gap = theme.sidebar_row_gap,
         .scroll_state = &app.sidebar_scroll,
         .scroll_axis = .vertical,
@@ -150,8 +146,8 @@ fn navButton(
     if (!expanded) {
         _ = try ctx.row(.{
             .direction = style.direction,
-            .basis = theme.sidebar_nav_row_height,
-            .min_main = theme.sidebar_nav_row_height,
+            .flex_basis = theme.sidebar_nav_row_height,
+            .min_height = theme.sidebar_nav_row_height,
             .shrink = style.shrink,
             .justify = .center,
             .@"align" = .center,
@@ -165,8 +161,8 @@ fn navButton(
             .visual_label = compact_label,
             .accessible_label = expanded_label,
             .on_click = on_click,
-            .basis = theme.sidebar_compact_target_size,
-            .min_main = theme.sidebar_compact_target_size,
+            .flex_basis = theme.sidebar_compact_target_size,
+            .min_width = theme.sidebar_compact_target_size,
             .grow = 0,
             .shrink = style.shrink,
             .color = if (active) theme.c_text else theme.c_text_sec,
@@ -183,8 +179,8 @@ fn navButton(
         .direction = style.direction,
         .label = expanded_label,
         .on_click = on_click,
-        .basis = theme.sidebar_nav_row_height,
-        .min_main = theme.sidebar_nav_row_height,
+        .flex_basis = theme.sidebar_nav_row_height,
+        .min_height = theme.sidebar_nav_row_height,
         .shrink = style.shrink,
         .justify = .start,
         .color = if (active) theme.c_text else theme.c_text_sec,
@@ -199,8 +195,8 @@ fn navButton(
 
 fn libraryHeader(ctx: *DrawCtx) !void {
     _ = try ctx.row(.{
-        .basis = theme.sidebar_nav_row_height,
-        .min_main = theme.sidebar_nav_row_height,
+        .flex_basis = theme.sidebar_nav_row_height,
+        .min_height = theme.sidebar_nav_row_height,
         .justify = .space_between,
         .@"align" = .center,
         .padding = .{ .left = 10, .right = 8 },
@@ -228,11 +224,11 @@ fn playlistRow(
 ) !void {
     if (active) {
         _ = try ctx.row(.{
-            .basis = theme.sidebar_row_height,
-            .min_main = theme.sidebar_row_height,
+            .flex_basis = theme.sidebar_row_height,
+            .min_height = theme.sidebar_row_height,
             .shrink = 0,
             .@"align" = .center,
-            .justify = @as(flex.Justify, if (expanded) .start else .center),
+            .justify = @as(nogui.Justify, if (expanded) .start else .center),
             .gap = if (expanded) theme.sidebar_section_gap else 0,
             .padding = .{
                 .left = if (expanded) @as(f32, 6) else @as(f32, 0),
@@ -247,11 +243,11 @@ fn playlistRow(
         });
     } else {
         _ = try ctx.row(.{
-            .basis = theme.sidebar_row_height,
-            .min_main = theme.sidebar_row_height,
+            .flex_basis = theme.sidebar_row_height,
+            .min_height = theme.sidebar_row_height,
             .shrink = 0,
             .@"align" = .center,
-            .justify = @as(flex.Justify, if (expanded) .start else .center),
+            .justify = @as(nogui.Justify, if (expanded) .start else .center),
             .gap = if (expanded) theme.sidebar_section_gap else 0,
             .padding = .{
                 .left = if (expanded) @as(f32, 6) else @as(f32, 0),
@@ -270,8 +266,8 @@ fn playlistRow(
             .visual_label = theme.compactArtworkMark(artwork_seed),
             .accessible_label = name,
             .on_click = on_click,
-            .basis = theme.sidebar_compact_target_size,
-            .min_main = theme.sidebar_compact_target_size,
+            .flex_basis = theme.sidebar_compact_target_size,
+            .min_width = theme.sidebar_compact_target_size,
             .grow = 0,
             .shrink = 0,
             .color = if (active) theme.c_text else theme.c_text_sec,
@@ -283,7 +279,7 @@ fn playlistRow(
     }
 
     _ = try theme.drawArtworkTile(ctx, theme.playlist_artwork_size, artwork_seed, null);
-    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 0, .gap = theme.sidebar_playlist_copy_gap });
+    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_width = 0, .gap = theme.sidebar_playlist_copy_gap });
     defer ctx.pop();
 
     _ = try ctx.button(.{
@@ -291,7 +287,7 @@ fn playlistRow(
         .on_click = on_click,
         .grow = 1,
         .shrink = 1,
-        .min_main = 0,
+        .min_height = 0,
         .justify = .start,
         .color = if (active) theme.c_text else theme.c_text_sec,
         .transparent = true,

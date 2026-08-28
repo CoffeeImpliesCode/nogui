@@ -6,14 +6,14 @@ const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const layout = @import("root.zig");
 
-fn layoutTreeMeasure(text: []const u8, _: f32, _: u8) widget.Size {
+fn layoutTreeMeasure(text: []const u8, _: layout.MeasureInput) widget.Size {
     return .{
         .width = @floatFromInt(text.len * 5),
         .height = 12,
     };
 }
 
-test "layoutTree preserves legacy relative column geometry" {
+test "layoutTree preserves relative column geometry" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -33,7 +33,7 @@ test "layoutTree preserves legacy relative column geometry" {
     });
     try tree.appendNode(.{
         .id = root_id,
-        .kind = .{ .column = .{ .gap = 4 } },
+        .kind = .{ .column = .{} },
         .parent = .root,
         .style = .{ .@"align" = .start, .gap = .{ .length = 4 } },
     });
@@ -122,7 +122,7 @@ test "layoutTree dispatches a single flow root through block float layout" {
     );
 }
 
-test "layoutTree keeps a leaf root on the legacy measurement path" {
+test "layoutTree measures a leaf root intrinsically" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -146,7 +146,7 @@ test "layoutTree keeps a leaf root on the legacy measurement path" {
     );
 }
 
-test "layoutTree keeps nested block trees on the legacy path" {
+test "layoutTree routes nested block trees" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -194,7 +194,7 @@ test "layoutTree keeps nested block trees on the legacy path" {
     );
 }
 
-test "layoutTree keeps scroll roots on the legacy offset path" {
+test "layoutTree preserves scroll root offsets" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -233,7 +233,7 @@ test "layoutTree keeps scroll roots on the legacy offset path" {
     try std.testing.expectEqual([2]f32{ 0, 10 }, scroll_state.max_offset);
 }
 
-test "layoutTree falls back for a direct auto-sized slider" {
+test "layoutTree uses visible slider label height" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -272,12 +272,13 @@ test "layoutTree falls back for a direct auto-sized slider" {
         .measure = layoutTreeMeasure,
     });
 
-    const slider_rect = tree.node(slider_id).?.rect;
-    try std.testing.expect(slider_rect.w > 0);
-    try std.testing.expect(slider_rect.h > 0);
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 100, .h = 12 },
+        tree.node(slider_id).?.rect,
+    );
 }
 
-test "layoutTree keeps capped direct labels on the legacy path" {
+test "layoutTree caps direct label intrinsic width" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -316,7 +317,7 @@ test "layoutTree keeps capped direct labels on the legacy path" {
     try std.testing.expectEqual(@as(f32, 20), tree.node(label_id).?.rect.w);
 }
 
-test "layoutTree preserves legacy root flex-item growth" {
+test "layoutTree preserves root flex-item growth" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -425,7 +426,7 @@ test "layoutTree dispatches an eligible flex root through modular flex" {
     );
 }
 
-test "layoutTree falls back for a hidden unsupported grid subtree" {
+test "layoutTree clears hidden grid subtree geometry" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -829,8 +830,8 @@ test "layoutTree rejects non-finite available width" {
     );
 }
 
-test "layoutTree legacy scroll fallback reserves RTL vertical scrollbar gutter" {
-    // Exercise gutter sizing through the public facade's non-null-scroll fallback.
+test "layoutTree reserves RTL vertical scrollbar gutter" {
+    // Exercise RTL scrollbar gutter sizing through the public facade.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -885,8 +886,8 @@ test "layoutTree legacy scroll fallback reserves RTL vertical scrollbar gutter" 
     try std.testing.expectEqual(@as(f32, 15), child_absolute.x);
 }
 
-test "layoutTree legacy grid fallback grows capped minmax track to natural width" {
-    // Exercise intrinsic track growth through the public facade's non-null-scroll fallback.
+test "layoutTree grows capped minmax track to natural width" {
+    // Exercise capped minmax intrinsic track growth through the public facade.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -940,7 +941,7 @@ test "layoutTree legacy grid fallback grows capped minmax track to natural width
     try std.testing.expect(child_rect.w <= 50);
 }
 
-test "layoutTree legacy grid fallback floors fit-content maximum at fixed minimum" {
+test "layoutTree floors fit-content maximum at fixed minimum" {
     // The fixed minimum must win when the percentage fit-content cap resolves smaller.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -994,8 +995,8 @@ test "layoutTree legacy grid fallback floors fit-content maximum at fixed minimu
     try std.testing.expectEqual(@as(f32, 60), child_rect.w);
 }
 
-test "layoutTree rejects invalid scrollbar width on legacy scroll fallback" {
-    // The public facade must validate styles before invoking the unchecked legacy path.
+test "layoutTree rejects invalid scrollbar width" {
+    // The public facade must validate styles before layout.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -1028,7 +1029,7 @@ test "layoutTree rejects invalid scrollbar width on legacy scroll fallback" {
     );
 }
 
-test "layoutTree legacy content-box scrollbar keeps outer width fixed" {
+test "layoutTree keeps content-box scrollbar outer width fixed" {
     // The gutter reduces content space without increasing a specified content-box width.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -1077,8 +1078,8 @@ test "layoutTree legacy content-box scrollbar keeps outer width fixed" {
     try std.testing.expectEqual(@as(f32, 85), tree.node(child_id).?.rect.w);
 }
 
-test "layoutTree legacy flex content-box scrollbar keeps outer width fixed" {
-    // Exercise growing percentage sizing through the public facade's legacy fallback.
+test "layoutTree keeps flex content-box scrollbar outer width fixed" {
+    // Exercise growing percentage sizing through the public facade.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -1129,8 +1130,8 @@ test "layoutTree legacy flex content-box scrollbar keeps outer width fixed" {
     try std.testing.expectEqual(@as(f32, 85), tree.node(child_id).?.rect.w);
 }
 
-test "layoutTree legacy grid content-box scrollbar keeps outer width fixed" {
-    // Exercise fractional track sizing through the public facade's legacy fallback.
+test "layoutTree keeps grid content-box scrollbar outer width fixed" {
+    // Exercise fractional track sizing through the public facade.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -1180,7 +1181,7 @@ test "layoutTree legacy grid content-box scrollbar keeps outer width fixed" {
     try std.testing.expectEqual(@as(f32, 85), tree.node(child_id).?.rect.w);
 }
 
-test "layoutTree legacy flex basis contains content-box scrollbar gutter" {
+test "layoutTree contains scrollbar gutter inside content-box flex basis" {
     // Reserve the scrollbar inside the specified outer flex basis, not in addition to it.
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -1232,4 +1233,453 @@ test "layoutTree legacy flex basis contains content-box scrollbar gutter" {
 
     try std.testing.expectEqual(@as(f32, 100), tree.node(root_id).?.rect.w);
     try std.testing.expectEqual(@as(f32, 20), tree.node(child_id).?.rect.w);
+}
+
+test "layoutTree preserves padded nested scroll grid content origins" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var grid_scroll_state: widget.ScrollState = .{};
+    const first_leaf_id: Id = @enumFromInt(1);
+    const second_leaf_id: Id = @enumFromInt(2);
+    const grid_id: Id = @enumFromInt(3);
+    const flex_id: Id = @enumFromInt(4);
+    const root_id: Id = @enumFromInt(5);
+    const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
+    const rows = [_]style.GridTrack{.{ .fixed = 100 }};
+
+    try tree.appendNode(.{
+        .id = first_leaf_id,
+        .kind = .{ .spacer = .{} },
+        .parent = grid_id,
+        .style = .{
+            .display = .block,
+            .writing_direction = .rtl,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 10 },
+                .height = .{ .length = 100 },
+            },
+            .grid_column = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } },
+            .grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } },
+        },
+    });
+    try tree.appendNode(.{
+        .id = second_leaf_id,
+        .kind = .{ .spacer = .{} },
+        .parent = grid_id,
+        .style = .{
+            .display = .block,
+            .writing_direction = .rtl,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 10 },
+                .height = .{ .length = 100 },
+            },
+            .grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } },
+            .grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } },
+            .grid_justify_self = .start,
+        },
+    });
+    try tree.appendNode(.{
+        .id = grid_id,
+        .kind = .{ .column = .{} },
+        .parent = flex_id,
+        .style = .{
+            .display = .grid,
+            .writing_direction = .rtl,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 110 },
+                .height = .{ .length = 60 },
+            },
+            .border_inset = .{
+                .top = .{ .length = 2 },
+                .right = .{ .length = 2 },
+                .bottom = .{ .length = 2 },
+                .left = .{ .length = 2 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 3 },
+                .right = .{ .length = 3 },
+                .bottom = .{ .length = 3 },
+                .left = .{ .length = 3 },
+            },
+            .grid_template_columns = columns[0..],
+            .grid_template_rows = rows[0..],
+            .grid_justify_content = .center,
+            .grid_align_content = .start,
+            .grid_justify_items = .end,
+            .grid_align_items = .start,
+            .overflow = .{ .width = .visible, .height = .scroll },
+        },
+        .scroll = .{ .state = &grid_scroll_state, .axis = .vertical },
+    });
+    try tree.appendNode(.{
+        .id = flex_id,
+        .kind = .{ .row = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 130 },
+                .height = .{ .length = 80 },
+            },
+            .border_inset = .{
+                .top = .{ .length = 1 },
+                .right = .{ .length = 1 },
+                .bottom = .{ .length = 1 },
+                .left = .{ .length = 1 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 4 },
+                .right = .{ .length = 4 },
+                .bottom = .{ .length = 4 },
+                .left = .{ .length = 4 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 150 },
+                .height = .{ .length = 100 },
+            },
+            .border_inset = .{
+                .top = .{ .length = 2 },
+                .right = .{ .length = 2 },
+                .bottom = .{ .length = 2 },
+                .left = .{ .length = 2 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 5 },
+                .right = .{ .length = 5 },
+                .bottom = .{ .length = 5 },
+                .left = .{ .length = 5 },
+            },
+        },
+    });
+    try tree.appendChild(grid_id, first_leaf_id);
+    try tree.appendChild(grid_id, second_leaf_id);
+    try tree.appendChild(flex_id, grid_id);
+    try tree.appendChild(root_id, flex_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 150, .height = 100 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 130, .h = 80 },
+        tree.node(flex_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 110, .h = 60 },
+        tree.node(grid_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 50, .y = 0, .w = 10, .h = 100 },
+        tree.node(first_leaf_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 40, .y = 0, .w = 10, .h = 100 },
+        tree.node(second_leaf_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 67, .y = 17, .w = 10, .h = 100 },
+        widget.absoluteRect(&tree, first_leaf_id),
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 57, .y = 17, .w = 10, .h = 100 },
+        widget.absoluteRect(&tree, second_leaf_id),
+    );
+    try std.testing.expectEqual([2]f32{ 0, 50 }, grid_scroll_state.max_offset);
+}
+
+test "layoutTree measures negative RTL flex overflow from both border edges" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var scroll_state: widget.ScrollState = .{};
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .writing_direction = .rtl,
+            .shrink = 0,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .writing_direction = .rtl,
+            .justify = .start,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 50 },
+            },
+            .overflow = .{ .width = .scroll, .height = .scroll },
+            .scrollbar_width = 15,
+        },
+        .scroll = .{ .state = &scroll_state, .axis = .both },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 50, .height = 50 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 50, .h = 50 },
+        tree.node(root_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = -65, .y = 0, .w = 100, .h = 100 },
+        tree.node(child_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = -50, .y = 0, .w = 100, .h = 100 },
+        widget.absoluteRect(&tree, child_id),
+    );
+    try std.testing.expectEqual([2]f32{ 65, 65 }, scroll_state.max_offset);
+}
+
+test "layoutTree propagates visible nested overflow but clips hidden descendants" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var scroll_state: widget.ScrollState = .{};
+    const visible_leaf_id: Id = @enumFromInt(1);
+    const visible_container_id: Id = @enumFromInt(2);
+    const hidden_leaf_id: Id = @enumFromInt(3);
+    const hidden_container_id: Id = @enumFromInt(4);
+    const root_id: Id = @enumFromInt(5);
+
+    try tree.appendNode(.{
+        .id = visible_leaf_id,
+        .kind = .{ .spacer = .{} },
+        .parent = visible_container_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = visible_container_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 30 },
+                .height = .{ .length = 20 },
+            },
+            .overflow = .{ .width = .visible, .height = .visible },
+        },
+    });
+    try tree.appendNode(.{
+        .id = hidden_leaf_id,
+        .kind = .{ .spacer = .{} },
+        .parent = hidden_container_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 120 },
+                .height = .{ .length = 10 },
+            },
+        },
+    });
+    try tree.appendNode(.{
+        .id = hidden_container_id,
+        .kind = .{ .column = .{} },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 30 },
+                .height = .{ .length = 20 },
+            },
+            .margin_inset = .{
+                .top = .{ .length = 0 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 40 },
+            },
+            .overflow = .{ .width = .hidden, .height = .hidden },
+        },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 80 },
+                .height = .{ .length = 60 },
+            },
+            .overflow = .{ .width = .scroll, .height = .visible },
+        },
+        .scroll = .{ .state = &scroll_state, .axis = .horizontal },
+    });
+    try tree.appendChild(visible_container_id, visible_leaf_id);
+    try tree.appendChild(hidden_container_id, hidden_leaf_id);
+    try tree.appendChild(root_id, visible_container_id);
+    try tree.appendChild(root_id, hidden_container_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 80, .height = 60 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 80, .h = 60 },
+        tree.node(root_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 30, .h = 20 },
+        tree.node(visible_container_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 40, .y = 20, .w = 30, .h = 20 },
+        tree.node(hidden_container_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 100, .h = 10 },
+        widget.absoluteRect(&tree, visible_leaf_id),
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 40, .y = 20, .w = 120, .h = 10 },
+        widget.absoluteRect(&tree, hidden_leaf_id),
+    );
+    try std.testing.expectEqual([2]f32{ 20, 0 }, scroll_state.max_offset);
+}
+
+test "layoutTree retains measured content on clipped scroll leaves" {
+    var tree = widget.WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var hidden_state: widget.ScrollState = .{};
+    var scroll_state: widget.ScrollState = .{};
+    var root_state: widget.ScrollState = .{};
+    const hidden_leaf_id: Id = @enumFromInt(1);
+    const scroll_leaf_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+    const text = "12345678901234567890";
+
+    try tree.appendNode(.{
+        .id = hidden_leaf_id,
+        .kind = .{ .label = .{ .text = text } },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .shrink = 0,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 20 },
+            },
+            .overflow = .{ .width = .hidden, .height = .hidden },
+        },
+        .scroll = .{ .state = &hidden_state, .axis = .horizontal },
+    });
+    try tree.appendNode(.{
+        .id = scroll_leaf_id,
+        .kind = .{ .label = .{ .text = text } },
+        .parent = root_id,
+        .style = .{
+            .display = .block,
+            .shrink = 0,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 20 },
+            },
+            .overflow = .{ .width = .scroll, .height = .hidden },
+            .scrollbar_width = 15,
+        },
+        .scroll = .{ .state = &scroll_state, .axis = .horizontal },
+    });
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .justify = .start,
+            .@"align" = .start,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 120 },
+                .height = .{ .length = 30 },
+            },
+            .overflow = .{ .width = .scroll, .height = .visible },
+        },
+        .scroll = .{ .state = &root_state, .axis = .horizontal },
+    });
+    try tree.appendChild(root_id, hidden_leaf_id);
+    try tree.appendChild(root_id, scroll_leaf_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 120, .height = 30 },
+        .measure = layoutTreeMeasure,
+    });
+
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 50, .h = 20 },
+        tree.node(hidden_leaf_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 50, .y = 0, .w = 50, .h = 20 },
+        tree.node(scroll_leaf_id).?.rect,
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 0, .y = 0, .w = 50, .h = 20 },
+        widget.absoluteRect(&tree, hidden_leaf_id),
+    );
+    try std.testing.expectEqual(
+        widget.Rect{ .x = 50, .y = 0, .w = 50, .h = 20 },
+        widget.absoluteRect(&tree, scroll_leaf_id),
+    );
+    try std.testing.expectEqual([2]f32{ 50, 0 }, hidden_state.max_offset);
+    try std.testing.expectEqual([2]f32{ 50, 0 }, scroll_state.max_offset);
+    try std.testing.expectEqual([2]f32{ 0, 0 }, root_state.max_offset);
 }

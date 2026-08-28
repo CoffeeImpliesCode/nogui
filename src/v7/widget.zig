@@ -65,16 +65,47 @@ pub const ResolvedBoxEdges = struct {
 /// Available / required space.
 pub const Size = struct { width: f32, height: f32 };
 
-/// A clip rectangle in layout (framebuffer px) space. The GPU clip
-/// buffer stores these verbatim (four f32, 16 bytes — the fragment
-/// shader's `pc.indirect + 16 * clip_id` stride); the shader discards
-/// fragments outside the rect indexed by a vertex's clip_id.
-/// 0xFFFFFFFF (no clip id) = no clip.
-pub const ClipRect = struct {
+/// Content-clip axes. PaintStyle.clip enables both axes; typed overflow can
+/// enable either axis independently.
+pub const ClipAxes = struct {
+    x: bool = false,
+    y: bool = false,
+
+    pub fn any(self: ClipAxes) bool {
+        return self.x or self.y;
+    }
+};
+
+/// A clip rectangle in layout (framebuffer px) space. The GPU clip buffer
+/// stores these verbatim (four f32, 16 bytes). An extent of
+/// `disabled_extent` disables clipping on that axis without changing the GPU
+/// ABI; all real clip extents are nonnegative.
+/// 0xFFFFFFFF (no clip id) disables both axes by bypassing the clip lookup.
+pub const ClipRect = extern struct {
+    pub const disabled_extent: f32 = -1;
+
     x: f32 = 0,
     y: f32 = 0,
     w: f32 = 0,
     h: f32 = 0,
+
+    pub fn fromRect(rect: Rect, axes: ClipAxes) ClipRect {
+        std.debug.assert(axes.any());
+        return .{
+            .x = if (axes.x) rect.x else 0,
+            .y = if (axes.y) rect.y else 0,
+            .w = if (axes.x) @max(0, rect.w) else disabled_extent,
+            .h = if (axes.y) @max(0, rect.h) else disabled_extent,
+        };
+    }
+
+    pub fn clipsX(self: ClipRect) bool {
+        return self.w != disabled_extent;
+    }
+
+    pub fn clipsY(self: ClipRect) bool {
+        return self.h != disabled_extent;
+    }
 };
 
 /// Horizontal+vertical sums of a Sides (for content-box derivation).
@@ -86,11 +117,11 @@ pub fn sidesSum(s: Sides) struct { w: f32, h: f32 } {
 pub const ColumnTrack = struct {
     grow: f32 = 0,
     shrink: f32 = 1,
-    basis: f32 = 0,
-    min_main: ?f32 = null,
+    flex_basis: Dimension = .auto,
+    min_width: Dimension = .auto,
 };
 
-/// Column tracks shared by compatible row children.
+/// Column tracks shared by row children.
 pub const SharedColumns = struct {
     tracks: []const ColumnTrack,
 };
@@ -152,8 +183,8 @@ pub fn sliderThumbRect(rail: Rect, fraction: f32) Rect {
 /// What a widget node is. Payload differs per kind; fields with defaults
 /// may be omitted at construction.
 pub const WidgetKind = union(enum) {
-    column: struct { gap: f32 = 0 },
-    row: struct { gap: f32 = 0 },
+    column: struct {},
+    row: struct {},
     /// `color` is the text color in sRGB (converted to Oklab by the
     /// renderer, like every widget color); default = white.
     label: struct { text: []const u8, color: [4]f32 = .{ 1, 1, 1, 1 } },
@@ -216,27 +247,19 @@ pub const WidgetNode = struct {
     /// BORDER box, positioned relative to the parent's CONTENT box (see
     /// Rect's doc). Filled by the layout dispatcher.
     rect: Rect = .{},
+    /// Propagated content extent produced by the current layout pass.
+    layout_content_size: Size = .{ .width = 0, .height = 0 },
     /// First baseline from the border-box top after final child placement.
     /// Null means the node has no natural baseline.
     first_baseline: ?f32 = null,
-    /// Resolved typed layout values. This is the canonical flex/style view.
-    resolved_style: ResolvedStyle = .{},
-    resolved_dimensions: ResolvedDimensions = .{},
-    resolved_insets: ResolvedInsets = .{
-        .top = null,
-        .right = null,
-        .bottom = null,
-        .left = null,
-    },
-    resolved_constraints: ResolvedConstraints = .{},
-    resolved_aspect_ratio: ?f32 = null,
-    resolved_overflow: OverflowAxes = .{ .width = .visible, .height = .visible },
-    /// Border and padding resolved against the layout pass's containing basis.
+    /// Cached physical border and padding edges from layout resolution.
+    /// This preserves the containing basis for percentage edges during later
+    /// absolute and visual geometry walks.
     resolved_box_edges: ?ResolvedBoxEdges = null,
-    /// True when the current block layout pass hides this node through itself or
-    /// an ancestor. Recomputed at every direct block layout entry.
+    /// True when the current block layout pass hides this node through itself
+    /// or an ancestor. Recomputed at every direct block layout entry.
     layout_hidden: bool = false,
-    /// Resolved typed layout values. This is the canonical flex/style view.
+    /// Canonical typed layout values.
     style: Style = .{},
     /// Resolved typed paint values. This is the canonical paint view.
     paint: PaintStyle = .{},
@@ -250,46 +273,25 @@ pub const WidgetNode = struct {
     font_size: f32 = 0,
     /// Font selection: 0 = the host default font, 1 = the second font.
     font_id: u8 = 0,
-    /// The item's natural (measured/hugged) main size before any basis
-    /// override, recorded by the parent when placing. The flex-shrink
-    /// floor: shrink never crosses it (the canonical automatic minimum,
-    /// CSS flexbox §4.5). Filled by flex.layout().
-    natural_main: f32 = 0,
-    /// The clip rect id (index into WidgetTree.clip_rects) enclosing this
-    /// node, stamped by collectDrawCmds during its walk; 0xFFFFFFFF = no
-    /// clip. The renderer clips the node's glyphs to that rect.
+    /// Ancestor clip applied to this node's own decorations. The node's
+    /// content clip must not crop its border, shadow, slider chrome, or
+    /// interaction rings.
+    paint_clip_id: u32 = 0xFFFFFFFF,
+    /// Clip applied to this node's content, including text and icons.
+    /// 0xFFFFFFFF means no clip.
     clip_id: u32 = 0xFFFFFFFF,
 
-    /// Resolve typed dimensions, constraints, insets, and overflow for the
-    /// containing block known by the current layout pass.
-    pub fn resolveTypedStyle(
-        self: *WidgetNode,
-        containing: ?Size,
-        intrinsic: Size,
-    ) void {
-        const width_containing = if (containing) |value| value.width else null;
-        const height_containing = if (containing) |value| value.height else null;
-        self.resolveTypedStyleAxes(width_containing, height_containing, intrinsic);
+    /// Return the independent axes on which this node clips content and
+    /// descendants.
+    pub fn contentClipAxes(self: *const WidgetNode) ClipAxes {
+        return .{
+            .x = self.paint.clip or self.style.overflow.width != .visible,
+            .y = self.paint.clip or self.style.overflow.height != .visible,
+        };
     }
 
-    /// Resolve typed values with independent width and height definiteness.
-    pub fn resolveTypedStyleAxes(
-        self: *WidgetNode,
-        width_containing: ?f32,
-        height_containing: ?f32,
-        intrinsic: Size,
-    ) void {
-        const resolved = self.style.resolveTotalAxes(
-            width_containing,
-            height_containing,
-            style.Size(f32){ .width = intrinsic.width, .height = intrinsic.height },
-        );
-        self.resolved_style = resolved;
-        self.resolved_dimensions = resolved.dimensions;
-        self.resolved_insets = resolved.insets;
-        self.resolved_constraints = resolved.constraints;
-        self.resolved_aspect_ratio = resolved.aspect_ratio;
-        self.resolved_overflow = resolved.overflow;
+    pub fn clipsContent(self: *const WidgetNode) bool {
+        return self.contentClipAxes().any();
     }
 };
 
@@ -377,11 +379,11 @@ pub const WidgetTree = struct {
         }
     }
 
-    /// Append a clip rect, returning its id (the index into clip_rects).
-    pub fn pushClipRect(self: *WidgetTree, r: ClipRect) ?u32 {
-        if (self.clip_count >= self.clip_rects.len) return null;
+    /// Append a clip rect and return its stable frame-local id.
+    pub fn pushClipRect(self: *WidgetTree, rect: ClipRect) error{ClipCapacityExceeded}!u32 {
+        if (self.clip_count >= self.clip_rects.len) return error.ClipCapacityExceeded;
         const id = self.clip_count;
-        self.clip_rects[id] = r;
+        self.clip_rects[id] = rect;
         self.clip_count += 1;
         return id;
     }
@@ -414,63 +416,32 @@ pub const WidgetTree = struct {
     }
 };
 
-fn resolveGeometryEdge(
-    typed: LengthPercentage,
-    legacy: f32,
-    border_box_width: f32,
-) f32 {
+fn resolveGeometryEdge(typed: LengthPercentage, border_box_width: f32) f32 {
     return switch (typed) {
-        .length => |value| if (value == 0 and legacy != 0) legacy else value,
+        .length => |value| value,
         .percent => |fraction| border_box_width * fraction,
     };
 }
 
-fn geometryBoxEdges(node: *const WidgetNode, border_box_width: f32) ResolvedBoxEdges {
+/// Resolve physical border and padding edges for geometry walks.
+///
+/// Layout stores resolved edges when percentage values use a containing basis
+/// that differs from the node's own border-box width. Before layout, typed
+/// lengths and percentages provide the canonical fallback.
+pub fn geometryBoxEdges(node: *const WidgetNode, border_box_width: f32) ResolvedBoxEdges {
     if (node.resolved_box_edges) |edges| return edges;
     return .{
         .border = .{
-            .top = resolveGeometryEdge(
-                node.style.border_inset.top,
-                node.style.border.top,
-                border_box_width,
-            ),
-            .right = resolveGeometryEdge(
-                node.style.border_inset.right,
-                node.style.border.right,
-                border_box_width,
-            ),
-            .bottom = resolveGeometryEdge(
-                node.style.border_inset.bottom,
-                node.style.border.bottom,
-                border_box_width,
-            ),
-            .left = resolveGeometryEdge(
-                node.style.border_inset.left,
-                node.style.border.left,
-                border_box_width,
-            ),
+            .top = resolveGeometryEdge(node.style.border_inset.top, border_box_width),
+            .right = resolveGeometryEdge(node.style.border_inset.right, border_box_width),
+            .bottom = resolveGeometryEdge(node.style.border_inset.bottom, border_box_width),
+            .left = resolveGeometryEdge(node.style.border_inset.left, border_box_width),
         },
         .padding = .{
-            .top = resolveGeometryEdge(
-                node.style.padding_inset.top,
-                node.style.padding.top,
-                border_box_width,
-            ),
-            .right = resolveGeometryEdge(
-                node.style.padding_inset.right,
-                node.style.padding.right,
-                border_box_width,
-            ),
-            .bottom = resolveGeometryEdge(
-                node.style.padding_inset.bottom,
-                node.style.padding.bottom,
-                border_box_width,
-            ),
-            .left = resolveGeometryEdge(
-                node.style.padding_inset.left,
-                node.style.padding.left,
-                border_box_width,
-            ),
+            .top = resolveGeometryEdge(node.style.padding_inset.top, border_box_width),
+            .right = resolveGeometryEdge(node.style.padding_inset.right, border_box_width),
+            .bottom = resolveGeometryEdge(node.style.padding_inset.bottom, border_box_width),
+            .left = resolveGeometryEdge(node.style.padding_inset.left, border_box_width),
         },
     };
 }
@@ -563,20 +534,26 @@ pub fn visualContentRect(tree: *const WidgetTree, id: Id) Rect {
     return contentBoxRect(border_rect, node);
 }
 
-/// Return whether a point is inside every clipped ancestor of a node.
-pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
-    var cur = id;
-    while (cur != .root) {
-        const n = tree.nodeConst(cur) orelse break;
-        if (n.paint.clip and !rectContainsPoint(visualBorderRect(tree, cur), pos)) return false;
-        cur = n.parent;
-    }
+/// Return whether a point is inside every clipped axis of a rectangle.
+pub fn pointInClipAxes(rect: Rect, axes: ClipAxes, pos: [2]f32) bool {
+    if (axes.x and (pos[0] < rect.x or pos[0] >= rect.x + rect.w)) return false;
+    if (axes.y and (pos[1] < rect.y or pos[1] >= rect.y + rect.h)) return false;
     return true;
 }
 
-fn rectContainsPoint(rect: Rect, pos: [2]f32) bool {
-    return pos[0] >= rect.x and pos[0] < rect.x + rect.w and
-        pos[1] >= rect.y and pos[1] < rect.y + rect.h;
+/// Return whether a point is inside every clipped ancestor axis of a node.
+pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
+    var cur = id;
+    while (cur != .root) {
+        const node = tree.nodeConst(cur) orelse break;
+        if (!pointInClipAxes(
+            visualBorderRect(tree, cur),
+            node.contentClipAxes(),
+            pos,
+        )) return false;
+        cur = node.parent;
+    }
+    return true;
 }
 
 /// Absolute CONTENT box of a node: the absolute border box inset by the
@@ -690,7 +667,7 @@ test "absoluteRect: walks parent content boxes through border+padding" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    // root-level column with padding, holding a row with a border, holding
+    // Root-level column with padding, holding a row with a border, holding
     // a label offset relative to the row's content box.
     const col: Id = @enumFromInt(1);
     const row: Id = @enumFromInt(2);
@@ -707,14 +684,28 @@ test "absoluteRect: walks parent content boxes through border+padding" {
         .kind = .{ .row = .{} },
         .parent = col,
         .rect = .{ .x = 10, .y = 10, .w = 100, .h = 40 },
-        .style = .{ .border = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 } },
+        .style = .{
+            .border_inset = .{
+                .top = .{ .length = 1 },
+                .right = .{ .length = 2 },
+                .bottom = .{ .length = 3 },
+                .left = .{ .length = 4 },
+            },
+        },
     });
     try tree.nodes.append(std.testing.allocator, .{
         .id = col,
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 200, .h = 200 },
-        .style = .{ .padding = .{ .top = 8, .left = 8 } },
+        .style = .{
+            .padding_inset = .{
+                .top = .{ .length = 8 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 8 },
+            },
+        },
     });
     try tree.appendChild(row, label);
     try tree.appendChild(col, row);
@@ -722,7 +713,10 @@ test "absoluteRect: walks parent content boxes through border+padding" {
     // Label absolute border box: col content origin (8,8) + row rect
     // (10,10) + row border (4,1) + label rect (5,3).
     const r = absoluteRect(&tree, label);
-    try std.testing.expectEqual(Rect{ .x = 8 + 10 + 4 + 5, .y = 8 + 10 + 1 + 3, .w = 20, .h = 24 }, r);
+    try std.testing.expectEqual(
+        Rect{ .x = 8 + 10 + 4 + 5, .y = 8 + 10 + 1 + 3, .w = 20, .h = 24 },
+        r,
+    );
 
     // Label content box: its own border+padding are zero, so identical.
     const c = contentRect(&tree, label);
@@ -731,20 +725,19 @@ test "absoluteRect: walks parent content boxes through border+padding" {
     // Row content box: absolute border box (18,18,100,40) inset by its
     // border (4,1,2,3).
     const rc = contentRect(&tree, row);
-    try std.testing.expectEqual(Rect{ .x = 18 + 4, .y = 18 + 1, .w = 100 - 6, .h = 40 - 4 }, rc);
+    try std.testing.expectEqual(
+        Rect{ .x = 18 + 4, .y = 18 + 1, .w = 100 - 6, .h = 40 - 4 },
+        rc,
+    );
 }
 
-test "absoluteRect: typed zero edges override inherited legacy content origin" {
+test "absoluteRect: typed zero edges preserve content origin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
     const child_id: Id = @enumFromInt(1);
     const parent_id: Id = @enumFromInt(2);
-    const inherited_style = Style.resolve(.{}, .{
-        .border = .{ .top = 2, .left = 13 },
-        .padding = .{ .top = 3, .left = 17 },
-    });
-    const resolved_parent_style = Style.resolve(inherited_style, .{
+    const parent_style: Style = .{
         .border_inset = .{
             .top = .{ .length = 2 },
             .right = .{ .length = 0 },
@@ -757,7 +750,7 @@ test "absoluteRect: typed zero edges override inherited legacy content origin" {
             .bottom = .{ .length = 0 },
             .left = .{ .length = 0 },
         },
-    });
+    };
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = child_id,
@@ -770,12 +763,11 @@ test "absoluteRect: typed zero edges override inherited legacy content origin" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
-        .style = resolved_parent_style,
+        .style = parent_style,
     });
     try tree.appendChild(parent_id, child_id);
 
-    // The typed left border and padding are explicitly zero. The inherited
-    // legacy mirrors still contain 13 and 17 and must not shift the child.
+    // Explicit typed zero edges remain authoritative during geometry fallback.
     try std.testing.expectEqual(
         Rect{ .x = 14, .y = 31, .w = 20, .h = 10 },
         absoluteRect(&tree, child_id),
@@ -901,27 +893,6 @@ test "WidgetNode: defaults are zero-valued" {
     try std.testing.expectEqual(PaintStyle{}, n.paint);
     try std.testing.expectEqual(@as(usize, 0), n.children.items.len);
 }
-test "WidgetNode: typed dimensions and constraints are stored after resolution" {
-    var node: WidgetNode = .{
-        .id = .root,
-        .kind = .{ .label = .{ .text = "typed" } },
-        .parent = .root,
-        .style = .{
-            .size = .{ .width = .{ .percent = 0.5 }, .height = .auto },
-            .min_size = .{ .width = .{ .length = 40 }, .height = .auto },
-            .inset = .{
-                .top = .auto,
-                .right = .{ .length = 8 },
-                .bottom = .auto,
-                .left = .auto,
-            },
-        },
-    };
-    node.resolveTypedStyle(.{ .width = 200, .height = 100 }, .{ .width = 30, .height = 20 });
-    try std.testing.expectEqual(@as(?f32, 100), node.resolved_dimensions.width);
-    try std.testing.expectEqual(@as(?f32, 40), node.resolved_constraints.min_width);
-    try std.testing.expectEqual(@as(?f32, 8), node.resolved_insets.right);
-}
 
 test "sliderVisualLabel: null falls back, empty suppresses visible text" {
     var value: f32 = 0.5;
@@ -971,8 +942,18 @@ test "visualBorderRect: scroll offset applies only to descendants" {
         .parent = .root,
         .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
         .style = .{
-            .border = .{ .top = 3, .left = 2 },
-            .padding = .{ .top = 2, .left = 1 },
+            .border_inset = .{
+                .top = .{ .length = 3 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 2 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 2 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 1 },
+            },
         },
         .scroll = .{ .state = &scroll_state },
     });

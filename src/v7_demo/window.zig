@@ -67,6 +67,14 @@ const RenderOptions = renderer.Options;
 // this GTX 1660 Ti driver does not expose (FeatureNotPresent). 32F stays.
 const render_target_format: noapi.Texture.TextureFormat = .rgba32_float;
 const SceneRect = renderer.SceneRect;
+comptime {
+    std.debug.assert(@sizeOf(ClipRect) == @sizeOf(renderer.ClipRect));
+    std.debug.assert(@alignOf(ClipRect) == @alignOf(renderer.ClipRect));
+    std.debug.assert(@offsetOf(ClipRect, "x") == @offsetOf(renderer.ClipRect, "x"));
+    std.debug.assert(@offsetOf(ClipRect, "y") == @offsetOf(renderer.ClipRect, "y"));
+    std.debug.assert(@offsetOf(ClipRect, "w") == @offsetOf(renderer.ClipRect, "w"));
+    std.debug.assert(@offsetOf(ClipRect, "h") == @offsetOf(renderer.ClipRect, "h"));
+}
 const TextEngine = @import("text.zig").TextEngine;
 const text_mod = @import("text.zig");
 const svg_xml = @import("svg_xml.zig");
@@ -820,24 +828,23 @@ fn buildSliceRects(
     const glyph_slots = text_engine.glyphSlotCount();
 
     for (cmds) |cmd| {
-        const style = cmd.style;
         const paint = cmd.paint;
         const corner_l: f32 = if (cmd.ring)
             paint.radius.left
         else
-            @max(0, paint.radius.left - style.border.left);
+            @max(0, paint.radius.left - cmd.border.left);
         const corner_r: f32 = if (cmd.ring)
             paint.radius.right
         else
-            @max(0, paint.radius.right - style.border.right);
+            @max(0, paint.radius.right - cmd.border.right);
         const corner_t: f32 = if (cmd.ring)
             paint.radius.top
         else
-            @max(0, paint.radius.top - style.border.top);
+            @max(0, paint.radius.top - cmd.border.top);
         const corner_b: f32 = if (cmd.ring)
             paint.radius.bottom
         else
-            @max(0, paint.radius.bottom - style.border.bottom);
+            @max(0, paint.radius.bottom - cmd.border.bottom);
 
         // Rounded-rect material geometry: one radius per axis (the SDF
         // rounds all four corners; demo boxes use uniform radii). Rings
@@ -847,8 +854,8 @@ fn buildSliceRects(
         const ry: f32 = @max(corner_t, corner_b);
         const border: f32 = if (cmd.ring)
             @max(
-                @max(style.border.left, style.border.right),
-                @max(style.border.top, style.border.bottom),
+                @max(cmd.border.left, cmd.border.right),
+                @max(cmd.border.top, cmd.border.bottom),
             )
         else
             0;
@@ -978,7 +985,7 @@ fn buildSliceRects(
                 .color = srgbToOklab(s.color),
                 .curve = .{ 0, 0, 0, 0 },
                 .material_index = material_slot,
-                .clip_id = n.clip_id,
+                .clip_id = n.paint_clip_id,
                 .origin = .{ r.x, r.y },
             });
         }
@@ -1005,7 +1012,7 @@ fn buildSliceRects(
             .color = srgbToOklab(.{ 0.82, 0.82, 0.85, 1 }),
             .curve = .{ 0, 0, 0, 0 },
             .material_index = material_slot,
-            .clip_id = n.clip_id,
+            .clip_id = n.paint_clip_id,
             .origin = .{ thumb.x, thumb.y },
         });
     }
@@ -1046,7 +1053,7 @@ fn buildSliceRects(
                 .color = srgbToOklab(.{ 1.0, 0.8, 0.2, hover_alpha }),
                 .curve = .{ 0, 0, 0, 0 },
                 .material_index = material_slot,
-                .clip_id = n.clip_id,
+                .clip_id = n.paint_clip_id,
                 .origin = .{ r.x, r.y },
             });
             break;
@@ -1085,7 +1092,7 @@ fn buildSliceRects(
                 .color = srgbToOklab(.{ 0.25, 0.85, 0.85, 1 }),
                 .curve = .{ 0, 0, 0, 0 },
                 .material_index = material_slot,
-                .clip_id = n.clip_id,
+                .clip_id = n.paint_clip_id,
                 .origin = .{ r.x, r.y },
             });
             break;
@@ -1104,7 +1111,6 @@ fn buildSliceRects(
         const content = visualContentRect(tree, n.id);
         if (content.w == 0 or content.h == 0) continue;
         const size: u32 = if (n.font_size > 0) @intFromFloat(@round(n.font_size)) else font_size_px;
-        const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
         const text_color: [4]f32 = switch (n.kind) {
             .label => |l| l.color,
             .slider => |s| s.color,
@@ -1115,22 +1121,62 @@ fn buildSliceRects(
         // The node's layer key stamps the glyphs' z: a layered node's text
         // must ride its OWN layer (the layer-1 badge's caption would
         // otherwise sort below the badge's z=1 fill and vanish behind it).
-        const max_width: ?f32 = if (n.text_overflow == .ellipsis)
-            @min(content.w, n.text_max_width orelse content.w)
-        else
-            null;
         const before = out.items.len;
-        try text_engine.emitTextWithWidth(
-            t,
-            content.x,
-            baseline_y,
-            size,
-            n.font_id,
-            n.clip_id,
-            srgbToOklab(text_color),
-            max_width,
-            out,
-        );
+        switch (n.text_overflow) {
+            .ellipsis => {
+                const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
+                const max_width: f32 = @min(content.w, n.text_max_width orelse content.w);
+                try text_engine.emitTextWithWidth(
+                    t,
+                    content.x,
+                    baseline_y,
+                    size,
+                    n.font_id,
+                    n.clip_id,
+                    srgbToOklab(text_color),
+                    max_width,
+                    out,
+                );
+            },
+            .clip => if (n.text_max_width != null) {
+                const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
+                try text_engine.emitText(
+                    t,
+                    content.x,
+                    baseline_y,
+                    size,
+                    n.font_id,
+                    n.clip_id,
+                    srgbToOklab(text_color),
+                    out,
+                );
+            } else {
+                try text_engine.emitTextFlow(
+                    t,
+                    content.x,
+                    content.y,
+                    content.w,
+                    content.h,
+                    size,
+                    n.font_id,
+                    n.clip_id,
+                    srgbToOklab(text_color),
+                    out,
+                );
+            },
+            .visible => try text_engine.emitTextFlow(
+                t,
+                content.x,
+                content.y,
+                content.w,
+                content.h,
+                size,
+                n.font_id,
+                n.clip_id,
+                srgbToOklab(text_color),
+                out,
+            ),
+        }
         if (n.paint.layer > 0) {
             for (out.items[before..]) |*r| r.z = n.paint.layer;
         }
