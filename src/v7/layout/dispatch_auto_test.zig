@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Id = @import("../id.zig").Id;
-const dispatch = @import("dispatch.zig");
+const layout_api = @import("root.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
@@ -45,12 +45,12 @@ fn appendNode(
     });
 }
 
-fn measureLabel(_: []const u8, _: f32, _: u8) widget.Size {
+fn measureLabel(_: []const u8, _: layout_api.MeasureInput) widget.Size {
     return .{ .width = 30, .height = 12 };
 }
 
 fn layout(tree: *WidgetTree, available: widget.Size) !void {
-    try dispatch.layoutTree(tree, .{
+    try layout_api.layoutTree(tree, .{
         .allocator = std.testing.allocator,
         .available = available,
         .measure = measureLabel,
@@ -130,7 +130,6 @@ test "auto-height block preserves intrinsic main size of wrapped column flex" {
     try appendNode(&tree, second_id, flex_id, fixedStyle(.block, 20, 20), .{ .spacer = .{} });
     var flex_style = autoStyle(.flex);
     flex_style.direction = .column;
-    flex_style.wrap = .wrap;
     flex_style.flex_wrap = .wrap;
     flex_style.@"align" = .start;
     flex_style.size.width = .{ .length = 100 };
@@ -190,7 +189,7 @@ test "fixed flex root uses auto grid tracks and gap as natural size" {
     var grid_style = autoStyle(.grid);
     grid_style.grid_template_columns = columns[0..];
     grid_style.grid_template_rows = rows[0..];
-    grid_style.grid_column_gap = .{ .length = 10 };
+    grid_style.column_gap = .{ .length = 10 };
     grid_style.grid_justify_items = .start;
     grid_style.grid_align_items = .start;
     try appendNode(&tree, grid_id, root_id, grid_style, .{ .column = .{} });
@@ -224,7 +223,6 @@ test "fixed grid root gives wrapped flex a natural auto height" {
     try appendNode(&tree, second_id, flex_id, fixedStyle(.block, 60, 10), .{ .spacer = .{} });
     var flex_style = autoStyle(.flex);
     flex_style.direction = .row;
-    flex_style.wrap = .wrap;
     flex_style.flex_wrap = .wrap;
     flex_style.@"align" = .start;
     flex_style.size.width = .{ .length = 100 };

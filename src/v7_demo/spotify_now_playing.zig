@@ -23,10 +23,10 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     const content_width = spec.now_playing_width - now_playing_rail_padding_x * 2;
 
     _ = try ctx.column(.{
-        .basis = spec.now_playing_width,
+        .flex_basis = spec.now_playing_width,
         .grow = 0,
         .shrink = 0,
-        .min_main = spec.now_playing_width,
+        .min_width = spec.now_playing_width,
         .box_sizing = .border_box,
         .gap = 10,
         .clip = true,
@@ -47,7 +47,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         _ = try ctx.label(.{
             .text = "Now Playing",
             .shrink = 1,
-            .min_main = 0,
+            .min_width = 0,
             .text_overflow = .ellipsis,
             .max_width = content_width,
             .color = theme.c_text,
@@ -71,12 +71,12 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 track.artwork_seed,
                 track.artwork_texture_index,
             );
-            ctx.tree.node(artwork_tile).?.style.padding.bottom = 0;
+            ctx.tree.node(artwork_tile).?.style.padding_inset.bottom = .{ .length = 0 };
         }
         _ = try ctx.label(.{
             .text = track.title,
             .shrink = 1,
-            .min_main = 0,
+            .min_height = 0,
             .text_overflow = .ellipsis,
             .max_width = content_width,
             .color = theme.c_text,
@@ -85,7 +85,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         _ = try ctx.label(.{
             .text = track.artist,
             .shrink = 1,
-            .min_main = 0,
+            .min_height = 0,
             .text_overflow = .ellipsis,
             .max_width = content_width,
             .color = theme.c_text_sec,
@@ -97,7 +97,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         _ = try ctx.label(.{
             .text = "Playback unavailable",
             .shrink = 1,
-            .min_main = 0,
+            .min_height = 0,
             .text_overflow = .ellipsis,
             .max_width = content_width,
             .color = theme.c_text_sec,
@@ -114,7 +114,7 @@ fn drawMetadata(
 ) !void {
     _ = try ctx.column(.{
         .shrink = 1,
-        .min_main = 0,
+        .min_height = 0,
         .box_sizing = .border_box,
         .gap = 6,
         .clip = true,
@@ -145,7 +145,7 @@ fn drawMetadataRow(
     defer ctx.pop();
     _ = try ctx.label(.{
         .text = heading,
-        .basis = 42,
+        .flex_basis = 42,
         .shrink = 0,
         .color = theme.c_text_muted,
         .font_size = 10,
@@ -155,7 +155,7 @@ fn drawMetadataRow(
         .text = value,
         .grow = 1,
         .shrink = 1,
-        .min_main = 0,
+        .min_width = 0,
         .max_width = content_width - 50,
         .color = theme.c_text,
         .font_size = 11,

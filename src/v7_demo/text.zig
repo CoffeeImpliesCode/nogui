@@ -17,12 +17,15 @@ const renderer = @import("v7_render");
 const SceneRect = renderer.SceneRect;
 const nogui = @import("nogui");
 pub const WidgetSize = nogui.widget.Size;
+pub const MeasureInput = nogui.layout.MeasureInput;
 
 // One C import, owned by the HarfBuzz binding: hb.h + hb-ft.h pull in
 // freetype.h, so this exposes the full FreeType API we still need for
 // outline extraction.
 const hb = @import("harfbuzz");
 const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
+const glyph_infos_type = @typeInfo(@TypeOf(hb.Buffer.getGlyphInfos)).@"fn".return_type.?;
+const glyph_positions_type = @typeInfo(@TypeOf(hb.Buffer.getGlyphPositions)).@"fn".return_type.?;
 
 /// slot 0 = solid; glyphs start at 1, the SVG region + decorations from
 /// the top. Demo needs ~620 glyphs + the tiger (240 fills + up to 78
@@ -32,6 +35,9 @@ pub const max_materials: u32 = 1536;
 /// unique runs; 256 leaves ample headroom for the churning dynamic text.
 pub const run_cache_capacity: u32 = 256;
 pub const font_size_px: u32 = 14;
+const fallback_scalar_advance: f32 = 10;
+const fallback_line_height: f32 = 24;
+const zero_width_space = "\xE2\x80\x8B";
 
 /// The demo's live toggle state — the window writes it per frame, the UI
 /// reads it for the header status line (the UI cannot import the window).
@@ -92,6 +98,72 @@ const TextRun = struct {
     generation: u32, // the LRU clock stamp
 };
 
+const RunCache = std.AutoHashMapUnmanaged(RunKey, TextRun);
+
+fn runKeyLess(left: RunKey, right: RunKey) bool {
+    if (left.hash != right.hash) return left.hash < right.hash;
+    if (left.size != right.size) return left.size < right.size;
+    return left.font_id < right.font_id;
+}
+
+fn rebaseRunClock(run_cache: *RunCache, run_clock: *u32) void {
+    var keys: [run_cache_capacity]RunKey = undefined;
+    var key_count: usize = 0;
+    var iterator = run_cache.iterator();
+    while (iterator.next()) |entry| {
+        std.debug.assert(key_count < keys.len);
+        const key = entry.key_ptr.*;
+        const generation = entry.value_ptr.generation;
+        var insert_at = key_count;
+        while (insert_at > 0) {
+            const previous_key = keys[insert_at - 1];
+            const previous_run = run_cache.getPtr(previous_key).?;
+            const should_precede = generation < previous_run.generation or
+                (generation == previous_run.generation and runKeyLess(key, previous_key));
+            if (!should_precede) break;
+            keys[insert_at] = previous_key;
+            insert_at -= 1;
+        }
+        keys[insert_at] = key;
+        key_count += 1;
+    }
+    for (keys[0..key_count], 0..) |key, rank| {
+        run_cache.getPtr(key).?.generation = @intCast(rank);
+    }
+    run_clock.* = @intCast(key_count);
+}
+
+fn advanceRunClock(run_cache: *RunCache, run_clock: *u32) u32 {
+    if (run_clock.* == std.math.maxInt(u32)) {
+        rebaseRunClock(run_cache, run_clock);
+    } else {
+        run_clock.* += 1;
+    }
+    return run_clock.*;
+}
+
+fn oldestRunKey(run_cache: *RunCache) ?RunKey {
+    var victim_key: ?RunKey = null;
+    var victim_generation: u32 = 0;
+    var iterator = run_cache.iterator();
+    while (iterator.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const generation = entry.value_ptr.generation;
+        if (victim_key) |current_key| {
+            if (generation < victim_generation or
+                (generation == victim_generation and runKeyLess(key, current_key)))
+            {
+                victim_generation = generation;
+                victim_key = key;
+            }
+        } else {
+            victim_generation = generation;
+            victim_key = key;
+        }
+    }
+    return victim_key;
+}
+
 /// The embedded font sources: 0 = InterVariable, 1 = Fira Code Nerd Font.
 const FontData = struct {
     data: []const u8,
@@ -102,21 +174,432 @@ const font_sources = [_]FontData{
     .{ .data = @embedFile("FiraCodeNerdFont-Regular.ttf"), .name = "Fira Code Nerd Font" },
 };
 
+const WidthMode = union(enum) {
+    min_content,
+    max_content,
+    definite: f32,
+};
+
+const BreakKind = enum {
+    soft,
+    hard,
+    end,
+};
+
+const TextSegment = struct {
+    end: usize,
+    next: usize,
+    break_kind: BreakKind,
+};
+
+const IntrinsicMetrics = struct {
+    min_width: f32,
+    max_width: f32,
+};
+
+const FlowMetrics = struct {
+    width: f32,
+    line_count: usize,
+};
+
+fn textClusterIsControl(text: []const u8, cluster: usize) bool {
+    if (cluster >= text.len) return false;
+    if (text[cluster] == '\n' or text[cluster] == '\r') return true;
+    return std.mem.startsWith(u8, text[cluster..], zero_width_space);
+}
+
+const ShapedAdvance = struct {
+    text: []const u8,
+    infos: glyph_infos_type,
+    positions: glyph_positions_type,
+    glyph_index: usize = 0,
+    last_offset: usize = 0,
+    prefix_width: f32 = 0,
+
+    fn init(text: []const u8, buffer: *hb.Buffer) ShapedAdvance {
+        return .{
+            .text = text,
+            .infos = buffer.getGlyphInfos(),
+            .positions = buffer.getGlyphPositions(),
+        };
+    }
+
+    fn reset(self: *ShapedAdvance) void {
+        self.glyph_index = 0;
+        self.last_offset = 0;
+        self.prefix_width = 0;
+    }
+
+    fn advanceRange(self: *ShapedAdvance, source: []const u8, start: usize, end: usize) f32 {
+        _ = source;
+        const start_width = self.prefixAt(start);
+        const end_width = self.prefixAt(end);
+        return end_width - start_width;
+    }
+
+    fn prefixAt(self: *ShapedAdvance, byte_offset: usize) f32 {
+        std.debug.assert(byte_offset >= self.last_offset);
+        const positions = self.positions orelse &.{};
+        const glyph_count = @min(self.infos.len, positions.len);
+        while (self.glyph_index < glyph_count) {
+            const info = self.infos[self.glyph_index];
+            const cluster: usize = @intCast(info.cluster);
+            if (cluster >= byte_offset) break;
+            if (!self.clusterIsControl(cluster)) {
+                const advance = @as(
+                    f32,
+                    @floatCast(@as(f64, @floatFromInt(positions[self.glyph_index].x_advance)) / 64.0),
+                );
+                self.prefix_width += advance;
+            }
+            self.glyph_index += 1;
+        }
+        self.last_offset = byte_offset;
+        return self.prefix_width;
+    }
+
+    fn clusterIsControl(self: *const ShapedAdvance, cluster: usize) bool {
+        return textClusterIsControl(self.text, cluster);
+    }
+};
+
+fn hasMeasurerMethod(comptime T: type, comptime method_name: []const u8) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |pointer| hasMeasurerMethod(pointer.child, method_name),
+        else => @hasDecl(T, method_name),
+    };
+}
+
+const FallbackAdvance = struct {
+    fn advance(_: FallbackAdvance, text: []const u8) f32 {
+        var width: f32 = 0;
+        var index: usize = 0;
+        while (index < text.len) {
+            if (std.mem.startsWith(u8, text[index..], zero_width_space)) {
+                index += zero_width_space.len;
+                continue;
+            }
+            if (text[index] == '\n' or text[index] == '\r') {
+                index += 1;
+                continue;
+            }
+            index += utf8ScalarLength(text, index);
+            width += fallback_scalar_advance;
+        }
+        return width;
+    }
+};
+
+fn utf8ScalarLength(text: []const u8, index: usize) usize {
+    const first = text[index];
+    const length: usize = if (first <= 0x7f)
+        1
+    else if (first >= 0xc2 and first <= 0xdf)
+        2
+    else if (first >= 0xe0 and first <= 0xef)
+        3
+    else if (first >= 0xf0 and first <= 0xf4)
+        4
+    else
+        1;
+    if (length == 1 or length > text.len - index) return 1;
+
+    for (text[index + 1 .. index + length]) |byte| {
+        if (byte < 0x80 or byte > 0xbf) return 1;
+    }
+    const second = text[index + 1];
+    if (first == 0xe0 and second < 0xa0) return 1;
+    if (first == 0xed and second > 0x9f) return 1;
+    if (first == 0xf0 and second < 0x90) return 1;
+    if (first == 0xf4 and second > 0x8f) return 1;
+    return length;
+}
+
+fn measureRange(measurer: anytype, text: []const u8, start: usize, end: usize) f32 {
+    if (comptime hasMeasurerMethod(@TypeOf(measurer), "advanceRange")) {
+        return measurer.advanceRange(text, start, end);
+    }
+    return measurer.advance(text[start..end]);
+}
+
+fn resetMeasurer(measurer: anytype) void {
+    if (comptime hasMeasurerMethod(@TypeOf(measurer), "reset")) {
+        measurer.reset();
+    }
+}
+
+fn separatorAdvance(measurer: anytype, text: []const u8, segment: TextSegment) f32 {
+    if (segment.break_kind != .soft) return 0;
+    const separator = text[segment.end..segment.next];
+    if (std.mem.eql(u8, separator, zero_width_space)) return 0;
+    return measureRange(measurer, text, segment.end, segment.next);
+}
+
+fn nextTextSegment(text: []const u8, start: usize) TextSegment {
+    var index = start;
+    while (index < text.len) : (index += 1) {
+        if (std.mem.startsWith(u8, text[index..], zero_width_space)) {
+            const next = index + zero_width_space.len;
+            return .{ .end = index, .next = next, .break_kind = .soft };
+        }
+        switch (text[index]) {
+            ' ', '\t' => {
+                const next = index + 1;
+                return .{ .end = index, .next = next, .break_kind = .soft };
+            },
+            '\n' => return .{ .end = index, .next = index + 1, .break_kind = .hard },
+            '\r' => {
+                const next = if (index + 1 < text.len and text[index + 1] == '\n')
+                    index + 2
+                else
+                    index + 1;
+                return .{ .end = index, .next = next, .break_kind = .hard };
+            },
+            else => {},
+        }
+    }
+    return .{ .end = text.len, .next = text.len, .break_kind = .end };
+}
+
+fn segmentHasContent(text: []const u8) bool {
+    var index: usize = 0;
+    while (index < text.len) {
+        if (std.mem.startsWith(u8, text[index..], zero_width_space)) {
+            index += zero_width_space.len;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn intrinsicMetrics(measurer: anytype, text: []const u8) IntrinsicMetrics {
+    resetMeasurer(measurer);
+    var minimum_width: f32 = 0;
+    var maximum_width: f32 = 0;
+    var forced_line_width: f32 = 0;
+    var segment_start: usize = 0;
+    var line_has_content = false;
+
+    while (true) {
+        const segment = nextTextSegment(text, segment_start);
+        const has_content = segmentHasContent(text[segment_start..segment.end]);
+        if (has_content) {
+            const segment_width = measureRange(measurer, text, segment_start, segment.end);
+            minimum_width = @max(minimum_width, segment_width);
+            forced_line_width += segment_width;
+            line_has_content = true;
+        }
+        switch (segment.break_kind) {
+            .soft => {
+                if (line_has_content) {
+                    forced_line_width += separatorAdvance(measurer, text, segment);
+                }
+            },
+            .hard => {
+                maximum_width = @max(maximum_width, forced_line_width);
+                forced_line_width = 0;
+                line_has_content = false;
+            },
+            .end => {
+                maximum_width = @max(maximum_width, forced_line_width);
+                break;
+            },
+        }
+        segment_start = segment.next;
+    }
+    return .{ .min_width = minimum_width, .max_width = maximum_width };
+}
+
+/// A measured line's source range. Soft separators remain in the range
+/// because measureFlow includes their advances; hard breaks stay outside.
+const LineRange = struct {
+    start: usize,
+    end: usize,
+};
+
+const PendingSegment = struct {
+    segment: TextSegment,
+    has_content: bool,
+    width: f32,
+};
+
+const LineRangeIterator = struct {
+    text: []const u8,
+    limit: f32,
+    segment_start: usize = 0,
+    line_start: usize = 0,
+    line_end: usize = 0,
+    pending: ?PendingSegment = null,
+    line_width: f32 = 0,
+    line_has_content: bool = false,
+    finished: bool = false,
+
+    fn init(text: []const u8, limit: f32) LineRangeIterator {
+        return .{ .text = text, .limit = limit };
+    }
+
+    fn next(self: *LineRangeIterator, measurer: anytype) ?LineRange {
+        if (self.finished) return null;
+
+        while (true) {
+            const current: PendingSegment = if (self.pending) |pending| from_pending: {
+                self.pending = null;
+                break :from_pending pending;
+            } else fresh: {
+                const segment = nextTextSegment(self.text, self.segment_start);
+                break :fresh .{
+                    .segment = segment,
+                    .has_content = segmentHasContent(
+                        self.text[self.segment_start..segment.end],
+                    ),
+                    .width = measureRange(
+                        measurer,
+                        self.text,
+                        self.segment_start,
+                        segment.end,
+                    ),
+                };
+            };
+            const segment = current.segment;
+            const has_content = current.has_content;
+            const segment_width = current.width;
+            const candidate_width = self.line_width + segment_width;
+            if (self.line_has_content and has_content and candidate_width > self.limit) {
+                const range: LineRange = .{ .start = self.line_start, .end = self.line_end };
+                self.pending = .{
+                    .segment = segment,
+                    .has_content = has_content,
+                    .width = segment_width,
+                };
+                self.line_start = self.segment_start;
+                self.line_end = self.segment_start;
+                self.line_width = 0;
+                self.line_has_content = false;
+                return range;
+            }
+
+            self.line_width = candidate_width;
+            if (has_content) {
+                self.line_has_content = true;
+                self.line_end = segment.end;
+            }
+
+            switch (segment.break_kind) {
+                .soft => {
+                    if (self.line_has_content) {
+                        self.line_width += separatorAdvance(measurer, self.text, segment);
+                        self.line_end = segment.next;
+                    } else {
+                        self.line_start = segment.next;
+                        self.line_end = segment.next;
+                    }
+                    self.segment_start = segment.next;
+                },
+                .hard => {
+                    const range: LineRange = .{ .start = self.line_start, .end = self.line_end };
+                    self.line_start = segment.next;
+                    self.line_end = segment.next;
+                    self.line_width = 0;
+                    self.line_has_content = false;
+                    self.segment_start = segment.next;
+                    return range;
+                },
+                .end => {
+                    self.finished = true;
+                    return .{ .start = self.line_start, .end = self.line_end };
+                },
+            }
+        }
+    }
+};
+
+fn wrappedLineCount(measurer: anytype, text: []const u8, limit: f32) usize {
+    resetMeasurer(measurer);
+    var ranges = LineRangeIterator.init(text, limit);
+    var line_count: usize = 0;
+    while (ranges.next(measurer)) |_| {
+        line_count += 1;
+    }
+    return line_count;
+}
+
+fn measureFlow(measurer: anytype, text: []const u8, mode: WidthMode) FlowMetrics {
+    const intrinsic = intrinsicMetrics(measurer, text);
+    const inline_width = switch (mode) {
+        .min_content => intrinsic.min_width,
+        .max_content => intrinsic.max_width,
+        .definite => |available_width| blk: {
+            const finite_width = if (std.math.isFinite(available_width))
+                @max(0, available_width)
+            else
+                intrinsic.max_width;
+            break :blk @max(
+                intrinsic.min_width,
+                @min(finite_width, intrinsic.max_width),
+            );
+        },
+    };
+    return .{
+        .width = inline_width,
+        .line_count = wrappedLineCount(measurer, text, inline_width),
+    };
+}
+fn measureByLinePolicy(measurer: anytype, text: []const u8, input: MeasureInput) FlowMetrics {
+    if (input.line_policy == .single_line) {
+        resetMeasurer(measurer);
+        return .{
+            .width = measureRange(measurer, text, 0, text.len),
+            .line_count = 1,
+        };
+    }
+    return measureFlow(measurer, text, widthMode(input));
+}
+
+fn widthMode(input: MeasureInput) WidthMode {
+    if (input.known_dimensions.width) |width| return .{ .definite = width };
+    return switch (input.available_space.width) {
+        .min_content => .min_content,
+        .max_content => .max_content,
+        .definite => |width| .{ .definite = width },
+    };
+}
+
+fn fontPixelSize(font_size: f32, default_size: u32) ?u32 {
+    if (!(font_size > 0)) return default_size;
+    if (!std.math.isFinite(font_size)) return null;
+    const rounded_size: f64 = @round(@as(f64, font_size));
+    const maximum_size: f64 = @floatFromInt(std.math.maxInt(u32));
+    if (rounded_size < 1 or rounded_size > maximum_size) return null;
+    return @intFromFloat(rounded_size);
+}
+
+fn applyKnownDimensions(size: WidgetSize, input: MeasureInput) WidgetSize {
+    var result = size;
+    if (input.known_dimensions.width) |width| result.width = width;
+    if (input.known_dimensions.height) |height| result.height = height;
+    return result;
+}
+
+fn fallbackMeasure(text: []const u8, input: MeasureInput) WidgetSize {
+    const flow = measureByLinePolicy(FallbackAdvance{}, text, input);
+    return applyKnownDimensions(.{
+        .width = flow.width,
+        .height = @as(f32, @floatFromInt(flow.line_count)) * fallback_line_height,
+    }, input);
+}
+
 const max_font_sizes = 16;
 
 pub const TextEngine = struct {
     /// The flex measure hook target: the demo sets this after init and
     /// points App.measure at measureForFlex, so layout sizes leaves to the
-    /// real text extent instead of the baked len*10 approximation.
+    /// shaped text extent rather than a coarse scalar estimate.
     pub var measure_engine: ?*TextEngine = null;
 
-    /// Host-side measure callback for flex.layoutWith.
-    pub fn measureForFlex(text: []const u8, font_size: f32, font_id: u8) WidgetSize {
-        return measure_engine.?.measureText(
-            text,
-            if (font_size > 0) @intFromFloat(@round(font_size)) else font_size_px,
-            font_id,
-        );
+    /// Host-side content-box measure callback for the canonical layout engine.
+    pub fn measureForFlex(text: []const u8, input: MeasureInput) WidgetSize {
+        return measure_engine.?.measureText(text, input);
     }
 
     /// The font's line height in px at `size` (ascender − descender; the
@@ -143,6 +626,11 @@ pub const TextEngine = struct {
     // sweepers[i] owns the GPU curve buffer backing entries[i].
     sweepers: std.ArrayList(renderer.GlyphSweeper) = .empty, // per glyph
     entries: std.ArrayList(GlyphEntry) = .empty, // per glyph
+    measure_buffer: hb.Buffer,
+    /// Reused HarfBuzz buffer for wrapped-line emission. Keeping this
+    /// separate preserves the whole-text measurement buffer while ranges
+    /// are consumed and prevents per-line run-cache allocations.
+    flow_buffer: hb.Buffer,
     materials: noapi.GpuPtr, // max_materials * material_size, .default
     next_slot: u32 = 1,
     material_bda: u64 = 0,
@@ -150,11 +638,10 @@ pub const TextEngine = struct {
     /// Shaped-run cache: (hash(text), size, font_id) → TextRun. The run's
     /// text dupe and glyph arrays are engine-owned (freed on eviction and
     /// in deinit). Unmanaged map — initialized `.empty`, methods take gpa.
-    run_cache: std.AutoHashMapUnmanaged(RunKey, TextRun) = .empty,
-    /// Generation clock for LRU eviction: every cache hit stamps the run;
-    /// on a full cache the minimum-generation entry is evicted. Wraps
-    /// after 2^32 stamps — stale stamps are just old values, the min-scan
-    /// still works.
+    run_cache: RunCache = .empty,
+    /// Generation clock for LRU eviction. Every cache hit and miss advances
+    /// the clock before stamping the run. Near u32 overflow, live entries
+    /// are rebased into dense oldest-to-newest ranks without allocation.
     run_clock: u32 = 0,
 
     /// How many glyph material slots are live (slots 1..next_slot-1 from
@@ -206,13 +693,19 @@ pub const TextEngine = struct {
         _ = c.hb_font_get_extents_for_direction(hb_handle, c.HB_DIRECTION_LTR, &font_ext);
 
         const materials = try gpu.gpuMalloc(max_materials * renderer.material_size, 64, .default);
-
+        errdefer gpu.gpuFree(materials);
+        var measure_buffer = try hb.Buffer.create();
+        errdefer measure_buffer.destroy();
+        var flow_buffer = try hb.Buffer.create();
+        errdefer flow_buffer.destroy();
         var self: TextEngine = .{
             .gpu = gpu,
             .gpa = gpa,
             .ft_lib = ft_lib,
+            .measure_buffer = measure_buffer,
             .materials = materials,
             .material_bda = materials.gpu,
+            .flow_buffer = flow_buffer,
         };
         // The default size's state (created inline so init errors release
         // everything); the other sizes come lazily via fontFor.
@@ -286,6 +779,8 @@ pub const TextEngine = struct {
                 _ = c.FT_Done_Face(fs.face);
             }
         }
+        self.measure_buffer.destroy();
+        self.flow_buffer.destroy();
         // Free each cached run's text dupe + glyph array, then the map.
         var cache_it = self.run_cache.iterator();
         while (cache_it.next()) |kv| self.freeRun(kv.value_ptr.*);
@@ -344,7 +839,8 @@ pub const TextEngine = struct {
         const key: RunKey = .{ .hash = std.hash.Wyhash.hash(0, text), .size = font.size, .font_id = font.font_id };
         if (self.run_cache.getPtr(key)) |run| {
             if (std.mem.eql(u8, run.text, text)) {
-                run.generation = self.run_clock; // LRU stamp on hit
+                const generation = advanceRunClock(&self.run_cache, &self.run_clock);
+                run.generation = generation;
                 return run;
             }
             // Hash collision (astronomically rare): drop the stale entry
@@ -357,49 +853,40 @@ pub const TextEngine = struct {
         defer buf.destroy();
         const infos = buf.getGlyphInfos();
         const positions = buf.getGlyphPositions() orelse &.{};
-
-        // The measure width is the sum of ALL shaper advances (the infos
-        // and positions arrays are equal-length in practice; if positions
-        // is empty the width is 0 and no glyphs are copied — no crash).
-        var w: f32 = 0;
-        for (positions) |pos| {
-            w += @as(f32, @floatCast(@as(f64, @floatFromInt(pos.x_advance)) / 64.0));
-        }
         const glyphs = try self.gpa.alloc(GlyphPos, @min(infos.len, positions.len));
         errdefer self.gpa.free(glyphs);
-        for (glyphs, 0..) |*g, i| {
-            const pos = positions[i];
-            g.* = .{
-                .gid = infos[i].codepoint,
-                .x_advance = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.x_advance)) / 64.0)),
-                .y_advance = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.y_advance)) / 64.0)),
-                .x_offset = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.x_offset)) / 64.0)),
-                .y_offset = @as(f32, @floatCast(@as(f64, @floatFromInt(pos.y_offset)) / 64.0)),
+        var w: f32 = 0;
+        for (glyphs, 0..) |*glyph, index| {
+            const position = positions[index];
+            const control = textClusterIsControl(text, @intCast(infos[index].cluster));
+            const x_advance = if (control) @as(f32, 0) else @as(f32, @floatCast(
+                @as(f64, @floatFromInt(position.x_advance)) / 64.0,
+            ));
+            w += x_advance;
+            glyph.* = .{
+                .gid = if (control) 0 else infos[index].codepoint,
+                .x_advance = x_advance,
+                .y_advance = if (control) 0 else @as(f32, @floatCast(
+                    @as(f64, @floatFromInt(position.y_advance)) / 64.0,
+                )),
+                .x_offset = if (control) 0 else @as(f32, @floatCast(
+                    @as(f64, @floatFromInt(position.x_offset)) / 64.0,
+                )),
+                .y_offset = if (control) 0 else @as(f32, @floatCast(
+                    @as(f64, @floatFromInt(position.y_offset)) / 64.0,
+                )),
             };
         }
 
         const text_dup = try self.gpa.dupe(u8, text);
         errdefer self.gpa.free(text_dup);
 
-        self.run_clock += 1; // bump BEFORE stamping
-        if (self.run_cache.count() >= run_cache_capacity) {
-            // Evict the entry with the oldest generation stamp (an O(n)
-            // scan of ≤256 entries is fine).
-            // SAFETY: only read if the scan finds a victim (victim_found);
-            // the undefined is never dereferenced otherwise.
-            var victim_key: RunKey = undefined;
-            var victim_gen: u32 = std.math.maxInt(u32);
-            var it = self.run_cache.iterator();
-            while (it.next()) |kv| {
-                if (kv.value_ptr.generation < victim_gen) {
-                    victim_gen = kv.value_ptr.generation;
-                    victim_key = kv.key_ptr.*;
-                }
-            }
-            if (self.run_cache.getPtr(victim_key)) |victim| {
-                self.freeRun(victim.*);
-                _ = self.run_cache.remove(victim_key);
-            }
+        const generation = advanceRunClock(&self.run_cache, &self.run_clock);
+        while (self.run_cache.count() >= run_cache_capacity) {
+            const victim_key = oldestRunKey(&self.run_cache) orelse unreachable;
+            const victim = self.run_cache.getPtr(victim_key) orelse unreachable;
+            self.freeRun(victim.*);
+            _ = self.run_cache.remove(victim_key);
         }
         try self.run_cache.put(self.gpa, key, .{
             .key = key,
@@ -407,12 +894,37 @@ pub const TextEngine = struct {
             .width = w,
             .line_height = font.ascent - font.descent,
             .glyphs = glyphs,
-            .generation = self.run_clock,
+            .generation = generation,
         });
         // Fetch the ptr AFTER the put — never hold a map ptr across a put.
         return self.run_cache.getPtr(key).?;
     }
 
+    fn shapeForMeasure(self: *TextEngine, font: *FontState, text: []const u8) ShapedAdvance {
+        self.measure_buffer.reset();
+        self.measure_buffer.addUTF8(text);
+        self.measure_buffer.setDirection(.ltr);
+        self.measure_buffer.setScript(.latin);
+        hb.shape(font.hb_font, self.measure_buffer, null);
+        return ShapedAdvance.init(text, &self.measure_buffer);
+    }
+
+    /// Measure a text run's content-box size for the canonical layout engine.
+    pub fn measureText(self: *TextEngine, text: []const u8, input: MeasureInput) WidgetSize {
+        const zone = tracy.Zone.begin(.{ .name = "measureText", .src = @src() });
+        defer zone.end();
+
+        const size = fontPixelSize(input.font_size, font_size_px) orelse
+            return fallbackMeasure(text, input);
+        const font = self.fontFor(input.font_id, size) catch
+            return fallbackMeasure(text, input);
+        var shaped = self.shapeForMeasure(font, text);
+        const flow = measureByLinePolicy(&shaped, text, input);
+        return applyKnownDimensions(.{
+            .width = flow.width,
+            .height = @as(f32, @floatFromInt(flow.line_count)) * (font.ascent - font.descent),
+        }, input);
+    }
     /// Rasterize glyph `gid` on demand. Glyph id 0 and glyphs without a
     /// supported outline are skipped. Returns the index into `entries` so
     /// callers do not need a second cache scan.
@@ -615,6 +1127,109 @@ pub const TextEngine = struct {
             out,
         );
     }
+    /// Emit visible text from measured soft/hard-break ranges. Wrapped
+    /// lines shape through one reusable HarfBuzz buffer instead of entering
+    /// each substring into the bounded complete-run cache.
+    pub fn emitTextFlow(
+        self: *TextEngine,
+        text: []const u8,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        size: u32,
+        font_id: u8,
+        clip_id: u32,
+        color: [4]f32,
+        out: *std.ArrayList(SceneRect),
+    ) !void {
+        const zone = tracy.Zone.begin(.{ .name = "emitTextFlow", .src = @src() });
+        defer zone.end();
+
+        const font = try self.fontFor(font_id, size);
+        var shaped = self.shapeForMeasure(font, text);
+        const flow = measureFlow(&shaped, text, .{ .definite = width });
+        resetMeasurer(&shaped);
+
+        const line_height = font.ascent - font.descent;
+        const block_height = @as(f32, @floatFromInt(flow.line_count)) * line_height;
+        const vertical_inset = if (height > block_height) (height - block_height) / 2 else 0;
+        const run_x = snapRunOrigin(x);
+        var ranges = LineRangeIterator.init(text, flow.width);
+        var line_index: usize = 0;
+        while (ranges.next(&shaped)) |range| {
+            const baseline = @round(
+                y + vertical_inset + font.ascent +
+                    @as(f32, @floatFromInt(line_index)) * line_height,
+            );
+            if (range.end > range.start) {
+                _ = try self.emitTransientRun(
+                    font,
+                    text[range.start..range.end],
+                    run_x,
+                    baseline,
+                    clip_id,
+                    color,
+                    out,
+                );
+            }
+            line_index += 1;
+        }
+        std.debug.assert(line_index == flow.line_count);
+    }
+
+    fn emitTransientRun(
+        self: *TextEngine,
+        font: *FontState,
+        text: []const u8,
+        run_x: f32,
+        run_baseline: f32,
+        clip_id: u32,
+        color: [4]f32,
+        out: *std.ArrayList(SceneRect),
+    ) !f32 {
+        self.flow_buffer.reset();
+        self.flow_buffer.addUTF8(text);
+        self.flow_buffer.setDirection(.ltr);
+        self.flow_buffer.setScript(.latin);
+        hb.shape(font.hb_font, self.flow_buffer, null);
+
+        const infos = self.flow_buffer.getGlyphInfos();
+        const positions = self.flow_buffer.getGlyphPositions() orelse &.{};
+        const glyph_count = @min(infos.len, positions.len);
+        try out.ensureTotalCapacity(self.gpa, out.items.len + glyph_count);
+        var cursor: f32 = 0;
+        for (0..glyph_count) |index| {
+            const position = positions[index];
+            const glyph: GlyphPos = .{
+                .gid = infos[index].codepoint,
+                .x_advance = @floatCast(
+                    @as(f64, @floatFromInt(position.x_advance)) / 64.0,
+                ),
+                .y_advance = @floatCast(
+                    @as(f64, @floatFromInt(position.y_advance)) / 64.0,
+                ),
+                .x_offset = @floatCast(
+                    @as(f64, @floatFromInt(position.x_offset)) / 64.0,
+                ),
+                .y_offset = @floatCast(
+                    @as(f64, @floatFromInt(position.y_offset)) / 64.0,
+                ),
+            };
+            try self.emitGlyph(
+                font,
+                glyph,
+                run_x,
+                run_baseline,
+                clip_id,
+                color,
+                out,
+                &cursor,
+            );
+        }
+        return cursor;
+    }
+
     fn fitGlyphCount(run: *const TextRun, width: f32) usize {
         var cursor: f32 = 0;
         for (run.glyphs, 0..) |g, i| {
@@ -638,51 +1253,54 @@ pub const TextEngine = struct {
         out: *std.ArrayList(SceneRect),
     ) !f32 {
         var cursor = initial_cursor;
-        for (run.glyphs[0..glyph_count]) |g| {
-            const entry_index = (try self.ensureGlyph(font, g.gid)) orelse {
-                cursor += g.x_advance;
-                continue;
-            };
-            const entry = &self.entries.items[entry_index];
-            const ch_x = run_x + cursor + g.x_offset + entry.bearing_x;
-            const ch_y = run_baseline - entry.bearing_y - g.y_offset;
-            if (entry.glyph_w <= 0 or entry.glyph_h <= 0) {
-                cursor += g.x_advance;
-                continue;
-            }
-            out.appendAssumeCapacity(.{
-                .dst = .{ ch_x - 2, ch_y - 2, @ceil(entry.glyph_w) + 4, @ceil(entry.glyph_h) + 4 },
-                .src = .{ 0, 0, 1, 1 },
-                .corners = .{ 0, 0, 0, 0 },
-                .color = color,
-                .material_index = entry.slot,
-                .curve = .{ entry.curve_left, entry.curve_bottom, entry.curve_w, entry.curve_h },
-                .clip_id = clip_id,
-                .origin = .{ run_x + cursor + g.x_offset, run_baseline - g.y_offset },
-            });
-            cursor += g.x_advance;
+        for (run.glyphs[0..glyph_count]) |glyph| {
+            try self.emitGlyph(
+                font,
+                glyph,
+                run_x,
+                run_baseline,
+                clip_id,
+                color,
+                out,
+                &cursor,
+            );
         }
         return cursor;
     }
 
-    /// Measure a text run's content size only: the SHAPED width (the sum of
-    /// the shaper's advances — kerning and ligatures included), 24px tall
-    /// (20px cap height + descender room); padding and border come from the
-    /// widget box (flex), not from the measurement. Shapes only — no glyph
-    /// rasterization (unlike the pre-shaping measure, which forced the
-    /// atlas to fill). On shape failure falls back to the baked estimate.
-    pub fn measureText(self: *TextEngine, text: []const u8, size: u32, font_id: u8) WidgetSize {
-        const zone = tracy.Zone.begin(.{ .name = "measureText", .src = @src() });
-        defer zone.end();
-        const font = self.fontFor(font_id, size) catch {
-            const len_f: f32 = @floatFromInt(@min(text.len, 1 << 24));
-            return .{ .width = len_f * 10, .height = 24 };
+    fn emitGlyph(
+        self: *TextEngine,
+        font: *FontState,
+        glyph: GlyphPos,
+        run_x: f32,
+        run_baseline: f32,
+        clip_id: u32,
+        color: [4]f32,
+        out: *std.ArrayList(SceneRect),
+        cursor: *f32,
+    ) !void {
+        const entry_index = (try self.ensureGlyph(font, glyph.gid)) orelse {
+            cursor.* += glyph.x_advance;
+            return;
         };
-        const run = self.getOrShape(font, text) catch {
-            const len_f: f32 = @floatFromInt(@min(text.len, 1 << 24));
-            return .{ .width = len_f * 10, .height = 24 };
-        };
-        return .{ .width = run.width, .height = run.line_height };
+        const entry = &self.entries.items[entry_index];
+        const ch_x = run_x + cursor.* + glyph.x_offset + entry.bearing_x;
+        const ch_y = run_baseline - entry.bearing_y - glyph.y_offset;
+        if (entry.glyph_w <= 0 or entry.glyph_h <= 0) {
+            cursor.* += glyph.x_advance;
+            return;
+        }
+        out.appendAssumeCapacity(.{
+            .dst = .{ ch_x - 2, ch_y - 2, @ceil(entry.glyph_w) + 4, @ceil(entry.glyph_h) + 4 },
+            .src = .{ 0, 0, 1, 1 },
+            .corners = .{ 0, 0, 0, 0 },
+            .color = color,
+            .material_index = entry.slot,
+            .curve = .{ entry.curve_left, entry.curve_bottom, entry.curve_w, entry.curve_h },
+            .clip_id = clip_id,
+            .origin = .{ run_x + cursor.* + glyph.x_offset, run_baseline - glyph.y_offset },
+        });
+        cursor.* += glyph.x_advance;
     }
 };
 
@@ -1023,6 +1641,139 @@ pub fn srgbToOklab(rgb: [4]f32) [4]f32 {
 // ─── Tests (pure only — GPU paths are smoke-verified by the orchestrator) ───
 
 const testing = std.testing;
+
+const CountingAdvanceMeasurer = struct {
+    call_count: usize = 0,
+    input_bytes_total: usize = 0,
+
+    fn advance(self: *CountingAdvanceMeasurer, text: []const u8) f32 {
+        self.call_count += 1;
+        self.input_bytes_total += text.len;
+        return @floatFromInt(text.len);
+    }
+};
+
+fn expectLineRanges(text: []const u8, limit: f32, expected: []const LineRange) !void {
+    var measurer: CountingAdvanceMeasurer = .{};
+    var ranges = LineRangeIterator.init(text, limit);
+    resetMeasurer(&measurer);
+
+    for (expected) |expected_range| {
+        const actual = ranges.next(&measurer) orelse return error.MissingLineRange;
+        try testing.expectEqual(expected_range.start, actual.start);
+        try testing.expectEqual(expected_range.end, actual.end);
+    }
+    try testing.expect(ranges.next(&measurer) == null);
+}
+
+test "run cache: clock wrap rebases generations before eviction" {
+    var run_cache: RunCache = .empty;
+    defer run_cache.deinit(testing.allocator);
+
+    const key_a: RunKey = .{ .hash = 1, .size = 14, .font_id = 0 };
+    const key_b: RunKey = .{ .hash = 2, .size = 14, .font_id = 0 };
+    const no_glyphs: []GlyphPos = @constCast(&[_]GlyphPos{});
+    try run_cache.put(testing.allocator, key_b, .{
+        .key = key_b,
+        .text = @constCast("b"),
+        .width = 1,
+        .line_height = 1,
+        .glyphs = no_glyphs,
+        .generation = std.math.maxInt(u32),
+    });
+    try run_cache.put(testing.allocator, key_a, .{
+        .key = key_a,
+        .text = @constCast("a"),
+        .width = 1,
+        .line_height = 1,
+        .glyphs = no_glyphs,
+        .generation = std.math.maxInt(u32),
+    });
+
+    var run_clock: u32 = std.math.maxInt(u32);
+    const next_generation = advanceRunClock(&run_cache, &run_clock);
+    try testing.expectEqual(@as(u32, 2), next_generation);
+
+    var iterator = run_cache.iterator();
+    while (iterator.next()) |entry| {
+        try testing.expect(entry.value_ptr.generation < next_generation);
+    }
+    const victim_key = oldestRunKey(&run_cache) orelse return error.MissingEvictionVictim;
+    try testing.expectEqual(key_a, victim_key);
+}
+
+test "line ranges: soft breaks retain measured separators" {
+    const text = "alpha beta gamma";
+    try expectLineRanges(text, 10, &.{
+        .{ .start = 0, .end = 11 },
+        .{ .start = 11, .end = text.len },
+    });
+}
+
+test "line ranges: hard breaks preserve empty and trailing lines" {
+    const text = "a\r\n\r\nb\n";
+    try expectLineRanges(text, 100, &.{
+        .{ .start = 0, .end = 1 },
+        .{ .start = 3, .end = 3 },
+        .{ .start = 5, .end = 6 },
+        .{ .start = 7, .end = 7 },
+    });
+}
+test "measureFlow: max-content preserves hard lines without soft wrapping" {
+    var measurer: CountingAdvanceMeasurer = .{};
+    const flow = measureFlow(&measurer, "alpha beta\ngamma delta", .max_content);
+
+    try testing.expectEqual(@as(f32, 11), flow.width);
+    try testing.expectEqual(@as(usize, 2), flow.line_count);
+}
+test "measureFlow: leading separators do not reserve painted width" {
+    var measurer: CountingAdvanceMeasurer = .{};
+    const flow = measureFlow(&measurer, "  alpha\n\tbeta", .max_content);
+
+    try testing.expectEqual(@as(f32, 5), flow.width);
+    try testing.expectEqual(@as(usize, 2), flow.line_count);
+}
+
+test "single-line policy ignores hard-break glyph advances" {
+    const input: MeasureInput = .{
+        .known_dimensions = .{ .width = null, .height = null },
+        .available_space = .{ .width = .max_content, .height = .max_content },
+        .font_size = 20,
+        .font_id = 0,
+        .line_policy = .single_line,
+    };
+    const flow = measureByLinePolicy(FallbackAdvance{}, "a\nbb", input);
+
+    try testing.expectEqual(@as(f32, 3 * fallback_scalar_advance), flow.width);
+    try testing.expectEqual(@as(usize, 1), flow.line_count);
+}
+
+test "wrappedLineCount: many segments use linear measurement work" {
+    const segment = "abc";
+    const segment_count: usize = 128;
+    const segments_per_line: usize = 16;
+    const separator_size: usize = 1;
+    const text_size =
+        segment_count * segment.len + (segment_count - 1) * separator_size;
+    var text: [text_size]u8 = undefined;
+    for (0..segment_count) |segment_index| {
+        const segment_start = segment_index * (segment.len + separator_size);
+        @memcpy(text[segment_start..][0..segment.len], segment);
+        if (segment_index + 1 < segment_count) {
+            text[segment_start + segment.len] = ' ';
+        }
+    }
+
+    const line_width: f32 = @floatFromInt(
+        segments_per_line * segment.len + (segments_per_line - 1) * separator_size,
+    );
+    var measurer: CountingAdvanceMeasurer = .{};
+    const line_count = wrappedLineCount(&measurer, &text, line_width);
+
+    try testing.expectEqual(segment_count / segments_per_line, line_count);
+    try testing.expect(measurer.input_bytes_total <= text.len * 4);
+    try testing.expect(measurer.call_count <= segment_count * 3);
+}
 
 test "srgbToOklab: white → L=1, a=0, b=0" {
     const lab = srgbToOklab(.{ 1, 1, 1, 1 });

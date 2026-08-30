@@ -1,12 +1,12 @@
 //! Direct dispatcher coverage for multiple root pseudo-items.
 //!
-//! Each tree is assembled in post-order and sent through `dispatch.layoutTree`.
+//! Each tree is assembled in post-order and sent through `layout_api.layoutTree`.
 //! The assertions inspect relative border boxes and absolute geometry so root
 //! flow remains separate from the selected mixed layout engine.
 
 const std = @import("std");
 const Id = @import("../id.zig").Id;
-const dispatch = @import("dispatch.zig");
+const layout_api = @import("root.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
@@ -50,7 +50,7 @@ fn appendNode(
 }
 
 fn layout(tree: *WidgetTree, available: widget.Size) !void {
-    try dispatch.layoutTree(tree, .{
+    try layout_api.layoutTree(tree, .{
         .allocator = std.testing.allocator,
         .available = available,
         .measure = null,
@@ -74,17 +74,69 @@ test "forest roots preserve source order and margin cursor overlap" {
     const second_id: Id = @enumFromInt(2);
 
     var first_style = fixedStyle(.flex, 30, 20);
-    first_style.margin = .{ .top = 4, .bottom = -24, .left = 5 };
+    first_style.margin_inset = .{
+        .top = .{ .length = 4 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = -24 },
+        .left = .{ .length = 5 },
+    };
     try appendNode(&tree, first_id, .root, first_style, .{ .column = .{} });
 
     var second_style = fixedStyle(.flex, 40, 10);
-    second_style.margin.left = 7;
+    second_style.margin_inset.left = .{ .length = 7 };
     try appendNode(&tree, second_id, .root, second_style, .{ .column = .{} });
 
     try layout(&tree, .{ .width = 100, .height = 80 });
 
     try expectRect(&tree, first_id, .{ .x = 5, .y = 4, .w = 95, .h = 20 });
     try expectRect(&tree, second_id, .{ .x = 7, .y = 0, .w = 93, .h = 10 });
+}
+
+test "intrinsic forest stacks flow roots and keeps absolute roots out of flow" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: Id = @enumFromInt(1);
+    const absolute_id: Id = @enumFromInt(2);
+    const second_id: Id = @enumFromInt(3);
+
+    try appendNode(
+        &tree,
+        first_id,
+        .root,
+        fixedStyle(.flex, 30, 10),
+        .{ .column = .{} },
+    );
+
+    var absolute_style = fixedStyle(.flex, 40, 50);
+    absolute_style.position = .absolute;
+    try appendNode(
+        &tree,
+        absolute_id,
+        .root,
+        absolute_style,
+        .{ .column = .{} },
+    );
+
+    try appendNode(
+        &tree,
+        second_id,
+        .root,
+        fixedStyle(.flex, 20, 12),
+        .{ .column = .{} },
+    );
+
+    try layout_api.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 80 },
+        .measure = null,
+        .width_mode = .max_content,
+        .height_mode = .max_content,
+    });
+
+    try expectRect(&tree, first_id, .{ .x = 0, .y = 0, .w = 30, .h = 10 });
+    try expectRect(&tree, absolute_id, .{ .x = 0, .y = 0, .w = 40, .h = 50 });
+    try expectRect(&tree, second_id, .{ .x = 0, .y = 10, .w = 20, .h = 12 });
 }
 
 test "forest auto root stretches width and keeps natural height" {
@@ -112,7 +164,12 @@ test "forest auto root stretches width and keeps natural height" {
     );
 
     var auto_root_style = autoStyle(.flex);
-    auto_root_style.margin = .{ .top = 2, .right = 6, .bottom = 3, .left = 4 };
+    auto_root_style.margin_inset = .{
+        .top = .{ .length = 2 },
+        .right = .{ .length = 6 },
+        .bottom = .{ .length = 3 },
+        .left = .{ .length = 4 },
+    };
     try appendNode(
         &tree,
         auto_root_id,
@@ -130,7 +187,6 @@ test "forest auto root stretches width and keeps natural height" {
     );
     try tree.appendChild(block_id, leaf_id);
     try tree.appendChild(auto_root_id, block_id);
-    try std.testing.expect(dispatch.eligibleMixedForest(&tree));
 
     try layout(&tree, .{ .width = 100, .height = 80 });
 
@@ -166,13 +222,17 @@ test "forest auto root remeasures wrapped flex at margin-resolved width" {
 
     var flex_style = autoStyle(.flex);
     flex_style.direction = .row;
-    flex_style.wrap = .wrap;
     flex_style.flex_wrap = .wrap;
     flex_style.@"align" = .start;
     try appendNode(&tree, flex_id, root_id, flex_style, .{ .row = .{} });
 
     var root_style = autoStyle(.flow_root);
-    root_style.margin = .{ .right = 10, .left = 10 };
+    root_style.margin_inset = .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 10 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 10 },
+    };
     try appendNode(&tree, root_id, .root, root_style, .{ .column = .{} });
 
     try tree.appendChild(flex_id, first_leaf_id);
@@ -196,13 +256,13 @@ test "forest root flex basis and grow distribute positive free space" {
 
     var first_style = fixedStyle(.flex, 10, 0);
     first_style.size.height = .auto;
-    first_style.basis = 20;
+    first_style.flex_basis = .{ .length = 20 };
     first_style.grow = 1;
     try appendNode(&tree, first_id, .root, first_style, .{ .column = .{} });
 
     var second_style = fixedStyle(.flex, 10, 0);
     second_style.size.height = .auto;
-    second_style.basis = 10;
+    second_style.flex_basis = .{ .length = 10 };
     second_style.grow = 2;
     try appendNode(&tree, second_id, .root, second_style, .{ .column = .{} });
 
@@ -212,7 +272,7 @@ test "forest root flex basis and grow distribute positive free space" {
     try expectRect(&tree, second_id, .{ .x = 0, .y = 40, .w = 100, .h = 50 });
 }
 
-test "forest root shrink freezes at minimum main floor" {
+test "forest root shrink freezes at minimum height floor" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -221,14 +281,14 @@ test "forest root shrink freezes at minimum main floor" {
 
     var first_style = fixedStyle(.flex, 10, 0);
     first_style.size.height = .auto;
-    first_style.basis = 40;
+    first_style.flex_basis = .{ .length = 40 };
     first_style.shrink = 1;
-    first_style.min_main = 30;
+    first_style.min_size.height = .{ .length = 30 };
     try appendNode(&tree, first_id, .root, first_style, .{ .column = .{} });
 
     var second_style = fixedStyle(.flex, 10, 0);
     second_style.size.height = .auto;
-    second_style.basis = 30;
+    second_style.flex_basis = .{ .length = 30 };
     second_style.shrink = 1;
     try appendNode(&tree, second_id, .root, second_style, .{ .column = .{} });
 
@@ -249,7 +309,12 @@ test "forest absolute and hidden roots do not consume flow" {
 
     var absolute_left_style = fixedStyle(.flex, 20, 10);
     absolute_left_style.position = .absolute;
-    absolute_left_style.margin = .{ .top = 2, .left = 3 };
+    absolute_left_style.margin_inset = .{
+        .top = .{ .length = 2 },
+        .right = .{ .length = 0 },
+        .bottom = .{ .length = 0 },
+        .left = .{ .length = 3 },
+    };
     absolute_left_style.inset = .{
         .top = .{ .length = 9 },
         .right = .auto,
@@ -266,7 +331,12 @@ test "forest absolute and hidden roots do not consume flow" {
 
     var absolute_right_style = fixedStyle(.flex, 10, 8);
     absolute_right_style.position = .absolute;
-    absolute_right_style.margin = .{ .right = 2, .bottom = 1 };
+    absolute_right_style.margin_inset = .{
+        .top = .{ .length = 0 },
+        .right = .{ .length = 2 },
+        .bottom = .{ .length = 1 },
+        .left = .{ .length = 0 },
+    };
     absolute_right_style.inset = .{
         .top = .auto,
         .right = .{ .length = 4 },
@@ -526,7 +596,7 @@ test "forest absolute inset and margin overflow returns InvalidStyle" {
     const root_id: Id = @enumFromInt(1);
     var root_style = fixedStyle(.flex, 10, 10);
     root_style.position = .absolute;
-    root_style.margin.left = extreme;
+    root_style.margin_inset.left = .{ .length = extreme };
     root_style.inset.left = .{ .length = extreme };
     try appendNode(&tree, root_id, .root, root_style, .{ .column = .{} });
 
@@ -545,8 +615,8 @@ test "forest relative inset overflow returns InvalidStyle" {
 
     const root_id: Id = @enumFromInt(1);
     var root_style = fixedStyle(.flex, 10, 10);
-    root_style.margin.left = extreme;
-    root_style.margin.right = -extreme;
+    root_style.margin_inset.left = .{ .length = extreme };
+    root_style.margin_inset.right = .{ .length = -extreme };
     root_style.inset.left = .{ .length = extreme };
     try appendNode(&tree, root_id, .root, root_style, .{ .column = .{} });
 
@@ -563,7 +633,7 @@ test "forest max-clamped root remains shrinkable" {
     const root_id: Id = @enumFromInt(1);
     var root_style = fixedStyle(.flex, 10, 0);
     root_style.size.height = .auto;
-    root_style.basis = 200;
+    root_style.flex_basis = .{ .length = 200 };
     root_style.max_size.height = .{ .length = 150 };
     root_style.shrink = 1;
     try appendNode(&tree, root_id, .root, root_style, .{ .column = .{} });
@@ -592,7 +662,7 @@ test "forest vertical percentage insets use surface height" {
     try expectRect(&tree, root_id, .{ .x = 10, .y = 20, .w = 100, .h = 10 });
 }
 
-test "forest absolute root ignores flex basis and minimum main" {
+test "forest absolute root ignores flex basis outside flex formatting context" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -609,8 +679,7 @@ test "forest absolute root ignores flex basis and minimum main" {
     root_style.position = .absolute;
     root_style.direction = .row;
     root_style.@"align" = .start;
-    root_style.basis = 50;
-    root_style.min_main = 40;
+    root_style.flex_basis = .{ .length = 50 };
     root_style.inset = .{
         .top = .{ .length = 0 },
         .right = .auto,
@@ -687,6 +756,33 @@ test "forest dispatch handles more than sixty-four roots" {
             .h = 1,
         });
     }
+}
+
+test "forest dispatcher propagates validation allocation failure" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const root_id: Id = @enumFromInt(1);
+    try appendNode(
+        &tree,
+        root_id,
+        .root,
+        fixedStyle(.flex, 20, 20),
+        .{ .column = .{} },
+    );
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        layout_api.layoutTree(&tree, .{
+            .allocator = failing_allocator.allocator(),
+            .available = .{ .width = 20, .height = 20 },
+            .measure = null,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), failing_allocator.alloc_index);
 }
 
 test "forest dispatcher rejects an orphan parent" {

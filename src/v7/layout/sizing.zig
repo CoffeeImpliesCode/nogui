@@ -4,6 +4,7 @@ const style = @import("../style.zig");
 pub const Error = error{
     InvalidStyle,
     IndefinitePercentage,
+    OutOfMemory,
 };
 pub const SizingError = Error;
 

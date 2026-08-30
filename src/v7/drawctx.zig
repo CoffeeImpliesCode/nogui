@@ -3,11 +3,11 @@
 //! DrawCtx owns the cursor into a `WidgetTree` and the `component_id` that
 //! binds event handlers to their owning component. State lives in
 //! components; the UI is rebuilt every frame: a fresh tree + DrawCtx, a
-//! draw pass, then flex.layout().
+//! draw pass, then `layout.layoutTree` dispatches canonical layout.
 //!
 //! Node order in the flat array is **post-order**: a container node is
-//! appended after all of its descendants. flex.layout() is a single
-//! bottom-up pass over the array and sizes children before their parent, so
+//! appended after all of its descendants. The canonical layout dispatcher
+//! validates this order and sizes descendants before their containers, so
 //! this order is load-bearing. DrawCtx keeps it by appending children as
 //! they are created and, on `pop()`, moving the just-closed container to the
 //! end of the array — everything after it is one of its descendants, by the
@@ -40,7 +40,7 @@ const FlexWrap = style.FlexWrap;
 const AlignContent = style.AlignContent;
 const FlexDirection = style.FlexDirection;
 const AlignSelf = style.AlignSelf;
-const layout = @import("flex.zig").layout;
+const layout = @import("layout/root.zig");
 const hitButton = @import("input.zig").hitButton;
 const StateKey = @import("state.zig").Key;
 const stateHash = @import("state.zig").hashName;
@@ -101,12 +101,10 @@ fn asInsets(x: anytype) style.Insets {
 
 fn asMarginInsets(x: anytype) style.Insets {
     const T = @TypeOf(x);
-    if (@typeInfo(T) != .@"struct") return .{
-        .top = .{ .length = 0 },
-        .right = .{ .length = 0 },
-        .bottom = .{ .length = 0 },
-        .left = .{ .length = 0 },
-    };
+    if (@typeInfo(T) != .@"struct") {
+        const value = style.lengthPercentageAutoFrom(x);
+        return .{ .top = value, .right = value, .bottom = value, .left = value };
+    }
     return .{
         .top = if (@hasField(T, "top")) style.lengthPercentageAutoFrom(x.top) else .{ .length = 0 },
         .right = if (@hasField(T, "right")) style.lengthPercentageAutoFrom(x.right) else .{ .length = 0 },
@@ -114,15 +112,12 @@ fn asMarginInsets(x: anytype) style.Insets {
         .left = if (@hasField(T, "left")) style.lengthPercentageAutoFrom(x.left) else .{ .length = 0 },
     };
 }
-
 fn asLengthPercentageRect(x: anytype) style.LengthPercentageRect {
     const T = @TypeOf(x);
-    if (@typeInfo(T) != .@"struct") return .{
-        .top = .{ .length = 0 },
-        .right = .{ .length = 0 },
-        .bottom = .{ .length = 0 },
-        .left = .{ .length = 0 },
-    };
+    if (@typeInfo(T) != .@"struct") {
+        const value = style.lengthPercentageFrom(x);
+        return .{ .top = value, .right = value, .bottom = value, .left = value };
+    }
     return .{
         .top = if (@hasField(T, "top")) style.lengthPercentageFrom(x.top) else .{ .length = 0 },
         .right = if (@hasField(T, "right")) style.lengthPercentageFrom(x.right) else .{ .length = 0 },
@@ -154,61 +149,16 @@ fn asOverflowAxes(x: anytype) style.OverflowAxes {
     };
 }
 
-fn asLegacySide(value: anytype) f32 {
-    const resolved = style.lengthPercentageAutoFrom(value);
-    return switch (resolved) {
-        .auto => 0,
-        .length => |length| length,
-        .percent => 0,
-    };
-}
-fn asLegacyGap(value: style.LengthPercentage) f32 {
-    return switch (value) {
-        .length => |length| length,
-        .percent => 0,
-    };
-}
 fn asFixedLength(value: anytype) ?f32 {
     return switch (style.lengthPercentageAutoFrom(value)) {
         .auto, .percent => null,
         .length => |length| length,
     };
 }
-fn asOptionalF32(value: anytype) ?f32 {
-    const T = @TypeOf(value);
-    if (T == style.Dimension) {
-        return switch (value) {
-            .length => |length| length,
-            .auto, .percent, .min_content, .max_content, .fit_content => null,
-        };
-    }
-    if (T == style.LengthPercentage) {
-        return switch (value) {
-            .length => |length| length,
-            .percent => null,
-        };
-    }
-    if (T == style.LengthPercentageAuto) {
-        return switch (value) {
-            .length => |length| length,
-            .auto, .percent => null,
-        };
-    }
-    if (T == std.meta.Tag(style.Dimension)) {
-        return asOptionalF32(style.dimensionFrom(value));
-    }
-    if (T == style.DimensionOverride) return asOptionalF32(style.dimensionFrom(value));
-    if (T == style.LengthPercentageAutoOverride) {
-        return asOptionalF32(style.lengthPercentageAutoFrom(value));
-    }
-    return switch (@typeInfo(T)) {
-        .optional => if (value) |inner| asOptionalF32(inner) else null,
-        .int, .comptime_int => @floatFromInt(value),
-        .float, .comptime_float => @floatCast(value),
-        .enum_literal => asOptionalF32(style.dimensionFrom(value)),
-        .@"struct" => asOptionalF32(style.dimensionFrom(value)),
-        else => @compileError("expected a numeric or fixed dimension value"),
-    };
+
+fn asDimensionOverride(value: anytype) style.DimensionOverride {
+    if (@TypeOf(value) == style.DimensionOverride) return value;
+    return .{ .value = style.dimensionFrom(value) };
 }
 
 /// Resolve typed layout and paint values from an anonymous widget options
@@ -224,10 +174,6 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     if (@hasField(T, "float")) local.float = @as(style.Float, opts.float);
     if (@hasField(T, "clear")) local.clear = @as(style.Clear, opts.clear);
     if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
-    if (@hasField(T, "flex_direction")) {
-        local.flex_direction = @as(style.FlexDirection, opts.flex_direction);
-    }
-    if (@hasField(T, "wrap")) local.wrap = @as(FlexWrap, opts.wrap);
     if (@hasField(T, "flex_wrap")) local.flex_wrap = @as(FlexWrap, opts.flex_wrap);
     if (@hasField(T, "align_content")) {
         local.align_content = @as(AlignContent, opts.align_content);
@@ -248,12 +194,6 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     if (@hasField(T, "grid_auto_columns")) local.grid_auto_columns = opts.grid_auto_columns;
     if (@hasField(T, "grid_auto_rows")) local.grid_auto_rows = opts.grid_auto_rows;
     if (@hasField(T, "grid_auto_flow")) local.grid_auto_flow = @as(style.GridAutoFlow, opts.grid_auto_flow);
-    if (@hasField(T, "grid_column_gap")) {
-        local.grid_column_gap = style.lengthPercentageFrom(opts.grid_column_gap);
-    }
-    if (@hasField(T, "grid_row_gap")) {
-        local.grid_row_gap = style.lengthPercentageFrom(opts.grid_row_gap);
-    }
     if (@hasField(T, "grid_justify_content")) {
         local.grid_justify_content = @as(Justify, opts.grid_justify_content);
     }
@@ -276,17 +216,9 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
             .end = asGridPlacement(opts.grid_row.end),
         };
     }
-    if (@hasField(T, "grid_column_start")) local.grid_column_start = opts.grid_column_start;
-    if (@hasField(T, "grid_column_end")) local.grid_column_end = opts.grid_column_end;
-    if (@hasField(T, "grid_row_start")) local.grid_row_start = opts.grid_row_start;
-    if (@hasField(T, "grid_row_end")) local.grid_row_end = opts.grid_row_end;
     if (@hasField(T, "grow")) local.grow = opts.grow;
     if (@hasField(T, "shrink")) local.shrink = opts.shrink;
-    if (@hasField(T, "basis")) local.basis = opts.basis;
-    if (@hasField(T, "min_main")) {
-        local.min_main = .{ .value = asOptionalF32(opts.min_main) };
-    }
-    if (@hasField(T, "flex_basis")) local.flex_basis = .{ .value = style.dimensionFrom(opts.flex_basis) };
+    if (@hasField(T, "flex_basis")) local.flex_basis = asDimensionOverride(opts.flex_basis);
     if (@hasField(T, "size")) local.size = .{ .value = asDimensionSize(opts.size) };
     if (@hasField(T, "min_size")) {
         local.min_size = .{ .value = asLengthPercentageAutoSize(opts.min_size) };
@@ -294,46 +226,19 @@ fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection
     if (@hasField(T, "max_size")) {
         local.max_size = .{ .value = asLengthPercentageAutoSize(opts.max_size) };
     }
-    if (@hasField(T, "width")) {
-        local.width = .{ .value = style.dimensionFrom(opts.width) };
-    }
-    if (@hasField(T, "height")) {
-        local.height = .{ .value = style.dimensionFrom(opts.height) };
-    }
-    if (@hasField(T, "min_width")) {
-        local.min_width = .{ .value = style.dimensionFrom(opts.min_width) };
-    }
-    if (@hasField(T, "min_height")) {
-        local.min_height = .{ .value = style.dimensionFrom(opts.min_height) };
-    }
-    if (@hasField(T, "max_width")) {
-        local.max_width = .{ .value = style.dimensionFrom(opts.max_width) };
-    }
-    if (@hasField(T, "max_height")) {
-        local.max_height = .{ .value = style.dimensionFrom(opts.max_height) };
-    }
-    if (@hasField(T, "width_override")) local.width_override = opts.width_override;
-    if (@hasField(T, "height_override")) local.height_override = opts.height_override;
-    if (@hasField(T, "min_width_override")) local.min_width_override = opts.min_width_override;
-    if (@hasField(T, "min_height_override")) local.min_height_override = opts.min_height_override;
-    if (@hasField(T, "max_width_override")) local.max_width_override = opts.max_width_override;
-    if (@hasField(T, "max_height_override")) local.max_height_override = opts.max_height_override;
+    if (@hasField(T, "width")) local.width = asDimensionOverride(opts.width);
+    if (@hasField(T, "height")) local.height = asDimensionOverride(opts.height);
+    if (@hasField(T, "min_width")) local.min_width = asDimensionOverride(opts.min_width);
+    if (@hasField(T, "min_height")) local.min_height = asDimensionOverride(opts.min_height);
+    if (@hasField(T, "max_width")) local.max_width = asDimensionOverride(opts.max_width);
+    if (@hasField(T, "max_height")) local.max_height = asDimensionOverride(opts.max_height);
     if (@hasField(T, "inset")) local.inset = .{ .value = asInsets(opts.inset) };
     if (@hasField(T, "aspect_ratio")) local.aspect_ratio = .{ .value = opts.aspect_ratio };
     if (@hasField(T, "overflow")) local.overflow = .{ .value = asOverflowAxes(opts.overflow) };
     if (@hasField(T, "scrollbar_width")) local.scrollbar_width = opts.scrollbar_width;
-    if (@hasField(T, "margin")) {
-        local.margin = asSides(opts.margin);
-        local.margin_inset = asMarginInsets(opts.margin);
-    }
-    if (@hasField(T, "border")) {
-        local.border = asSides(opts.border);
-        local.border_inset = asLengthPercentageRect(opts.border);
-    }
-    if (@hasField(T, "padding")) {
-        local.padding = asSides(opts.padding);
-        local.padding_inset = asLengthPercentageRect(opts.padding);
-    }
+    if (@hasField(T, "margin")) local.margin_inset = asMarginInsets(opts.margin);
+    if (@hasField(T, "border")) local.border_inset = asLengthPercentageRect(opts.border);
+    if (@hasField(T, "padding")) local.padding_inset = asLengthPercentageRect(opts.padding);
     if (@hasField(T, "margin_inset")) local.margin_inset = asInsets(opts.margin_inset);
     if (@hasField(T, "border_inset")) local.border_inset = asLengthPercentageRect(opts.border_inset);
     if (@hasField(T, "padding_inset")) local.padding_inset = asLengthPercentageRect(opts.padding_inset);
@@ -345,7 +250,7 @@ fn paintStyleFromOpts(opts: anytype, defaults: ?PaintStyle) PaintStyle {
     var local: PaintStyleOverride = .{};
     const T = @TypeOf(opts);
     if (@hasField(T, "border_color")) local.border_color = asColor(opts.border_color);
-    if (@hasField(T, "radius")) local.radius = asSides(opts.radius);
+    if (@hasField(T, "radius")) local.radius = asPaintSides(opts.radius);
     if (@hasField(T, "shadow")) local.shadow = opts.shadow;
     if (@hasField(T, "transparent")) local.transparent = opts.transparent;
     if (@hasField(T, "clip")) local.clip = opts.clip;
@@ -356,16 +261,21 @@ fn paintStyleFromOpts(opts: anytype, defaults: ?PaintStyle) PaintStyle {
     return PaintStyle.resolve(defaults orelse .{}, local);
 }
 
-/// Set the generated button label's typed flex bounds.
+/// Set the generated button label's canonical flex bounds.
 fn setButtonLabelSizing(self: *DrawCtx, id: Id, opts: anytype) void {
     const node = self.tree.node(id).?;
     const T = @TypeOf(opts);
     if (@hasField(T, "shrink")) node.style.shrink = opts.shrink;
-    if (@hasField(T, "min_main")) node.style.min_main = asOptionalF32(opts.min_main);
+    if (@hasField(T, "min_size")) {
+        node.style.min_size.width = asDimensionSize(opts.min_size).width;
+    }
+    if (@hasField(T, "min_width")) {
+        node.style.min_size.width = style.dimensionFrom(opts.min_width);
+    }
 }
 
 /// Seed a direct row child from its parent's shared column track. Explicit
-/// child Style values take precedence; tracks fill only unspecified defaults.
+/// child Style values take precedence; tracks fill only automatic dimensions.
 fn seedSharedColumnStyle(self: *DrawCtx, id: Id) void {
     const child = self.tree.node(id).?;
     if (child.parent == .root) return;
@@ -378,15 +288,11 @@ fn seedSharedColumnStyle(self: *DrawCtx, id: Id) void {
     const track = columns.tracks[child_index];
     if (child.style.grow == 0) child.style.grow = track.grow;
     if (child.style.shrink == 1) child.style.shrink = track.shrink;
-    if (child.style.basis == 0 and std.meta.activeTag(child.style.flex_basis) == .auto) {
-        child.style.basis = track.basis;
-        if (track.basis > 0) child.style.flex_basis = .{ .length = track.basis };
+    if (std.meta.activeTag(child.style.flex_basis) == .auto) {
+        child.style.flex_basis = track.flex_basis;
     }
-    if (child.style.min_main == null and
-        std.meta.activeTag(child.style.min_size.width) == .auto)
-    {
-        child.style.min_main = track.min_main;
-        if (track.min_main) |value| child.style.min_size.width = .{ .length = value };
+    if (std.meta.activeTag(child.style.min_size.width) == .auto) {
+        child.style.min_size.width = track.min_width;
     }
 }
 
@@ -415,14 +321,20 @@ fn setTextOptions(self: *DrawCtx, id: Id, opts: anytype) void {
     }
 }
 
-fn asSides(x: anytype) Sides {
+fn asPaintSide(value: anytype) f32 {
+    return switch (style.lengthPercentageAutoFrom(value)) {
+        .auto, .percent => 0,
+        .length => |length| length,
+    };
+}
+
+fn asPaintSides(x: anytype) Sides {
     const T = @TypeOf(x);
-    // Partial Sides literals are allowed: absent sides stay 0.
     return .{
-        .top = if (@hasField(T, "top")) asLegacySide(x.top) else 0,
-        .right = if (@hasField(T, "right")) asLegacySide(x.right) else 0,
-        .bottom = if (@hasField(T, "bottom")) asLegacySide(x.bottom) else 0,
-        .left = if (@hasField(T, "left")) asLegacySide(x.left) else 0,
+        .top = if (@hasField(T, "top")) asPaintSide(x.top) else 0,
+        .right = if (@hasField(T, "right")) asPaintSide(x.right) else 0,
+        .bottom = if (@hasField(T, "bottom")) asPaintSide(x.bottom) else 0,
+        .left = if (@hasField(T, "left")) asPaintSide(x.left) else 0,
     };
 }
 
@@ -438,7 +350,7 @@ pub const DrawCtx = struct {
     /// double-buffered arenas keep the previous frame's text readable.
     arena: std.mem.Allocator,
     /// The host surface for this frame. Null keeps direct-draw contexts
-    /// independent of an App and lets scenes choose their legacy layout.
+    /// independent of an App and lets callers select the layout surface.
     surface: ?widget.Size = null,
     /// The App's component registry + its gpa: component() registers nested
     /// components here so their buttons dispatch (dispatchClick looks the
@@ -463,7 +375,7 @@ pub const DrawCtx = struct {
     identity_map: ?*IdentityRegistry = null,
     /// Attached GPU endpoint used to mount newly discovered components.
     gpu_endpoint: ?*GpuEndpoint = null,
-    /// Frame-local widget owner retained for event dispatch compatibility.
+    /// Frame-local widget owner used for event dispatch.
     component_id: Id = .root,
     /// Nesting depth of pushClip()/popClip() calls. The clip rects
     /// themselves live in the tree's per-frame list (WidgetTree.
@@ -526,12 +438,12 @@ pub const DrawCtx = struct {
 
     /// Container: create + descend. The cursor becomes the new container.
     /// `gap` comes from `opts.gap` when present, else 0; `justify` and
-    /// `align` set the Style distribution/alignment (start / stretch). The
-    /// typed Style's padding/border define where flex places children.
+    /// typed Style's padding/border define where the canonical dispatcher
+    /// places children.
     pub fn column(self: *DrawCtx, opts: anytype) !Id {
         const resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
         const id = try self.create(
-            .{ .column = .{ .gap = asLegacyGap(resolved_style.gap) } },
+            .{ .column = .{} },
             resolved_style,
             paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
@@ -545,7 +457,7 @@ pub const DrawCtx = struct {
     pub fn row(self: *DrawCtx, opts: anytype) !Id {
         const resolved_style = styleFromOpts(opts, self.component_defaults.style, .row);
         const id = try self.create(
-            .{ .row = .{ .gap = asLegacyGap(resolved_style.gap) } },
+            .{ .row = .{} },
             resolved_style,
             paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
@@ -577,7 +489,7 @@ pub const DrawCtx = struct {
         if (!@hasField(T, "grid_align_items") and @hasField(T, "align"))
             resolved_style.grid_align_items = resolved_style.@"align";
         const id = try self.create(
-            .{ .column = .{ .gap = asLegacyGap(resolved_style.gap) } },
+            .{ .column = .{} },
             resolved_style,
             paintStyleFromOpts(opts, self.component_defaults.paint),
             optsFontSize(opts),
@@ -626,8 +538,8 @@ pub const DrawCtx = struct {
     /// callback when `opts.on_click` is present. Label text is duplicated
     /// into the frame arena (see label()).
     ///
-    /// The label is a CHILD label node, centered by the button's flex style
-    /// — the text pipeline (measure + emission + color) is shared with
+    /// The label is a CHILD label node, centered by the button's typed layout
+    /// style — the text pipeline (measure + emission + color) is shared with
     /// plain labels, one path instead of a second kind arm in the
     /// renderer. The kind's `label` field still carries the text (the
     /// click-injection + hit-testing scan it).
@@ -671,7 +583,7 @@ pub const DrawCtx = struct {
         setTextOptions(self, id, opts);
 
         // Buttons center generated labels unless the caller overrides either
-        // flex axis independently.
+        // layout axis independently.
         const node = self.tree.node(id).?;
         if (self.component_defaults.style == null) {
             node.style.justify = .center;
@@ -699,7 +611,7 @@ pub const DrawCtx = struct {
                             if (max_width > 0) {
                                 // A bounded button label may shrink to its parent's
                                 // final content box instead of its natural width.
-                                self.tree.node(label_id).?.style.min_main = 0;
+                                self.tree.node(label_id).?.style.min_size.width = .{ .length = 0 };
                             }
                         }
                     }
@@ -751,16 +663,15 @@ pub const DrawCtx = struct {
         return id;
     }
 
-    /// Push a clip rect onto the frame's clip-rect list, returning its
-    /// clip id (or 0xFFFFFFFF when the list is full — the clip is then
-    /// skipped). The id stamps onto the clip-marked container's draw
-    /// commands: the `.clip` PaintStyle option wires this automatically; the
-    /// declarative path the demo uses; pushClip is the programmatic API
-    /// for widgets that know their rect at draw time (scroll containers).
-    /// popClip() balances the push. The list is append-only — ids stay
-    /// valid for the frame.
-    pub fn pushClip(self: *DrawCtx, x: f32, y: f32, w: f32, h: f32) u32 {
-        const id = self.tree.pushClipRect(.{ .x = x, .y = y, .w = w, .h = h }) orelse return 0xFFFFFFFF;
+    /// Push a clip rect onto the frame's clip-rect list and return its
+    /// stable id. A full GPU clip buffer is an explicit error; rendering
+    /// without the requested clip would expose content outside its bounds.
+    /// The `.clip` PaintStyle option wires the declarative path
+    /// automatically. This programmatic API serves widgets that know their
+    /// rect at draw time, such as scroll containers. popClip() balances the
+    /// push. The list is append-only for the frame.
+    pub fn pushClip(self: *DrawCtx, x: f32, y: f32, w: f32, h: f32) !u32 {
+        const id = try self.tree.pushClipRect(.{ .x = x, .y = y, .w = w, .h = h });
         self.clip_depth += 1;
         return id;
     }
@@ -1268,7 +1179,11 @@ test "DrawCtx: button label honors justify and align overrides" {
     try std.testing.expectEqual(Align.end, button_node.style.@"align");
     try std.testing.expectEqualStrings("start", tree.node(label_id).?.kind.label.text);
 
-    layout(&tree, .{ .width = 120, .height = 40 });
+    try layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = .{ .width = 120, .height = 40 },
+        .measure = null,
+    });
     try std.testing.expectEqual(@as(f32, 0), tree.node(label_id).?.rect.x);
 }
 test "DrawCtx: semantic and visual labels are copied, empty override stays explicit" {
@@ -1338,12 +1253,16 @@ test "DrawCtx: icon-only button stays interactive without a label child" {
         .accessible_label = "Play",
         .icon = @as(widget.IconId, .play),
         .on_click = Counter.click,
-        .basis = 24,
-        .min_main = 24,
+        .flex_basis = 24,
+        .min_width = 24,
         .shrink = 0,
     });
 
-    layout(&tree, .{ .width = 80, .height = 40 });
+    try layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = .{ .width = 80, .height = 40 },
+        .measure = null,
+    });
     const button_node = tree.node(button).?;
     const button_kind = button_node.kind.button;
     try std.testing.expectEqual(@as(usize, 0), button_node.children.items.len);
@@ -1358,7 +1277,7 @@ test "DrawCtx: icon-only button stays interactive without a label child" {
     try std.testing.expectEqual(button, hit.?);
 }
 
-test "DrawCtx: container gap comes from opts, defaults to 0" {
+test "DrawCtx: container gap is stored in Style, defaults to zero" {
     // DrawCtx text is arena-owned (duplicated label strings), so tests use
     // a real arena — the testing allocator would leak every duplicate.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1376,10 +1295,22 @@ test "DrawCtx: container gap comes from opts, defaults to 0" {
     const plain_row = try ctx.row(.{});
     ctx.pop();
 
-    try std.testing.expectEqual(@as(f32, 4), tree.node(gapped_col).?.kind.column.gap);
-    try std.testing.expectEqual(@as(f32, 0), tree.node(plain_col).?.kind.column.gap);
-    try std.testing.expectEqual(@as(f32, 7), tree.node(gapped_row).?.kind.row.gap);
-    try std.testing.expectEqual(@as(f32, 0), tree.node(plain_row).?.kind.row.gap);
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 4 },
+        tree.node(gapped_col).?.style.gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 0 },
+        tree.node(plain_col).?.style.gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 7 },
+        tree.node(gapped_row).?.style.gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 0 },
+        tree.node(plain_row).?.style.gap,
+    );
 }
 
 test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
@@ -1412,7 +1343,7 @@ test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
     try std.testing.expectEqual(@as(u32, 1), counter.n);
 }
 
-test "DrawCtx: shared columns inherit direct-child flex sizing" {
+test "DrawCtx: shared columns seed canonical child flex sizing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
@@ -1420,8 +1351,18 @@ test "DrawCtx: shared columns inherit direct-child flex sizing" {
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const tracks = [_]ColumnTrack{
-        .{ .grow = 2, .shrink = 0.5, .basis = 40, .min_main = 12 },
-        .{ .grow = 3, .shrink = 0.25, .basis = 60, .min_main = 20 },
+        .{
+            .grow = 2,
+            .shrink = 0.5,
+            .flex_basis = .{ .length = 40 },
+            .min_width = .{ .length = 12 },
+        },
+        .{
+            .grow = 3,
+            .shrink = 0.25,
+            .flex_basis = .{ .length = 60 },
+            .min_width = .{ .length = 20 },
+        },
     };
     const columns: SharedColumns = .{ .tracks = &tracks };
     const row = try ctx.row(.{ .columns = &columns });
@@ -1430,8 +1371,8 @@ test "DrawCtx: shared columns inherit direct-child flex sizing" {
         .text = "second",
         .grow = 9,
         .shrink = 0.75,
-        .basis = 90,
-        .min_main = 30,
+        .flex_basis = 90,
+        .min_width = 30,
     });
     const button = try ctx.button(.{ .label = "button" });
     ctx.pop();
@@ -1441,17 +1382,29 @@ test "DrawCtx: shared columns inherit direct-child flex sizing" {
     try std.testing.expectEqual(row, tree.node(button).?.parent);
     try std.testing.expectEqual(@as(f32, 2), tree.node(first).?.style.grow);
     try std.testing.expectEqual(@as(f32, 0.5), tree.node(first).?.style.shrink);
-    try std.testing.expectEqual(@as(f32, 40), tree.node(first).?.style.basis);
-    try std.testing.expectEqual(@as(?f32, 12), tree.node(first).?.style.min_main);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 40 },
+        tree.node(first).?.style.flex_basis,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 12 },
+        tree.node(first).?.style.min_size.width,
+    );
     try std.testing.expectEqual(@as(f32, 9), tree.node(second).?.style.grow);
     try std.testing.expectEqual(@as(f32, 0.75), tree.node(second).?.style.shrink);
-    try std.testing.expectEqual(@as(f32, 90), tree.node(second).?.style.basis);
-    try std.testing.expectEqual(@as(?f32, 30), tree.node(second).?.style.min_main);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 90 },
+        tree.node(second).?.style.flex_basis,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 30 },
+        tree.node(second).?.style.min_size.width,
+    );
     // The button is the third child, so it is outside the two-track layout.
     try std.testing.expectEqual(@as(f32, 0), tree.node(button).?.style.grow);
     try std.testing.expectEqual(@as(f32, 1), tree.node(button).?.style.shrink);
-    try std.testing.expectEqual(@as(f32, 0), tree.node(button).?.style.basis);
-    try std.testing.expectEqual(@as(?f32, null), tree.node(button).?.style.min_main);
+    try std.testing.expectEqual(style.Dimension.auto, tree.node(button).?.style.flex_basis);
+    try std.testing.expectEqual(style.Dimension.auto, tree.node(button).?.style.min_size.width);
 }
 
 test "DrawCtx: button label does not consume shared column track" {
@@ -1462,8 +1415,8 @@ test "DrawCtx: button label does not consume shared column track" {
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
 
     const tracks = [_]ColumnTrack{
-        .{ .grow = 1, .basis = 25 },
-        .{ .grow = 4, .basis = 75 },
+        .{ .grow = 1, .flex_basis = .{ .length = 25 } },
+        .{ .grow = 4, .flex_basis = .{ .length = 75 } },
     };
     const columns: SharedColumns = .{ .tracks = &tracks };
     const row = try ctx.row(.{ .columns = &columns });
@@ -1474,11 +1427,17 @@ test "DrawCtx: button label does not consume shared column track" {
     const button_node = tree.node(button).?;
     const button_label = tree.node(button_node.children.items[0]).?;
     try std.testing.expectEqual(@as(f32, 1), button_node.style.grow);
-    try std.testing.expectEqual(@as(f32, 25), button_node.style.basis);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 25 },
+        button_node.style.flex_basis,
+    );
     try std.testing.expectEqual(@as(f32, 0), button_label.style.grow);
-    try std.testing.expectEqual(@as(f32, 0), button_label.style.basis);
+    try std.testing.expectEqual(style.Dimension.auto, button_label.style.flex_basis);
     try std.testing.expectEqual(@as(f32, 4), tree.node(sibling).?.style.grow);
-    try std.testing.expectEqual(@as(f32, 75), tree.node(sibling).?.style.basis);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 75 },
+        tree.node(sibling).?.style.flex_basis,
+    );
     try std.testing.expectEqual(row, button_node.parent);
 }
 
@@ -1530,16 +1489,31 @@ test "DrawCtx: typed Style and PaintStyle fields flow from opts" {
     });
 
     try std.testing.expectEqual(
-        Sides{ .top = 1, .right = 2, .bottom = 3, .left = 4 },
-        tree.node(id).?.style.margin,
+        style.Insets{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 2 },
+            .bottom = .{ .length = 3 },
+            .left = .{ .length = 4 },
+        },
+        tree.node(id).?.style.margin_inset,
     );
     try std.testing.expectEqual(
-        Sides{ .top = 5, .right = 6, .bottom = 7, .left = 8 },
-        tree.node(id).?.style.padding,
+        style.LengthPercentageRect{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 6 },
+            .bottom = .{ .length = 7 },
+            .left = .{ .length = 8 },
+        },
+        tree.node(id).?.style.padding_inset,
     );
     try std.testing.expectEqual(
-        Sides{ .top = 9, .right = 10, .bottom = 11, .left = 12 },
-        tree.node(id).?.style.border,
+        style.LengthPercentageRect{
+            .top = .{ .length = 9 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 11 },
+            .left = .{ .length = 12 },
+        },
+        tree.node(id).?.style.border_inset,
     );
     try std.testing.expectEqual(BoxSizing.border_box, tree.node(id).?.style.box_sizing);
     try std.testing.expectEqual(
@@ -1555,8 +1529,24 @@ test "DrawCtx: typed Style and PaintStyle fields flow from opts" {
     ctx.pop();
     const row = try ctx.row(.{ .border = .{ .top = 2 } });
     ctx.pop();
-    try std.testing.expectEqual(Sides{ .top = 8, .left = 8 }, tree.node(col).?.style.padding);
-    try std.testing.expectEqual(Sides{ .top = 2 }, tree.node(row).?.style.border);
+    try std.testing.expectEqual(
+        style.LengthPercentageRect{
+            .top = .{ .length = 8 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 8 },
+        },
+        tree.node(col).?.style.padding_inset,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentageRect{
+            .top = .{ .length = 2 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+        tree.node(row).?.style.border_inset,
+    );
 }
 
 test "DrawCtx: absent typed fields retain defaults" {
@@ -1565,6 +1555,7 @@ test "DrawCtx: absent typed fields retain defaults" {
     var tree = WidgetTree.init(arena.allocator());
     defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    const default_style: Style = .{};
 
     const plain_label = try ctx.label(.{ .text = "plain" });
     const plain_button = try ctx.button(.{ .label = "B" });
@@ -1576,14 +1567,14 @@ test "DrawCtx: absent typed fields retain defaults" {
 
     for ([_]Id{ plain_label, plain_button, plain_slider, plain_spacer }) |id| {
         const node = tree.node(id).?;
-        try std.testing.expectEqual(Sides{}, node.style.margin);
-        try std.testing.expectEqual(Sides{}, node.style.border);
-        try std.testing.expectEqual(Sides{}, node.style.padding);
+        try std.testing.expectEqual(default_style.margin_inset, node.style.margin_inset);
+        try std.testing.expectEqual(default_style.border_inset, node.style.border_inset);
+        try std.testing.expectEqual(default_style.padding_inset, node.style.padding_inset);
         try std.testing.expectEqual(PaintStyle{}, node.paint);
     }
-    try std.testing.expectEqual(Sides{}, tree.node(plain_col).?.style.margin);
-    try std.testing.expectEqual(Sides{}, tree.node(plain_col).?.style.border);
-    try std.testing.expectEqual(Sides{}, tree.node(plain_col).?.style.padding);
+    try std.testing.expectEqual(default_style.margin_inset, tree.node(plain_col).?.style.margin_inset);
+    try std.testing.expectEqual(default_style.border_inset, tree.node(plain_col).?.style.border_inset);
+    try std.testing.expectEqual(default_style.padding_inset, tree.node(plain_col).?.style.padding_inset);
     try std.testing.expectEqual(PaintStyle{}, tree.node(plain_col).?.paint);
 }
 
@@ -1616,8 +1607,8 @@ test "DrawCtx: typed PaintStyle clip option; pushClip appends to the tree clip l
     ctx.pop();
     try std.testing.expect(tree.node(card).?.paint.clip);
 
-    const id0 = ctx.pushClip(10, 20, 30, 40);
-    const id1 = ctx.pushClip(50, 60, 70, 80);
+    const id0 = try ctx.pushClip(10, 20, 30, 40);
+    const id1 = try ctx.pushClip(50, 60, 70, 80);
     ctx.popClip();
     ctx.popClip();
     try std.testing.expectEqual(@as(u32, 0), id0);
@@ -1626,40 +1617,54 @@ test "DrawCtx: typed PaintStyle clip option; pushClip appends to the tree clip l
     try std.testing.expectEqual(@as(f32, 30), tree.clip_rects[0].w);
     try std.testing.expectEqual(@as(f32, 80), tree.clip_rects[1].h);
 }
-test "DrawCtx: legacy basis and min_main stay in the parent-axis flex model" {
+test "DrawCtx: canonical flex basis and parent-axis minimums" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
-    const id = try ctx.label(.{ .text = "typed", .basis = 30, .min_main = 12 });
+    const id = try ctx.label(.{ .text = "typed", .flex_basis = 30, .min_height = 12 });
     const node = tree.node(id).?;
-    switch (node.style.flex_basis) {
-        .length => |value| try std.testing.expectEqual(@as(f32, 30), value),
-        else => try std.testing.expect(false),
-    }
-    try std.testing.expectEqual(@as(f32, 30), node.style.basis);
-    try std.testing.expectEqual(@as(?f32, 12), node.style.min_main);
-    try std.testing.expect(std.meta.eql(@as(style.Dimension, .auto), node.style.min_size.height));
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 30 },
+        node.style.flex_basis,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 12 },
+        node.style.min_size.height,
+    );
+    try std.testing.expectEqual(style.Dimension.auto, node.style.min_size.width);
 }
 
-test "DrawCtx: min_main conversion accepts optionals and fixed dimensions" {
+test "DrawCtx: canonical dimensions convert optional and fixed values" {
     const optional_number: ?u16 = 9;
     const optional_fixed: ?style.Dimension = style.Dimension.fixed(18);
 
-    try std.testing.expectEqual(@as(?f32, 9), asOptionalF32(optional_number));
-    try std.testing.expectEqual(@as(?f32, 18), asOptionalF32(optional_fixed));
+    const resolved = styleFromOpts(.{
+        .flex_basis = optional_number,
+        .min_width = optional_fixed,
+        .min_height = style.Dimension.percentage(0.5),
+    }, null, .row);
     try std.testing.expectEqual(
-        @as(?f32, null),
-        asOptionalF32(style.Dimension.percentage(0.5)),
+        style.Dimension{ .length = 9 },
+        resolved.flex_basis,
     );
     try std.testing.expectEqual(
-        @as(?f32, null),
-        asOptionalF32(@as(style.Dimension, .min_content)),
+        style.Dimension{ .length = 18 },
+        resolved.min_size.width,
     );
+    try std.testing.expectEqual(
+        style.Dimension{ .percent = 0.5 },
+        resolved.min_size.height,
+    );
+
+    const min_content = styleFromOpts(.{
+        .min_width = @as(style.Dimension, .min_content),
+    }, null, .row);
+    try std.testing.expectEqual(style.Dimension.min_content, min_content.min_size.width);
 }
 
-test "DrawCtx: fixed and percentage min_main retain legacy axis semantics" {
+test "DrawCtx: direct min height retains fixed and percentage dimensions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
@@ -1668,22 +1673,24 @@ test "DrawCtx: fixed and percentage min_main retain legacy axis semantics" {
 
     const fixed_id = try ctx.label(.{
         .text = "fixed",
-        .min_main = style.Dimension.fixed(18),
+        .min_height = style.Dimension.fixed(18),
     });
     const fixed = tree.node(fixed_id).?;
-    try std.testing.expectEqual(@as(?f32, 18), fixed.style.min_main);
-    try std.testing.expect(std.meta.eql(@as(style.Dimension, .auto), fixed.style.min_size.height));
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 18 },
+        fixed.style.min_size.height,
+    );
+    try std.testing.expectEqual(style.Dimension.auto, fixed.style.min_size.width);
 
     const percent_id = try ctx.label(.{
         .text = "percent",
-        .min_main = style.Dimension.percentage(0.5),
+        .min_height = style.Dimension.percentage(0.5),
     });
     const percent = tree.node(percent_id).?;
-    try std.testing.expectEqual(@as(?f32, null), percent.style.min_main);
-    try std.testing.expect(std.meta.eql(
-        @as(style.Dimension, .auto),
+    try std.testing.expectEqual(
+        style.Dimension{ .percent = 0.5 },
         percent.style.min_size.height,
-    ));
+    );
 }
 
 test "DrawCtx: constructor translates display and position into Style" {
@@ -1700,7 +1707,7 @@ test "DrawCtx: constructor translates display and position into Style" {
     try std.testing.expectEqual(style.Position.absolute, tree.node(id).?.style.position);
 }
 
-test "DrawCtx: wrapped flex options translate into typed Style" {
+test "DrawCtx: canonical flex options translate into typed Style" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
@@ -1709,7 +1716,7 @@ test "DrawCtx: wrapped flex options translate into typed Style" {
 
     const id = try ctx.row(.{
         .direction = .row_reverse,
-        .wrap = .wrap_reverse,
+        .flex_wrap = .wrap_reverse,
         .align_content = .space_around,
         .align_self = .end,
         .margin_inset = .{
@@ -1723,13 +1730,13 @@ test "DrawCtx: wrapped flex options translate into typed Style" {
 
     const resolved = tree.node(id).?.style;
     try std.testing.expectEqual(style.FlexDirection.row_reverse, resolved.direction);
-    try std.testing.expectEqual(style.FlexWrap.wrap_reverse, resolved.wrap);
+    try std.testing.expectEqual(style.FlexWrap.wrap_reverse, resolved.flex_wrap);
     try std.testing.expectEqual(style.AlignContent.space_around, resolved.align_content);
     try std.testing.expectEqual(style.AlignSelf.end, resolved.align_self);
     try std.testing.expect(std.meta.eql(@as(style.LengthPercentageAuto, .auto), resolved.margin_inset.top));
 }
 
-test "DrawCtx: grid constructor translates tracks placement and gaps" {
+test "DrawCtx: grid constructor translates tracks placement and canonical gaps" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
@@ -1739,8 +1746,8 @@ test "DrawCtx: grid constructor translates tracks placement and gaps" {
 
     const id = try ctx.grid(.{
         .grid_template_columns = tracks[0..],
-        .grid_column_gap = 4,
-        .grid_row_gap = 8,
+        .column_gap = 4,
+        .row_gap = 8,
         .grid_auto_flow = .column,
         .grid_column = .{
             .start = .{ .line = 1 },
@@ -1751,20 +1758,22 @@ test "DrawCtx: grid constructor translates tracks placement and gaps" {
     const resolved = tree.node(id).?.style;
     try std.testing.expectEqual(style.Display.grid, resolved.display);
     try std.testing.expectEqual(@as(usize, 2), resolved.grid_template_columns.len);
-    try std.testing.expect(std.meta.eql(
-        @as(style.LengthPercentage, .{ .length = 4 }),
-        resolved.grid_column_gap,
-    ));
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 4 },
+        resolved.column_gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 8 },
+        resolved.row_gap,
+    );
     try std.testing.expectEqual(style.GridAutoFlow.column, resolved.grid_auto_flow);
 }
 
-test "DrawCtx numeric gap options become typed lengths" {
+test "DrawCtx numeric canonical gap options become typed lengths" {
     const resolved = styleFromOpts(.{
         .gap = 12,
         .column_gap = 13,
         .row_gap = 14,
-        .grid_column_gap = 15,
-        .grid_row_gap = 16,
     }, null, .column);
 
     try std.testing.expect(std.meta.eql(
@@ -1779,14 +1788,6 @@ test "DrawCtx numeric gap options become typed lengths" {
         @as(style.LengthPercentage, .{ .length = 14 }),
         resolved.row_gap,
     ));
-    try std.testing.expect(std.meta.eql(
-        @as(style.LengthPercentage, .{ .length = 15 }),
-        resolved.grid_column_gap,
-    ));
-    try std.testing.expect(std.meta.eql(
-        @as(style.LengthPercentage, .{ .length = 16 }),
-        resolved.grid_row_gap,
-    ));
 }
 
 test "DrawCtx typed percentage gap survives override and resolution" {
@@ -1800,7 +1801,7 @@ test "DrawCtx typed percentage gap survives override and resolution" {
     ));
 }
 
-test "DrawCtx WidgetKind gap mirror stays fixed for percentage options" {
+test "DrawCtx container gaps remain typed for percentage options" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
@@ -1818,10 +1819,8 @@ test "DrawCtx WidgetKind gap mirror stays fixed for percentage options" {
         @as(style.LengthPercentage, .{ .length = 12 }),
         tree.node(fixed).?.style.gap,
     ));
-    try std.testing.expectEqual(@as(f32, 12), tree.node(fixed).?.kind.column.gap);
     try std.testing.expect(std.meta.eql(
         @as(style.LengthPercentage, .{ .percent = 0.1 }),
         tree.node(percentage).?.style.gap,
     ));
-    try std.testing.expectEqual(@as(f32, 0), tree.node(percentage).?.kind.column.gap);
 }

@@ -74,9 +74,7 @@ pub const Calc = struct {
     }
 
     fn hasPercentage(self: Calc) bool {
-        // Keep legacy zero-percent constructors indefinite while also
-        // recognizing direct public literals that omit the historical flag.
-        return self.has_percentage or self.percent_sum != 0;
+        return self.has_percentage;
     }
 
     pub fn resolve(self: Calc, containing_size: ?f32) CalcError!f32 {

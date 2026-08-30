@@ -11,9 +11,9 @@ const theme = @import("spotify_theme.zig");
 // stable Volume. Side columns keep their width so play controls never
 // jitter as track metadata changes.
 const player_tracks = [_]widget.ColumnTrack{
-    .{ .basis = 240, .grow = 0, .shrink = 1, .min_main = 120 },
-    .{ .basis = 0, .grow = 1, .shrink = 1, .min_main = 200 },
-    .{ .basis = 200, .grow = 0, .shrink = 1, .min_main = 120 },
+    .{ .flex_basis = .{ .length = 240 }, .grow = 0, .shrink = 1, .min_width = .{ .length = 120 } },
+    .{ .flex_basis = .{ .length = 0 }, .grow = 1, .shrink = 1, .min_width = .{ .length = 200 } },
+    .{ .flex_basis = .{ .length = 200 }, .grow = 0, .shrink = 1, .min_width = .{ .length = 120 } },
 };
 const player_columns: widget.SharedColumns = .{ .tracks = &player_tracks };
 
@@ -21,7 +21,12 @@ const UtilityButton = struct {
     pub const default_style: nogui.Style = .{
         .direction = .row,
         .shrink = 1,
-        .padding = .{ .left = 2, .right = 2, .top = 2, .bottom = 2 },
+        .padding_inset = .{
+            .left = .{ .length = 2 },
+            .right = .{ .length = 2 },
+            .top = .{ .length = 2 },
+            .bottom = .{ .length = 2 },
+        },
     };
     pub const default_paint: nogui.PaintStyle = .{
         .fill = theme.c_player_control_bg,
@@ -33,7 +38,12 @@ const TransportButton = struct {
     pub const default_style: nogui.Style = .{
         .direction = .row,
         .shrink = 1,
-        .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 },
+        .padding_inset = .{
+            .left = .{ .length = 4 },
+            .right = .{ .length = 4 },
+            .top = .{ .length = 4 },
+            .bottom = .{ .length = 4 },
+        },
     };
     pub const default_paint: nogui.PaintStyle = .{
         .fill = theme.c_player_control_bg,
@@ -48,8 +58,8 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
 
     _ = try ctx.row(.{
         .columns = &player_columns,
-        .basis = theme.player_height,
-        .min_main = theme.player_height,
+        .flex_basis = theme.player_height,
+        .min_height = theme.player_height,
         .shrink = 0,
         .gap = 16,
         .clip = true,
@@ -74,8 +84,8 @@ fn drawUtilityButton(
     ctx: *DrawCtx,
     label: []const u8,
     icon: widget.IconId,
-    basis: f32,
-    min_main: f32,
+    flex_basis: f32,
+    min_width: f32,
     color: [4]f32,
     options: anytype,
 ) !void {
@@ -90,11 +100,11 @@ fn drawUtilityButton(
             .visual_label = "",
             .icon = icon,
             .on_click = options.on_click,
-            .basis = basis,
+            .flex_basis = flex_basis,
             .shrink = style.shrink,
-            .min_main = min_main,
+            .min_width = min_width,
             .color = color,
-            .padding = style.padding,
+            .padding = style.padding_inset,
             .fill = paint.fill,
             .gradient = paint.gradient,
         });
@@ -106,11 +116,11 @@ fn drawUtilityButton(
         .accessible_label = label,
         .visual_label = "",
         .icon = icon,
-        .basis = basis,
+        .flex_basis = flex_basis,
         .shrink = style.shrink,
-        .min_main = min_main,
+        .min_width = min_width,
         .color = color,
-        .padding = style.padding,
+        .padding = style.padding_inset,
         .fill = paint.fill,
         .gradient = paint.gradient,
     });
@@ -121,7 +131,7 @@ fn drawUnavailable(ctx: *DrawCtx) !void {
         .text = "No playable track",
         .grow = 1,
         .shrink = 1,
-        .min_main = 120,
+        .min_width = 120,
         .text_overflow = .ellipsis,
         .color = theme.c_player_utility,
         .font_size = 11,
@@ -130,7 +140,7 @@ fn drawUnavailable(ctx: *DrawCtx) !void {
         .text = "Playback unavailable",
         .grow = 1,
         .shrink = 1,
-        .min_main = 200,
+        .min_width = 200,
         .justify = .center,
         .text_overflow = .ellipsis,
         .color = theme.c_player_utility,
@@ -139,7 +149,7 @@ fn drawUnavailable(ctx: *DrawCtx) !void {
 }
 
 fn drawNowPlaying(comptime App: type, track: anytype, ctx: *DrawCtx) !void {
-    _ = try ctx.row(.{ .gap = 8, .shrink = 1, .min_main = 0, .clip = true, .@"align" = .center });
+    _ = try ctx.row(.{ .gap = 8, .shrink = 1, .min_width = 0, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
     _ = try theme.drawArtworkTile(
@@ -150,7 +160,7 @@ fn drawNowPlaying(comptime App: type, track: anytype, ctx: *DrawCtx) !void {
     );
 
     {
-        _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 20, .gap = 2, .clip = true });
+        _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_width = 20, .gap = 2, .clip = true });
         defer ctx.pop();
         _ = try ctx.label(.{
             .text = track.title,
@@ -178,7 +188,7 @@ fn drawNowPlaying(comptime App: type, track: anytype, ctx: *DrawCtx) !void {
 }
 
 fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx) !void {
-    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_main = 200, .gap = 6, .clip = true, .@"align" = .center });
+    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_width = 200, .gap = 6, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
     {
@@ -192,9 +202,9 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
             .visual_label = "",
             .icon = @as(widget.IconId, if (app.is_playing) .pause else .play),
             .on_click = App.togglePlay,
-            .basis = 32,
+            .flex_basis = 32,
             .shrink = 0,
-            .min_main = 32,
+            .min_width = 32,
             .color = theme.c_bg,
             .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 },
             .radius = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 },
@@ -218,7 +228,7 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
             .{ elapsed_minutes, elapsed_seconds },
         );
         {
-            _ = try ctx.row(.{ .basis = 28, .shrink = 0, .justify = .end, .clip = true });
+            _ = try ctx.row(.{ .flex_basis = 28, .shrink = 0, .justify = .end, .clip = true });
             defer ctx.pop();
             _ = try ctx.label(.{ .text = elapsed_text, .color = theme.c_player_utility, .font_size = 9 });
         }
@@ -230,8 +240,8 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
             .max = duration_sec,
             .grow = 1,
             .shrink = 1,
-            .basis = 100,
-            .min_main = 100,
+            .flex_basis = 100,
+            .min_width = 100,
             .color = theme.c_player_progress,
             .padding = .{ .left = 1, .right = 1 },
         });
@@ -239,7 +249,7 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
             .text = track.duration_str,
             .color = theme.c_player_utility,
             .font_size = 9,
-            .basis = 28,
+            .flex_basis = 28,
             .shrink = 0,
         });
     }
@@ -251,7 +261,7 @@ fn drawTransportButton(
     label: []const u8,
     handler: anytype,
     active: bool,
-    basis: f32,
+    flex_basis: f32,
 ) !void {
     const style = TransportButton.default_style;
     const paint = TransportButton.default_paint;
@@ -262,18 +272,18 @@ fn drawTransportButton(
         .visual_label = "",
         .icon = icon,
         .on_click = handler,
-        .basis = basis,
+        .flex_basis = flex_basis,
         .shrink = style.shrink,
-        .min_main = basis,
+        .min_width = flex_basis,
         .color = if (active) theme.c_player_progress else theme.c_player_utility,
-        .padding = style.padding,
+        .padding = style.padding_inset,
         .fill = paint.fill,
         .gradient = paint.gradient,
     });
 }
 
 fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
-    _ = try ctx.row(.{ .gap = 6, .shrink = 1, .min_main = 0, .clip = true, .@"align" = .center });
+    _ = try ctx.row(.{ .gap = 6, .shrink = 1, .min_width = 0, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
     try drawUtilityButton(ctx, "Queue", .queue, 22, 18, theme.c_player_utility, .{});
@@ -291,9 +301,9 @@ fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
         .accessible_label = "Volume",
         .visual_label = "",
         .icon = .volume,
-        .basis = 16,
+        .flex_basis = 16,
         .shrink = 0,
-        .min_main = 16,
+        .min_width = 16,
         .color = theme.c_player_utility,
     });
     _ = try ctx.slider(.{
@@ -302,10 +312,9 @@ fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
         .value = &app.volume,
         .min = 0.0,
         .max = 1.0,
-        .grow = 0,
         .shrink = 1,
-        .basis = 100,
-        .min_main = 0,
+        .flex_basis = 100,
+        .min_width = 0,
         .color = theme.c_player_utility,
         .padding = .{ .left = 1, .right = 1, .top = 2, .bottom = 2 },
     });

@@ -2,11 +2,11 @@
 
 const std = @import("std");
 const Id = @import("../id.zig").Id;
-const flex = @import("../flex.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const block_float = @import("block_float.zig");
-const layout_dispatch = @import("dispatch.zig");
+const layout_context = @import("context.zig");
+const layout = @import("root.zig");
 const sizing = @import("sizing.zig");
 
 const Rect = widget.Rect;
@@ -39,7 +39,7 @@ fn definiteContext(width: f32, height: f32) sizing.SizingContext {
 }
 
 fn layoutContainer(tree: *WidgetTree, container_id: Id, width: f32, height: f32) !void {
-    const measure: ?flex.MeasureFn = null;
+    const measure: ?layout_context.MeasureFn = null;
     try block_float.layoutContainer(
         tree,
         container_id,
@@ -49,7 +49,7 @@ fn layoutContainer(tree: *WidgetTree, container_id: Id, width: f32, height: f32)
 }
 
 fn layoutTree(tree: *WidgetTree, width: f32, height: f32) !void {
-    try layout_dispatch.layoutTree(tree, .{
+    try layout.layoutTree(tree, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = width, .height = height },
         .measure = null,
@@ -66,6 +66,105 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
     try expectRect(expected, tree.nodeConst(id).?.rect);
+}
+
+fn unreachableMeasureNode(
+    _: *layout_context.LayoutContext,
+    _: *WidgetTree,
+    _: *const widget.WidgetNode,
+    _: layout_context.Request,
+) layout_context.LayoutError!layout_context.Measured {
+    unreachable;
+}
+
+fn unreachableLayoutNode(
+    _: *layout_context.LayoutContext,
+    _: *WidgetTree,
+    _: *widget.WidgetNode,
+    _: layout_context.LayoutRequest,
+) layout_context.LayoutError!void {
+    unreachable;
+}
+
+fn intrinsicAspectMeasure(_: []const u8, _: layout_context.MeasureInput) widget.Size {
+    return .{ .width = 360, .height = 10 };
+}
+
+test "absolute leaf aspect ratio transfers after width and height constraints" {
+    const scenarios = [_]struct {
+        min_size: style.DimensionSize,
+        max_size: style.DimensionSize,
+        aspect_ratio: f32,
+        expected: Rect,
+    }{
+        .{
+            .min_size = .{ .width = .auto, .height = .auto },
+            .max_size = .{ .width = .{ .length = 50 }, .height = .auto },
+            .aspect_ratio = 3,
+            .expected = .{ .x = 0, .y = 0, .w = 50, .h = 50.0 / 3.0 },
+        },
+        .{
+            .min_size = .{ .width = .auto, .height = .auto },
+            .max_size = .{ .width = .auto, .height = .{ .length = 50 } },
+            .aspect_ratio = 0.5,
+            .expected = .{ .x = 0, .y = 0, .w = 25, .h = 50 },
+        },
+        .{
+            .min_size = .{ .width = .auto, .height = .auto },
+            .max_size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 100 },
+            },
+            .aspect_ratio = 3,
+            .expected = .{ .x = 0, .y = 0, .w = 50, .h = 50.0 / 3.0 },
+        },
+        .{
+            .min_size = .{ .width = .{ .length = 60 }, .height = .auto },
+            .max_size = .{ .width = .{ .length = 50 }, .height = .auto },
+            .aspect_ratio = 3,
+            .expected = .{ .x = 0, .y = 0, .w = 60, .h = 20 },
+        },
+    };
+
+    for (scenarios) |scenario| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const absolute_id: Id = @enumFromInt(1);
+        const root_id: Id = @enumFromInt(2);
+        try tree.appendNode(.{
+            .id = absolute_id,
+            .kind = .{ .label = .{ .text = "intrinsic" } },
+            .parent = root_id,
+            .style = .{
+                .display = .block,
+                .position = .absolute,
+                .box_sizing = .border_box,
+                .size = .{ .width = .auto, .height = .auto },
+                .min_size = scenario.min_size,
+                .max_size = scenario.max_size,
+                .aspect_ratio = scenario.aspect_ratio,
+            },
+        });
+        try appendNode(&tree, root_id, .root, .{
+            .display = .flow_root,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 400 },
+                .height = .{ .length = 300 },
+            },
+        });
+        try tree.appendChild(root_id, absolute_id);
+
+        try block_float.layoutContainer(
+            &tree,
+            root_id,
+            definiteContext(400, 300),
+            intrinsicAspectMeasure,
+        );
+
+        try expectRelative(&tree, absolute_id, scenario.expected);
+    }
 }
 
 test "flow root clears a left float before the following block" {
@@ -131,8 +230,6 @@ test "absolute child uses containing padding box without advancing block flow" {
         .display = .flow_root,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 30 } },
-        .border = .{ .top = 2, .left = 3 },
-        .padding = .{ .top = 4, .left = 5 },
         .border_inset = .{
             .top = .{ .length = 2 },
             .right = .{ .length = 0 },
@@ -429,6 +526,32 @@ test "minimum width clamp drives block child aspect-ratio height" {
         .{ .x = 0, .y = 0, .w = 40, .h = 20 },
         widget.absoluteRect(&tree, child_id),
     );
+}
+
+test "auto block width transfers through aspect ratio" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+
+    try appendNode(&tree, child_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .aspect_ratio = 2,
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 50 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    try layoutContainer(&tree, root_id, 50, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 50, .h = 25 });
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 50, .h = 25 });
 }
 
 test "indefinite percentage height behaves as auto" {
@@ -942,15 +1065,35 @@ test "prepared pass recursively sizes nested auto-height blocks in relative coor
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 60 }, .height = .auto },
-        .border = .{ .top = 1, .right = 4, .bottom = 2, .left = 3 },
-        .padding = .{ .top = 4, .right = 7, .bottom = 5, .left = 6 },
+        .border_inset = .{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 4 },
+            .bottom = .{ .length = 2 },
+            .left = .{ .length = 3 },
+        },
+        .padding_inset = .{
+            .top = .{ .length = 4 },
+            .right = .{ .length = 7 },
+            .bottom = .{ .length = 5 },
+            .left = .{ .length = 6 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 100 }, .height = .auto },
-        .border = .{ .top = 2, .right = 1, .bottom = 3, .left = 4 },
-        .padding = .{ .top = 5, .right = 8, .bottom = 7, .left = 6 },
+        .border_inset = .{
+            .top = .{ .length = 2 },
+            .right = .{ .length = 1 },
+            .bottom = .{ .length = 3 },
+            .left = .{ .length = 4 },
+        },
+        .padding_inset = .{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 8 },
+            .bottom = .{ .length = 7 },
+            .left = .{ .length = 6 },
+        },
     });
     try tree.appendChild(nested_id, descendant_id);
     try tree.appendChild(root_id, nested_id);
@@ -987,7 +1130,12 @@ test "nested auto width resolves percent descendants after margins" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .auto, .height = .auto },
-        .margin = .{ .left = 10, .right = 10 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 10 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1217,7 +1365,12 @@ test "absolute paired insets reserve child margins" {
         .position = .absolute,
         .box_sizing = .border_box,
         .size = .{ .width = .auto, .height = .auto },
-        .margin = .{ .top = 3, .right = 5, .bottom = 2, .left = 5 },
+        .margin_inset = .{
+            .top = .{ .length = 3 },
+            .right = .{ .length = 5 },
+            .bottom = .{ .length = 2 },
+            .left = .{ .length = 5 },
+        },
         .inset = .{
             .top = .{ .length = 4 },
             .right = .{ .length = 15 },
@@ -1273,6 +1426,43 @@ test "absolute paired horizontal insets split fixed-width auto margins" {
     try pass.layoutContainer(root_id, definiteContext(100, 50), null);
 
     try expectRelative(&tree, absolute_id, .{ .x = 40, .y = 4, .w = 20, .h = 10 });
+}
+
+test "absolute paired horizontal auto margins split positive free space" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: Id = @enumFromInt(1);
+    const root_id: Id = @enumFromInt(2);
+    try appendNode(&tree, absolute_id, root_id, .{
+        .display = .block,
+        .position = .absolute,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 60 }, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .auto,
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+        .inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .auto,
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 100 }, .height = .{ .length = 50 } },
+    });
+    try tree.appendChild(root_id, absolute_id);
+
+    const pass = try block_float.LayoutPass.init(&tree);
+    try pass.layoutContainer(root_id, definiteContext(100, 50), null);
+
+    try expectRelative(&tree, absolute_id, .{ .x = 20, .y = 0, .w = 60, .h = 10 });
 }
 
 test "absolute paired vertical insets split fixed-height auto margins" {
@@ -1398,7 +1588,12 @@ test "float margins reserve clear and flow extent" {
         .float = .left,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 3, .right = 10, .bottom = 5, .left = 5 },
+        .margin_inset = .{
+            .top = .{ .length = 3 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 5 },
+            .left = .{ .length = 5 },
+        },
     });
     try appendNode(&tree, clear_id, root_id, .{
         .display = .block,
@@ -1580,7 +1775,12 @@ test "prepared pass applies margins and relative insets without shifting later f
         .position = .relative,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 4, .right = 1, .bottom = 5, .left = 6 },
+        .margin_inset = .{
+            .top = .{ .length = 4 },
+            .right = .{ .length = 1 },
+            .bottom = .{ .length = 5 },
+            .left = .{ .length = 6 },
+        },
         .inset = .{
             .top = .{ .length = 3 },
             .right = .auto,
@@ -1592,7 +1792,12 @@ test "prepared pass applies margins and relative insets without shifting later f
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 15 }, .height = .{ .length = 8 } },
-        .margin = .{ .top = 2, .right = 0, .bottom = 4, .left = 3 },
+        .margin_inset = .{
+            .top = .{ .length = 2 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 4 },
+            .left = .{ .length = 3 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1622,13 +1827,23 @@ test "prepared pass collapses positive sibling margins to their maximum" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .bottom = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 20 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, second_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 30 },
+        .margin_inset = .{
+            .top = .{ .length = 30 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1658,13 +1873,23 @@ test "prepared pass collapses negative sibling margins to the most negative" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 40 } },
-        .margin = .{ .bottom = -20 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = -20 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, second_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = -30 },
+        .margin_inset = .{
+            .top = .{ .length = -30 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1694,13 +1919,23 @@ test "prepared pass collapses mixed sibling margins by their extrema" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .bottom = -30 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = -30 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, second_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 20 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1776,14 +2011,24 @@ test "prepared pass collapses larger parent top margin through first child" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 20 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, parent_id, root_id, .{
         .display = .block,
         .position = .relative,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 60 }, .height = .auto },
-        .margin = .{ .top = 30 },
+        .margin_inset = .{
+            .top = .{ .length = 30 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1821,14 +2066,24 @@ test "prepared pass collapses larger first-child top margin through parent" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 30 },
+        .margin_inset = .{
+            .top = .{ .length = 30 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, parent_id, root_id, .{
         .display = .block,
         .position = .relative,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 60 }, .height = .auto },
-        .margin = .{ .top = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 20 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1866,14 +2121,24 @@ test "prepared pass combines mixed parent and first-child top margins" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 30 },
+        .margin_inset = .{
+            .top = .{ .length = 30 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, parent_id, root_id, .{
         .display = .block,
         .position = .relative,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 60 }, .height = .auto },
-        .margin = .{ .top = -10 },
+        .margin_inset = .{
+            .top = .{ .length = -10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -1918,14 +2183,24 @@ test "prepared pass collapses last-child bottom margin through auto-height paren
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .bottom = 30 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 30 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, parent_id, root_id, .{
         .display = .block,
         .position = .relative,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 60 }, .height = .auto },
-        .margin = .{ .bottom = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 20 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, following_id, root_id, .{
         .display = .block,
@@ -1976,14 +2251,24 @@ test "prepared pass keeps first-child top margin inside flow root" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 30 },
+        .margin_inset = .{
+            .top = .{ .length = 30 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, parent_id, root_id, .{
         .display = .flow_root,
         .position = .relative,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 60 }, .height = .auto },
-        .margin = .{ .top = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 20 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -2190,13 +2475,23 @@ test "adjacent positive vertical margins collapse to their maximum" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 10, .bottom = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 20 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, second_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 30 },
+        .margin_inset = .{
+            .top = .{ .length = 30 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -2225,13 +2520,23 @@ test "adjacent negative vertical margins collapse to the most negative" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 10, .bottom = -20 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = -20 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, second_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = -5 },
+        .margin_inset = .{
+            .top = .{ .length = -5 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -2303,13 +2608,23 @@ test "ordinary block collapses its first child top margin" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 10 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, outer_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 40 }, .height = .auto },
-        .margin = .{ .top = 5 },
+        .margin_inset = .{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -2341,13 +2656,23 @@ test "ordinary block collapses its last child bottom margin" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .bottom = 10 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, outer_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 40 }, .height = .auto },
-        .margin = .{ .bottom = 5 },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 5 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -2376,14 +2701,29 @@ test "top border blocks parent first-child margin collapse" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 20 }, .height = .{ .length = 10 } },
-        .margin = .{ .top = 10 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, outer_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 40 }, .height = .auto },
-        .margin = .{ .top = 5 },
-        .border = .{ .top = 1 },
+        .margin_inset = .{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+        .border_inset = .{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -2423,7 +2763,12 @@ test "prepared pass updates scroll limits after recursive child geometry" {
         .display = .block,
         .box_sizing = .border_box,
         .size = .{ .width = .{ .length = 50 }, .height = .{ .length = 30 } },
-        .padding = .{ .top = 5, .right = 5, .bottom = 5, .left = 5 },
+        .padding_inset = .{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 5 },
+            .bottom = .{ .length = 5 },
+            .left = .{ .length = 5 },
+        },
         .overflow = .{ .width = .scroll, .height = .scroll },
     });
     tree.node(root_id).?.scroll = .{ .state = &scroll_state, .axis = .both };
@@ -3240,6 +3585,142 @@ test "vertical scrollbar gutter stays inside fixed content box" {
     try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 85, .h = 10 });
 }
 
+test "fixed-width BFC resolves auto margins inside a float-avoiding slot" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const bfc_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, float_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 50 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .auto,
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 300 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 300, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 300, .h = 100 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, bfc_id, .{ .x = 150, .y = 0, .w = 100, .h = 50 });
+}
+test "float-avoiding BFC does not subtract its fixed margin twice" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const bfc_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, float_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 50 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 20 },
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 300 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 300, 100);
+
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, bfc_id, .{ .x = 180, .y = 0, .w = 100, .h = 50 });
+}
+
+test "auto-width BFC resolves auto margins inside a float-avoiding slot" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const float_id: Id = @enumFromInt(1);
+    const bfc_id: Id = @enumFromInt(2);
+    const root_id: Id = @enumFromInt(3);
+
+    try appendNode(&tree, float_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try appendNode(&tree, bfc_id, root_id, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .auto,
+            .height = .{ .length = 50 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .auto,
+            .bottom = .{ .length = 0 },
+            .left = .auto,
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 300 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, bfc_id);
+
+    try layoutContainer(&tree, root_id, 300, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 300, .h = 100 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, bfc_id, .{ .x = 100, .y = 0, .w = 200, .h = 50 });
+}
+
 test "auto-width BFC ignores a small negative leading margin beside a float" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -3424,7 +3905,7 @@ test "BFC avoids a float from a preceding sibling subtree" {
 
     try layoutContainer(&tree, root_id, 100, 100);
 
-    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
     try expectRelative(&tree, preceding_id, .{ .x = 0, .y = 0, .w = 100, .h = 0 });
     try expectRelative(&tree, float_id, .{ .x = 0, .y = 0, .w = 50, .h = 100 });
     try expectRelative(&tree, bfc_id, .{ .x = 50, .y = 0, .w = 50, .h = 50 });
@@ -3736,7 +4217,12 @@ test "flex-item block keeps vertical margins inside its BFC" {
             .width = .{ .length = 50 },
             .height = .{ .length = 10 },
         },
-        .margin = .{ .top = 10, .bottom = 10 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, second_id, block_item_id, .{
         .display = .block,
@@ -3745,7 +4231,12 @@ test "flex-item block keeps vertical margins inside its BFC" {
             .width = .{ .length = 50 },
             .height = .{ .length = 10 },
         },
-        .margin = .{ .top = 10, .bottom = 10 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, third_id, block_item_id, .{
         .display = .block,
@@ -3754,7 +4245,12 @@ test "flex-item block keeps vertical margins inside its BFC" {
             .width = .{ .length = 50 },
             .height = .{ .length = 10 },
         },
-        .margin = .{ .top = 5, .bottom = 5 },
+        .margin_inset = .{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 5 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, fourth_id, block_item_id, .{
         .display = .block,
@@ -3763,7 +4259,12 @@ test "flex-item block keeps vertical margins inside its BFC" {
             .width = .{ .length = 50 },
             .height = .{ .length = 10 },
         },
-        .margin = .{ .top = 10, .bottom = 10 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, block_item_id, flex_root_id, .{
         .display = .block,
@@ -3927,7 +4428,12 @@ test "flex-item BFC contains an empty child's collapsed margins" {
             .width = .{ .length = 100 },
             .height = .{ .length = 0 },
         },
-        .margin = .{ .top = 10, .bottom = 20 },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 20 },
+            .left = .{ .length = 0 },
+        },
     });
     try appendNode(&tree, block_item_id, flex_root_id, .{
         .display = .block,
@@ -4407,4 +4913,384 @@ test "auto block min height aligns content in the final box" {
 
     try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 200 });
     try expectRelative(&tree, child_id, .{ .x = 0, .y = 75, .w = 100, .h = 50 });
+}
+
+test "absolute children use the padding box for opposing insets and margins" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const Case = struct {
+        id: Id,
+        inset: style.Insets,
+        margin: style.Insets = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+        expected_relative: Rect,
+        expected_absolute: Rect,
+    };
+    const cases = [_]Case{
+        .{
+            .id = @enumFromInt(1),
+            .inset = .{
+                .top = .{ .length = 0 },
+                .right = .auto,
+                .bottom = .auto,
+                .left = .{ .length = 0 },
+            },
+            .expected_relative = .{ .x = -10, .y = -10, .w = 50, .h = 50 },
+            .expected_absolute = .{ .x = 10, .y = 10, .w = 50, .h = 50 },
+        },
+        .{
+            .id = @enumFromInt(2),
+            .inset = .{
+                .top = .auto,
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .auto,
+            },
+            .expected_relative = .{ .x = 20, .y = 20, .w = 50, .h = 50 },
+            .expected_absolute = .{ .x = 40, .y = 40, .w = 50, .h = 50 },
+        },
+        .{
+            .id = @enumFromInt(3),
+            .inset = .{
+                .top = .{ .length = 0 },
+                .right = .auto,
+                .bottom = .auto,
+                .left = .{ .length = 0 },
+            },
+            .margin = .{
+                .top = .{ .length = 10 },
+                .right = .{ .length = 10 },
+                .bottom = .{ .length = 10 },
+                .left = .{ .length = 10 },
+            },
+            .expected_relative = .{ .x = 0, .y = 0, .w = 50, .h = 50 },
+            .expected_absolute = .{ .x = 20, .y = 20, .w = 50, .h = 50 },
+        },
+        .{
+            .id = @enumFromInt(4),
+            .inset = .{
+                .top = .auto,
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .auto,
+            },
+            .margin = .{
+                .top = .{ .length = 10 },
+                .right = .{ .length = 10 },
+                .bottom = .{ .length = 10 },
+                .left = .{ .length = 10 },
+            },
+            .expected_relative = .{ .x = 10, .y = 10, .w = 50, .h = 50 },
+            .expected_absolute = .{ .x = 30, .y = 30, .w = 50, .h = 50 },
+        },
+    };
+    const root_id: Id = @enumFromInt(5);
+
+    for (cases) |case| {
+        try appendNode(&tree, case.id, root_id, .{
+            .display = .block,
+            .position = .absolute,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 50 },
+            },
+            .inset = case.inset,
+            .margin_inset = case.margin,
+        });
+    }
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+        .border_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 10 },
+        },
+        .padding_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 10 },
+        },
+    });
+    for (cases) |case| {
+        try tree.appendChild(root_id, case.id);
+    }
+
+    try layoutContainer(&tree, root_id, 100, 100);
+
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    for (cases) |case| {
+        try expectRelative(&tree, case.id, case.expected_relative);
+        try expectRect(case.expected_absolute, widget.absoluteRect(&tree, case.id));
+    }
+}
+
+test "float placement preserves a preceding collapsed bottom margin strut" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const preceding_id: Id = @enumFromInt(1);
+    const float_id: Id = @enumFromInt(2);
+    const following_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+
+    try appendNode(&tree, preceding_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 200 },
+            .height = .{ .length = 20 },
+        },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 16 },
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, float_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 50 },
+        },
+    });
+    try appendNode(&tree, following_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 200 },
+            .height = .{ .length = 30 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 200 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, preceding_id);
+    try tree.appendChild(root_id, float_id);
+    try tree.appendChild(root_id, following_id);
+
+    try layoutContainer(&tree, root_id, 200, 100);
+
+    try expectRelative(&tree, preceding_id, .{ .x = 0, .y = 0, .w = 200, .h = 20 });
+    try expectRelative(&tree, float_id, .{ .x = 0, .y = 36, .w = 50, .h = 50 });
+    try expectRelative(&tree, following_id, .{ .x = 0, .y = 36, .w = 200, .h = 30 });
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 200, .h = 86 });
+}
+
+test "intrinsic auto width packs a same-side float run in a nested shrink-to-fit block" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_float_id: Id = @enumFromInt(1);
+    const second_float_id: Id = @enumFromInt(2);
+    const shrink_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+
+    try appendNode(&tree, first_float_id, shrink_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 30 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, second_float_id, shrink_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 20 },
+            .height = .{ .length = 10 },
+        },
+    });
+    try appendNode(&tree, shrink_id, root_id, .{
+        .display = .block,
+        .float = .left,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .flow_root,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(shrink_id, first_float_id);
+    try tree.appendChild(shrink_id, second_float_id);
+    try tree.appendChild(root_id, shrink_id);
+
+    var context: layout_context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = null,
+        .measure_node = unreachableMeasureNode,
+        .layout_node = unreachableLayoutNode,
+    };
+    defer context.deinit();
+    const shrink = tree.nodeConst(shrink_id).?;
+    const measured = try block_float.measureNatural(
+        &tree,
+        shrink,
+        .{
+            .available = .{ .width = 100, .height = 100 },
+            .percentage_basis = .{ .width = 100, .height = 100 },
+            .width_mode = .max_content,
+            .height_mode = .max_content,
+        },
+        &context,
+    );
+    const tolerance: f32 = 0.001;
+
+    try std.testing.expectApproxEqAbs(@as(f32, 50), measured.content.width, tolerance);
+    try std.testing.expectApproxEqAbs(@as(f32, 10), measured.content.height, tolerance);
+    try std.testing.expectApproxEqAbs(@as(f32, 50), measured.border.width, tolerance);
+    try std.testing.expectApproxEqAbs(@as(f32, 10), measured.border.height, tolerance);
+}
+
+test "empty flex and grid children keep vertical margins from collapsing through" {
+    const displays = [_]style.Display{ .flex, .grid };
+
+    for (displays) |independent_display| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const preceding_id: Id = @enumFromInt(1);
+        const independent_id: Id = @enumFromInt(2);
+        const following_id: Id = @enumFromInt(3);
+        const root_id: Id = @enumFromInt(4);
+
+        try appendNode(&tree, preceding_id, root_id, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 10 },
+            },
+            .margin_inset = .{
+                .top = .{ .length = 0 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 10 },
+                .left = .{ .length = 0 },
+            },
+        });
+        try appendNode(&tree, independent_id, root_id, .{
+            .display = independent_display,
+            .box_sizing = .border_box,
+            .size = .{ .width = .auto, .height = .auto },
+            .margin_inset = .{
+                .top = .{ .length = 10 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 10 },
+                .left = .{ .length = 0 },
+            },
+        });
+        try appendNode(&tree, following_id, root_id, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 50 },
+                .height = .{ .length = 10 },
+            },
+            .margin_inset = .{
+                .top = .{ .length = 10 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 0 },
+            },
+        });
+        try appendNode(&tree, root_id, .root, .{
+            .display = .block,
+            .box_sizing = .border_box,
+            .size = .{ .width = .{ .length = 50 }, .height = .auto },
+        });
+        try tree.appendChild(root_id, preceding_id);
+        try tree.appendChild(root_id, independent_id);
+        try tree.appendChild(root_id, following_id);
+
+        try layoutTree(&tree, 50, 100);
+
+        try expectRelative(&tree, preceding_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+        try expectRelative(&tree, independent_id, .{ .x = 0, .y = 20, .w = 50, .h = 0 });
+        try expectRelative(&tree, following_id, .{ .x = 0, .y = 30, .w = 50, .h = 10 });
+        try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 50, .h = 40 });
+    }
+}
+
+test "aspect-ratio block contributes transferred height between collapsing margins" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const preceding_id: Id = @enumFromInt(1);
+    const ratio_id: Id = @enumFromInt(2);
+    const following_id: Id = @enumFromInt(3);
+    const root_id: Id = @enumFromInt(4);
+
+    try appendNode(&tree, preceding_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 0 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, ratio_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .auto },
+        .aspect_ratio = 2,
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 10 },
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, following_id, root_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .auto, .height = .{ .length = 10 } },
+        .margin_inset = .{
+            .top = .{ .length = 10 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+    });
+    try appendNode(&tree, root_id, .root, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{ .width = .{ .length = 50 }, .height = .auto },
+    });
+    try tree.appendChild(root_id, preceding_id);
+    try tree.appendChild(root_id, ratio_id);
+    try tree.appendChild(root_id, following_id);
+
+    try layoutTree(&tree, 50, 100);
+
+    try expectRelative(&tree, preceding_id, .{ .x = 0, .y = 0, .w = 50, .h = 10 });
+    try expectRelative(&tree, ratio_id, .{ .x = 0, .y = 20, .w = 50, .h = 25 });
+    try expectRelative(&tree, following_id, .{ .x = 0, .y = 55, .w = 50, .h = 10 });
+    try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 50, .h = 65 });
 }

@@ -4,6 +4,7 @@ const block_float = @import("block_float.zig");
 const context = @import("context.zig");
 const flex = @import("flex.zig");
 const grid = @import("grid.zig");
+const overflow = @import("overflow.zig");
 const sizing = @import("sizing.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
@@ -12,13 +13,26 @@ pub const Options = struct {
     allocator: std.mem.Allocator,
     available: widget.Size,
     measure: ?context.MeasureFn,
+    width_mode: context.MeasureMode = .definite,
+    height_mode: context.MeasureMode = .definite,
 };
 
 pub const LayoutError = context.LayoutError;
 
+fn validateScrollbarWidths(tree: *const widget.WidgetTree) LayoutError!void {
+    for (tree.nodes.items) |node| {
+        const width = node.style.scrollbar_width;
+        if (!std.math.isFinite(width) or width < 0) return error.InvalidStyle;
+    }
+}
+
 const Edges = struct {
     border: style.Sides,
     padding: style.Sides,
+    box_padding: style.Sides,
+    gutter: style.Sides,
+    box_horizontal: f32,
+    box_vertical: f32,
     horizontal: f32,
     vertical: f32,
 };
@@ -26,11 +40,12 @@ const RootMeasurement = struct {
     natural: context.Measured,
     width: f32,
 };
-
 pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
+    try validateScrollbarWidths(tree);
     try validateAvailable(options.available);
     var roots = try validateTree(options.allocator, tree);
     defer roots.deinit(options.allocator);
+    resetDerivedState(tree);
     for (roots.items) |root_index| {
         try markHidden(tree, root_index, false, tree.nodes.items.len + 1);
     }
@@ -41,6 +56,16 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
         .measure_node = measureNodeCallback,
         .layout_node = layoutNodeCallback,
     };
+    defer layout_context.deinit();
+    if (options.width_mode != .definite or options.height_mode != .definite) {
+        try layoutIntrinsicRoots(
+            &layout_context,
+            tree,
+            roots.items,
+            options,
+        );
+        return;
+    }
     var items: std.ArrayList(RootItem) = .empty;
     defer items.deinit(options.allocator);
     for (roots.items) |root_index| {
@@ -91,8 +116,8 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
                         .width = width,
                         .height = options.available.height,
                     },
-                    .intrinsic_width = false,
-                    .intrinsic_height = false,
+                    .width_mode = .definite,
+                    .height_mode = .definite,
                 },
             );
             break :blk .{
@@ -109,34 +134,34 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
                 node.style,
                 natural,
                 options.available,
-                edges.vertical,
+                edges,
             )
         else
             try rootBaseHeight(
                 node.style,
                 natural,
                 options.available,
-                edges.vertical,
+                edges,
             );
         const min_height = if (absolute)
             try absoluteRootMinHeight(
                 node.style,
                 natural,
                 options.available,
-                edges.vertical,
+                edges,
             )
         else
             try rootMinHeight(
                 node.style,
                 natural,
                 options.available,
-                edges.vertical,
+                edges,
             );
         const max_height = try rootMaxHeight(
             node.style,
             natural,
             options.available,
-            edges.vertical,
+            edges,
         );
         if (!std.math.isFinite(node.style.grow) or node.style.grow < 0) {
             return error.InvalidStyle;
@@ -144,7 +169,7 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
         if (!std.math.isFinite(node.style.shrink) or node.style.shrink < 0) {
             return error.InvalidStyle;
         }
-        items.append(options.allocator, .{
+        try items.append(options.allocator, .{
             .index = root_index,
             .natural = natural,
             .margins = margins,
@@ -161,7 +186,7 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
             .shrink = node.style.shrink,
             .absolute = absolute,
             .frozen = false,
-        }) catch return error.InvalidStyle;
+        });
     }
 
     try resolveRootHeights(&items, options.available.height);
@@ -175,6 +200,7 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
                 node,
                 item,
                 options.available,
+                false,
             );
         } else {
             try placeFlowRoot(
@@ -184,6 +210,7 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
                 item,
                 options.available,
                 &flow_cursor,
+                false,
             );
         }
     }
@@ -211,6 +238,216 @@ const RootInsets = struct {
     left: ?f32,
 };
 
+fn layoutIntrinsicRoots(
+    self: *context.LayoutContext,
+    tree: *widget.WidgetTree,
+    roots: []const usize,
+    options: Options,
+) LayoutError!void {
+    var flow_cursor: f32 = 0;
+    for (roots) |root_index| {
+        const node = &tree.nodes.items[root_index];
+        if (node.layout_hidden) continue;
+
+        const margins = try resolveRootMargins(
+            node.style,
+            if (options.width_mode == .definite)
+                @as(?f32, options.available.width)
+            else
+                null,
+        );
+        const size = try measureIntrinsicRootSize(
+            self,
+            tree,
+            node,
+            options,
+            margins,
+        );
+        const absolute = node.style.position == .absolute;
+        try placeIntrinsicRoot(
+            self,
+            tree,
+            node,
+            size.width,
+            size.height,
+            if (absolute) 0 else flow_cursor,
+            options,
+        );
+        if (!absolute) {
+            flow_cursor = try finiteAdd(node.rect.y, node.rect.h);
+        }
+    }
+}
+
+fn measureIntrinsicRootSize(
+    self: *context.LayoutContext,
+    tree: *widget.WidgetTree,
+    node: *const widget.WidgetNode,
+    options: Options,
+    margins: style.Sides,
+) LayoutError!widget.Size {
+    const percentage_basis: style.Size(?f32) = .{
+        .width = if (options.width_mode == .definite) options.available.width else null,
+        .height = if (options.height_mode == .definite) options.available.height else null,
+    };
+    var natural = try self.measure_node(
+        self,
+        tree,
+        node,
+        .{
+            .available = .{
+                .width = if (options.width_mode == .definite) options.available.width else 0,
+                .height = if (options.height_mode == .definite) options.available.height else 0,
+            },
+            .percentage_basis = percentage_basis,
+            .width_mode = options.width_mode,
+            .height_mode = options.height_mode,
+        },
+    );
+    var width = try intrinsicRootWidth(node, natural, options, margins);
+    const edges = try resolveEdges(node.style, percentage_basis.width);
+    width = try clampIntrinsicRootWidth(node.style, natural, width, percentage_basis.width, edges);
+
+    if (options.width_mode != .definite) {
+        natural = try self.measure_node(
+            self,
+            tree,
+            node,
+            .{
+                .available = .{
+                    .width = width,
+                    .height = if (options.height_mode == .definite) options.available.height else 0,
+                },
+                .percentage_basis = percentage_basis,
+                .width_mode = .definite,
+                .height_mode = options.height_mode,
+            },
+        );
+    }
+    return .{
+        .width = width,
+        .height = try clampIntrinsicRootHeight(
+            node.style,
+            natural,
+            natural.border.height,
+            percentage_basis.height,
+            edges,
+        ),
+    };
+}
+
+fn clampIntrinsicRootWidth(
+    input: style.Style,
+    natural: context.Measured,
+    candidate: f32,
+    percentage_basis: ?f32,
+    edges: Edges,
+) LayoutError!f32 {
+    const minimum = (try rootDimensionBorder(
+        input.min_size.width,
+        percentage_basis,
+        natural.content.width,
+        edges.box_horizontal,
+        edges.horizontal,
+        input.box_sizing,
+    )) orelse 0;
+    const maximum = try rootDimensionBorder(
+        input.max_size.width,
+        percentage_basis,
+        natural.content.width,
+        edges.box_horizontal,
+        edges.horizontal,
+        input.box_sizing,
+    );
+    return clampRootFinite(candidate, minimum, maximum);
+}
+
+fn clampIntrinsicRootHeight(
+    input: style.Style,
+    natural: context.Measured,
+    candidate: f32,
+    percentage_basis: ?f32,
+    edges: Edges,
+) LayoutError!f32 {
+    const minimum = (try rootDimensionBorder(
+        input.min_size.height,
+        percentage_basis,
+        natural.content.height,
+        edges.box_vertical,
+        edges.vertical,
+        input.box_sizing,
+    )) orelse 0;
+    const maximum = try rootDimensionBorder(
+        input.max_size.height,
+        percentage_basis,
+        natural.content.height,
+        edges.box_vertical,
+        edges.vertical,
+        input.box_sizing,
+    );
+    return clampRootFinite(candidate, minimum, maximum);
+}
+
+fn intrinsicRootWidth(
+    node: *const widget.WidgetNode,
+    natural: context.Measured,
+    options: Options,
+    margins: style.Sides,
+) LayoutError!f32 {
+    if (options.width_mode != .definite) {
+        return finiteNonNegative(natural.border.width);
+    }
+    const block_root_stretches = node.style.position != .absolute and
+        (node.style.display == .block or node.style.display == .flow_root) and
+        node.style.size.width == .auto;
+    if (block_root_stretches) {
+        return rootSizeFromInsets(
+            options.available.width,
+            0,
+            0,
+            margins.left,
+            margins.right,
+        );
+    }
+    return finiteNonNegative(natural.border.width);
+}
+
+fn placeIntrinsicRoot(
+    self: *context.LayoutContext,
+    tree: *widget.WidgetTree,
+    node: *widget.WidgetNode,
+    width: f32,
+    height: f32,
+    y: f32,
+    options: Options,
+) LayoutError!void {
+    const x = if (options.width_mode == .definite and
+        node.style.writing_direction == .rtl)
+        try finiteSubtract(options.available.width, width)
+    else
+        0;
+    node.rect = .{
+        .x = x,
+        .y = y,
+        .w = width,
+        .h = height,
+    };
+    try validateRootRect(node.rect);
+    try self.layout_node(
+        self,
+        tree,
+        node,
+        .{
+            .available = .{ .width = width, .height = height },
+            .percentage_basis = .{
+                .width = if (options.width_mode == .definite) options.available.width else null,
+                .height = if (options.height_mode == .definite) options.available.height else null,
+            },
+            .border = .{ .width = width, .height = height },
+        },
+    );
+}
+
 fn placeFlowRoot(
     self: *context.LayoutContext,
     tree: *widget.WidgetTree,
@@ -218,6 +455,7 @@ fn placeFlowRoot(
     item: *RootItem,
     available: widget.Size,
     cursor: *f32,
+    use_internal_basis: bool,
 ) LayoutError!void {
     const y = try finiteAdd(cursor.*, item.margins.top);
     node.rect = .{
@@ -228,17 +466,21 @@ fn placeFlowRoot(
     };
     try applyRelativeRootInset(node, available);
     try validateRootRect(node.rect);
+    const layout_available: widget.Size = if (use_internal_basis)
+        .{ .width = item.width, .height = item.height }
+    else
+        available;
     try self.layout_node(
         self,
         tree,
         node,
         .{
-            .available = available,
+            .available = layout_available,
             .percentage_basis = .{
-                .width = available.width,
-                .height = available.height,
+                .width = layout_available.width,
+                .height = layout_available.height,
             },
-            .forced_border = .{ .width = item.width, .height = item.height },
+            .border = .{ .width = item.width, .height = item.height },
         },
     );
     const next_cursor = try finiteAdd(y, item.height);
@@ -251,13 +493,46 @@ fn placeAbsoluteRoot(
     node: *widget.WidgetNode,
     item: *RootItem,
     available: widget.Size,
+    use_internal_basis: bool,
 ) LayoutError!void {
     const insets = try resolveRootInsets(node.style, available);
+    if (use_internal_basis) {
+        const width = item.width;
+        const height = item.height;
+        const x = if (insets.left) |left|
+            try finiteAdd(left, item.margins.left)
+        else if (insets.right) |right| blk: {
+            const after_right = try finiteSubtract(available.width, right);
+            const after_margin = try finiteSubtract(after_right, item.margins.right);
+            break :blk try finiteSubtract(after_margin, width);
+        } else item.margins.left;
+        const y = if (insets.top) |top|
+            try finiteAdd(top, item.margins.top)
+        else if (insets.bottom) |bottom| blk: {
+            const after_bottom = try finiteSubtract(available.height, bottom);
+            const after_margin = try finiteSubtract(after_bottom, item.margins.bottom);
+            break :blk try finiteSubtract(after_margin, height);
+        } else item.margins.top;
+        node.rect = .{ .x = x, .y = y, .w = width, .h = height };
+        try validateRootRect(node.rect);
+        try self.layout_node(
+            self,
+            tree,
+            node,
+            .{
+                .available = .{ .width = width, .height = height },
+                .percentage_basis = .{ .width = width, .height = height },
+                .border = .{ .width = width, .height = height },
+            },
+        );
+        return;
+    }
     const edges = try resolveEdges(node.style, available.width);
     const min_width = (try rootDimensionBorder(
         node.style.min_size.width,
         available.width,
         item.natural.content.width,
+        edges.box_horizontal,
         edges.horizontal,
         node.style.box_sizing,
     )) orelse 0;
@@ -265,6 +540,7 @@ fn placeAbsoluteRoot(
         node.style.max_size.width,
         available.width,
         item.natural.content.width,
+        edges.box_horizontal,
         edges.horizontal,
         node.style.box_sizing,
     );
@@ -302,8 +578,8 @@ fn placeAbsoluteRoot(
                     .width = width,
                     .height = available.height,
                 },
-                .intrinsic_width = false,
-                .intrinsic_height = false,
+                .width_mode = .definite,
+                .height_mode = .definite,
             },
         );
     }
@@ -311,19 +587,19 @@ fn placeAbsoluteRoot(
         node.style,
         item.natural,
         available,
-        edges.vertical,
+        edges,
     );
     const min_height = try absoluteRootMinHeight(
         node.style,
         item.natural,
         available,
-        edges.vertical,
+        edges,
     );
     const max_height = try rootMaxHeight(
         node.style,
         item.natural,
         available,
-        edges.vertical,
+        edges,
     );
     var height = if (height_from_insets)
         try rootSizeFromInsets(
@@ -352,7 +628,7 @@ fn placeAbsoluteRoot(
             const height_for_ratio = try finiteDivide(width_for_ratio, ratio);
             height = try sizingToBorder(
                 height_for_ratio,
-                edges.vertical,
+                edges.box_vertical,
                 node.style.box_sizing,
             );
         } else if (!width_definite and
@@ -367,7 +643,7 @@ fn placeAbsoluteRoot(
             const width_for_ratio = try finiteMultiply(height_for_ratio, ratio);
             width = try sizingToBorder(
                 width_for_ratio,
-                edges.horizontal,
+                edges.box_horizontal,
                 node.style.box_sizing,
             );
         }
@@ -403,7 +679,7 @@ fn placeAbsoluteRoot(
                 .width = available.width,
                 .height = available.height,
             },
-            .forced_border = .{ .width = width, .height = height },
+            .border = .{ .width = width, .height = height },
         },
     );
 }
@@ -557,34 +833,41 @@ fn rootBaseHeight(
     input: style.Style,
     natural: context.Measured,
     available: widget.Size,
-    vertical_edges: f32,
+    edges: Edges,
 ) LayoutError!f32 {
-    if (input.basis != 0) {
-        return sizingToBorder(input.basis, vertical_edges, input.box_sizing);
-    }
     const basis = switch (input.flex_basis) {
         .auto => null,
         .length => |value| @as(?f32, value),
-        .percent => |fraction| @as(?f32, fraction * available.height),
-        .min_content, .max_content, .fit_content => @as(?f32, natural.content.height),
+        .percent => |fraction| @as(?f32, try finiteMultiply(fraction, available.height)),
+        .min_content, .max_content => @as(?f32, natural.content.height),
+        .fit_content => |limit| @as(?f32, if (limit) |value|
+            @min(natural.content.height, value)
+        else
+            natural.content.height),
     };
-    if (basis) |value| return sizingToBorder(value, vertical_edges, input.box_sizing);
+    if (basis) |value| {
+        const edge_sum = switch (input.flex_basis) {
+            .length, .percent => edges.box_vertical,
+            .min_content, .max_content, .fit_content => edges.vertical,
+            .auto => unreachable,
+        };
+        return sizingToBorder(value, edge_sum, input.box_sizing);
+    }
     return finiteNonNegative(natural.border.height);
 }
-
 fn rootMinHeight(
     input: style.Style,
     natural: context.Measured,
     available: widget.Size,
-    vertical_edges: f32,
+    edges: Edges,
 ) LayoutError!f32 {
     var result: f32 = 0;
-    if (input.min_main) |minimum| result = try finiteNonNegative(minimum);
     if (try rootDimensionBorder(
         input.min_size.height,
         available.height,
         natural.content.height,
-        vertical_edges,
+        edges.box_vertical,
+        edges.vertical,
         input.box_sizing,
     )) |minimum| {
         result = @max(result, minimum);
@@ -596,13 +879,14 @@ fn absoluteRootBaseHeight(
     input: style.Style,
     natural: context.Measured,
     available: widget.Size,
-    vertical_edges: f32,
+    edges: Edges,
 ) LayoutError!f32 {
     return (try rootDimensionBorder(
         input.size.height,
         available.height,
         natural.content.height,
-        vertical_edges,
+        edges.box_vertical,
+        edges.vertical,
         input.box_sizing,
     )) orelse finiteNonNegative(natural.border.height);
 }
@@ -611,13 +895,14 @@ fn absoluteRootMinHeight(
     input: style.Style,
     natural: context.Measured,
     available: widget.Size,
-    vertical_edges: f32,
+    edges: Edges,
 ) LayoutError!f32 {
     return (try rootDimensionBorder(
         input.min_size.height,
         available.height,
         natural.content.height,
-        vertical_edges,
+        edges.box_vertical,
+        edges.vertical,
         input.box_sizing,
     )) orelse 0;
 }
@@ -626,32 +911,42 @@ fn rootMaxHeight(
     input: style.Style,
     natural: context.Measured,
     available: widget.Size,
-    vertical_edges: f32,
+    edges: Edges,
 ) LayoutError!?f32 {
     return rootDimensionBorder(
         input.max_size.height,
         available.height,
         natural.content.height,
-        vertical_edges,
+        edges.box_vertical,
+        edges.vertical,
         input.box_sizing,
     );
 }
 
 fn rootDimensionBorder(
     value: style.Dimension,
-    basis: f32,
+    basis: ?f32,
     intrinsic: f32,
-    edges: f32,
+    box_edges: f32,
+    content_edges: f32,
     box_sizing: style.BoxSizing,
 ) LayoutError!?f32 {
     const content = switch (value) {
         .auto => return null,
         .length => |number| number,
-        .percent => |fraction| try finiteMultiply(fraction, basis),
+        .percent => |fraction| if (basis) |resolved_basis|
+            try finiteMultiply(fraction, resolved_basis)
+        else
+            return null,
         .min_content, .max_content => intrinsic,
         .fit_content => |limit_opt| if (limit_opt) |limit| @min(limit, intrinsic) else intrinsic,
     };
-    return @as(?f32, try sizingToBorder(content, edges, box_sizing));
+    const edge_sum = switch (value) {
+        .length, .percent => box_edges,
+        .min_content, .max_content, .fit_content => content_edges,
+        .auto => unreachable,
+    };
+    return @as(?f32, try sizingToBorder(content, edge_sum, box_sizing));
 }
 
 fn rootShrinkFloor(
@@ -659,7 +954,7 @@ fn rootShrinkFloor(
     natural: context.Measured,
     minimum: f32,
 ) f32 {
-    const explicit_minimum = input.min_main != null or input.min_size.height != .auto;
+    const explicit_minimum = input.min_size.height != .auto;
     return if (explicit_minimum) minimum else natural.border.height;
 }
 fn sizingToBorder(value: f32, edges: f32, box_sizing: style.BoxSizing) LayoutError!f32 {
@@ -670,24 +965,26 @@ fn sizingToBorder(value: f32, edges: f32, box_sizing: style.BoxSizing) LayoutErr
     };
 }
 
-fn resolveRootMargins(input: style.Style, basis: f32) LayoutError!style.Sides {
+fn resolveRootMargins(input: style.Style, basis: ?f32) LayoutError!style.Sides {
     return .{
-        .top = try resolveRootMargin(input.margin_inset.top, input.margin.top, basis),
-        .right = try resolveRootMargin(input.margin_inset.right, input.margin.right, basis),
-        .bottom = try resolveRootMargin(input.margin_inset.bottom, input.margin.bottom, basis),
-        .left = try resolveRootMargin(input.margin_inset.left, input.margin.left, basis),
+        .top = try resolveRootMargin(input.margin_inset.top, basis),
+        .right = try resolveRootMargin(input.margin_inset.right, basis),
+        .bottom = try resolveRootMargin(input.margin_inset.bottom, basis),
+        .left = try resolveRootMargin(input.margin_inset.left, basis),
     };
 }
 
 fn resolveRootMargin(
     value: style.LengthPercentageAuto,
-    legacy: f32,
-    basis: f32,
+    basis: ?f32,
 ) LayoutError!f32 {
     const result = switch (value) {
         .auto => 0,
-        .length => |number| if (number == 0 and legacy != 0) legacy else number,
-        .percent => |fraction| try finiteMultiply(fraction, basis),
+        .length => |number| number,
+        .percent => |fraction| if (basis) |percentage_basis|
+            try finiteMultiply(fraction, percentage_basis)
+        else
+            0,
     };
     return finiteSigned(result);
 }
@@ -742,7 +1039,9 @@ fn measureNodeCallback(
     node: *const widget.WidgetNode,
     request: context.Request,
 ) LayoutError!context.Measured {
-    if (node.children.items.len != 0 and needsNaturalMeasurement(node)) {
+    if (requestForcedSizing(request) or
+        (node.children.items.len != 0 and needsNaturalMeasurement(node, request)))
+    {
         return switch (node.style.display) {
             .block, .flow_root => block_float.measureNatural(
                 tree,
@@ -767,11 +1066,21 @@ fn measureNodeCallback(
     );
 }
 
-fn needsNaturalMeasurement(node: *const widget.WidgetNode) bool {
-    return isIntrinsicDimension(node.style.size.width) or
+fn needsNaturalMeasurement(
+    node: *const widget.WidgetNode,
+    request: context.Request,
+) bool {
+    return request.width_mode != .definite or
+        request.height_mode != .definite or
+        isIntrinsicDimension(node.style.size.width) or
         isIntrinsicDimension(node.style.size.height);
 }
 
+fn requestForcedSizing(request: context.Request) bool {
+    return request.sizing_mode == .content or
+        request.known_border.width != null or
+        request.known_border.height != null;
+}
 fn isIntrinsicDimension(value: style.Dimension) bool {
     return switch (value) {
         .auto, .min_content, .max_content, .fit_content => true,
@@ -789,12 +1098,16 @@ fn layoutNodeCallback(
     self: *context.LayoutContext,
     tree: *widget.WidgetTree,
     node: *widget.WidgetNode,
-    request: context.Request,
+    request: context.LayoutRequest,
 ) LayoutError!void {
-    try validateRequest(request);
+    try validateLayoutRequest(request);
     if (node.layout_hidden) return;
     const node_index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
     if (&tree.nodes.items[node_index] != node) return error.InvalidStyle;
+    if (node.children.items.len == 0) {
+        try layoutLeaf(self, node, request);
+        return;
+    }
     const sizing_context: sizing.SizingContext = .{
         .available = .{
             .width = .{ .definite = request.available.width },
@@ -811,7 +1124,7 @@ fn layoutNodeCallback(
                 sizing_context,
                 self.measure,
                 self,
-                request.forced_border,
+                request.border,
             );
         },
         .flex => try flex.layoutPreparedContainer(tree, node.id, .{
@@ -819,13 +1132,13 @@ fn layoutNodeCallback(
             .available = request.available,
             .measure = self.measure,
             .context = self,
-        }, request.forced_border),
+        }, request.border),
         .grid => try grid.layoutPreparedContainer(tree, node.id, .{
             .allocator = self.allocator,
             .available = request.available,
             .measure = self.measure,
             .context = self,
-        }, request.forced_border),
+        }, request.border),
     }
 }
 
@@ -844,7 +1157,7 @@ fn measureNode(
     };
     const edges = try resolveEdges(node.style, request.percentage_basis.width);
     const intrinsic: widget.Size = if (node.children.items.len == 0)
-        try measureLeaf(node, measure)
+        try measureLeaf(node, request, edges, measure, false)
     else
         .{ .width = 0, .height = 0 };
     const width = try resolveConcreteDimension(
@@ -858,10 +1171,18 @@ fn measureNode(
         if (node.children.items.len == 0) intrinsic.height else null,
     );
     if (width == null or height == null) return error.InvalidStyle;
-    const border = try borderSize(
+    const unclamped_border = try borderSize(
         node.style,
         .{ .width = width.?, .height = height.? },
         edges,
+        request.percentage_basis,
+    );
+    const border = try clampBorderSize(
+        node.style,
+        unclamped_border,
+        intrinsic,
+        edges,
+        request.percentage_basis,
     );
     return .{
         .content = .{
@@ -872,46 +1193,267 @@ fn measureNode(
     };
 }
 
-fn measureLeaf(
-    node: *const widget.WidgetNode,
-    measure: ?context.MeasureFn,
-) LayoutError!widget.Size {
-    var result: widget.Size = switch (node.kind) {
-        .label => |label| if (measure) |callback|
-            callback(label.text, node.font_size, node.font_id)
-        else blk: {
-            const text_length: f32 = @floatFromInt(@min(label.text.len, 1 << 24));
-            break :blk .{
-                .width = text_length * (if (node.font_size > 0) node.font_size / 2 else 10),
-                .height = if (node.font_size > 0) node.font_size else 20,
-            };
-        },
-        .spacer => |spacer| .{ .width = spacer.size, .height = spacer.size },
-        .button => .{ .width = 100, .height = 32 },
-        .slider => .{ .width = 100, .height = widget.slider_rail_height },
-        .row, .column => .{ .width = 0, .height = 0 },
+fn layoutLeaf(
+    self: *context.LayoutContext,
+    node: *widget.WidgetNode,
+    request: context.LayoutRequest,
+) LayoutError!void {
+    const edges = try resolveEdges(node.style, request.percentage_basis.width);
+    node.resolved_box_edges = .{ .border = edges.border, .padding = edges.padding };
+    const leaf_request: context.Request = .{
+        .available = .{ .width = node.rect.w, .height = node.rect.h },
+        .percentage_basis = request.percentage_basis,
     };
-    if (node.text_max_width) |maximum| {
-        if (node.text_overflow != .visible) result.width = @min(result.width, maximum);
+    const content = try measureLeaf(node, leaf_request, edges, self.measure, true);
+    node.layout_content_size = try overflow.contentExtent(content, edges.box_padding);
+    if (node.scroll) |scroll| {
+        scroll.state.max_offset = try overflow.maxOffset(
+            node.layout_content_size,
+            try overflow.clientSize(
+                .{ .width = node.rect.w, .height = node.rect.h },
+                edges.border,
+                edges.gutter,
+            ),
+            scroll.axis,
+        );
     }
-    if (!std.math.isFinite(result.width) or !std.math.isFinite(result.height)) {
-        return error.InvalidStyle;
-    }
-    if (result.width < 0 or result.height < 0) return error.InvalidStyle;
-    return result;
 }
 
-fn borderSize(input: style.Style, dimensions: widget.Size, edges: Edges) LayoutError!widget.Size {
-    const width = if (input.box_sizing == .content_box)
-        dimensions.width + edges.horizontal
+fn measureLeaf(
+    node: *const widget.WidgetNode,
+    request: context.Request,
+    edges: Edges,
+    measure: ?context.MeasureFn,
+    ignore_known: bool,
+) LayoutError!widget.Size {
+    const font_size = try finiteNonNegative(node.font_size);
+    const known_dimensions = if (ignore_known)
+        sizing.OptionalSize{ .width = null, .height = null }
+    else
+        try measureKnownDimensions(node, request, edges);
+    const available_space: sizing.AvailableSize = .{
+        .width = try measureAvailableSpace(
+            node.style.size.width,
+            known_dimensions.width,
+            request.available.width,
+            edges.horizontal,
+            request.width_mode,
+        ),
+        .height = try measureAvailableSpace(
+            node.style.size.height,
+            known_dimensions.height,
+            request.available.height,
+            edges.vertical,
+            request.height_mode,
+        ),
+    };
+    const result: widget.Size = switch (node.kind) {
+        .label => |label| try context.measureText(
+            measure,
+            label.text,
+            .{
+                .known_dimensions = known_dimensions,
+                .available_space = available_space,
+                .font_size = font_size,
+                .font_id = node.font_id,
+            },
+            node.text_overflow,
+            node.text_max_width,
+        ),
+        .spacer => |spacer| .{ .width = spacer.size, .height = spacer.size },
+        .button => .{ .width = 100, .height = 32 },
+        .slider => try context.measureSliderContent(measure, node, .{
+            .known_dimensions = known_dimensions,
+            .available_space = available_space,
+            .font_size = font_size,
+            .font_id = node.font_id,
+        }),
+        .row, .column => .{ .width = 0, .height = 0 },
+    };
+    return .{
+        .width = try finiteNonNegative(result.width),
+        .height = try finiteNonNegative(result.height),
+    };
+}
+
+fn measureKnownDimensions(
+    node: *const widget.WidgetNode,
+    request: context.Request,
+    edges: Edges,
+) LayoutError!sizing.OptionalSize {
+    return .{
+        .width = try knownDimensionForRequest(
+            node.style.size.width,
+            request.known_border.width,
+            request.sizing_mode,
+            request.percentage_basis.width,
+            edges.box_horizontal,
+            edges.horizontal,
+            node.style.box_sizing,
+        ),
+        .height = try knownDimensionForRequest(
+            node.style.size.height,
+            request.known_border.height,
+            request.sizing_mode,
+            request.percentage_basis.height,
+            edges.box_vertical,
+            edges.vertical,
+            node.style.box_sizing,
+        ),
+    };
+}
+
+fn knownDimensionForRequest(
+    value: style.Dimension,
+    known_border: ?f32,
+    sizing_mode: context.SizingMode,
+    basis: ?f32,
+    box_edges: f32,
+    content_edges: f32,
+    box_sizing: style.BoxSizing,
+) LayoutError!?f32 {
+    if (known_border) |border| {
+        return @as(?f32, try contentFromBorder(border, content_edges));
+    }
+    if (sizing_mode == .content) return null;
+    return knownDimension(
+        value,
+        basis,
+        box_edges,
+        content_edges,
+        box_sizing,
+    );
+}
+
+fn knownDimension(
+    value: style.Dimension,
+    basis: ?f32,
+    box_edges: f32,
+    content_edges: f32,
+    box_sizing: style.BoxSizing,
+) LayoutError!?f32 {
+    const sizing_value = switch (value) {
+        .length => |number| try finiteNonNegative(number),
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse return null;
+            break :blk try finiteNonNegative(fraction * percentage_basis);
+        },
+        .auto, .min_content, .max_content, .fit_content => return null,
+    };
+    const border = switch (box_sizing) {
+        .content_box => try finiteAdd(sizing_value, box_edges),
+        .border_box => sizing_value,
+    };
+    return @as(?f32, try contentFromBorder(border, content_edges));
+}
+
+fn contentFromBorder(border: f32, edges: f32) LayoutError!f32 {
+    const difference = try finiteSubtract(try finiteNonNegative(border), edges);
+    return finiteNonNegative(@max(0, difference));
+}
+
+fn measureAvailableSpace(
+    dimension: style.Dimension,
+    known: ?f32,
+    available_border: f32,
+    edge_sum: f32,
+    mode: context.MeasureMode,
+) LayoutError!sizing.AvailableSpace {
+    if (known) |value| return .{ .definite = try finiteNonNegative(value) };
+    const available_content = @max(
+        0,
+        try finiteSubtract(try finiteNonNegative(available_border), edge_sum),
+    );
+    return switch (dimension) {
+        .min_content => .min_content,
+        .max_content => .max_content,
+        .fit_content => |limit| .{
+            .definite = if (limit) |value|
+                @min(available_content, try finiteNonNegative(value))
+            else
+                available_content,
+        },
+        .auto, .length, .percent => switch (mode) {
+            .definite => .{ .definite = available_content },
+            .min_content => .min_content,
+            .max_content => .max_content,
+        },
+    };
+}
+
+fn borderSize(
+    input: style.Style,
+    dimensions: widget.Size,
+    edges: Edges,
+    percentage_basis: style.Size(?f32),
+) LayoutError!widget.Size {
+    const width = if (dimensionUsesIntrinsic(
+        input.size.width,
+        percentage_basis.width,
+    ))
+        try finiteAdd(dimensions.width, edges.horizontal)
+    else if (input.box_sizing == .content_box)
+        try finiteAdd(dimensions.width, edges.box_horizontal)
     else
         dimensions.width;
-    const height = if (input.box_sizing == .content_box)
-        dimensions.height + edges.vertical
+    const height = if (dimensionUsesIntrinsic(
+        input.size.height,
+        percentage_basis.height,
+    ))
+        try finiteAdd(dimensions.height, edges.vertical)
+    else if (input.box_sizing == .content_box)
+        try finiteAdd(dimensions.height, edges.box_vertical)
     else
         dimensions.height;
-    if (!std.math.isFinite(width) or !std.math.isFinite(height)) return error.InvalidStyle;
-    return .{ .width = @max(edges.horizontal, width), .height = @max(edges.vertical, height) };
+    return .{
+        .width = @max(edges.box_horizontal, try finiteNonNegative(width)),
+        .height = @max(edges.box_vertical, try finiteNonNegative(height)),
+    };
+}
+
+fn clampBorderSize(
+    input: style.Style,
+    candidate: widget.Size,
+    intrinsic: widget.Size,
+    edges: Edges,
+    percentage_basis: style.Size(?f32),
+) LayoutError!widget.Size {
+    const minimum_width = (try rootDimensionBorder(
+        input.min_size.width,
+        percentage_basis.width,
+        intrinsic.width,
+        edges.box_horizontal,
+        edges.horizontal,
+        input.box_sizing,
+    )) orelse 0;
+    const maximum_width = try rootDimensionBorder(
+        input.max_size.width,
+        percentage_basis.width,
+        intrinsic.width,
+        edges.box_horizontal,
+        edges.horizontal,
+        input.box_sizing,
+    );
+    const minimum_height = (try rootDimensionBorder(
+        input.min_size.height,
+        percentage_basis.height,
+        intrinsic.height,
+        edges.box_vertical,
+        edges.vertical,
+        input.box_sizing,
+    )) orelse 0;
+    const maximum_height = try rootDimensionBorder(
+        input.max_size.height,
+        percentage_basis.height,
+        intrinsic.height,
+        edges.box_vertical,
+        edges.vertical,
+        input.box_sizing,
+    );
+    return .{
+        .width = try clampRootFinite(candidate.width, minimum_width, maximum_width),
+        .height = try clampRootFinite(candidate.height, minimum_height, maximum_height),
+    };
 }
 
 fn resolveConcreteDimension(
@@ -925,7 +1467,7 @@ fn resolveConcreteDimension(
             break :blk @as(?f32, resolved);
         },
         .percent => |fraction| blk: {
-            const basis = percentage_basis orelse return error.InvalidStyle;
+            const basis = percentage_basis orelse return intrinsic;
             const resolved = try finiteNonNegative(fraction * basis);
             break :blk @as(?f32, resolved);
         },
@@ -933,32 +1475,66 @@ fn resolveConcreteDimension(
     };
 }
 
+fn dimensionUsesIntrinsic(value: style.Dimension, percentage_basis: ?f32) bool {
+    return isIntrinsicDimension(value) or
+        (value == .percent and percentage_basis == null);
+}
+
 fn resolveEdges(input: style.Style, basis: ?f32) LayoutError!Edges {
-    const width_basis = basis orelse return error.InvalidStyle;
+    const width_basis = basis;
+    _ = try finiteNonNegative(input.scrollbar_width);
     const border: style.Sides = .{
-        .top = try resolveEdge(input.border_inset.top, input.border.top, width_basis),
-        .right = try resolveEdge(input.border_inset.right, input.border.right, width_basis),
-        .bottom = try resolveEdge(input.border_inset.bottom, input.border.bottom, width_basis),
-        .left = try resolveEdge(input.border_inset.left, input.border.left, width_basis),
+        .top = try resolveEdge(input.border_inset.top, width_basis),
+        .right = try resolveEdge(input.border_inset.right, width_basis),
+        .bottom = try resolveEdge(input.border_inset.bottom, width_basis),
+        .left = try resolveEdge(input.border_inset.left, width_basis),
     };
+    const resolved_padding: style.Sides = .{
+        .top = try resolveEdge(input.padding_inset.top, width_basis),
+        .right = try resolveEdge(input.padding_inset.right, width_basis),
+        .bottom = try resolveEdge(input.padding_inset.bottom, width_basis),
+        .left = try resolveEdge(input.padding_inset.left, width_basis),
+    };
+    const gutter = input.scrollbarGutter();
     const padding: style.Sides = .{
-        .top = try resolveEdge(input.padding_inset.top, input.padding.top, width_basis),
-        .right = try resolveEdge(input.padding_inset.right, input.padding.right, width_basis),
-        .bottom = try resolveEdge(input.padding_inset.bottom, input.padding.bottom, width_basis),
-        .left = try resolveEdge(input.padding_inset.left, input.padding.left, width_basis),
+        .top = try finiteAdd(resolved_padding.top, gutter.top),
+        .right = try finiteAdd(resolved_padding.right, gutter.right),
+        .bottom = try finiteAdd(resolved_padding.bottom, gutter.bottom),
+        .left = try finiteAdd(resolved_padding.left, gutter.left),
     };
+    const box_horizontal = try finiteAdd(
+        try finiteAdd(border.left, border.right),
+        try finiteAdd(resolved_padding.left, resolved_padding.right),
+    );
+    const box_vertical = try finiteAdd(
+        try finiteAdd(border.top, border.bottom),
+        try finiteAdd(resolved_padding.top, resolved_padding.bottom),
+    );
     return .{
         .border = border,
         .padding = padding,
-        .horizontal = border.left + border.right + padding.left + padding.right,
-        .vertical = border.top + border.bottom + padding.top + padding.bottom,
+        .box_padding = resolved_padding,
+        .gutter = gutter,
+        .box_horizontal = box_horizontal,
+        .box_vertical = box_vertical,
+        .horizontal = try finiteAdd(
+            try finiteAdd(border.left, border.right),
+            try finiteAdd(padding.left, padding.right),
+        ),
+        .vertical = try finiteAdd(
+            try finiteAdd(border.top, border.bottom),
+            try finiteAdd(padding.top, padding.bottom),
+        ),
     };
 }
 
-fn resolveEdge(value: style.LengthPercentage, legacy: f32, basis: f32) LayoutError!f32 {
+fn resolveEdge(value: style.LengthPercentage, basis: ?f32) LayoutError!f32 {
     const result = switch (value) {
-        .length => |number| if (number == 0 and legacy != 0) legacy else number,
-        .percent => |fraction| fraction * basis,
+        .length => |number| number,
+        .percent => |fraction| blk: {
+            const percentage_basis = basis orelse break :blk 0;
+            break :blk fraction * percentage_basis;
+        },
     };
     return finiteNonNegative(result);
 }
@@ -967,10 +1543,16 @@ fn validateRequest(request: context.Request) LayoutError!void {
     try validateAvailable(request.available);
     if (request.percentage_basis.width) |width| _ = try finiteNonNegative(width);
     if (request.percentage_basis.height) |height| _ = try finiteNonNegative(height);
-    if (request.forced_border) |border| {
-        _ = try finiteNonNegative(border.width);
-        _ = try finiteNonNegative(border.height);
-    }
+    if (request.known_border.width) |width| _ = try finiteNonNegative(width);
+    if (request.known_border.height) |height| _ = try finiteNonNegative(height);
+}
+
+fn validateLayoutRequest(request: context.LayoutRequest) LayoutError!void {
+    try validateAvailable(request.available);
+    if (request.percentage_basis.width) |width| _ = try finiteNonNegative(width);
+    if (request.percentage_basis.height) |height| _ = try finiteNonNegative(height);
+    _ = try finiteNonNegative(request.border.width);
+    _ = try finiteNonNegative(request.border.height);
 }
 
 fn validateAvailable(available: widget.Size) LayoutError!void {
@@ -989,9 +1571,7 @@ fn validateTree(
 ) LayoutError!std.ArrayList(usize) {
     var roots: std.ArrayList(usize) = .empty;
     errdefer roots.deinit(allocator);
-    const visited = allocator.alloc(bool, tree.nodes.items.len) catch {
-        return error.InvalidStyle;
-    };
+    const visited = try allocator.alloc(bool, tree.nodes.items.len);
     defer allocator.free(visited);
     @memset(visited, false);
     for (tree.nodes.items, 0..) |node, node_index| {
@@ -1000,10 +1580,9 @@ fn validateTree(
             if (prior.id == node.id) return error.InvalidStyle;
         }
         if (node.parent == .root) {
-            roots.append(allocator, node_index) catch return error.InvalidStyle;
+            try roots.append(allocator, node_index);
         }
     }
-    if (roots.items.len == 0) return error.InvalidStyle;
     for (roots.items) |root_index| {
         try validateNode(
             tree,
@@ -1031,12 +1610,6 @@ fn validateNode(
     visited[index] = true;
     const node = &tree.nodes.items[index];
     if (node.parent != expected_parent) return error.InvalidStyle;
-    if (node.style.display != .none and node.children.items.len != 0) {
-        switch (node.kind) {
-            .row, .column => {},
-            else => return error.InvalidStyle,
-        }
-    }
     for (node.children.items, 0..) |child_id, child_offset| {
         if (child_id == .root) return error.InvalidStyle;
         for (node.children.items[0..child_offset]) |prior_id| {
@@ -1059,47 +1632,15 @@ fn validateNode(
     }
 }
 
-pub fn eligibleMixedForest(tree: *const widget.WidgetTree) bool {
-    var roots = validateTree(tree.allocator, tree) catch return false;
-    defer roots.deinit(tree.allocator);
-    var mixed = false;
-    for (roots.items) |root_index| {
-        const root = &tree.nodes.items[root_index];
-        if (!eligibleRoot(root)) return false;
-        if (!isConcreteTree(tree, root_index, tree.nodes.items.len + 1, true)) {
-            return false;
-        }
-        if (hasMixedDisplay(tree, root_index, tree.nodes.items.len + 1)) {
-            mixed = true;
+fn resetDerivedState(tree: *widget.WidgetTree) void {
+    for (tree.nodes.items) |*node| {
+        node.layout_hidden = false;
+        node.first_baseline = null;
+        node.layout_content_size = .{ .width = 0, .height = 0 };
+        if (node.scroll) |scroll| {
+            scroll.state.max_offset = .{ 0, 0 };
         }
     }
-    return mixed;
-}
-
-fn eligibleRoot(node: *const widget.WidgetNode) bool {
-    if (node.scroll != null or hasScrollOverflow(node.style)) return false;
-    if (node.style.float != .none or node.style.clear != .none) return false;
-    if (!isSupportedRootDimension(node.style.size.width)) return false;
-    if (!isSupportedRootDimension(node.style.size.height)) return false;
-    if (!isFiniteRootStyle(node.style)) return false;
-    return true;
-}
-
-fn hasScrollOverflow(input: style.Style) bool {
-    return input.overflow.width == .scroll or
-        input.overflow.width == .auto or
-        input.overflow.height == .scroll or
-        input.overflow.height == .auto;
-}
-
-fn isFiniteRootStyle(input: style.Style) bool {
-    if (!std.math.isFinite(input.grow) or input.grow < 0) return false;
-    if (!std.math.isFinite(input.shrink) or input.shrink < 0) return false;
-    if (!std.math.isFinite(input.basis) or input.basis < 0) return false;
-    if (input.min_main) |minimum| {
-        if (!std.math.isFinite(minimum) or minimum < 0) return false;
-    }
-    return true;
 }
 
 fn markHidden(
@@ -1113,80 +1654,16 @@ fn markHidden(
     const hidden = inherited or node.style.display == .none;
     node.layout_hidden = hidden;
     if (hidden) {
+        node.first_baseline = null;
         node.rect = .{};
-        node.natural_main = 0;
         node.resolved_box_edges = null;
+        node.layout_content_size = .{ .width = 0, .height = 0 };
+        if (node.scroll) |scroll| {
+            scroll.state.max_offset = .{ 0, 0 };
+        }
     }
     for (node.children.items) |child_id| {
         const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
         try markHidden(tree, child_index, hidden, depth - 1);
     }
-}
-
-const EngineFamily = enum { none, block, flex, grid };
-
-fn engineFamily(display: style.Display) EngineFamily {
-    return switch (display) {
-        .none => .none,
-        .block, .flow_root => .block,
-        .flex => .flex,
-        .grid => .grid,
-    };
-}
-
-fn hasMixedDisplay(tree: *const widget.WidgetTree, index: usize, depth: usize) bool {
-    if (depth == 0) return false;
-    const node = &tree.nodes.items[index];
-    if (node.style.display == .none) return false;
-    const family = engineFamily(node.style.display);
-    for (node.children.items) |child_id| {
-        const child_index = tree.nodeIndex(child_id) orelse return false;
-        const child = &tree.nodes.items[child_index];
-        if (child.style.display == .none) continue;
-        if (child.children.items.len != 0 and engineFamily(child.style.display) != family) {
-            return true;
-        }
-        if (hasMixedDisplay(tree, child_index, depth - 1)) return true;
-    }
-    return false;
-}
-
-fn isConcreteTree(
-    tree: *const widget.WidgetTree,
-    index: usize,
-    depth: usize,
-    is_root: bool,
-) bool {
-    if (depth == 0 or index >= tree.nodes.items.len) return false;
-    const node = &tree.nodes.items[index];
-    if (node.scroll != null) return false;
-    if (node.style.display != .none and node.children.items.len != 0) {
-        if (is_root) {
-            if (!isSupportedRootDimension(node.style.size.width)) return false;
-            if (node.style.display != .block and
-                node.style.display != .flow_root and
-                !isSupportedRootDimension(node.style.size.height))
-            {
-                return false;
-            }
-        }
-        switch (node.kind) {
-            .row, .column => {},
-            else => return false,
-        }
-    }
-    for (node.children.items) |child_id| {
-        const child_index = tree.nodeIndex(child_id) orelse return false;
-        if (!isConcreteTree(tree, child_index, depth - 1, false)) return false;
-    }
-    return true;
-}
-
-fn isSupportedRootDimension(value: style.Dimension) bool {
-    return switch (value) {
-        .auto => true,
-        .length => |number| std.math.isFinite(number) and number >= 0,
-        .percent => |fraction| std.math.isFinite(fraction) and fraction >= 0,
-        .min_content, .max_content, .fit_content => false,
-    };
 }

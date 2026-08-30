@@ -9,6 +9,7 @@ const std = @import("std");
 
 const Id = @import("id.zig").Id;
 const widget = @import("widget.zig");
+const style = @import("style.zig");
 const WidgetTree = widget.WidgetTree;
 const Rect = widget.Rect;
 
@@ -52,7 +53,7 @@ fn pointInClipChainFromRect(
     var current_rect = candidate_rect;
     while (cur != .root) {
         const n = tree.nodeConst(cur) orelse break;
-        if (n.paint.clip and !contains(current_rect, pos)) return false;
+        if (!widget.pointInClipAxes(current_rect, n.contentClipAxes(), pos)) return false;
         cur = n.parent;
         if (cur != .root) current_rect = widget.visualBorderRect(tree, cur);
     }
@@ -245,8 +246,18 @@ test "hitTest: resolves absolute rect through parent padding + border" {
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
         .style = .{
-            .padding = .{ .left = 8, .top = 8 },
-            .border = .{ .left = 2, .top = 1 },
+            .padding_inset = .{
+                .top = .{ .length = 8 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 8 },
+            },
+            .border_inset = .{
+                .top = .{ .length = 1 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 2 },
+            },
         },
     });
     try tree.appendChild(column_id, label_id);
@@ -326,4 +337,96 @@ test "hitButton: clipped child outside parent clip returns null" {
     try tree.appendChild(parent_id, button_id);
 
     try std.testing.expectEqual(@as(?Id, null), hitButton(&tree, .{ 25, 10 }));
+}
+
+test "hit tests: style overflow modes reject descendants outside parent" {
+    const overflow_modes = [_]style.Overflow{ .hidden, .clip };
+
+    for (overflow_modes) |overflow_mode| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const parent_id: Id = @enumFromInt(1);
+        const button_id: Id = @enumFromInt(2);
+        try tree.nodes.append(std.testing.allocator, .{
+            .id = button_id,
+            .kind = .{ .button = .{ .label = "overflowed" } },
+            .parent = parent_id,
+            .rect = .{ .x = 25, .y = 20, .w = 30, .h = 20 },
+        });
+        try tree.nodes.append(std.testing.allocator, .{
+            .id = parent_id,
+            .kind = .{ .column = .{} },
+            .parent = .root,
+            .rect = .{ .x = 10, .y = 10, .w = 40, .h = 30 },
+            .style = .{
+                .overflow = .{ .width = overflow_mode, .height = overflow_mode },
+            },
+        });
+        try tree.appendChild(parent_id, button_id);
+
+        try std.testing.expect(tree.node(parent_id).?.scroll == null);
+        try std.testing.expect(!tree.node(parent_id).?.paint.clip);
+        // The point is inside the button's visual rect but outside the
+        // overflow parent's border box.
+        try std.testing.expectEqual(@as(?Id, null), hitButton(&tree, .{ 60, 45 }));
+        try std.testing.expectEqual(@as(?Id, null), hitTest(&tree, .{ 60, 45 }));
+        try std.testing.expect(!widget.pointInClipChain(&tree, button_id, .{ 60, 45 }));
+    }
+}
+
+test "hit tests: mixed overflow axes clip independently" {
+    const parent_id: Id = @enumFromInt(1);
+    const button_id: Id = @enumFromInt(2);
+    const cases = [_]struct {
+        overflow: style.OverflowAxes,
+        horizontal_hit: ?Id,
+        vertical_hit: ?Id,
+    }{
+        .{
+            .overflow = .{ .width = .clip, .height = .visible },
+            .horizontal_hit = null,
+            .vertical_hit = button_id,
+        },
+        .{
+            .overflow = .{ .width = .visible, .height = .hidden },
+            .horizontal_hit = button_id,
+            .vertical_hit = null,
+        },
+    };
+
+    for (cases) |case| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        try tree.nodes.append(std.testing.allocator, .{
+            .id = button_id,
+            .kind = .{ .button = .{ .label = "overflowed" } },
+            .parent = parent_id,
+            .rect = .{ .x = 25, .y = 20, .w = 30, .h = 30 },
+        });
+        try tree.nodes.append(std.testing.allocator, .{
+            .id = parent_id,
+            .kind = .{ .column = .{} },
+            .parent = .root,
+            .rect = .{ .x = 10, .y = 10, .w = 40, .h = 30 },
+            .style = .{ .overflow = case.overflow },
+        });
+        try tree.appendChild(parent_id, button_id);
+
+        const horizontal_overflow = [2]f32{ 60, 35 };
+        const vertical_overflow = [2]f32{ 40, 50 };
+        try std.testing.expectEqual(case.horizontal_hit, hitButton(&tree, horizontal_overflow));
+        try std.testing.expectEqual(case.horizontal_hit, hitTest(&tree, horizontal_overflow));
+        try std.testing.expectEqual(
+            case.horizontal_hit != null,
+            widget.pointInClipChain(&tree, button_id, horizontal_overflow),
+        );
+        try std.testing.expectEqual(case.vertical_hit, hitButton(&tree, vertical_overflow));
+        try std.testing.expectEqual(case.vertical_hit, hitTest(&tree, vertical_overflow));
+        try std.testing.expectEqual(
+            case.vertical_hit != null,
+            widget.pointInClipChain(&tree, button_id, vertical_overflow),
+        );
+    }
 }

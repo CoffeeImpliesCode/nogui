@@ -1,15 +1,20 @@
 const std = @import("std");
 const fixture = @import("fixture.zig");
+const fixture_options = @import("fixture_options");
 
-test "runs the pinned leaf fixture" {
-    const result = try fixture.runAll(
-        std.testing.allocator,
-        "leaf/leaf_with_content_and_border.html",
-    );
+test "runs the complete pinned fixture corpus" {
+    const filter: ?[]const u8 = if (fixture_options.filter.len == 0) null else fixture_options.filter;
+    const result = try fixture.runAll(std.testing.allocator, filter);
+    if (filter != null) {
+        try std.testing.expectEqual(@as(usize, 0), result.failed);
+        try std.testing.expectEqual(@as(usize, 0), result.unsupported);
+        try std.testing.expect(result.passed > 0);
+        return;
+    }
 
-    try std.testing.expectEqual(@as(usize, 1), result.passed);
+    try std.testing.expectEqual(@as(usize, 5504), result.passed);
     try std.testing.expectEqual(@as(usize, 0), result.failed);
-    try std.testing.expectEqual(@as(usize, 0), result.unsupported);
+    try std.testing.expectEqual(@as(usize, 20), result.unsupported);
 }
 
 test "runs one pinned fixture variant" {
@@ -39,6 +44,6 @@ test "runs a pinned fixture range" {
     );
     try std.testing.expectError(
         error.FixtureNotFound,
-        fixture.runRange(std.testing.allocator, 1, 1),
+        fixture.runRange(std.testing.allocator, 5524, 1),
     );
 }

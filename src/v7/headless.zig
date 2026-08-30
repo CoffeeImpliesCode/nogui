@@ -7,8 +7,9 @@
 //!
 //! Node object shape — kind-specific fields are omitted when absent:
 //!   {"id":N,"kind":"column","parent":N,"rect":{"x":..,"y":..,"w":..,"h":..},
-//!    "children":[ids],"gap":..,"label":..,"value":..}
-//!   - column/row:   "children" (array of child ids) and "gap"
+//!    "children":[ids],"gap":{"length":..},"label":..,"value":..}
+//!   - column/row:   "children" (array of child ids) and typed "gap"
+//!                   (`{"length":..}` or `{"percent":..}`)
 //!   - label/button: "label"
 //!   - slider:       "label" and "value"
 //!   - spacer:       no extra fields
@@ -25,8 +26,8 @@ const Size = @import("widget.zig").Size;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const WidgetNode = @import("widget.zig").WidgetNode;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
-const MeasureFn = @import("flex.zig").MeasureFn;
-const layoutWith = @import("flex.zig").layoutWith;
+const layout = @import("layout/root.zig");
+const MeasureFn = layout.MeasureFn;
 const Event = @import("event.zig").Event;
 const Key = @import("event.zig").Key;
 const KeyEvent = @import("event.zig").KeyEvent;
@@ -258,6 +259,11 @@ fn objNumber(obj: std.json.ObjectMap, name: []const u8) !f64 {
     return num(try objField(obj, name));
 }
 
+const LengthPercentageView = struct {
+    length: ?f32 = null,
+    percent: ?f32 = null,
+};
+
 const NodeView = struct {
     id: u32,
     kind: []const u8,
@@ -266,7 +272,7 @@ const NodeView = struct {
     abs_rect: ?RectView = null,
     vis_rect: ?RectView = null,
     children: ?[]const u32 = null, // containers
-    gap: ?f32 = null, // column/row
+    gap: ?LengthPercentageView = null, // column/row
     label: ?[]const u8 = null, // label/button/slider
     accessible_label: ?[]const u8 = null, // button semantic label
     visual_label: ?[]const u8 = null, // slider visible label override
@@ -311,8 +317,7 @@ fn writeNode(
         .vis_rect = vis_rect,
         .children = child_ids,
         .gap = switch (node.kind) {
-            .column => |c| c.gap,
-            .row => |r| r.gap,
+            .column, .row => lengthPercentageView(node.style.gap),
             else => null,
         },
         .label = switch (node.kind) {
@@ -339,6 +344,13 @@ fn writeNode(
 
 fn rectView(r: Rect) RectView {
     return .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+}
+
+fn lengthPercentageView(value: widget.LengthPercentage) LengthPercentageView {
+    return switch (value) {
+        .length => |length| .{ .length = length },
+        .percent => |percent| .{ .percent = percent },
+    };
 }
 
 /// ── Offscreen layout verification (CPU only — no GPU, no display) ────────
@@ -461,9 +473,11 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
     return grid;
 }
 
-/// Draw label text at the layout position: char i at x+6+i*10 (the flex
-/// advance estimate), baseline at y + h*0.75 — matching the demo's emitText
-/// placement for the map's purpose (rects are the ground truth).
+/// Draw label text at the layout position: byte i at x+6+i*10 (the
+/// fallback advance estimate), baseline at y + h*0.75 — matching the
+/// demo's emitText placement for the map's purpose (rects are the ground
+/// truth). Text is intentionally indexed as UTF-8 bytes, as the fallback
+/// measure callback is.
 fn drawText(grid: []u8, cols: usize, text: []const u8, r: Rect) void {
     const put = struct {
         fn f(g: []u8, c: usize, x: f32, y: f32, ch: u8) void {
@@ -501,18 +515,54 @@ fn visualText(node: *const WidgetNode) ?[]const u8 {
     };
 }
 
+/// Write one length-percentage edge with its union tag and payload.
+fn writeLengthPercentageEdge(
+    w: *std.Io.Writer,
+    name: []const u8,
+    value: widget.LengthPercentage,
+) !void {
+    switch (value) {
+        .length => |number| try w.print(
+            ",\"{s}\":{{\"length\":{d:.2}}}",
+            .{ name, number },
+        ),
+        .percent => |number| try w.print(
+            ",\"{s}\":{{\"percent\":{d:.2}}}",
+            .{ name, number },
+        ),
+    }
+}
+
+fn writeLengthPercentageAutoEdge(
+    w: *std.Io.Writer,
+    name: []const u8,
+    value: widget.LengthPercentageAuto,
+) !void {
+    switch (value) {
+        .auto => try w.print(",\"{s}\":{{\"auto\":null}}", .{name}),
+        .length => |number| try w.print(
+            ",\"{s}\":{{\"length\":{d:.2}}}",
+            .{ name, number },
+        ),
+        .percent => |number| try w.print(
+            ",\"{s}\":{{\"percent\":{d:.2}}}",
+            .{ name, number },
+        ),
+    }
+}
+
 /// Deterministic layout fingerprint for golden comparisons: one compact
-/// JSON object per node — id, kind, the four rect values, and the typed
-/// Style's layout-relevant sides (margin/border/padding, four floats each).
+/// JSON object per node — id, kind, the four rect values, and each canonical
+/// typed margin, border, and padding edge. The union tag is part of the
+/// fingerprint, so equal numeric payloads with different CSS meanings do not
+/// collide (for example, `length: 0.5` and `percent: 0.5`).
+///
 /// Rects are the RAW RELATIVE border boxes (parent-content-relative, see
-/// widget.zig Rect), so the fingerprint is stable when a subtree moves as
-/// a unit — a parent offset change does not invalidate child rects.
-/// PaintStyle border_color and radius are paint-only (they change nothing
-/// about layout), so they are intentionally omitted: two frames with the same
-/// geometry but different paint flags hash identically, which is what a
-/// golden LAYOUT comparison wants. No labels, no values, no frame
-/// counters — two runs with the same layout always produce the same
-/// bytes, so it is safe to check in and diff.
+/// widget.zig Rect), so the fingerprint is stable when a subtree moves as a
+/// unit — a parent offset change does not invalidate child rects.
+/// PaintStyle fields are intentionally omitted: two frames with the same
+/// layout but different paint hash identically. No labels, values, or frame
+/// counters are included.
 pub fn layoutFingerprint(allocator: std.mem.Allocator, tree: *const WidgetTree) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -522,22 +572,29 @@ pub fn layoutFingerprint(allocator: std.mem.Allocator, tree: *const WidgetTree) 
         if (i != 0) try w.writeByte(',');
         try w.print(
             "{{\"id\":{d},\"kind\":\"{s}\"," ++
-                "\"x\":{d:.2},\"y\":{d:.2},\"w\":{d:.2},\"h\":{d:.2}," ++
-                "\"margin_top\":{d:.2},\"margin_right\":{d:.2},\"margin_bottom\":{d:.2},\"margin_left\":{d:.2}," ++
-                "\"border_top\":{d:.2},\"border_right\":{d:.2},\"border_bottom\":{d:.2},\"border_left\":{d:.2}," ++
-                "\"padding_top\":{d:.2},\"padding_right\":{d:.2},\"padding_bottom\":{d:.2},\"padding_left\":{d:.2}}}",
+                "\"x\":{d:.2},\"y\":{d:.2},\"w\":{d:.2},\"h\":{d:.2}",
             .{
-                n.id.index(),           @tagName(n.kind),
-                n.rect.x,               n.rect.y,
-                n.rect.w,               n.rect.h,
-                n.style.margin.top,     n.style.margin.right,
-                n.style.margin.bottom,  n.style.margin.left,
-                n.style.border.top,     n.style.border.right,
-                n.style.border.bottom,  n.style.border.left,
-                n.style.padding.top,    n.style.padding.right,
-                n.style.padding.bottom, n.style.padding.left,
+                n.id.index(),
+                @tagName(n.kind),
+                n.rect.x,
+                n.rect.y,
+                n.rect.w,
+                n.rect.h,
             },
         );
+        try writeLengthPercentageAutoEdge(w, "margin_top", n.style.margin_inset.top);
+        try writeLengthPercentageAutoEdge(w, "margin_right", n.style.margin_inset.right);
+        try writeLengthPercentageAutoEdge(w, "margin_bottom", n.style.margin_inset.bottom);
+        try writeLengthPercentageAutoEdge(w, "margin_left", n.style.margin_inset.left);
+        try writeLengthPercentageEdge(w, "border_top", n.style.border_inset.top);
+        try writeLengthPercentageEdge(w, "border_right", n.style.border_inset.right);
+        try writeLengthPercentageEdge(w, "border_bottom", n.style.border_inset.bottom);
+        try writeLengthPercentageEdge(w, "border_left", n.style.border_inset.left);
+        try writeLengthPercentageEdge(w, "padding_top", n.style.padding_inset.top);
+        try writeLengthPercentageEdge(w, "padding_right", n.style.padding_inset.right);
+        try writeLengthPercentageEdge(w, "padding_bottom", n.style.padding_inset.bottom);
+        try writeLengthPercentageEdge(w, "padding_left", n.style.padding_inset.left);
+        try w.writeByte('}');
     }
     try w.writeByte(']');
     return out.toOwnedSlice();
@@ -580,13 +637,20 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
         if (r.w < 0 or r.h < 0) {
             try add("negative size: id {d} {d}x{d}", w, &problems, .{ n.id.index(), r.w, r.h });
         }
-
-        // Style borders and paddings must not be negative. Margins may
-        // be negative (legal CSS — the layer badge's -44 bottom margin is a
+        const box_edges = n.resolved_box_edges orelse
+            widget.geometryBoxEdges(n, r.w);
+        // Resolved border and padding must not be negative. Margins may be
+        // negative (legal CSS — the layer badge's -44 bottom margin is a
         // deliberate layout trick).
         const side_vals = [_]f32{
-            n.style.border.top,  n.style.border.right,  n.style.border.bottom,  n.style.border.left,
-            n.style.padding.top, n.style.padding.right, n.style.padding.bottom, n.style.padding.left,
+            box_edges.border.top,
+            box_edges.border.right,
+            box_edges.border.bottom,
+            box_edges.border.left,
+            box_edges.padding.top,
+            box_edges.padding.right,
+            box_edges.padding.bottom,
+            box_edges.padding.left,
         };
         for (side_vals) |v| {
             if (v < -0.001) {
@@ -604,15 +668,17 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
                 try add("missing parent: id {d}", w, &problems, .{n.id.index()});
                 continue;
             };
+            const parent_edges = p.resolved_box_edges orelse
+                widget.geometryBoxEdges(p, p.rect.w);
             const pw = @max(
                 0,
-                p.rect.w - p.style.border.left - p.style.border.right -
-                    p.style.padding.left - p.style.padding.right,
+                p.rect.w - parent_edges.border.left - parent_edges.border.right -
+                    parent_edges.padding.left - parent_edges.padding.right,
             );
             const ph = @max(
                 0,
-                p.rect.h - p.style.border.top - p.style.border.bottom -
-                    p.style.padding.top - p.style.padding.bottom,
+                p.rect.h - parent_edges.border.top - parent_edges.border.bottom -
+                    parent_edges.padding.top - parent_edges.padding.bottom,
             );
             if (r.x < -0.001 or r.y < -0.001 or
                 r.x + r.w > pw + 0.001 or r.y + r.h > ph + 0.001)
@@ -656,13 +722,16 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
             const text = visualText(n);
             if (text) |t| {
                 if (t.len == 0) continue;
-                const ms = m(t, n.font_size, n.font_id);
-                // flex.zig's measureLeaf adds the node's ACTUAL border +
-                // padding (widget.sidesSum) to the content measure; the old
-                // +16 baked approximation disagrees whenever they sum to
-                // anything else.
-                const insets = widget.sidesSum(n.style.border);
-                const pads = widget.sidesSum(n.style.padding);
+                const ms = m(t, .{
+                    .known_dimensions = .{ .width = null, .height = null },
+                    .available_space = .{ .width = .max_content, .height = .max_content },
+                    .font_size = n.font_size,
+                    .font_id = n.font_id,
+                });
+                // The canonical dispatcher measures content only; add the
+                // node's actual border and padding below.
+                const insets = widget.sidesSum(box_edges.border);
+                const pads = widget.sidesSum(box_edges.padding);
                 const need_w = switch (n.kind) {
                     .button => ms.width + insets.w + pads.w,
                     .slider => @max(100, ms.width + insets.w + pads.w),
@@ -892,13 +961,15 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     });
     try tree.nodes.append(std.testing.allocator, .{
         .id = row_id,
-        .kind = .{ .row = .{ .gap = 3 } },
+        .kind = .{ .row = .{} },
         .parent = col_id,
+        .style = .{ .gap = .{ .length = 3 } },
     });
     try tree.nodes.append(std.testing.allocator, .{
         .id = col_id,
-        .kind = .{ .column = .{ .gap = 5 } },
+        .kind = .{ .column = .{} },
         .parent = .root,
+        .style = .{ .gap = .{ .length = 5 } },
     });
     try tree.appendChild(row_id, @enumFromInt(1));
     try tree.appendChild(row_id, @enumFromInt(2));
@@ -931,7 +1002,9 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     // Row container: gap + children.
     const row_node = arr.items[2].object;
     try std.testing.expectEqualStrings("row", row_node.get("kind").?.string);
-    try std.testing.expectApproxEqAbs(@as(f64, 3), try num(row_node.get("gap").?), 1e-9);
+    const row_gap = row_node.get("gap").?.object;
+    try std.testing.expectApproxEqAbs(@as(f64, 3), try num(row_gap.get("length").?), 1e-9);
+    try std.testing.expect(row_gap.get("percent") == null);
     const row_children = row_node.get("children").?.array;
     try std.testing.expectEqual(@as(usize, 2), row_children.items.len);
     try std.testing.expectEqual(@as(i64, 1), row_children.items[0].integer);
@@ -940,11 +1013,33 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     // Column container: gap + children, no label.
     const col_node = arr.items[3].object;
     try std.testing.expectEqualStrings("column", col_node.get("kind").?.string);
-    try std.testing.expectApproxEqAbs(@as(f64, 5), try num(col_node.get("gap").?), 1e-9);
+    const col_gap = col_node.get("gap").?.object;
+    try std.testing.expectApproxEqAbs(@as(f64, 5), try num(col_gap.get("length").?), 1e-9);
+    try std.testing.expect(col_gap.get("percent") == null);
     const col_children = col_node.get("children").?.array;
     try std.testing.expectEqual(@as(usize, 1), col_children.items.len);
     try std.testing.expectEqual(@as(i64, 3), col_children.items[0].integer);
     try std.testing.expect(col_node.get("label") == null);
+}
+test "treeToJson: percentage gap retains its canonical tag" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = .{ .gap = .{ .percent = 0.25 } },
+    });
+
+    const json = try treeToJson(std.testing.allocator, &tree);
+    defer std.testing.allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const gap = parsed.value.array.items[0].object.get("gap").?.object;
+    try std.testing.expect(gap.get("length") == null);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), try num(gap.get("percent").?), 1e-9);
 }
 
 test "treeToJsonWith: more than 32 child ids serialize in append order" {
@@ -1157,7 +1252,7 @@ test "verifyLayout: overlap, escape, and out-of-range value are reported" {
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
 }
 
-test "layoutFingerprint: deterministic, rects only" {
+test "layoutFingerprint: deterministic geometry and typed edges" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
@@ -1177,7 +1272,7 @@ test "layoutFingerprint: deterministic, rects only" {
     const fp = try layoutFingerprint(std.testing.allocator, &tree);
     defer std.testing.allocator.free(fp);
 
-    // Rects only — no label text anywhere in the fingerprint.
+    // Geometry and typed edge values are present; label text is omitted.
     try std.testing.expect(std.mem.indexOf(u8, fp, "dynamic counter") == null);
     try std.testing.expect(std.mem.indexOf(u8, fp, "148.25") != null);
     try std.testing.expect(std.mem.indexOf(u8, fp, "\"kind\":\"button\"") != null);
@@ -1189,7 +1284,7 @@ test "layoutFingerprint: deterministic, rects only" {
 }
 
 const fakeMeasure = struct {
-    fn f(_: []const u8, _: f32, _: u8) Size {
+    fn f(_: []const u8, _: layout.MeasureInput) Size {
         return .{ .width = 40, .height = 24 };
     }
 }.f;
@@ -1312,8 +1407,18 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
         .parent = .root,
         .rect = .{ .x = 10, .y = 20, .w = 100, .h = 80 },
         .style = .{
-            .border = .{ .left = 2, .top = 3 },
-            .padding = .{ .left = 4, .top = 5 },
+            .border_inset = .{
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 2 },
+                .top = .{ .length = 3 },
+            },
+            .padding_inset = .{
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 4 },
+                .top = .{ .length = 5 },
+            },
         },
     });
     try tree.appendChild(parent, child);
@@ -1330,7 +1435,6 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
     const compact_child = compact_parsed.value.array.items[0].object;
     try std.testing.expect(compact_child.get("abs_rect") == null);
     try std.testing.expect(compact_child.get("vis_rect") == null);
-
     const diagnostic = try treeToJsonWith(
         std.testing.allocator,
         &tree,
@@ -1379,7 +1483,14 @@ test "renderAscii: nested node renders at its absolute position" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .style = .{ .padding = .{ .left = 8, .top = 8 } },
+        .style = .{
+            .padding_inset = .{
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 8 },
+                .top = .{ .length = 8 },
+            },
+        },
     });
     try tree.appendChild(col, btn);
 
@@ -1417,8 +1528,18 @@ test "verifyLayout: nested tree with padding and border verifies OK" {
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 60 },
         .style = .{
-            .border = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 },
-            .padding = .{ .top = 8, .right = 6, .bottom = 7, .left = 8 },
+            .border_inset = .{
+                .top = .{ .length = 1 },
+                .right = .{ .length = 2 },
+                .bottom = .{ .length = 3 },
+                .left = .{ .length = 4 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 8 },
+                .right = .{ .length = 6 },
+                .bottom = .{ .length = 7 },
+                .left = .{ .length = 8 },
+            },
         },
     });
     try tree.appendChild(col, btn);
@@ -1432,11 +1553,10 @@ test "verifyLayout: child outside the parent's content box is flagged" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    // Child sits inside the border box (x+w = 95 <= 100) but past the
-    // content box (content w = 100-8-8 = 84): the content box constrains.
     const col: Id = @enumFromInt(1);
     const child: Id = @enumFromInt(2);
-
+    // Child sits inside the border box (x+w = 95 <= 100) but past the
+    // content box (content w = 100-8-8 = 84): the content box constrains.
     try tree.nodes.append(std.testing.allocator, .{
         .id = child,
         .kind = .{ .label = .{ .text = "x" } },
@@ -1448,7 +1568,14 @@ test "verifyLayout: child outside the parent's content box is flagged" {
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
-        .style = .{ .padding = .{ .left = 8, .right = 8 } },
+        .style = .{
+            .padding_inset = .{
+                .top = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 8 },
+                .right = .{ .length = 8 },
+            },
+        },
     });
     try tree.appendChild(col, child);
 
@@ -1467,12 +1594,45 @@ test "verifyLayout: negative box sides are reported" {
         .kind = .{ .label = .{ .text = "x" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
-        .style = .{ .padding = .{ .top = -2 } },
+        .style = .{
+            .padding_inset = .{
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 0 },
+                .top = .{ .length = -2 },
+            },
+        },
     });
 
     const report = try verifyLayout(std.testing.allocator, &tree, null, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "negative box side") != null);
+    try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
+}
+
+test "verifyLayout: negative width and height are reported" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const negative_width: Id = @enumFromInt(1);
+    const negative_height: Id = @enumFromInt(2);
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = negative_width,
+        .kind = .{ .spacer = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = -1, .h = 20 },
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = negative_height,
+        .kind = .{ .spacer = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 20, .w = 20, .h = -1 },
+    });
+
+    const report = try verifyLayout(std.testing.allocator, &tree, null, null);
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, "negative size: id 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "negative size: id 2") != null);
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
 }
 
@@ -1594,14 +1754,14 @@ test "verifyLayout: root-level sibling overlap and surface bounds are flagged" {
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
 }
 
-test "layoutFingerprint: identical rects with different Style sides differ" {
+test "layoutFingerprint: identical rects with different typed edges differ" {
     var tree_a = WidgetTree.init(std.testing.allocator);
     defer tree_a.deinit();
     var tree_b = WidgetTree.init(std.testing.allocator);
     defer tree_b.deinit();
 
-    // Same ids, kinds, and rects — only the padding differs. The old
-    // fingerprint (rects only) produced identical bytes for both.
+    // Same ids, kinds, and rects — only the typed padding differs. The
+    // fingerprint must include both each edge's tag and its numeric value.
     try tree_a.nodes.append(std.testing.allocator, .{
         .id = @enumFromInt(1),
         .kind = .{ .label = .{ .text = "a" } },
@@ -1613,7 +1773,14 @@ test "layoutFingerprint: identical rects with different Style sides differ" {
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
-        .style = .{ .padding = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 } },
+        .style = .{
+            .padding_inset = .{
+                .top = .{ .length = 4 },
+                .right = .{ .length = 4 },
+                .bottom = .{ .length = 4 },
+                .left = .{ .length = 4 },
+            },
+        },
     });
 
     const fpa = try layoutFingerprint(std.testing.allocator, &tree_a);
@@ -1623,10 +1790,59 @@ test "layoutFingerprint: identical rects with different Style sides differ" {
 
     try std.testing.expect(!std.mem.eql(u8, fpa, fpb));
     // The padding sides actually appear in the output.
-    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_top\":4.00") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_right\":4.00") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_bottom\":4.00") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_left\":4.00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_top\":{\"length\":4.00}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_right\":{\"length\":4.00}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_bottom\":{\"length\":4.00}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fpb, "\"padding_left\":{\"length\":4.00}") != null);
+}
+
+test "layoutFingerprint: typed edge tags remain distinct" {
+    var tree_length = WidgetTree.init(std.testing.allocator);
+    defer tree_length.deinit();
+    var tree_percent = WidgetTree.init(std.testing.allocator);
+    defer tree_percent.deinit();
+
+    try tree_length.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .label = .{ .text = "a" } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
+        .style = .{
+            .padding_inset = .{
+                .top = .{ .length = 0.5 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 0 },
+            },
+        },
+    });
+    try tree_percent.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .label = .{ .text = "a" } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
+        .style = .{
+            .padding_inset = .{
+                .top = .{ .percent = 0.5 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 0 },
+            },
+        },
+    });
+
+    const length_fingerprint = try layoutFingerprint(std.testing.allocator, &tree_length);
+    defer std.testing.allocator.free(length_fingerprint);
+    const percent_fingerprint = try layoutFingerprint(std.testing.allocator, &tree_percent);
+    defer std.testing.allocator.free(percent_fingerprint);
+
+    try std.testing.expect(!std.mem.eql(u8, length_fingerprint, percent_fingerprint));
+    try std.testing.expect(
+        std.mem.indexOf(u8, length_fingerprint, "\"padding_top\":{\"length\":0.50}") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, percent_fingerprint, "\"padding_top\":{\"percent\":0.50}") != null,
+    );
 }
 
 test "layoutFingerprint: paint-only fields (layer) are excluded" {
@@ -1696,12 +1912,16 @@ test "verifyLayout: DrawCtx ellipsized button verifies its label child once" {
     });
 
     const measure = struct {
-        fn f(text: []const u8, _: f32, _: u8) widget.Size {
+        fn f(text: []const u8, _: layout.MeasureInput) widget.Size {
             return .{ .width = @floatFromInt(text.len * 10), .height = 20 };
         }
     }.f;
     const surface: Size = .{ .width = 20, .height = 40 };
-    layoutWith(&tree, surface, measure);
+    try layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = surface,
+        .measure = measure,
+    });
 
     const report = try verifyLayout(
         std.testing.allocator,
@@ -1743,7 +1963,7 @@ test "verifyLayout: slider text fit uses visual_label" {
     });
 
     const measure = struct {
-        fn f(text: []const u8, _: f32, _: u8) Size {
+        fn f(text: []const u8, _: layout.MeasureInput) Size {
             return .{ .width = @floatFromInt(text.len * 10), .height = 20 };
         }
     }.f;

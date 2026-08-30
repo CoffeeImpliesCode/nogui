@@ -21,7 +21,7 @@ fn unreachableLayoutNode(
     _: *layout_context.LayoutContext,
     _: *WidgetTree,
     _: *widget.WidgetNode,
-    _: layout_context.Request,
+    _: layout_context.LayoutRequest,
 ) layout_context.LayoutError!void {
     unreachable;
 }
@@ -51,6 +51,7 @@ test "measureNatural resolves flex percentages from request basis" {
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
+    defer context.deinit();
     const measured = try flex.measureNatural(
         &tree,
         tree.nodeConst(root_id).?,

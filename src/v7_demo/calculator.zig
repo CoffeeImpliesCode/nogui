@@ -128,7 +128,7 @@ pub const CalculatorApp = struct {
                         .color = if (key.accent) c_on_accent else c_text,
                         .font_size = 18,
                         .grow = 1,
-                        .basis = 44,
+                        .flex_basis = 44,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = if (key.accent) c_accent else default_paint.border_color,
                         .fill = fill,

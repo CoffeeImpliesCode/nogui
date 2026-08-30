@@ -2,6 +2,8 @@ const std = @import("std");
 
 const Id = @import("../id.zig").Id;
 const layout = @import("root.zig");
+const layout_context = @import("context.zig");
+const grid_layout = @import("grid.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 
@@ -46,6 +48,7 @@ pub const Case = struct {
     grid_feature: bool,
     use_rounding: bool,
     viewport: Size,
+    viewport_mode: ViewportMode,
     nodes: []const Node,
     expected: []const Rect,
 };
@@ -55,23 +58,17 @@ const Size = struct {
     height: f64,
 };
 
+const ViewportMode = struct {
+    width: layout_context.MeasureMode,
+    height: layout_context.MeasureMode,
+};
+
 const Node = struct {
     kind: []const u8,
     text: ?[]const u8 = null,
     writing_mode: ?[]const u8 = null,
     child_count: usize,
     attributes: ?std.json.Value = null,
-    style: LegacyStyle,
-};
-
-/// Compatibility data retained because it is part of normalized schema 1.
-/// Layout input comes only from `attributes`.
-const LegacyStyle = struct {
-    direction: []const u8,
-    border_top: []const u8,
-    border_right: []const u8,
-    border_bottom: []const u8,
-    border_left: []const u8,
 };
 
 const Rect = struct {
@@ -167,7 +164,7 @@ fn runFiltered(
     };
     defer parsed_manifest.deinit();
 
-    try validateCorpus(parsed_corpus.value, parsed_manifest.value);
+    try validateCorpus(allocator, parsed_corpus.value, parsed_manifest.value);
     try validateSelection(parsed_corpus.value.cases, parsed_manifest.value.selection);
     if (count) |maximum| {
         if (maximum == 0) return .{};
@@ -195,10 +192,18 @@ fn runFiltered(
         const passed = runCase(allocator, fixture_case) catch |case_error| {
             switch (case_error) {
                 error.Unsupported => {
+                    std.log.warn(
+                        "fixture\tunsupported\t{s}\t{s}\n",
+                        .{ fixture_case.id, fixture_case.variant },
+                    );
                     summary.unsupported += 1;
                     continue;
                 },
                 error.LayoutFailed => {
+                    std.log.warn(
+                        "fixture\tlayout_failed\t{s}\t{s}\n",
+                        .{ fixture_case.id, fixture_case.variant },
+                    );
                     summary.failed += 1;
                     continue;
                 },
@@ -210,6 +215,10 @@ fn runFiltered(
         if (passed) {
             summary.passed += 1;
         } else {
+            std.log.warn(
+                "fixture\tcompare_failed\t{s}\t{s}\n",
+                .{ fixture_case.id, fixture_case.variant },
+            );
             summary.failed += 1;
         }
     }
@@ -229,9 +238,13 @@ fn readCorpusFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) Fi
     };
 }
 
-fn validateCorpus(corpus: Corpus, manifest: Manifest) FixtureError!void {
-    if (corpus.schema != 1) return error.InvalidFixture;
-    if (manifest.schema != 1) return error.InvalidFixture;
+fn validateCorpus(
+    allocator: std.mem.Allocator,
+    corpus: Corpus,
+    manifest: Manifest,
+) FixtureError!void {
+    if (corpus.schema != 2) return error.InvalidFixture;
+    if (manifest.schema != 2) return error.InvalidFixture;
     if (!std.mem.eql(u8, manifest.upstream_repository, pinned_repository)) {
         return error.InvalidFixture;
     }
@@ -242,28 +255,42 @@ fn validateCorpus(corpus: Corpus, manifest: Manifest) FixtureError!void {
     if (!std.mem.eql(u8, manifest.generator, "tools/import_taffy_v013_fixtures.py")) {
         return error.InvalidFixture;
     }
-    if (manifest.generator_version != 1) return error.InvalidFixture;
+    if (manifest.generator_version != 2) return error.InvalidFixture;
     if (manifest.source_count != manifest.sources.len) return error.InvalidFixture;
     if (manifest.case_count != corpus.cases.len) return error.InvalidFixture;
     if (corpus.cases.len == 0) return error.InvalidFixture;
 
-    for (manifest.sources, 0..) |source, source_index| {
+    var source_hashes: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer source_hashes.deinit(allocator);
+    for (manifest.sources) |source| {
         if (!validSha256(source.sha256)) return error.InvalidFixture;
         if (!std.mem.startsWith(u8, source.path, source_prefix)) {
             return error.InvalidFixture;
         }
-        for (manifest.sources[0..source_index]) |previous| {
-            if (std.mem.eql(u8, previous.path, source.path)) return error.InvalidFixture;
-        }
+        if (source_hashes.contains(source.path)) return error.InvalidFixture;
+        try source_hashes.put(allocator, source.path, source.sha256);
     }
 
-    for (corpus.cases, 0..) |fixture_case, case_index| {
-        try validateCaseRecord(fixture_case, manifest.sources);
-        for (corpus.cases[0..case_index]) |previous| {
-            const same_source = std.mem.eql(u8, previous.source, fixture_case.source);
-            const same_variant = std.mem.eql(u8, previous.variant, fixture_case.variant);
-            if (same_source and same_variant) return error.InvalidFixture;
-        }
+    var variants_by_source: std.StringHashMapUnmanaged(
+        std.StringHashMapUnmanaged(void),
+    ) = .empty;
+    defer {
+        var iterator = variants_by_source.valueIterator();
+        while (iterator.next()) |variants| variants.deinit(allocator);
+        variants_by_source.deinit(allocator);
+    }
+    for (corpus.cases) |fixture_case| {
+        try validateCaseRecord(fixture_case, &source_hashes);
+        const variants = if (variants_by_source.getPtr(fixture_case.source)) |value|
+            value
+        else blk: {
+            const empty: std.StringHashMapUnmanaged(void) = .empty;
+            try variants_by_source.put(allocator, fixture_case.source, empty);
+            break :blk variants_by_source.getPtr(fixture_case.source) orelse
+                return error.InvalidFixture;
+        };
+        if (variants.*.contains(fixture_case.variant)) return error.InvalidFixture;
+        try variants.*.put(allocator, fixture_case.variant, {});
     }
 }
 
@@ -278,7 +305,10 @@ fn validateSelection(cases: []const Case, selection: ?Selection) FixtureError!vo
     if (matches != 1) return error.InvalidFixture;
 }
 
-fn validateCaseRecord(fixture_case: Case, sources: []const ManifestSource) FixtureError!void {
+fn validateCaseRecord(
+    fixture_case: Case,
+    source_hashes: *const std.StringHashMapUnmanaged([]const u8),
+) FixtureError!void {
     if (!std.mem.startsWith(u8, fixture_case.source, source_prefix)) {
         return error.InvalidFixture;
     }
@@ -289,15 +319,12 @@ fn validateCaseRecord(fixture_case: Case, sources: []const ManifestSource) Fixtu
     if (fixture_case.nodes.len != fixture_case.expected.len) return error.InvalidFixture;
     if (fixture_case.nodes.len == 0) return error.InvalidFixture;
 
-    var source_matches: usize = 0;
-    for (sources) |source| {
-        if (!std.mem.eql(u8, source.path, fixture_case.source)) continue;
-        source_matches += 1;
-        if (!std.mem.eql(u8, source.sha256, fixture_case.source_sha256)) {
-            return error.InvalidFixture;
-        }
+    const source_sha256 = source_hashes.get(fixture_case.source) orelse {
+        return error.InvalidFixture;
+    };
+    if (!std.mem.eql(u8, source_sha256, fixture_case.source_sha256)) {
+        return error.InvalidFixture;
     }
-    if (source_matches != 1) return error.InvalidFixture;
 
     if (std.mem.eql(u8, fixture_case.source, canonical_source)) {
         if (!std.mem.eql(u8, fixture_case.source_sha256, canonical_source_sha256)) {
@@ -405,7 +432,6 @@ const TreeBuilder = struct {
         const node_style = try fixtureStyle(
             &self.result.resources,
             fixture_node,
-            self.fixture_case.variant,
         );
         const kind = try fixtureKind(fixture_node, node_style);
         const scroll = try fixtureScrollSpec(&self.result.resources, index, expected);
@@ -451,16 +477,9 @@ fn expectedScrollAxis(expected: Rect) ?widget.ScrollAxis {
 }
 
 test "fixture builder converts preorder nodes to a linked postorder tree" {
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "0px",
-        .border_right = "0px",
-        .border_bottom = "0px",
-        .border_left = "0px",
-    };
     const nodes = [_]Node{
-        .{ .kind = "div", .child_count = 1, .style = legacy },
-        .{ .kind = "text", .text = "H", .child_count = 0, .style = legacy },
+        .{ .kind = "div", .child_count = 1 },
+        .{ .kind = "text", .text = "H", .child_count = 0 },
     };
     const expected = [_]Rect{
         .{ .x = 0, .y = 0, .width = 0, .height = 0 },
@@ -474,6 +493,7 @@ test "fixture builder converts preorder nodes to a linked postorder tree" {
         .grid_feature = false,
         .use_rounding = true,
         .viewport = .{ .width = 100, .height = 100 },
+        .viewport_mode = .{ .width = .definite, .height = .definite },
         .nodes = &nodes,
         .expected = &expected,
     };
@@ -524,18 +544,11 @@ test "fixture scroll state allocations remain stable independently" {
 }
 
 test "fixture builder attaches expected scroll axes without incidental state" {
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "0px",
-        .border_right = "0px",
-        .border_bottom = "0px",
-        .border_left = "0px",
-    };
     const nodes = [_]Node{
-        .{ .kind = "div", .child_count = 3, .style = legacy },
-        .{ .kind = "div", .child_count = 0, .style = legacy },
-        .{ .kind = "div", .child_count = 0, .style = legacy },
-        .{ .kind = "div", .child_count = 0, .style = legacy },
+        .{ .kind = "div", .child_count = 3 },
+        .{ .kind = "div", .child_count = 0 },
+        .{ .kind = "div", .child_count = 0 },
+        .{ .kind = "div", .child_count = 0 },
     };
     const expected = [_]Rect{
         .{
@@ -558,6 +571,7 @@ test "fixture builder attaches expected scroll axes without incidental state" {
         .grid_feature = false,
         .use_rounding = true,
         .viewport = .{ .width = 100, .height = 100 },
+        .viewport_mode = .{ .width = .definite, .height = .definite },
         .nodes = &nodes,
         .expected = &expected,
     };
@@ -595,15 +609,8 @@ test "fixture builder attaches expected scroll axes without incidental state" {
 }
 
 test "fixture expected scroll offsets remain validated inputs" {
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "0px",
-        .border_right = "0px",
-        .border_bottom = "0px",
-        .border_left = "0px",
-    };
     const nodes = [_]Node{
-        .{ .kind = "div", .child_count = 0, .style = legacy },
+        .{ .kind = "div", .child_count = 0 },
     };
     var expected = [_]Rect{
         .{
@@ -623,6 +630,7 @@ test "fixture expected scroll offsets remain validated inputs" {
         .grid_feature = false,
         .use_rounding = true,
         .viewport = .{ .width = 100, .height = 100 },
+        .viewport_mode = .{ .width = .definite, .height = .definite },
         .nodes = &nodes,
         .expected = &expected,
     };
@@ -636,15 +644,8 @@ test "fixture expected scroll offsets remain validated inputs" {
 }
 
 test "fixture comparison requires matching optional scroll max offsets" {
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "0px",
-        .border_right = "0px",
-        .border_bottom = "0px",
-        .border_left = "0px",
-    };
     const nodes = [_]Node{
-        .{ .kind = "div", .child_count = 0, .style = legacy },
+        .{ .kind = "div", .child_count = 0 },
     };
     var expected = [_]Rect{
         .{ .x = 0, .y = 0, .width = 0, .height = 0, .scroll_width = 7 },
@@ -657,6 +658,7 @@ test "fixture comparison requires matching optional scroll max offsets" {
         .grid_feature = false,
         .use_rounding = true,
         .viewport = .{ .width = 100, .height = 100 },
+        .viewport_mode = .{ .width = .definite, .height = .definite },
         .nodes = &nodes,
         .expected = &expected,
     };
@@ -688,6 +690,84 @@ test "fixture comparison requires matching optional scroll max offsets" {
     try std.testing.expect(!try compareFixtureTree(fixture_case, &fixture_tree));
 }
 
+test "fixture rounded comparison derives size from absolute opposing edges" {
+    const actual: Rect = .{
+        .x = 33.333332,
+        .y = 0,
+        .width = 33.333332,
+        .height = 10,
+    };
+    const expected_rounded: Rect = .{
+        .x = 33,
+        .y = 0,
+        .width = 34,
+        .height = 10,
+    };
+    try std.testing.expect(rectMatchesRounded(actual, expected_rounded, true));
+    try std.testing.expect(!rectMatchesRounded(actual, expected_rounded, false));
+    const negative_half: Rect = .{ .x = -0.5, .y = -0.5, .width = 10, .height = 10 };
+    const zero_origin: Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    try std.testing.expect(rectMatchesRounded(negative_half, zero_origin, true));
+
+    const nodes = [_]Node{
+        .{ .kind = "div", .child_count = 1 },
+        .{ .kind = "div", .child_count = 0 },
+    };
+    var expected = [_]Rect{
+        .{ .x = 40, .y = 20, .width = 70, .height = 20 },
+        .{ .x = -7, .y = 0, .width = 34, .height = 10 },
+    };
+    const fixture_case: Case = .{
+        .id = "test",
+        .source = "test_fixtures/test.html",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .variant = "border_box_ltr",
+        .grid_feature = false,
+        .use_rounding = true,
+        .viewport = .{ .width = 100, .height = 100 },
+        .viewport_mode = .{ .width = .definite, .height = .definite },
+        .nodes = &nodes,
+        .expected = &expected,
+    };
+    var fixture_tree = try FixtureTree.init(std.testing.allocator, nodes.len);
+    defer fixture_tree.deinit(std.testing.allocator);
+    var builder: TreeBuilder = .{
+        .allocator = std.testing.allocator,
+        .fixture_case = fixture_case,
+        .result = &fixture_tree,
+    };
+    _ = try builder.buildRoot();
+
+    fixture_tree.tree.node(fixture_tree.source_ids[0]).?.rect = .{
+        .x = 40,
+        .y = 20,
+        .w = 70,
+        .h = 20,
+    };
+    fixture_tree.tree.node(fixture_tree.source_ids[1]).?.rect = .{
+        .x = -6.666668,
+        .y = 0,
+        .w = 33.333332,
+        .h = 10,
+    };
+    try std.testing.expect(try compareFixtureTree(fixture_case, &fixture_tree));
+    expected[0] = .{ .x = 4, .y = 0, .width = 10, .height = 10 };
+    expected[1] = .{ .x = 2, .y = 0, .width = 2, .height = 2 };
+    fixture_tree.tree.node(fixture_tree.source_ids[0]).?.rect = .{
+        .x = 3.5,
+        .y = 0,
+        .w = 10,
+        .h = 10,
+    };
+    fixture_tree.tree.node(fixture_tree.source_ids[1]).?.rect = .{
+        .x = 1.5,
+        .y = 0,
+        .w = 2,
+        .h = 2,
+    };
+    try std.testing.expect(try compareFixtureTree(fixture_case, &fixture_tree));
+}
+
 const Side = enum { top, right, bottom, left };
 
 pub fn runCase(allocator: std.mem.Allocator, fixture_case: Case) CaseError!bool {
@@ -700,49 +780,25 @@ pub fn runCase(allocator: std.mem.Allocator, fixture_case: Case) CaseError!bool 
         .fixture_case = fixture_case,
         .result = &fixture_tree,
     };
-    const fixture_root = try builder.buildRoot();
+    _ = try builder.buildRoot();
 
     const available: widget.Size = .{
         .width = try finiteF32(fixture_case.viewport.width),
         .height = try finiteF32(fixture_case.viewport.height),
     };
-    try appendFixtureSurface(&fixture_tree.tree, fixture_root, available);
     layout.layoutTree(&fixture_tree.tree, .{
         .allocator = allocator,
         .available = available,
         .measure = ahemMeasure,
+        .width_mode = fixture_case.viewport_mode.width,
+        .height_mode = fixture_case.viewport_mode.height,
     }) catch |layout_error| {
         if (layout_error == error.OutOfMemory) return error.OutOfMemory;
+        std.log.warn("fixture_layout_error\t{s}\n", .{@errorName(layout_error)});
+        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         return error.LayoutFailed;
     };
     return compareFixtureTree(fixture_case, &fixture_tree);
-}
-
-fn appendFixtureSurface(
-    tree: *widget.WidgetTree,
-    fixture_root: Id,
-    available: widget.Size,
-) CaseError!void {
-    if (tree.nodes.items.len >= std.math.maxInt(u32)) return error.InvalidFixture;
-    const surface_id: Id = @enumFromInt(@as(u32, @intCast(tree.nodes.items.len + 1)));
-    const root = tree.node(fixture_root) orelse return error.InvalidFixture;
-    root.parent = surface_id;
-    try tree.appendNode(.{
-        .id = surface_id,
-        .kind = .{ .row = .{} },
-        .parent = .root,
-        .style = .{
-            .display = .flex,
-            .direction = .row,
-            .@"align" = .start,
-            .box_sizing = .border_box,
-            .size = .{
-                .width = .{ .length = available.width },
-                .height = .{ .length = available.height },
-            },
-        },
-    });
-    try tree.appendChild(surface_id, fixture_root);
 }
 
 fn validateFixtureInputs(fixture_case: Case) CaseError!void {
@@ -755,11 +811,14 @@ fn validateFixtureInputs(fixture_case: Case) CaseError!void {
 
 fn compareFixtureTree(fixture_case: Case, fixture_tree: *const FixtureTree) CaseError!bool {
     var source_index: usize = 0;
+    const origin: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
     return compareFixtureNode(
         fixture_case,
         fixture_tree,
         &source_index,
-        .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+        origin,
+        origin,
+        origin,
     );
 }
 
@@ -768,6 +827,8 @@ fn compareFixtureNode(
     fixture_tree: *const FixtureTree,
     source_index: *usize,
     expected_parent: Rect,
+    actual_parent_unrounded: Rect,
+    actual_parent_rounded: Rect,
 ) CaseError!bool {
     if (source_index.* >= fixture_case.nodes.len) return error.InvalidFixture;
     const index = source_index.*;
@@ -790,13 +851,43 @@ fn compareFixtureNode(
         &fixture_tree.tree,
         fixture_tree.source_ids[index],
     );
-    const actual: Rect = .{
+    const actual_unrounded: Rect = .{
         .x = @floatCast(actual_rect.x),
         .y = @floatCast(actual_rect.y),
         .width = @floatCast(actual_rect.w),
         .height = @floatCast(actual_rect.h),
     };
-    if (!rectMatchesRounded(actual, expected_absolute, fixture_case.use_rounding)) return false;
+    const actual = if (fixture_case.use_rounding) Rect{
+        .x = actual_parent_rounded.x +
+            fixtureRound(actual_unrounded.x - actual_parent_unrounded.x),
+        .y = actual_parent_rounded.y +
+            fixtureRound(actual_unrounded.y - actual_parent_unrounded.y),
+        .width = fixtureRound(actual_unrounded.x + actual_unrounded.width) -
+            fixtureRound(actual_unrounded.x),
+        .height = fixtureRound(actual_unrounded.y + actual_unrounded.height) -
+            fixtureRound(actual_unrounded.y),
+    } else actual_unrounded;
+    if (!rectMatchesRounded(actual, expected_absolute, false)) {
+        std.log.warn(
+            "fixture_rect\t{s}\t{s}\t{d}\t{s}\tactual={d:.3},{d:.3}," ++
+                "{d:.3},{d:.3}\texpected={d:.3},{d:.3},{d:.3},{d:.3}\n",
+            .{
+                fixture_case.id,
+                fixture_case.variant,
+                index,
+                fixture_case.nodes[index].kind,
+                actual.x,
+                actual.y,
+                actual.width,
+                actual.height,
+                expected_absolute.x,
+                expected_absolute.y,
+                expected_absolute.width,
+                expected_absolute.height,
+            },
+        );
+        return false;
+    }
 
     const attached_state: ?*widget.ScrollState = if (node.scroll) |scroll|
         scroll.state
@@ -809,7 +900,27 @@ fn compareFixtureNode(
         node.scroll,
         expected,
         fixture_case.use_rounding,
-    )) return false;
+    )) {
+        const actual_axis = if (node.scroll) |scroll| @tagName(scroll.axis) else "none";
+        const actual_x = if (node.scroll) |scroll| scroll.state.max_offset[0] else -1;
+        const actual_y = if (node.scroll) |scroll| scroll.state.max_offset[1] else -1;
+        std.log.warn(
+            "fixture_scroll\t{s}\t{s}\t{d}\t{s}\taxis={s}\tactual={d:.3},{d:.3}\t" ++
+                "expected={d:.3},{d:.3}\n",
+            .{
+                fixture_case.id,
+                fixture_case.variant,
+                index,
+                fixture_case.nodes[index].kind,
+                actual_axis,
+                actual_x,
+                actual_y,
+                expected.scroll_width orelse -1,
+                expected.scroll_height orelse -1,
+            },
+        );
+        return false;
+    }
 
     for (0..fixture_case.nodes[index].child_count) |_| {
         if (!try compareFixtureNode(
@@ -817,6 +928,8 @@ fn compareFixtureNode(
             fixture_tree,
             source_index,
             expected_absolute,
+            actual_unrounded,
+            actual,
         )) return false;
     }
     return true;
@@ -862,37 +975,15 @@ fn fixtureKind(fixture_node: Node, node_style: style.Style) CaseError!widget.Wid
     return .{ .column = .{} };
 }
 
-fn variantBoxSizing(variant: []const u8) CaseError!style.BoxSizing {
-    if (std.mem.eql(u8, variant, "border_box_ltr") or
-        std.mem.eql(u8, variant, "border_box_rtl"))
-    {
-        return .border_box;
-    }
-    if (std.mem.eql(u8, variant, "content_box_ltr") or
-        std.mem.eql(u8, variant, "content_box_rtl"))
-    {
-        return .content_box;
-    }
-    return error.InvalidFixture;
-}
-
 fn fixtureStyle(
     resources: *FixtureResources,
     fixture_node: Node,
-    variant: []const u8,
 ) CaseError!style.Style {
     if (fixture_node.writing_mode) |writing_mode| {
         if (!std.mem.eql(u8, writing_mode, "horizontal-tb")) return error.Unsupported;
     }
 
-    var result: style.Style = .{
-        .box_sizing = try variantBoxSizing(variant),
-    };
-    try applyDirection(&result, fixture_node.style.direction);
-    setBorder(&result, .top, try pixelsF32(fixture_node.style.border_top));
-    setBorder(&result, .right, try pixelsF32(fixture_node.style.border_right));
-    setBorder(&result, .bottom, try pixelsF32(fixture_node.style.border_bottom));
-    setBorder(&result, .left, try pixelsF32(fixture_node.style.border_left));
+    var result: style.Style = .{ .box_sizing = .border_box };
 
     var has_flex_direction = false;
     if (fixture_node.attributes) |attributes| {
@@ -909,32 +1000,7 @@ fn fixtureStyle(
     {
         result.direction = .row;
     }
-    if (std.mem.eql(u8, fixture_node.kind, "text")) {
-        const text = fixture_node.text orelse "";
-        if (hasTextBreakOpportunity(text)) return error.Unsupported;
-        const intrinsic = ahemMeasure(text, 0, 0);
-        if (dimensionAuto(result.size.width)) {
-            result.size.width = .{ .length = textSizingValue(
-                intrinsic.width,
-                result.border.left + result.border.right + result.padding.left + result.padding.right,
-                result.box_sizing,
-            ) };
-        }
-        if (dimensionAuto(result.size.height)) {
-            result.size.height = .{ .length = textSizingValue(
-                intrinsic.height,
-                result.border.top + result.border.bottom + result.padding.top + result.padding.bottom,
-                result.box_sizing,
-            ) };
-        }
-    }
     return result;
-}
-fn textSizingValue(intrinsic: f32, edges: f32, box_sizing: style.BoxSizing) f32 {
-    return switch (box_sizing) {
-        .content_box => intrinsic,
-        .border_box => intrinsic + edges,
-    };
 }
 
 fn applyFixtureAttributes(
@@ -973,22 +1039,59 @@ fn isAxisGapAttribute(name: []const u8) bool {
     return std.mem.eql(u8, name, "column-gap") or std.mem.eql(u8, name, "row-gap");
 }
 
-fn dimensionAuto(value: style.Dimension) bool {
-    return switch (value) {
-        .auto => true,
-        .length, .percent, .min_content, .max_content, .fit_content => false,
+test "fixture Ahem breaks only at zero-width spaces" {
+    const measured = ahemMeasure("H H", .{
+        .known_dimensions = .{ .width = null, .height = null },
+        .available_space = .{ .width = .{ .definite = 25 }, .height = .max_content },
+        .font_size = 10,
+        .font_id = 0,
+    });
+
+    try std.testing.expectEqual(@as(f32, 30), measured.width);
+    try std.testing.expectEqual(ahem_line_height, measured.height);
+}
+
+test "fixture Ahem measures UTF-8 byte lengths" {
+    const measured = ahemMeasure("\xC3\xA9", .{
+        .known_dimensions = .{ .width = null, .height = null },
+        .available_space = .{ .width = .max_content, .height = .max_content },
+        .font_size = 10,
+        .font_id = 0,
+    });
+
+    try std.testing.expectEqual(@as(f32, 20), measured.width);
+    try std.testing.expectEqual(ahem_line_height, measured.height);
+}
+
+test "fixture horizontal Ahem zero-width breaks wrap under definite width" {
+    var attributes: std.json.ObjectMap = .empty;
+    defer attributes.deinit(std.testing.allocator);
+    try attributes.put(std.testing.allocator, "width", .{ .string = "10px" });
+
+    const nodes = [_]Node{.{
+        .kind = "text",
+        .text = "H\xE2\x80\x8BH",
+        .writing_mode = "horizontal-tb",
+        .child_count = 0,
+        .attributes = .{ .object = attributes },
+    }};
+    const expected = [_]Rect{
+        .{ .x = 0, .y = 0, .width = 10, .height = 20 },
     };
-}
+    const fixture_case: Case = .{
+        .id = "test",
+        .source = "test_fixtures/test.html",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .variant = "border_box_ltr",
+        .grid_feature = false,
+        .use_rounding = false,
+        .viewport = .{ .width = 10, .height = 100 },
+        .viewport_mode = .{ .width = .definite, .height = .definite },
+        .nodes = &nodes,
+        .expected = &expected,
+    };
 
-fn hasTextBreakOpportunity(text: []const u8) bool {
-    return std.mem.indexOfAny(u8, text, " \t\n\r") != null or
-        std.mem.indexOf(u8, text, "\xE2\x80\x8B") != null;
-}
-
-test "fixture text wrap detection is explicit" {
-    try std.testing.expect(!hasTextBreakOpportunity("HHHH"));
-    try std.testing.expect(hasTextBreakOpportunity("H H"));
-    try std.testing.expect(hasTextBreakOpportunity("H\xE2\x80\x8BH"));
+    try std.testing.expect(try runCase(std.testing.allocator, fixture_case));
 }
 
 fn applyAttribute(result: *style.Style, name: []const u8, value: []const u8) CaseError!void {
@@ -1027,56 +1130,12 @@ fn applyAttributeWithResources(
     if (std.mem.eql(u8, name, "justify-self")) return applyJustifySelf(result, value);
     if (std.mem.eql(u8, name, "grid-template-columns")) {
         const owner = resources orelse return error.InvalidFixture;
-        const scrollbar_gutter = result.scrollbarGutter();
-        const width_avail: ?f32 = switch (result.size.width) {
-            .length => |w| switch (result.box_sizing) {
-                .content_box => @max(
-                    0,
-                    w - scrollbar_gutter.left - scrollbar_gutter.right,
-                ),
-                .border_box => @max(
-                    0,
-                    w - result.border.left - result.border.right -
-                        result.padding.left - result.padding.right -
-                        scrollbar_gutter.left - scrollbar_gutter.right,
-                ),
-            },
-            else => null,
-        };
-        const gap = if (!isTypedZero(result.grid_column_gap))
-            result.grid_column_gap
-        else if (!isTypedZero(result.column_gap))
-            result.column_gap
-        else
-            result.gap;
-        result.grid_template_columns = try parseGridTemplate(owner, value, width_avail, gap);
+        result.grid_template_columns = try parseGridTemplate(owner, value);
         return;
     }
     if (std.mem.eql(u8, name, "grid-template-rows")) {
         const owner = resources orelse return error.InvalidFixture;
-        const scrollbar_gutter = result.scrollbarGutter();
-        const height_avail: ?f32 = switch (result.size.height) {
-            .length => |h| switch (result.box_sizing) {
-                .content_box => @max(
-                    0,
-                    h - scrollbar_gutter.top - scrollbar_gutter.bottom,
-                ),
-                .border_box => @max(
-                    0,
-                    h - result.border.top - result.border.bottom -
-                        result.padding.top - result.padding.bottom -
-                        scrollbar_gutter.top - scrollbar_gutter.bottom,
-                ),
-            },
-            else => null,
-        };
-        const gap = if (!isTypedZero(result.grid_row_gap))
-            result.grid_row_gap
-        else if (!isTypedZero(result.row_gap))
-            result.row_gap
-        else
-            result.gap;
-        result.grid_template_rows = try parseGridTemplate(owner, value, height_avail, gap);
+        result.grid_template_rows = try parseGridTemplate(owner, value);
         return;
     }
     if (std.mem.eql(u8, name, "grid-auto-columns")) {
@@ -1094,27 +1153,19 @@ fn applyAttributeWithResources(
         return;
     }
     if (std.mem.eql(u8, name, "grid-column-start")) {
-        const placement = try parseGridPlacement(value);
-        result.grid_column_start = placement;
-        result.grid_column.start = placement;
+        result.grid_column.start = try parseGridPlacement(value);
         return;
     }
     if (std.mem.eql(u8, name, "grid-column-end")) {
-        const placement = try parseGridPlacement(value);
-        result.grid_column_end = placement;
-        result.grid_column.end = placement;
+        result.grid_column.end = try parseGridPlacement(value);
         return;
     }
     if (std.mem.eql(u8, name, "grid-row-start")) {
-        const placement = try parseGridPlacement(value);
-        result.grid_row_start = placement;
-        result.grid_row.start = placement;
+        result.grid_row.start = try parseGridPlacement(value);
         return;
     }
     if (std.mem.eql(u8, name, "grid-row-end")) {
-        const placement = try parseGridPlacement(value);
-        result.grid_row_end = placement;
-        result.grid_row.end = placement;
+        result.grid_row.end = try parseGridPlacement(value);
         return;
     }
     if (std.mem.eql(u8, name, "aspect-ratio")) return applyAspectRatio(result, value);
@@ -1179,19 +1230,11 @@ test "fixture flex direction and wrap attributes map represented values" {
     for (wrap_cases) |case| {
         var result: style.Style = .{};
         try applyAttribute(&result, "flex-wrap", case.value);
-        try std.testing.expectEqual(case.expected, result.wrap);
         try std.testing.expectEqual(case.expected, result.flex_wrap);
     }
 }
 
 test "fixture flex display defaults to row unless direction is explicit" {
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "0px",
-        .border_right = "0px",
-        .border_bottom = "0px",
-        .border_left = "0px",
-    };
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
 
@@ -1203,9 +1246,7 @@ test "fixture flex display defaults to row unless direction is explicit" {
             .kind = "div",
             .child_count = 0,
             .attributes = .{ .object = implicit_attributes },
-            .style = legacy,
         },
-        "border_box_ltr",
     );
 
     var default_attributes: std.json.ObjectMap = .empty;
@@ -1217,9 +1258,7 @@ test "fixture flex display defaults to row unless direction is explicit" {
             .kind = "div",
             .child_count = 0,
             .attributes = .{ .object = default_attributes },
-            .style = legacy,
         },
-        "border_box_ltr",
     );
 
     var block_attributes: std.json.ObjectMap = .empty;
@@ -1231,9 +1270,7 @@ test "fixture flex display defaults to row unless direction is explicit" {
             .kind = "div",
             .child_count = 0,
             .attributes = .{ .object = block_attributes },
-            .style = legacy,
         },
-        "border_box_ltr",
     );
 
     var explicit_attributes: std.json.ObjectMap = .empty;
@@ -1250,9 +1287,7 @@ test "fixture flex display defaults to row unless direction is explicit" {
             .kind = "div",
             .child_count = 0,
             .attributes = .{ .object = explicit_attributes },
-            .style = legacy,
         },
-        "border_box_ltr",
     );
 
     try std.testing.expectEqual(style.Display.flex, implicit_style.display);
@@ -1265,7 +1300,7 @@ test "fixture flex display defaults to row unless direction is explicit" {
     try std.testing.expectEqual(style.FlexDirection.column, explicit_style.direction);
 }
 
-test "fixture flex item attributes map typed and legacy fields" {
+test "fixture flex item attributes map canonical values" {
     var result: style.Style = .{};
     try applyAttribute(&result, "flex-grow", "2.5");
     try applyAttribute(&result, "flex-shrink", "0.5");
@@ -1273,34 +1308,28 @@ test "fixture flex item attributes map typed and legacy fields" {
     try std.testing.expectEqual(@as(f32, 0.5), result.shrink);
 
     try applyAttribute(&result, "flex-basis", "12px");
-    try std.testing.expectEqual(@as(f32, 12), result.basis);
     try std.testing.expectEqual(style.Dimension{ .length = 12 }, result.flex_basis);
 
     try applyAttribute(&result, "flex-basis", "25%");
-    try std.testing.expectEqual(@as(f32, 0), result.basis);
     try std.testing.expectEqual(style.Dimension{ .percent = 0.25 }, result.flex_basis);
 
     try applyAttribute(&result, "flex-basis", "min-content");
-    try std.testing.expectEqual(@as(f32, 0), result.basis);
     try std.testing.expectEqual(@as(style.Dimension, .min_content), result.flex_basis);
 
     try applyAttribute(&result, "flex-basis", "max-content");
-    try std.testing.expectEqual(@as(f32, 0), result.basis);
     try std.testing.expectEqual(@as(style.Dimension, .max_content), result.flex_basis);
 
     try applyAttribute(&result, "flex-basis", "fit-content");
-    try std.testing.expectEqual(@as(f32, 0), result.basis);
     try std.testing.expectEqual(style.Dimension{ .fit_content = null }, result.flex_basis);
 
     try applyAttribute(&result, "width", "fit-content(40px)");
     try std.testing.expectEqual(style.Dimension{ .fit_content = 40 }, result.size.width);
 
     try applyAttribute(&result, "flex-basis", "auto");
-    try std.testing.expectEqual(@as(f32, 0), result.basis);
     try std.testing.expectEqual(@as(style.Dimension, .auto), result.flex_basis);
 }
 
-test "fixture gap attributes keep generic and axis fields coherent" {
+test "fixture gap attributes map canonical fields" {
     var result: style.Style = .{};
     try applyAttribute(&result, "gap", "4px");
     try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 4 }), result.gap));
@@ -1326,18 +1355,18 @@ test "fixture gap attributes keep generic and axis fields coherent" {
     try std.testing.expect(std.meta.eql(@as(style.LengthPercentage, .{ .length = 1 }), reordered.row_gap));
 }
 
-test "fixture justify content maps represented values and flex aliases" {
+test "fixture alignment attributes preserve flex-relative tokens" {
     const cases = [_]struct {
         value: []const u8,
         expected: style.Justify,
     }{
         .{ .value = "start", .expected = .start },
-        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "flex-start", .expected = .flex_start },
         .{ .value = "center", .expected = .center },
         .{ .value = "safe center", .expected = .safe_center },
         .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
-        .{ .value = "flex-end", .expected = .end },
+        .{ .value = "flex-end", .expected = .flex_end },
         .{ .value = "space-between", .expected = .space_between },
         .{ .value = "space-around", .expected = .space_around },
         .{ .value = "space-evenly", .expected = .space_evenly },
@@ -1349,19 +1378,19 @@ test "fixture justify content maps represented values and flex aliases" {
     }
 }
 
-test "fixture alignment attributes map only represented values" {
+test "fixture item alignment preserves represented tokens" {
     const item_cases = [_]struct {
         value: []const u8,
         expected: style.Align,
     }{
         .{ .value = "stretch", .expected = .stretch },
         .{ .value = "start", .expected = .start },
-        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "flex-start", .expected = .flex_start },
         .{ .value = "center", .expected = .center },
         .{ .value = "safe center", .expected = .safe_center },
         .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
-        .{ .value = "flex-end", .expected = .end },
+        .{ .value = "flex-end", .expected = .flex_end },
     };
     for (item_cases) |case| {
         var result: style.Style = .{};
@@ -1376,12 +1405,12 @@ test "fixture alignment attributes map only represented values" {
         .{ .value = "auto", .expected = .auto },
         .{ .value = "stretch", .expected = .stretch },
         .{ .value = "start", .expected = .start },
-        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "flex-start", .expected = .flex_start },
         .{ .value = "center", .expected = .center },
         .{ .value = "safe center", .expected = .safe_center },
         .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
-        .{ .value = "flex-end", .expected = .end },
+        .{ .value = "flex-end", .expected = .flex_end },
     };
     for (self_cases) |case| {
         var result: style.Style = .{};
@@ -1395,12 +1424,12 @@ test "fixture alignment attributes map only represented values" {
     }{
         .{ .value = "stretch", .expected = .stretch },
         .{ .value = "start", .expected = .start },
-        .{ .value = "flex-start", .expected = .start },
+        .{ .value = "flex-start", .expected = .flex_start },
         .{ .value = "center", .expected = .center },
         .{ .value = "safe center", .expected = .safe_center },
         .{ .value = "unsafe center", .expected = .unsafe_center },
         .{ .value = "end", .expected = .end },
-        .{ .value = "flex-end", .expected = .end },
+        .{ .value = "flex-end", .expected = .flex_end },
         .{ .value = "space-between", .expected = .space_between },
         .{ .value = "space-around", .expected = .space_around },
         .{ .value = "space-evenly", .expected = .space_evenly },
@@ -1709,73 +1738,48 @@ test "fixture unmapped style syntax stays unsupported" {
         );
     }
 
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "0px",
-        .border_right = "0px",
-        .border_bottom = "0px",
-        .border_left = "0px",
-    };
     try std.testing.expectError(error.Unsupported, fixtureStyle(
         &fixture_tree.resources,
         .{
             .kind = "div",
             .writing_mode = "vertical-rl",
             .child_count = 0,
-            .style = legacy,
         },
-        "border_box_ltr",
     ));
 }
-test "fixture variants supply generated box sizing defaults" {
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "0px",
-        .border_right = "0px",
-        .border_bottom = "0px",
-        .border_left = "0px",
-    };
+test "fixture omitted box sizing uses pinned border box default" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
     const node: Node = .{
         .kind = "div",
         .child_count = 0,
-        .style = legacy,
     };
-    try std.testing.expectEqual(
-        style.BoxSizing.border_box,
-        (try fixtureStyle(&fixture_tree.resources, node, "border_box_ltr")).box_sizing,
-    );
-    try std.testing.expectEqual(
-        style.BoxSizing.content_box,
-        (try fixtureStyle(&fixture_tree.resources, node, "content_box_rtl")).box_sizing,
-    );
+    const default_style = try fixtureStyle(&fixture_tree.resources, node);
+
+    var attributes: std.json.ObjectMap = .empty;
+    defer attributes.deinit(std.testing.allocator);
+    try attributes.put(std.testing.allocator, "box-sizing", .{ .string = "content-box" });
+    const explicit_style = try fixtureStyle(&fixture_tree.resources, .{
+        .kind = "div",
+        .child_count = 0,
+        .attributes = .{ .object = attributes },
+    });
+
+    try std.testing.expectEqual(style.BoxSizing.border_box, default_style.box_sizing);
+    try std.testing.expectEqual(style.BoxSizing.content_box, explicit_style.box_sizing);
 }
 
-test "fixture text sizing honors generated box sizing defaults" {
-    const legacy: LegacyStyle = .{
-        .direction = "ltr",
-        .border_top = "2px",
-        .border_right = "4px",
-        .border_bottom = "6px",
-        .border_left = "8px",
-    };
+test "fixture text preserves automatic dimensions for canonical measurement" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
     const node: Node = .{
         .kind = "text",
         .text = "HHHH",
         .child_count = 0,
-        .style = legacy,
     };
-    try std.testing.expect(std.meta.eql(
-        @as(style.Dimension, .{ .length = 52 }),
-        (try fixtureStyle(&fixture_tree.resources, node, "border_box_ltr")).size.width,
-    ));
-    try std.testing.expect(std.meta.eql(
-        @as(style.Dimension, .{ .length = 40 }),
-        (try fixtureStyle(&fixture_tree.resources, node, "content_box_ltr")).size.width,
-    ));
+    const text_style = try fixtureStyle(&fixture_tree.resources, node);
+    try std.testing.expectEqual(@as(style.Dimension, .auto), text_style.size.width);
+    try std.testing.expectEqual(@as(style.Dimension, .auto), text_style.size.height);
 }
 
 test "fixture grid templates parse all supported track classes" {
@@ -1886,16 +1890,18 @@ test "fixture grid auto tracks and flow map represented values" {
         "grid-auto-rows",
         "max-content",
     );
+    try std.testing.expectEqual(@as(usize, 1), result.grid_auto_columns.len);
     try std.testing.expect(std.meta.eql(
         @as(style.GridTrack, .{ .minmax = .{
             .min = .{ .fixed = 10 },
             .max = .{ .fr = 2 },
         } }),
-        result.grid_auto_columns,
+        result.grid_auto_columns[0],
     ));
+    try std.testing.expectEqual(@as(usize, 1), result.grid_auto_rows.len);
     try std.testing.expect(std.meta.eql(
         @as(style.GridTrack, .max_content),
-        result.grid_auto_rows,
+        result.grid_auto_rows[0],
     ));
 
     const flow_cases = [_]struct {
@@ -1918,6 +1924,53 @@ test "fixture grid auto tracks and flow map represented values" {
     }
 }
 
+test "fixture grid auto columns cycle the complete track list" {
+    var attributes: std.json.ObjectMap = .empty;
+    defer attributes.deinit(std.testing.allocator);
+    try attributes.put(std.testing.allocator, "display", .{ .string = "grid" });
+    try attributes.put(std.testing.allocator, "width", .{ .string = "70px" });
+    try attributes.put(std.testing.allocator, "height", .{ .string = "10px" });
+    try attributes.put(std.testing.allocator, "grid-auto-flow", .{ .string = "column" });
+    try attributes.put(
+        std.testing.allocator,
+        "grid-auto-columns",
+        .{ .string = "10px 20px 30px" },
+    );
+
+    const nodes = [_]Node{
+        .{
+            .kind = "div",
+            .child_count = 4,
+            .attributes = .{ .object = attributes },
+        },
+        .{ .kind = "div", .child_count = 0 },
+        .{ .kind = "div", .child_count = 0 },
+        .{ .kind = "div", .child_count = 0 },
+        .{ .kind = "div", .child_count = 0 },
+    };
+    const expected = [_]Rect{
+        .{ .x = 0, .y = 0, .width = 70, .height = 10 },
+        .{ .x = 0, .y = 0, .width = 10, .height = 10 },
+        .{ .x = 10, .y = 0, .width = 20, .height = 10 },
+        .{ .x = 30, .y = 0, .width = 30, .height = 10 },
+        .{ .x = 60, .y = 0, .width = 10, .height = 10 },
+    };
+    const fixture_case: Case = .{
+        .id = "test",
+        .source = "test_fixtures/test.html",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .variant = "border_box_ltr",
+        .grid_feature = true,
+        .use_rounding = false,
+        .viewport = .{ .width = 70, .height = 10 },
+        .viewport_mode = .{ .width = .definite, .height = .definite },
+        .nodes = &nodes,
+        .expected = &expected,
+    };
+
+    try std.testing.expect(try runCase(std.testing.allocator, fixture_case));
+}
+
 test "fixture grid templates parse repeat and fit-content patterns" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
@@ -1929,16 +1982,11 @@ test "fixture grid templates parse repeat and fit-content patterns" {
         "grid-template-columns",
         "repeat(4, 50px)",
     );
-    const expected_repeat4 = [_]style.GridTrack{
-        .{ .fixed = 50 },
-        .{ .fixed = 50 },
-        .{ .fixed = 50 },
-        .{ .fixed = 50 },
-    };
-    try std.testing.expectEqual(expected_repeat4.len, result.grid_template_columns.len);
-    for (expected_repeat4, result.grid_template_columns) |expected, actual| {
-        try std.testing.expect(std.meta.eql(expected, actual));
-    }
+    try expectSemanticRepeat(
+        result.grid_template_columns,
+        .{ .count = 4 },
+        &[_]style.GridTrack{.{ .fixed = 50 }},
+    );
 
     try applyAttributeWithResources(
         &fixture_tree.resources,
@@ -1948,15 +1996,27 @@ test "fixture grid templates parse repeat and fit-content patterns" {
     );
     const expected_mixed = [_]style.GridTrack{
         .{ .fixed = 10 },
-        .{ .fr = 1 },
-        .{ .fr = 2 },
-        .{ .fr = 1 },
-        .{ .fr = 2 },
+        .{ .repeat = .{
+            .kind = .{ .count = 2 },
+            .tracks = &.{ .{ .fr = 1 }, .{ .fr = 2 } },
+        } },
         .{ .fixed = 20 },
     };
     try std.testing.expectEqual(expected_mixed.len, result.grid_template_columns.len);
     for (expected_mixed, result.grid_template_columns) |expected, actual| {
-        try std.testing.expect(std.meta.eql(expected, actual));
+        switch (expected) {
+            .repeat => |expected_repeat| switch (actual) {
+                .repeat => |actual_repeat| {
+                    try std.testing.expectEqual(expected_repeat.kind, actual_repeat.kind);
+                    try std.testing.expectEqual(expected_repeat.tracks.len, actual_repeat.tracks.len);
+                    for (expected_repeat.tracks, actual_repeat.tracks) |nested_expected, nested_actual| {
+                        try std.testing.expect(std.meta.eql(nested_expected, nested_actual));
+                    }
+                },
+                else => try std.testing.expect(false),
+            },
+            else => try std.testing.expect(std.meta.eql(expected, actual)),
+        }
     }
 
     try applyAttributeWithResources(
@@ -1967,13 +2027,30 @@ test "fixture grid templates parse repeat and fit-content patterns" {
     );
     const expected_rows = [_]style.GridTrack{
         .{ .fit_content = .{ .length = 20 } },
-        .{ .minmax = .{ .min = .{ .fixed = 10 }, .max = .{ .fr = 1 } } },
-        .{ .minmax = .{ .min = .{ .fixed = 10 }, .max = .{ .fr = 1 } } },
+        .{ .repeat = .{
+            .kind = .{ .count = 2 },
+            .tracks = &.{.{ .minmax = .{
+                .min = .{ .fixed = 10 },
+                .max = .{ .fr = 1 },
+            } }},
+        } },
         .{ .fit_content = .{ .length = 30 } },
     };
     try std.testing.expectEqual(expected_rows.len, result.grid_template_rows.len);
     for (expected_rows, result.grid_template_rows) |expected, actual| {
-        try std.testing.expect(std.meta.eql(expected, actual));
+        switch (expected) {
+            .repeat => |expected_repeat| switch (actual) {
+                .repeat => |actual_repeat| {
+                    try std.testing.expectEqual(expected_repeat.kind, actual_repeat.kind);
+                    try std.testing.expectEqual(expected_repeat.tracks.len, actual_repeat.tracks.len);
+                    for (expected_repeat.tracks, actual_repeat.tracks) |nested_expected, nested_actual| {
+                        try std.testing.expect(std.meta.eql(nested_expected, nested_actual));
+                    }
+                },
+                else => try std.testing.expect(false),
+            },
+            else => try std.testing.expect(std.meta.eql(expected, actual)),
+        }
     }
 
     try applyAttributeWithResources(
@@ -1982,9 +2059,10 @@ test "fixture grid templates parse repeat and fit-content patterns" {
         "grid-auto-columns",
         "fit-content(50px)",
     );
+    try std.testing.expectEqual(@as(usize, 1), result.grid_auto_columns.len);
     try std.testing.expect(std.meta.eql(
         @as(style.GridTrack, .{ .fit_content = .{ .length = 50 } }),
-        result.grid_auto_columns,
+        result.grid_auto_columns[0],
     ));
 
     try applyAttributeWithResources(
@@ -2005,22 +2083,18 @@ test "fixture grid templates parse auto-fit and auto-fill repeat patterns" {
 
     var result: style.Style = .{};
     result.size.width = .{ .length = 200 };
-    result.grid_column_gap = .{ .length = 10 };
+    result.column_gap = .{ .length = 10 };
     try applyAttributeWithResources(
         &fixture_tree.resources,
         &result,
         "grid-template-columns",
         "repeat(auto-fit, 60px)",
     );
-    const expected_fit = [_]style.GridTrack{
-        .{ .fixed = 60 },
-        .{ .fixed = 60 },
-        .{ .fixed = 60 },
-    };
-    try std.testing.expectEqual(expected_fit.len, result.grid_template_columns.len);
-    for (expected_fit, result.grid_template_columns) |expected, actual| {
-        try std.testing.expect(std.meta.eql(expected, actual));
-    }
+    try expectSemanticRepeat(
+        result.grid_template_columns,
+        .auto_fit,
+        &[_]style.GridTrack{.{ .fixed = 60 }},
+    );
 
     try applyAttributeWithResources(
         &fixture_tree.resources,
@@ -2028,19 +2102,17 @@ test "fixture grid templates parse auto-fit and auto-fill repeat patterns" {
         "grid-template-columns",
         "repeat(auto-fill, minmax(40px, 1fr))",
     );
-    const expected_fill = [_]style.GridTrack{
-        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
-        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
-        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
-        .{ .minmax = .{ .min = .{ .fixed = 40 }, .max = .{ .fr = 1 } } },
-    };
-    try std.testing.expectEqual(expected_fill.len, result.grid_template_columns.len);
-    for (expected_fill, result.grid_template_columns) |expected, actual| {
-        try std.testing.expect(std.meta.eql(expected, actual));
-    }
+    try expectSemanticRepeat(
+        result.grid_template_columns,
+        .auto_fill,
+        &[_]style.GridTrack{.{ .minmax = .{
+            .min = .{ .fixed = 40 },
+            .max = .{ .fr = 1 },
+        } }},
+    );
 }
 
-test "fixture grid auto-fill subtracts scrollbar gutter from border-box width" {
+test "fixture grid auto-fill preserves semantic repeat under border-box sizing" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
 
@@ -2058,10 +2130,12 @@ test "fixture grid auto-fill subtracts scrollbar gutter from border-box width" {
         "repeat(auto-fill, 30px)",
     );
 
-    try std.testing.expectEqual(@as(usize, 2), result.grid_template_columns.len);
+    try expectSemanticRepeat(result.grid_template_columns, .auto_fill, &[_]style.GridTrack{
+        .{ .fixed = 30 },
+    });
 }
 
-test "fixture grid auto-fill subtracts scrollbar gutter from content-box width" {
+test "fixture grid auto-fill preserves semantic repeat under content-box sizing" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
 
@@ -2079,7 +2153,9 @@ test "fixture grid auto-fill subtracts scrollbar gutter from content-box width" 
         "repeat(auto-fill, 30px)",
     );
 
-    try std.testing.expectEqual(@as(usize, 2), result.grid_template_columns.len);
+    try expectSemanticRepeat(result.grid_template_columns, .auto_fill, &[_]style.GridTrack{
+        .{ .fixed = 30 },
+    });
 }
 
 test "fixture grid placements parse lines and positive spans" {
@@ -2092,22 +2168,6 @@ test "fixture grid placements parse lines and positive spans" {
     try applyAttributeWithResources(&fixture_tree.resources, &result, "grid-row-start", "-4");
     try applyAttributeWithResources(&fixture_tree.resources, &result, "grid-row-end", "auto");
 
-    try std.testing.expect(std.meta.eql(
-        @as(style.GridPlacement, .{ .line = 3 }),
-        result.grid_column_start,
-    ));
-    try std.testing.expect(std.meta.eql(
-        @as(style.GridPlacement, .{ .span = 2 }),
-        result.grid_column_end,
-    ));
-    try std.testing.expect(std.meta.eql(
-        @as(style.GridPlacement, .{ .line = -4 }),
-        result.grid_row_start,
-    ));
-    try std.testing.expect(std.meta.eql(
-        @as(style.GridPlacement, .auto),
-        result.grid_row_end,
-    ));
     try std.testing.expect(std.meta.eql(
         @as(style.GridLine, .{
             .start = .{ .line = 3 },
@@ -2126,17 +2186,17 @@ test "fixture grid placements parse lines and positive spans" {
     try applyAttributeWithResources(&fixture_tree.resources, &result, "grid-row-end", "span 1024");
     try std.testing.expect(std.meta.eql(
         @as(style.GridPlacement, .{ .span = 1024 }),
-        result.grid_row_end,
+        result.grid_row.end,
     ));
     try applyAttributeWithResources(&fixture_tree.resources, &result, "grid-row-end", "span 255");
     try std.testing.expect(std.meta.eql(
         @as(style.GridPlacement, .{ .span = 255 }),
-        result.grid_row_end,
+        result.grid_row.end,
     ));
     try applyAttributeWithResources(&fixture_tree.resources, &result, "grid-row-end", "span  2");
     try std.testing.expect(std.meta.eql(
         @as(style.GridPlacement, .{ .span = 2 }),
-        result.grid_row_end,
+        result.grid_row.end,
     ));
 
     const invalid = [_]struct {
@@ -2144,8 +2204,6 @@ test "fixture grid placements parse lines and positive spans" {
         value: []const u8,
     }{
         .{ .name = "grid-column-start", .value = "0" },
-        .{ .name = "grid-column-start", .value = "32768" },
-        .{ .name = "grid-row-start", .value = "-32769" },
         .{ .name = "grid-column-end", .value = "span 0" },
         .{ .name = "grid-row-end", .value = "span -1" },
         .{ .name = "grid-row-end", .value = "span" },
@@ -2163,14 +2221,35 @@ test "fixture grid placements parse lines and positive spans" {
             ),
         );
     }
-    try std.testing.expectError(
-        error.Unsupported,
-        applyAttributeWithResources(
-            &fixture_tree.resources,
-            &result,
-            "grid-column-end",
-            "span 1025",
-        ),
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-column-end",
+        "span 1025",
+    );
+    try std.testing.expectEqual(
+        @as(style.GridPlacement, .{ .span = 1025 }),
+        result.grid_column.end,
+    );
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-column-start",
+        "32768",
+    );
+    try std.testing.expectEqual(
+        @as(style.GridPlacement, .{ .line = 10_000 }),
+        result.grid_column.start,
+    );
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &result,
+        "grid-row-start",
+        "-32769",
+    );
+    try std.testing.expectEqual(
+        @as(style.GridPlacement, .{ .line = -10_000 }),
+        result.grid_row.start,
     );
     try std.testing.expectError(
         error.Unsupported,
@@ -2192,14 +2271,28 @@ test "fixture grid placements parse lines and positive spans" {
     );
 }
 
-test "fixture grid alignment and gaps populate grid fields" {
+test "fixture overlarge grid values clamp to upstream track maximum" {
+    try std.testing.expect(std.meta.eql(
+        @as(style.GridPlacement, .{ .span = 10_000 }),
+        try parseGridPlacement("span 15000"),
+    ));
+
+    const repeat = try parseRepeatHeader("repeat(15000, 1px)");
+    try std.testing.expectEqual(
+        @as(style.GridRepeatKind, .{ .count = 10_000 }),
+        repeat.kind,
+    );
+    try std.testing.expectEqualStrings("1px", repeat.body);
+}
+
+test "fixture grid alignment and gaps map canonical fields" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
 
     var result: style.Style = .{};
     try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-content", "flex-end");
-    try std.testing.expectEqual(style.Justify.end, result.justify);
-    try std.testing.expectEqual(style.Justify.end, result.grid_justify_content);
+    try std.testing.expectEqual(style.Justify.flex_end, result.justify);
+    try std.testing.expectEqual(style.Justify.flex_end, result.grid_justify_content);
     try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-content", "space-evenly");
     try std.testing.expectEqual(style.Justify.space_evenly, result.grid_justify_content);
 
@@ -2211,10 +2304,10 @@ test "fixture grid alignment and gaps populate grid fields" {
     try std.testing.expectEqual(style.AlignContent.space_evenly, result.align_content);
     try std.testing.expectEqual(style.AlignContent.space_evenly, result.grid_align_content);
     try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-items", "flex-start");
-    try std.testing.expectEqual(style.Align.start, result.grid_justify_items);
+    try std.testing.expectEqual(style.Align.flex_start, result.grid_justify_items);
     try applyAttributeWithResources(&fixture_tree.resources, &result, "align-items", "flex-end");
-    try std.testing.expectEqual(style.Align.end, result.@"align");
-    try std.testing.expectEqual(style.Align.end, result.grid_align_items);
+    try std.testing.expectEqual(style.Align.flex_end, result.@"align");
+    try std.testing.expectEqual(style.Align.flex_end, result.grid_align_items);
     try applyAttributeWithResources(&fixture_tree.resources, &result, "justify-self", "center");
     try std.testing.expectEqual(style.AlignSelf.center, result.grid_justify_self);
     try applyAttributeWithResources(&fixture_tree.resources, &result, "align-self", "stretch");
@@ -2291,25 +2384,29 @@ test "fixture grid alignment and gaps populate grid fields" {
     try applyAttributeWithResources(&fixture_tree.resources, &result, "gap", "4px");
     try std.testing.expect(std.meta.eql(
         @as(style.LengthPercentage, .{ .length = 4 }),
-        result.grid_column_gap,
+        result.gap,
     ));
     try std.testing.expect(std.meta.eql(
         @as(style.LengthPercentage, .{ .length = 4 }),
-        result.grid_row_gap,
+        result.column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 4 }),
+        result.row_gap,
     ));
     try applyAttributeWithResources(&fixture_tree.resources, &result, "column-gap", "2px");
     try applyAttributeWithResources(&fixture_tree.resources, &result, "row-gap", "3px");
     try std.testing.expect(std.meta.eql(
         @as(style.LengthPercentage, .{ .length = 2 }),
-        result.grid_column_gap,
+        result.column_gap,
     ));
     try std.testing.expect(std.meta.eql(
         @as(style.LengthPercentage, .{ .length = 3 }),
-        result.grid_row_gap,
+        result.row_gap,
     ));
 }
 
-test "fixture grid representation gaps stay explicitly unsupported" {
+test "fixture unsupported grid representations remain rejected" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
 
@@ -2320,8 +2417,6 @@ test "fixture grid representation gaps stay explicitly unsupported" {
         .{ .name = "grid-template-columns", .value = "[content] 1fr" },
         .{ .name = "grid-template-rows", .value = "subgrid" },
         .{ .name = "grid-template-areas", .value = "\"main main\"" },
-        .{ .name = "grid-auto-columns", .value = "10px 1fr" },
-        .{ .name = "grid-auto-rows", .value = "minmax(10px, 1fr) 20px" },
     };
     for (unsupported) |case| {
         var result: style.Style = .{};
@@ -2335,6 +2430,30 @@ test "fixture grid representation gaps stay explicitly unsupported" {
             ),
         );
     }
+
+    var auto_tracks: style.Style = .{};
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &auto_tracks,
+        "grid-auto-columns",
+        "10px 1fr",
+    );
+    try std.testing.expectEqual(@as(usize, 2), auto_tracks.grid_auto_columns.len);
+    try std.testing.expect(std.meta.eql(
+        @as(style.GridTrack, .{ .fixed = 10 }),
+        auto_tracks.grid_auto_columns[0],
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.GridTrack, .{ .fr = 1 }),
+        auto_tracks.grid_auto_columns[1],
+    ));
+    try applyAttributeWithResources(
+        &fixture_tree.resources,
+        &auto_tracks,
+        "grid-auto-rows",
+        "minmax(10px, 1fr) 20px",
+    );
+    try std.testing.expectEqual(@as(usize, 2), auto_tracks.grid_auto_rows.len);
 
     const invalid = [_]struct {
         name: []const u8,
@@ -2421,7 +2540,7 @@ fn applyFlexDirection(result: *style.Style, value: []const u8) CaseError!void {
 }
 
 fn applyFlexWrap(result: *style.Style, value: []const u8) CaseError!void {
-    const wrap: style.FlexWrap = if (std.mem.eql(u8, value, "nowrap"))
+    result.flex_wrap = if (std.mem.eql(u8, value, "nowrap"))
         .nowrap
     else if (std.mem.eql(u8, value, "wrap"))
         .wrap
@@ -2429,8 +2548,6 @@ fn applyFlexWrap(result: *style.Style, value: []const u8) CaseError!void {
         .wrap_reverse
     else
         return error.Unsupported;
-    result.wrap = wrap;
-    result.flex_wrap = wrap;
 }
 
 fn applyFlexGrow(result: *style.Style, value: []const u8) CaseError!void {
@@ -2448,15 +2565,9 @@ fn applyFlexShrink(result: *style.Style, value: []const u8) CaseError!void {
 fn applyFlexBasis(result: *style.Style, value: []const u8) CaseError!void {
     if (std.mem.eql(u8, value, "content")) {
         result.flex_basis = .max_content;
-        result.basis = 0;
         return;
     }
-    const basis = try parseDimension(value);
-    result.flex_basis = basis;
-    result.basis = switch (basis) {
-        .length => |number| number,
-        .auto, .percent, .min_content, .max_content, .fit_content => 0,
-    };
+    result.flex_basis = try parseDimension(value);
 }
 
 fn applyGap(result: *style.Style, value: []const u8) CaseError!void {
@@ -2464,22 +2575,16 @@ fn applyGap(result: *style.Style, value: []const u8) CaseError!void {
     result.gap = gap;
     result.column_gap = gap;
     result.row_gap = gap;
-    result.grid_column_gap = gap;
-    result.grid_row_gap = gap;
 }
 
 fn applyColumnGap(result: *style.Style, value: []const u8) CaseError!void {
     result.gap = .{ .length = 0 };
-    const gap = try parseGap(value);
-    result.column_gap = gap;
-    result.grid_column_gap = gap;
+    result.column_gap = try parseGap(value);
 }
 
 fn applyRowGap(result: *style.Style, value: []const u8) CaseError!void {
     result.gap = .{ .length = 0 };
-    const gap = try parseGap(value);
-    result.row_gap = gap;
-    result.grid_row_gap = gap;
+    result.row_gap = try parseGap(value);
 }
 
 fn applyTextAlign(result: *style.Style, value: []const u8) CaseError!void {
@@ -2499,7 +2604,7 @@ fn applyJustifyContent(result: *style.Style, value: []const u8) CaseError!void {
     else if (std.mem.eql(u8, value, "start"))
         .start
     else if (std.mem.eql(u8, value, "flex-start"))
-        .start
+        .flex_start
     else if (std.mem.eql(u8, value, "center"))
         .center
     else if (std.mem.eql(u8, value, "safe center"))
@@ -2509,7 +2614,7 @@ fn applyJustifyContent(result: *style.Style, value: []const u8) CaseError!void {
     else if (std.mem.eql(u8, value, "end"))
         .end
     else if (std.mem.eql(u8, value, "flex-end"))
-        .end
+        .flex_end
     else if (std.mem.eql(u8, value, "safe end"))
         .safe_end
     else if (std.mem.eql(u8, value, "unsafe end"))
@@ -2549,7 +2654,7 @@ fn applyAlignContent(result: *style.Style, value: []const u8) CaseError!void {
     else if (std.mem.eql(u8, value, "start"))
         .start
     else if (std.mem.eql(u8, value, "flex-start"))
-        .start
+        .flex_start
     else if (std.mem.eql(u8, value, "center"))
         .center
     else if (std.mem.eql(u8, value, "safe center"))
@@ -2559,7 +2664,7 @@ fn applyAlignContent(result: *style.Style, value: []const u8) CaseError!void {
     else if (std.mem.eql(u8, value, "end"))
         .end
     else if (std.mem.eql(u8, value, "flex-end"))
-        .end
+        .flex_end
     else if (std.mem.eql(u8, value, "safe end"))
         .safe_end
     else if (std.mem.eql(u8, value, "unsafe end"))
@@ -2643,7 +2748,7 @@ fn parseAlign(value: []const u8) CaseError!style.Align {
     else if (std.mem.eql(u8, value, "start"))
         .start
     else if (std.mem.eql(u8, value, "flex-start"))
-        .start
+        .flex_start
     else if (std.mem.eql(u8, value, "center"))
         .center
     else if (std.mem.eql(u8, value, "safe center"))
@@ -2653,7 +2758,7 @@ fn parseAlign(value: []const u8) CaseError!style.Align {
     else if (std.mem.eql(u8, value, "end"))
         .end
     else if (std.mem.eql(u8, value, "flex-end"))
-        .end
+        .flex_end
     else if (std.mem.eql(u8, value, "safe end"))
         .safe_end
     else if (std.mem.eql(u8, value, "unsafe end"))
@@ -2690,45 +2795,16 @@ fn parseAlignSelf(value: []const u8) CaseError!style.AlignSelf {
 }
 
 const RepeatSpec = struct {
-    count: usize,
+    kind: style.GridRepeatKind,
     body: []const u8,
 };
 
-fn isTypedZero(value: style.LengthPercentage) bool {
-    return switch (value) {
-        .length => |number| number == 0,
-        .percent => |fraction| fraction == 0,
-    };
-}
-
-fn trackTokenEstimatedSize(token: []const u8, available_size: ?f32) f32 {
-    const track = parseGridTrackToken(token) catch return 0;
-    return switch (track) {
-        .fixed => |v| v,
-        .percent => |p| if (available_size) |avail| p * avail else 0,
-        .fit_content => |limit| limit.resolve(available_size) orelse 0,
-        .minmax => |mm| switch (mm.min) {
-            .fixed => |v| v,
-            .percent => |p| if (available_size) |avail| p * avail else 0,
-            .fit_content => |limit| limit.resolve(available_size) orelse 0,
-            .auto, .min_content, .max_content => switch (mm.max) {
-                .fixed => |v| v,
-                .percent => |p| if (available_size) |avail| p * avail else 0,
-                .fit_content => |limit| limit.resolve(available_size) orelse 0,
-                .auto, .min_content, .max_content, .fr => 0,
-            },
-            .fr => 0,
-        },
-        .auto, .min_content, .max_content, .fr => 0,
-    };
-}
-
-fn parseRepeatHeader(
-    token: []const u8,
-    available_size: ?f32,
-    gap: style.LengthPercentage,
-) CaseError!RepeatSpec {
-    if (!std.mem.endsWith(u8, token, ")")) return error.Unsupported;
+fn parseRepeatHeader(token: []const u8) CaseError!RepeatSpec {
+    if (!std.mem.startsWith(u8, token, "repeat(") or
+        !std.mem.endsWith(u8, token, ")"))
+    {
+        return error.Unsupported;
+    }
     const inner = token[7 .. token.len - 1];
     var comma: ?usize = null;
     var depth: usize = 0;
@@ -2741,119 +2817,99 @@ fn parseRepeatHeader(
         } else if (character == ',' and depth == 0) {
             if (comma != null) return error.InvalidFixture;
             comma = index;
-            break;
         }
     }
     if (depth != 0) return error.InvalidFixture;
     const split = comma orelse return error.InvalidFixture;
-    const count_str = std.mem.trim(u8, inner[0..split], " \t\n\r");
-    if (count_str.len == 0) return error.InvalidFixture;
+    const count_text = std.mem.trim(u8, inner[0..split], " \t\n\r");
     const body = std.mem.trim(u8, inner[split + 1 ..], " \t\n\r");
-    if (body.len == 0) return error.InvalidFixture;
+    if (count_text.len == 0 or body.len == 0) return error.InvalidFixture;
 
-    if (std.mem.eql(u8, count_str, "auto-fill") or std.mem.eql(u8, count_str, "auto-fit")) {
-        var cursor: usize = 0;
-        var pattern_size: f32 = 0;
-        var inner_count: usize = 0;
-        while (try nextGridTrackToken(body, &cursor)) |inner_token| {
-            if (std.mem.startsWith(u8, inner_token, "repeat(")) {
-                return error.Unsupported;
-            }
-            pattern_size += trackTokenEstimatedSize(inner_token, available_size);
-            inner_count += 1;
-        }
-        if (inner_count == 0) return error.InvalidFixture;
-        const resolved_gap = gap.resolve(available_size) orelse 0;
-        const count: usize = if (available_size) |avail| blk: {
-            if (avail > 0 and (pattern_size + resolved_gap) > 0) {
-                const raw = @floor((avail + resolved_gap) / (pattern_size + resolved_gap));
-                break :blk @max(@as(usize, 1), @as(usize, @intFromFloat(raw)));
-            }
-            break :blk 1;
-        } else 1;
-        if (count > 1024) return error.Unsupported;
-        return .{ .count = count, .body = body };
-    }
-
-    const count = std.fmt.parseInt(usize, count_str, 10) catch {
-        return error.InvalidFixture;
-    };
-    if (count == 0) return error.InvalidFixture;
-    if (count > 1024) return error.Unsupported;
-    return .{ .count = count, .body = body };
+    const kind: style.GridRepeatKind = if (std.mem.eql(u8, count_text, "auto-fill"))
+        .auto_fill
+    else if (std.mem.eql(u8, count_text, "auto-fit"))
+        .auto_fit
+    else
+        .{ .count = try parseSaturatedGridCount(count_text) };
+    return .{ .kind = kind, .body = body };
 }
 
-fn countRepeatTracks(
-    token: []const u8,
-    available_size: ?f32,
-    gap: style.LengthPercentage,
-) CaseError!usize {
-    const repeat_spec = try parseRepeatHeader(token, available_size, gap);
-    var cursor: usize = 0;
-    var inner_count: usize = 0;
-    while (try nextGridTrackToken(repeat_spec.body, &cursor)) |inner_token| {
-        if (std.mem.startsWith(u8, inner_token, "repeat(")) {
-            return error.Unsupported;
+fn parseSaturatedGridCount(value: []const u8) CaseError!u16 {
+    if (value.len == 0) return error.InvalidFixture;
+    var start: usize = 0;
+    if (value[0] == '+') start = 1;
+    if (start == value.len) return error.InvalidFixture;
+
+    var count: usize = 0;
+    var has_digit = false;
+    for (value[start..]) |character| {
+        if (character < '0' or character > '9') return error.InvalidFixture;
+        has_digit = true;
+        if (count >= grid_layout.grid_track_count_max) continue;
+        const digit: usize = character - '0';
+        if (count > (grid_layout.grid_track_count_max - digit) / 10) {
+            count = grid_layout.grid_track_count_max;
+        } else {
+            count = count * 10 + digit;
         }
-        _ = try parseGridTrackToken(inner_token);
-        inner_count += 1;
     }
-    if (inner_count == 0) return error.InvalidFixture;
-    const total = std.math.mul(usize, repeat_spec.count, inner_count) catch return error.Unsupported;
-    if (total > 1024) return error.Unsupported;
-    return total;
+    if (!has_digit or count == 0) return error.InvalidFixture;
+    return @intCast(@min(count, grid_layout.grid_track_count_max));
 }
 
 fn parseGridTemplate(
     resources: *FixtureResources,
     value: []const u8,
-    available_size: ?f32,
-    gap: style.LengthPercentage,
 ) CaseError![]const style.GridTrack {
-    const count = try countGridTracks(value, available_size, gap);
+    return parseGridTrackList(resources, value, value.len);
+}
+
+fn parseGridTrackList(
+    resources: *FixtureResources,
+    value: []const u8,
+    depth: usize,
+) CaseError![]const style.GridTrack {
+    if (value.len == 0 or depth == 0) return error.InvalidFixture;
+    const count = try countGridTrackTokens(value);
     const owned = try resources.allocator.alloc(style.GridTrack, count);
-    errdefer resources.allocator.free(owned);
+    resources.grid_track_allocations.append(resources.allocator, owned) catch |allocation_error| {
+        resources.allocator.free(owned);
+        return allocation_error;
+    };
 
     var cursor: usize = 0;
     var index: usize = 0;
     while (try nextGridTrackToken(value, &cursor)) |token| {
-        if (std.mem.startsWith(u8, token, "repeat(")) {
-            const repeat_spec = try parseRepeatHeader(token, available_size, gap);
-            var rep_i: usize = 0;
-            while (rep_i < repeat_spec.count) : (rep_i += 1) {
-                var inner_cursor: usize = 0;
-                while (try nextGridTrackToken(repeat_spec.body, &inner_cursor)) |inner_token| {
-                    owned[index] = try parseGridTrackToken(inner_token);
-                    index += 1;
-                }
-            }
-        } else {
-            owned[index] = try parseGridTrackToken(token);
-            index += 1;
-        }
+        if (index >= owned.len) return error.InvalidFixture;
+        owned[index] = try parseGridTrackValue(resources, token, depth - 1);
+        index += 1;
     }
-    std.debug.assert(index == count);
-    try resources.grid_track_allocations.append(resources.allocator, owned);
+    if (index != owned.len) return error.InvalidFixture;
     return owned;
 }
 
-fn countGridTracks(
-    value: []const u8,
-    available_size: ?f32,
-    gap: style.LengthPercentage,
-) CaseError!usize {
+fn countGridTrackTokens(value: []const u8) CaseError!usize {
     var cursor: usize = 0;
     var count: usize = 0;
-    while (try nextGridTrackToken(value, &cursor)) |token| {
-        if (std.mem.startsWith(u8, token, "repeat(")) {
-            count += try countRepeatTracks(token, available_size, gap);
-        } else {
-            _ = try parseGridTrackToken(token);
-            count += 1;
-        }
+    while ((try nextGridTrackToken(value, &cursor)) != null) {
+        if (count == std.math.maxInt(usize)) return error.InvalidFixture;
+        count += 1;
     }
     if (count == 0) return error.InvalidFixture;
     return count;
+}
+
+fn parseGridTrackValue(
+    resources: *FixtureResources,
+    token: []const u8,
+    depth: usize,
+) CaseError!style.GridTrack {
+    if (std.mem.startsWith(u8, token, "repeat(")) {
+        const repeat = try parseRepeatHeader(token);
+        const tracks = try parseGridTrackList(resources, repeat.body, depth);
+        return .{ .repeat = .{ .kind = repeat.kind, .tracks = tracks } };
+    }
+    return parseGridTrackToken(token);
 }
 
 fn nextGridTrackToken(
@@ -2891,25 +2947,31 @@ fn isFixtureWhitespace(character: u8) bool {
 fn parseGridAutoTrack(
     resources: *FixtureResources,
     value: []const u8,
-) CaseError!style.GridTrack {
-    _ = resources;
-    return parseSingleGridTrack(value);
+) CaseError![]const style.GridTrack {
+    return parseGridTrackList(resources, value, value.len);
 }
 
-fn parseSingleGridTrack(value: []const u8) CaseError!style.GridTrack {
-    var cursor: usize = 0;
-    const token = (try nextGridTrackToken(value, &cursor)) orelse {
-        return error.InvalidFixture;
-    };
-    if ((try nextGridTrackToken(value, &cursor)) != null) {
-        return error.Unsupported;
+fn expectSemanticRepeat(
+    actual: []const style.GridTrack,
+    expected_kind: style.GridRepeatKind,
+    expected_tracks: []const style.GridTrack,
+) !void {
+    try std.testing.expectEqual(@as(usize, 1), actual.len);
+    switch (actual[0]) {
+        .repeat => |repeat| {
+            try std.testing.expectEqual(expected_kind, repeat.kind);
+            try std.testing.expectEqual(expected_tracks.len, repeat.tracks.len);
+            for (expected_tracks, repeat.tracks) |expected, track| {
+                try std.testing.expect(std.meta.eql(expected, track));
+            }
+        },
+        else => try std.testing.expect(false),
     }
-    return parseGridTrackToken(token);
 }
 
 fn parseGridTrackToken(token: []const u8) CaseError!style.GridTrack {
     if (token.len == 0) return error.InvalidFixture;
-    if (token[0] == '[' or std.mem.startsWith(u8, token, "repeat(")) {
+    if (token[0] == '[') {
         return error.Unsupported;
     }
     if (std.mem.startsWith(u8, token, "fit-content(")) {
@@ -3058,23 +3120,46 @@ fn parseGridPlacement(value: []const u8) CaseError!style.GridPlacement {
         {
             return error.InvalidFixture;
         }
-        const parsed_span = std.fmt.parseInt(i64, span_text, 10) catch {
+        const parsed_span = parseSaturatedGridCount(span_text) catch {
             if (isNamedGridLine(span_text)) return error.Unsupported;
             return error.InvalidFixture;
         };
-        if (parsed_span <= 0) return error.InvalidFixture;
-        if (parsed_span > 1024) return error.Unsupported;
-        return .{ .span = @intCast(parsed_span) };
+        return .{ .span = parsed_span };
     }
     if (std.mem.indexOfAny(u8, trimmed, " \t\n\r") != null) {
         return error.InvalidFixture;
     }
-    const line = std.fmt.parseInt(i16, trimmed, 10) catch {
+    const line = parseSaturatedGridLine(trimmed) catch {
         if (isNamedGridLine(trimmed)) return error.Unsupported;
         return error.InvalidFixture;
     };
-    if (line == 0) return error.InvalidFixture;
     return .{ .line = line };
+}
+
+fn parseSaturatedGridLine(value: []const u8) CaseError!i16 {
+    if (value.len == 0) return error.InvalidFixture;
+    var index: usize = 0;
+    var negative = false;
+    if (value[index] == '-' or value[index] == '+') {
+        negative = value[index] == '-';
+        index += 1;
+    }
+    if (index == value.len) return error.InvalidFixture;
+
+    var magnitude: usize = 0;
+    for (value[index..]) |character| {
+        if (character < '0' or character > '9') return error.InvalidFixture;
+        if (magnitude >= grid_layout.grid_track_count_max) continue;
+        const digit: usize = character - '0';
+        if (magnitude > (grid_layout.grid_track_count_max - digit) / 10) {
+            magnitude = grid_layout.grid_track_count_max;
+        } else {
+            magnitude = magnitude * 10 + digit;
+        }
+    }
+    if (magnitude == 0) return error.InvalidFixture;
+    const bounded: i32 = @intCast(@min(magnitude, grid_layout.grid_track_count_max));
+    return @intCast(if (negative) -bounded else bounded);
 }
 
 fn isNamedGridLine(value: []const u8) bool {
@@ -3112,16 +3197,6 @@ fn setMargin(result: *style.Style, side: Side, value: style.LengthPercentageAuto
         .bottom => result.margin_inset.bottom = value,
         .left => result.margin_inset.left = value,
     }
-    const fixed: f32 = switch (value) {
-        .length => |number| number,
-        .auto, .percent => 0,
-    };
-    switch (side) {
-        .top => result.margin.top = fixed,
-        .right => result.margin.right = fixed,
-        .bottom => result.margin.bottom = fixed,
-        .left => result.margin.left = fixed,
-    }
 }
 
 fn setPadding(result: *style.Style, side: Side, value: style.LengthPercentage) void {
@@ -3131,36 +3206,14 @@ fn setPadding(result: *style.Style, side: Side, value: style.LengthPercentage) v
         .bottom => result.padding_inset.bottom = value,
         .left => result.padding_inset.left = value,
     }
-    const fixed: f32 = switch (value) {
-        .length => |number| number,
-        .percent => 0,
-    };
-    switch (side) {
-        .top => result.padding.top = fixed,
-        .right => result.padding.right = fixed,
-        .bottom => result.padding.bottom = fixed,
-        .left => result.padding.left = fixed,
-    }
 }
 
 fn setBorder(result: *style.Style, side: Side, value: f32) void {
     switch (side) {
-        .top => {
-            result.border.top = value;
-            result.border_inset.top = .{ .length = value };
-        },
-        .right => {
-            result.border.right = value;
-            result.border_inset.right = .{ .length = value };
-        },
-        .bottom => {
-            result.border.bottom = value;
-            result.border_inset.bottom = .{ .length = value };
-        },
-        .left => {
-            result.border.left = value;
-            result.border_inset.left = .{ .length = value };
-        },
+        .top => result.border_inset.top = .{ .length = value },
+        .right => result.border_inset.right = .{ .length = value },
+        .bottom => result.border_inset.bottom = .{ .length = value },
+        .left => result.border_inset.left = .{ .length = value },
     }
 }
 
@@ -3242,30 +3295,74 @@ fn finiteF32(value: f64) CaseError!f32 {
     return result;
 }
 
-fn ahemMeasure(text: []const u8, _: f32, _: u8) widget.Size {
-    var line_width: f32 = 0;
-    var maximum_width: f32 = 0;
-    var line_count: f32 = 1;
-    var index: usize = 0;
-    while (index < text.len) {
-        if (std.mem.startsWith(u8, text[index..], "\xE2\x80\x8B")) {
-            index += 3;
-            continue;
-        }
-        const byte = text[index];
-        if (byte == '\n') {
-            maximum_width = @max(maximum_width, line_width);
-            line_width = 0;
-            line_count += 1;
-        } else if ((byte & 0b1100_0000) != 0b1000_0000) {
-            line_width += ahem_glyph_width;
-        }
-        index += 1;
+const AhemMetrics = struct {
+    min_line_length: usize = 0,
+    max_line_length: usize = 0,
+};
+
+fn ahemMeasure(text: []const u8, input: layout_context.MeasureInput) widget.Size {
+    return layout_context.measureContent(ahemMeasureBase, text, input);
+}
+
+fn ahemMeasureBase(text: []const u8, input: layout_context.MeasureInput) widget.Size {
+    const metrics = measureAhemMetrics(text);
+    const width = ahemInlineSize(metrics, input);
+    const line_count = ahemLineCount(text, width);
+    const height: f32 = @floatCast(
+        @as(f64, @floatFromInt(line_count)) * @as(f64, ahem_line_height),
+    );
+    return .{ .width = width, .height = height };
+}
+
+fn measureAhemMetrics(text: []const u8) AhemMetrics {
+    var metrics: AhemMetrics = .{};
+    var segments = std.mem.splitSequence(u8, text, "\xE2\x80\x8B");
+    while (segments.next()) |segment| {
+        metrics.min_line_length = @max(metrics.min_line_length, segment.len);
+        metrics.max_line_length += segment.len;
     }
-    return .{
-        .width = @max(maximum_width, line_width),
-        .height = line_count * ahem_line_height,
+    return metrics;
+}
+
+fn ahemInlineSize(metrics: AhemMetrics, input: layout_context.MeasureInput) f32 {
+    const min_content_width: f32 = @floatCast(
+        @as(f64, @floatFromInt(metrics.min_line_length)) * @as(f64, ahem_glyph_width),
+    );
+    const max_content_width: f32 = @floatCast(
+        @as(f64, @floatFromInt(metrics.max_line_length)) * @as(f64, ahem_glyph_width),
+    );
+    const available_width: f32 = if (input.known_dimensions.width) |known| blk: {
+        break :blk finiteAhemWidth(known);
+    } else switch (input.available_space.width) {
+        .min_content => min_content_width,
+        .max_content => max_content_width,
+        .definite => |available| finiteAhemWidth(available),
     };
+    return @max(min_content_width, @min(available_width, max_content_width));
+}
+
+fn finiteAhemWidth(value: f32) f32 {
+    if (!std.math.isFinite(value) or value < 0) return 0;
+    return value;
+}
+
+fn ahemLineCount(text: []const u8, available_width: f32) usize {
+    const inline_capacity: usize = @intFromFloat(
+        @floor(available_width / ahem_glyph_width),
+    );
+    var line_count: usize = 1;
+    var current_line_length: usize = 0;
+    var segments = std.mem.splitSequence(u8, text, "\xE2\x80\x8B");
+    while (segments.next()) |segment| {
+        const combined = current_line_length + segment.len;
+        if (combined > inline_capacity) {
+            if (current_line_length > 0) line_count += 1;
+            current_line_length = segment.len;
+        } else {
+            current_line_length = combined;
+        }
+    }
+    return line_count;
 }
 
 fn parsePixels(value: []const u8) FixtureError!f64 {
@@ -3309,16 +3406,43 @@ fn matchesVariant(fixture_case: Case, variant: ?[]const u8) bool {
 }
 
 fn scalarMatchesRounded(actual: f64, expected: f64, use_rounding: bool) bool {
-    const compared_actual = if (use_rounding) @round(actual) else actual;
-    const compared_expected = if (use_rounding) @round(expected) else expected;
+    const compared_actual = if (use_rounding) fixtureRound(actual) else actual;
+    const compared_expected = if (use_rounding) fixtureRound(expected) else expected;
     return @abs(compared_actual - compared_expected) < comparison_tolerance;
 }
 
 fn rectMatchesRounded(actual: Rect, expected: Rect, use_rounding: bool) bool {
-    if (!scalarMatchesRounded(actual.x, expected.x, use_rounding)) return false;
-    if (!scalarMatchesRounded(actual.y, expected.y, use_rounding)) return false;
-    if (!scalarMatchesRounded(actual.width, expected.width, use_rounding)) return false;
-    return scalarMatchesRounded(actual.height, expected.height, use_rounding);
+    if (!use_rounding) {
+        if (!scalarMatchesRounded(actual.x, expected.x, false)) return false;
+        if (!scalarMatchesRounded(actual.y, expected.y, false)) return false;
+        if (!scalarMatchesRounded(actual.width, expected.width, false)) return false;
+        return scalarMatchesRounded(actual.height, expected.height, false);
+    }
+
+    const actual_left = fixtureRound(actual.x);
+    const actual_top = fixtureRound(actual.y);
+    const actual_right = fixtureRound(actual.x + actual.width);
+    const actual_bottom = fixtureRound(actual.y + actual.height);
+    const expected_left = fixtureRound(expected.x);
+    const expected_top = fixtureRound(expected.y);
+    const expected_right = fixtureRound(expected.x + expected.width);
+    const expected_bottom = fixtureRound(expected.y + expected.height);
+
+    if (!scalarMatchesRounded(actual_left, expected_left, false)) return false;
+    if (!scalarMatchesRounded(actual_top, expected_top, false)) return false;
+    if (!scalarMatchesRounded(
+        actual_right - actual_left,
+        expected_right - expected_left,
+        false,
+    )) return false;
+    return scalarMatchesRounded(
+        actual_bottom - actual_top,
+        expected_bottom - expected_top,
+        false,
+    );
+}
+fn fixtureRound(value: f64) f64 {
+    return @floor(value + 0.5);
 }
 
 fn validSha256(value: []const u8) bool {
@@ -3331,7 +3455,7 @@ fn validSha256(value: []const u8) bool {
     return true;
 }
 
-test "fixture gap percentages retain typed tags across all mirrors" {
+test "fixture gap percentages retain typed tags across canonical gap fields" {
     var result: style.Style = .{};
     try applyAttribute(&result, "gap", "50%");
 
@@ -3339,8 +3463,6 @@ test "fixture gap percentages retain typed tags across all mirrors" {
     try std.testing.expect(std.meta.eql(expected, result.gap));
     try std.testing.expect(std.meta.eql(expected, result.column_gap));
     try std.testing.expect(std.meta.eql(expected, result.row_gap));
-    try std.testing.expect(std.meta.eql(expected, result.grid_column_gap));
-    try std.testing.expect(std.meta.eql(expected, result.grid_row_gap));
 }
 
 test "fixture column percentage gap clears generic fallback" {
@@ -3356,10 +3478,6 @@ test "fixture column percentage gap clears generic fallback" {
         @as(style.LengthPercentage, .{ .percent = 0.25 }),
         result.column_gap,
     ));
-    try std.testing.expect(std.meta.eql(
-        @as(style.LengthPercentage, .{ .percent = 0.25 }),
-        result.grid_column_gap,
-    ));
 }
 
 test "fixture normal gaps map to typed zero and whitespace stays unsupported" {
@@ -3370,14 +3488,11 @@ test "fixture normal gaps map to typed zero and whitespace stays unsupported" {
     try std.testing.expect(std.meta.eql(zero, generic.gap));
     try std.testing.expect(std.meta.eql(zero, generic.column_gap));
     try std.testing.expect(std.meta.eql(zero, generic.row_gap));
-    try std.testing.expect(std.meta.eql(zero, generic.grid_column_gap));
-    try std.testing.expect(std.meta.eql(zero, generic.grid_row_gap));
 
     var row: style.Style = .{};
     try applyAttribute(&row, "row-gap", "normal");
     try std.testing.expect(std.meta.eql(zero, row.gap));
     try std.testing.expect(std.meta.eql(zero, row.row_gap));
-    try std.testing.expect(std.meta.eql(zero, row.grid_row_gap));
 
     try std.testing.expectError(
         error.Unsupported,
@@ -3385,7 +3500,7 @@ test "fixture normal gaps map to typed zero and whitespace stays unsupported" {
     );
 }
 
-test "fixture auto-fill resolves percentage gap only with definite basis" {
+test "fixture auto-fill preserves percentage gap and semantic repeat" {
     var fixture_tree = try FixtureTree.init(std.testing.allocator, 0);
     defer fixture_tree.deinit(std.testing.allocator);
 
@@ -3398,13 +3513,11 @@ test "fixture auto-fill resolves percentage gap only with definite basis" {
         "grid-template-columns",
         "repeat(auto-fill, 60px)",
     );
-    try std.testing.expectEqual(@as(usize, 2), definite.grid_template_columns.len);
-    for (definite.grid_template_columns) |track| {
-        try std.testing.expect(std.meta.eql(
-            @as(style.GridTrack, .{ .fixed = 60 }),
-            track,
-        ));
-    }
+    try expectSemanticRepeat(
+        definite.grid_template_columns,
+        .auto_fill,
+        &[_]style.GridTrack{.{ .fixed = 60 }},
+    );
 
     var indefinite: style.Style = .{};
     indefinite.size.width = .{ .percent = 0.5 };
@@ -3415,5 +3528,9 @@ test "fixture auto-fill resolves percentage gap only with definite basis" {
         "grid-template-columns",
         "repeat(auto-fill, 60px)",
     );
-    try std.testing.expectEqual(@as(usize, 1), indefinite.grid_template_columns.len);
+    try expectSemanticRepeat(
+        indefinite.grid_template_columns,
+        .auto_fill,
+        &[_]style.GridTrack{.{ .fixed = 60 }},
+    );
 }

@@ -88,6 +88,86 @@ class ImportTaffyFixturesTests(unittest.TestCase):
         with self.assertRaises(importer.ImportError):
             importer.parse_number("2em", path=path, attribute="width")
 
+    def test_import_normalizes_viewport_modes_and_v2_shape(self) -> None:
+        viewport_by_variant = {
+            "border_box_ltr": (
+                "321.5px",
+                "240.25px",
+                {"width": 321.5, "height": 240.25},
+                {"width": "definite", "height": "definite"},
+            ),
+            "content_box_ltr": (
+                "min-content",
+                "max-content",
+                {"width": 800.0, "height": 600.0},
+                {"width": "min_content", "height": "max_content"},
+            ),
+            "border_box_rtl": (
+                "max-content",
+                "min-content",
+                {"width": 800.0, "height": 600.0},
+                {"width": "max_content", "height": "min_content"},
+            ),
+            "content_box_rtl": (
+                "640",
+                "360",
+                {"width": 640.0, "height": 360.0},
+                {"width": "definite", "height": "definite"},
+            ),
+        }
+        for variant, (width, height, _, _) in viewport_by_variant.items():
+            xml_path = (
+                self.source
+                / "tests"
+                / "xml"
+                / "leaf"
+                / f"minimal__{variant}.xml"
+            )
+            xml = xml_path.read_text(encoding="utf-8")
+            xml_path.write_text(
+                xml.replace(
+                    '<viewport width="320" height="240" />',
+                    f'<viewport width="{width}" height="{height}" />',
+                ),
+                encoding="utf-8",
+            )
+
+        self._run_import()
+
+        corpus_path = self.output / "normalized" / "cases.json"
+        manifest_path = self.output / "MANIFEST.json"
+        corpus = self._read_json("normalized/cases.json")
+        manifest = self._read_json("MANIFEST.json")
+        self.assertEqual(corpus["schema"], 2)
+        self.assertEqual(manifest["schema"], 2)
+        self.assertEqual(manifest["generator_version"], 2)
+        cases = {case["variant"]: case for case in corpus["cases"]}
+        for variant, (_, _, expected_viewport, expected_mode) in viewport_by_variant.items():
+            self.assertEqual(cases[variant]["viewport"], expected_viewport)
+            self.assertEqual(cases[variant]["viewport_mode"], expected_mode)
+            for node in cases[variant]["nodes"]:
+                self.assertNotIn("style", node)
+
+        first_outputs = (corpus_path.read_bytes(), manifest_path.read_bytes())
+        self._run_import()
+        self.assertEqual(first_outputs, (corpus_path.read_bytes(), manifest_path.read_bytes()))
+
+    def test_parse_viewport_rejects_auto_without_shared_mode(self) -> None:
+        root = importer.ET.fromstring(
+            '<test><viewport width="auto" height="100" /></test>'
+        )
+        with self.assertRaisesRegex(
+            importer.ImportError,
+            "unsupported viewport width='auto'",
+        ):
+            importer.parse_viewport(root, Path("fixture.xml"))
+
+    def test_parse_viewport_uses_pinned_max_content_defaults(self) -> None:
+        root = importer.ET.fromstring("<test><viewport /></test>")
+        viewport, mode = importer.parse_viewport(root, Path("fixture.xml"))
+        self.assertEqual(viewport, {"width": 800.0, "height": 600.0})
+        self.assertEqual(mode, {"width": "max_content", "height": "max_content"})
+
     def test_import_preserves_all_xml_input_attributes(self) -> None:
         variant = "border_box_ltr"
         xml_path = (
@@ -148,16 +228,7 @@ class ImportTaffyFixturesTests(unittest.TestCase):
         self.assertEqual(node["kind"], "node")
         self.assertEqual(node["child_count"], 0)
         self.assertEqual(node["writing_mode"], "vertical-rl")
-        self.assertEqual(
-            node["style"],
-            {
-                "direction": "rtl",
-                "border_top": "3px",
-                "border_right": "0px",
-                "border_bottom": "0px",
-                "border_left": "0px",
-            },
-        )
+        self.assertNotIn("style", node)
 
     def test_seed_import_records_explicit_fixture_and_variant_selection(self) -> None:
         selected_variant = "border_box_ltr"

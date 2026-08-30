@@ -93,7 +93,6 @@ test "flex bridge remeasures mixed block after main-axis shrink" {
 
     var inner_flex_style = autoStyle(.flex);
     inner_flex_style.direction = .row;
-    inner_flex_style.wrap = .wrap;
     inner_flex_style.flex_wrap = .wrap;
     inner_flex_style.@"align" = .start;
     inner_flex_style.align_content = .start;

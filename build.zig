@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
     // zig-cov coverage (see zig-cov README): zig-gate --cov passes these
     const coverage = b.option(bool, "coverage", "Enable zig-cov") orelse false;
     const cov_rt = b.option([]const u8, "coverage-rt", "zig-cov-rt path") orelse null;
+    const test_filter = b.option([]const u8, "test-filter", "Run tests matching a name substring");
+    const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
+    const fixture_filter = b.option([]const u8, "fixture-filter", "Run one normalized Taffy source");
+    const fixture_options = b.addOptions();
+    fixture_options.addOption([]const u8, "filter", fixture_filter orelse "");
 
     // ── Dependencies ──────────────────────────────
     const sdl3 = b.dependency("sdl3", .{ .target = target, .optimize = release_safe });
@@ -182,6 +187,7 @@ pub fn build(b: *std.Build) void {
 
     // ── Tests ────────────────────────────────
     const v7_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7/root.zig"),
             .target = target,
@@ -193,6 +199,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    v7_tests.root_module.addOptions("fixture_options", fixture_options);
     if (coverage) {
         v7_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
         v7_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
@@ -204,6 +211,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_v7_tests.step);
 
     const v7_text_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7_demo/text.zig"),
             .target = target,
@@ -230,6 +238,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_v7_text_tests.step);
 
     const v7_ui_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7_demo/ui.zig"),
             .target = target,
@@ -256,6 +265,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_v7_ui_tests.step);
 
     const v7_spotify_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7_demo/spotify.zig"),
             .target = target,
@@ -282,6 +292,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_v7_spotify_tests.step);
 
     const v7_calculator_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7_demo/calculator.zig"),
             .target = target,
@@ -308,6 +319,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_v7_calculator_tests.step);
 
     const v7_svg_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7_demo/svg_xml.zig"),
             .target = target,
@@ -335,6 +347,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_v7_svg_tests.step);
 
     const exe_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/v7_demo/main.zig"),
             .target = target,

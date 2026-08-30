@@ -221,7 +221,7 @@ pub const MandelbrotComponent = struct {
         defer ctx.pop();
         self.widget_id = try ctx.column(.{
             .texture = self.bindless_index,
-            .basis = 480,
+            .flex_basis = 480,
             .box_sizing = .border_box,
             .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
             .border_color = c_border,
