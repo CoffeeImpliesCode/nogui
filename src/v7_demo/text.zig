@@ -24,8 +24,8 @@ pub const MeasureInput = nogui.layout.MeasureInput;
 // outline extraction.
 const hb = @import("harfbuzz");
 const c = hb.c; // the binding's single C import: hb.h + hb-ft.h + freetype.h
-const glyph_infos_type = @typeInfo(@TypeOf(hb.Buffer.getGlyphInfos)).@"fn".return_type.?;
-const glyph_positions_type = @typeInfo(@TypeOf(hb.Buffer.getGlyphPositions)).@"fn".return_type.?;
+const glyph_infos = @typeInfo(@TypeOf(hb.Buffer.getGlyphInfos)).@"fn".return_type.?;
+const glyph_positions = @typeInfo(@TypeOf(hb.Buffer.getGlyphPositions)).@"fn".return_type.?;
 
 /// slot 0 = solid; glyphs start at 1, the SVG region + decorations from
 /// the top. Demo needs ~620 glyphs + the tiger (240 fills + up to 78
@@ -117,7 +117,8 @@ fn rebaseRunClock(run_cache: *RunCache, run_clock: *u32) void {
         var insert_at = key_count;
         while (insert_at > 0) {
             const previous_key = keys[insert_at - 1];
-            const previous_run = run_cache.getPtr(previous_key).?;
+            // `previous_key` came from this map, which is not mutated here.
+            const previous_run = run_cache.getPtr(previous_key) orelse unreachable;
             const should_precede = generation < previous_run.generation or
                 (generation == previous_run.generation and runKeyLess(key, previous_key));
             if (!should_precede) break;
@@ -128,7 +129,9 @@ fn rebaseRunClock(run_cache: *RunCache, run_clock: *u32) void {
         key_count += 1;
     }
     for (keys[0..key_count], 0..) |key, rank| {
-        run_cache.getPtr(key).?.generation = @intCast(rank);
+        // The keys are copied from the same map immediately above.
+        const run = run_cache.getPtr(key) orelse unreachable;
+        run.generation = @intCast(rank);
     }
     run_clock.* = @intCast(key_count);
 }
@@ -210,8 +213,8 @@ fn textClusterIsControl(text: []const u8, cluster: usize) bool {
 
 const ShapedAdvance = struct {
     text: []const u8,
-    infos: glyph_infos_type,
-    positions: glyph_positions_type,
+    infos: glyph_infos,
+    positions: glyph_positions,
     glyph_index: usize = 0,
     last_offset: usize = 0,
     prefix_width: f32 = 0,
@@ -581,11 +584,22 @@ fn applyKnownDimensions(size: WidgetSize, input: MeasureInput) WidgetSize {
     return result;
 }
 
+fn scaleCountToF32(count: usize, unit: f32) f32 {
+    // Scale in f64 so the integer is not narrowed before multiplication.
+    const scaled = @as(f64, @floatFromInt(count)) * @as(f64, unit);
+    const maximum: f64 = std.math.floatMax(f32);
+    // The assertions establish the finite f32 range before narrowing.
+    std.debug.assert(std.math.isFinite(scaled));
+    std.debug.assert(scaled >= -maximum);
+    std.debug.assert(scaled <= maximum);
+    return @floatCast(scaled);
+}
+
 fn fallbackMeasure(text: []const u8, input: MeasureInput) WidgetSize {
     const flow = measureByLinePolicy(FallbackAdvance{}, text, input);
     return applyKnownDimensions(.{
         .width = flow.width,
-        .height = @as(f32, @floatFromInt(flow.line_count)) * fallback_line_height,
+        .height = scaleCountToF32(flow.line_count, fallback_line_height),
     }, input);
 }
 
@@ -766,7 +780,8 @@ pub const TextEngine = struct {
             .ascent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.ascender)) / 64.0)),
             .descent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.descender)) / 64.0)),
         };
-        return &self.fonts[idx].?;
+        if (self.fonts[idx]) |*font| return font;
+        unreachable;
     }
 
     pub fn deinit(self: *TextEngine) void {
@@ -896,8 +911,8 @@ pub const TextEngine = struct {
             .glyphs = glyphs,
             .generation = generation,
         });
-        // Fetch the ptr AFTER the put — never hold a map ptr across a put.
-        return self.run_cache.getPtr(key).?;
+        // `put` succeeded and no map mutation occurs before this fetch.
+        return self.run_cache.getPtr(key) orelse unreachable;
     }
 
     fn shapeForMeasure(self: *TextEngine, font: *FontState, text: []const u8) ShapedAdvance {
@@ -922,7 +937,7 @@ pub const TextEngine = struct {
         const flow = measureByLinePolicy(&shaped, text, input);
         return applyKnownDimensions(.{
             .width = flow.width,
-            .height = @as(f32, @floatFromInt(flow.line_count)) * (font.ascent - font.descent),
+            .height = scaleCountToF32(flow.line_count, font.ascent - font.descent),
         }, input);
     }
     /// Rasterize glyph `gid` on demand. Glyph id 0 and glyphs without a
@@ -1015,7 +1030,8 @@ pub const TextEngine = struct {
             .curve_w = sweeper.curve_w,
             .curve_h = sweeper.curve_h,
         }) catch |err| {
-            var orphan = self.sweepers.pop().?;
+            // The sweeper was appended immediately before the entries append.
+            var orphan = self.sweepers.pop() orelse unreachable;
             orphan.deinit();
             return err;
         };
@@ -1069,7 +1085,8 @@ pub const TextEngine = struct {
         defer zone.end();
         const font = try self.fontFor(font_id, size);
         const run_key = (try self.getOrShape(font, text)).key;
-        const shaped_run = self.run_cache.getPtr(run_key).?;
+        // `getOrShape` returned this key and no cache mutation followed.
+        const shaped_run = self.run_cache.getPtr(run_key) orelse unreachable;
         const run_x = snapRunOrigin(x);
         const run_baseline = @round(baseline_y);
 
@@ -1096,9 +1113,11 @@ pub const TextEngine = struct {
         const ellipsis_key = (try self.getOrShape(font, "...")).key;
         // Shaping the ellipsis can rehash the cache, so fetch both pointers
         // only after the second cache operation.
-        const run = self.run_cache.getPtr(run_key).?;
-        const suffix = self.run_cache.getPtr(ellipsis_key).?;
-        const width = @max(0, max_width.?);
+        // The original run was just touched, so eviction removes an older key.
+        const run = self.run_cache.getPtr(run_key) orelse unreachable;
+        const suffix = self.run_cache.getPtr(ellipsis_key) orelse unreachable;
+        // `truncate` can only be true for a present, non-NaN width.
+        const width = max_width orelse unreachable;
         if (suffix.width > width) return;
         const prefix_limit = width - suffix.width;
         const prefix_count = fitGlyphCount(run, prefix_limit);
@@ -1152,7 +1171,7 @@ pub const TextEngine = struct {
         resetMeasurer(&shaped);
 
         const line_height = font.ascent - font.descent;
-        const block_height = @as(f32, @floatFromInt(flow.line_count)) * line_height;
+        const block_height = scaleCountToF32(flow.line_count, line_height);
         const vertical_inset = if (height > block_height) (height - block_height) / 2 else 0;
         const run_x = snapRunOrigin(x);
         var ranges = LineRangeIterator.init(text, flow.width);
@@ -1160,7 +1179,7 @@ pub const TextEngine = struct {
         while (ranges.next(&shaped)) |range| {
             const baseline = @round(
                 y + vertical_inset + font.ascent +
-                    @as(f32, @floatFromInt(line_index)) * line_height,
+                    scaleCountToF32(line_index, line_height),
             );
             if (range.end > range.start) {
                 _ = try self.emitTransientRun(
@@ -1575,39 +1594,6 @@ fn sweepSegment(size: [2]f32, offset: [2]f32, p0: [2]f32, p1: [2]f32, p2: [2]f32
     const b_trap = size[0] - 0.5 * (q0[0] + q1[0]);
     area += b_trap * h_trap;
     return area;
-}
-
-/// Rasterize real glyph curves at a pixel; returns coverage.
-fn glyphCoverage(
-    curves: []const renderer.Curve,
-    curve_left: f32,
-    curve_bottom: f32,
-    curve_w: f32,
-    curve_h: f32,
-    px: [2]f32,
-    win: [2]f32,
-) f32 {
-    // map pixel → curve space (the shader's uv mapping):
-    // window size in curve units = win (curve_w/dst_w etc.), offset = pixel's curve pos
-    const offset = [2]f32{
-        curve_left + curve_w * (px[0] + 0.5 - px[0]),
-        curve_bottom + curve_h * (px[1] + 0.5 - px[1]),
-    };
-    _ = offset;
-    // The shader: win_size = dFdx(vUv) = curve_w/dst_w; offset = vUv - 0.5*win_size.
-    // For a pixel at curve position c: window = [c - win/2, c + win/2].
-
-    var total: f32 = 0;
-    for (curves) |cv| {
-        total += sweepSegment(
-            win,
-            .{ curve_left + curve_w * px[0] / 200, curve_bottom + curve_h * px[1] / 200 },
-            .{ cv.p0x, cv.p0y },
-            .{ cv.p1x, cv.p1y },
-            .{ cv.p2x, cv.p2y },
-        );
-    }
-    return total / (win[0] * win[1]);
 }
 
 /// sRGB (0..1) → Oklab; alpha passes through. a/b may be negative.

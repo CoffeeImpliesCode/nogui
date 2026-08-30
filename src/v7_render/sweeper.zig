@@ -506,6 +506,9 @@ pub fn buildFillBands(a: std.mem.Allocator, curves: []const Curve) !FillBands {
         for (r0i..r1i + 1) |ri| counts[ri] += 1;
     }
     const pairs = try a.alloc(u32, 2 * row_count);
+    // `counts` is released by its unconditional defer. `pairs` is a
+    // separate allocation whose ownership transfers in the successful
+    // return and is released here only if a later allocation fails.
     errdefer a.free(pairs);
     var total: u32 = 0;
     for (0..row_count) |i| {
@@ -634,6 +637,9 @@ pub fn buildStrokeBands(a: std.mem.Allocator, edges: []const StrokeEdge, window:
         for (r0i..r1i + 1) |ri| counts[ri] += 1;
     }
     const pairs = try a.alloc(u32, 2 * row_count);
+    // `counts` is released by its unconditional defer. `pairs` is a
+    // separate allocation whose ownership transfers in the successful
+    // return and is released here only if a later allocation fails.
     errdefer a.free(pairs);
     var total: u32 = 0;
     for (0..row_count) |i| {

@@ -36,10 +36,18 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
         .height_mode = options.height_mode,
     });
 }
+fn exactF32FromUsize(value: usize) f32 {
+    std.debug.assert(value <= (1 << 24));
+    const value_f64: f64 = @floatFromInt(value);
+    return @floatCast(value_f64);
+}
+
 fn rootIntrinsicMeasure(text: []const u8, _: MeasureInput) widget.Size {
+    std.debug.assert(text.len < (1 << 24));
+    const height_length = text.len + 1;
     return .{
-        .width = @floatFromInt(text.len),
-        .height = @floatFromInt(text.len + 1),
+        .width = exactF32FromUsize(text.len),
+        .height = exactF32FromUsize(height_length),
     };
 }
 
@@ -69,11 +77,11 @@ test "root max-content request uses natural leaf border on both axes" {
     });
 
     try std.testing.expectEqual(
-        @as(f32, @floatFromInt(text.len)),
+        exactF32FromUsize(text.len),
         tree.node(root_id).?.rect.w,
     );
     try std.testing.expectEqual(
-        @as(f32, @floatFromInt(text.len + 1)),
+        exactF32FromUsize(text.len + 1),
         tree.node(root_id).?.rect.h,
     );
 }
@@ -105,7 +113,7 @@ test "root definite width preserves width while height uses max-content" {
 
     try std.testing.expectEqual(available_width, tree.node(root_id).?.rect.w);
     try std.testing.expectEqual(
-        @as(f32, @floatFromInt(text.len + 1)),
+        exactF32FromUsize(text.len + 1),
         tree.node(root_id).?.rect.h,
     );
 }

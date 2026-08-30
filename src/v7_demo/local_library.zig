@@ -117,9 +117,7 @@ pub const LocalLibrary = struct {
             return error.PathLimitExceeded;
         }
 
-        return std.fs.path.join(self.allocator, &.{ parent, name }) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-        };
+        return std.fs.path.join(self.allocator, &.{ parent, name });
     }
 
     fn appendRecord(

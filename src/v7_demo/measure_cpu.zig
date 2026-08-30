@@ -15,8 +15,8 @@ pub const MeasureInput = nogui.layout.MeasureInput;
 // Same single C import as text.zig (the HarfBuzz binding owns it).
 const hb = @import("harfbuzz");
 const c = hb.c;
-const glyph_infos_type = @typeInfo(@TypeOf(hb.Buffer.getGlyphInfos)).@"fn".return_type.?;
-const glyph_positions_type = @typeInfo(@TypeOf(hb.Buffer.getGlyphPositions)).@"fn".return_type.?;
+const glyph_infos = @typeInfo(@TypeOf(hb.Buffer.getGlyphInfos)).@"fn".return_type.?;
+const glyph_positions = @typeInfo(@TypeOf(hb.Buffer.getGlyphPositions)).@"fn".return_type.?;
 
 const font_size_px: u32 = 16; // must match TextEngine.font_size_px
 const fallback_scalar_advance: f32 = 10;
@@ -53,8 +53,8 @@ const FlowMetrics = struct {
 
 const ShapedAdvance = struct {
     text: []const u8,
-    infos: glyph_infos_type,
-    positions: glyph_positions_type,
+    infos: glyph_infos,
+    positions: glyph_positions,
     glyph_index: usize = 0,
     last_offset: usize = 0,
     prefix_width: f32 = 0,
@@ -357,11 +357,22 @@ fn applyKnownDimensions(size: WidgetSize, input: MeasureInput) WidgetSize {
     return result;
 }
 
+fn scaleCountToF32(count: usize, unit: f32) f32 {
+    // Scale in f64 so the integer is not narrowed before multiplication.
+    const scaled = @as(f64, @floatFromInt(count)) * @as(f64, unit);
+    const maximum: f64 = std.math.floatMax(f32);
+    // The assertions establish the finite f32 range before narrowing.
+    std.debug.assert(std.math.isFinite(scaled));
+    std.debug.assert(scaled >= -maximum);
+    std.debug.assert(scaled <= maximum);
+    return @floatCast(scaled);
+}
+
 fn fallbackMeasure(text: []const u8, input: MeasureInput) WidgetSize {
     const flow = measureByLinePolicy(FallbackAdvance{}, text, input);
     return applyKnownDimensions(.{
         .width = flow.width,
-        .height = @as(f32, @floatFromInt(flow.line_count)) * fallback_line_height,
+        .height = scaleCountToF32(flow.line_count, fallback_line_height),
     }, input);
 }
 
@@ -397,19 +408,22 @@ fn entryFor(font_id: u8, px: u32) !*SizeState {
             break;
         }
     }
-    if (slot == null) {
-        // All busy: reuse the first (the demo only ever uses 13/16/20, so
-        // this never triggers in practice).
-        const old = &entries[0].?;
-        old.measure_buffer.destroy();
-        old.hb_font.destroy();
-        _ = c.FT_Done_Face(old.face);
-        // Each entry owns its own FT library (see entryFor); release it too.
-        _ = c.FT_Done_FreeType(old.ft_lib);
+    var idx: usize = 0;
+    if (slot) |free_slot| {
+        idx = free_slot;
+    } else {
+        // All slots are occupied, so entry zero is present by invariant.
+        if (entries[0]) |*old| {
+            old.measure_buffer.destroy();
+            old.hb_font.destroy();
+            _ = c.FT_Done_Face(old.face);
+            // Each entry owns its own FT library (see entryFor); release it too.
+            _ = c.FT_Done_FreeType(old.ft_lib);
+        } else {
+            unreachable;
+        }
         entries[0] = null;
-        slot = 0;
     }
-    const idx = slot.?;
 
     // SAFETY: assigned by FT_Init/FT_New before any use; failures return errors.
     var ft_lib: c.FT_Library = undefined;
@@ -447,7 +461,8 @@ fn entryFor(font_id: u8, px: u32) !*SizeState {
         .descent = @as(f32, @floatCast(@as(f64, @floatFromInt(font_ext.descender)) / 64.0)),
         .font_id = font_id,
     };
-    return &entries[idx].?;
+    if (entries[idx]) |*entry| return entry;
+    unreachable;
 }
 
 /// Release every size entry. Call once at shutdown.
@@ -478,15 +493,14 @@ pub fn measure(text: []const u8, input: MeasureInput) WidgetSize {
     const flow = measureByLinePolicy(&shaped, text, input);
     return applyKnownDimensions(.{
         .width = flow.width,
-        .height = @as(f32, @floatFromInt(flow.line_count)) * (state.ascent - state.descent),
+        .height = scaleCountToF32(flow.line_count, state.ascent - state.descent),
     }, input);
 }
 test "measureFlow excludes separators trimmed at hard-line starts" {
     const CountingAdvance = struct {
         const Self = @This();
-
         fn advance(_: *Self, text: []const u8) f32 {
-            return @floatFromInt(text.len);
+            return scaleCountToF32(text.len, 1.0);
         }
     };
     var measurer: CountingAdvance = .{};

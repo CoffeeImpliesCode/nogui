@@ -122,11 +122,6 @@ const OutlineCollector = struct {
         self.last_x = to_x;
         self.last_y = to_y;
     }
-    fn close(self: *OutlineCollector) void {
-        if (@abs(self.last_x - self.first_x) > 0.001 or @abs(self.last_y - self.first_y) > 0.001) {
-            self.lineTo(self.first_x, self.first_y);
-        }
-    }
 };
 
 fn ftMoveTo(to: [*c]const c.FT_Vector, user: ?*anyopaque) callconv(.c) c_int {

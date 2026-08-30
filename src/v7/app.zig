@@ -191,7 +191,7 @@ pub const App = struct {
         if (self.gpu_endpoint != null) {
             try self.initGpuEntry(entry.value_ptr);
         }
-        return self.components.getPtr(id).?;
+        return self.components.getPtr(id) orelse return error.ComponentRegistrationFailed;
     }
 
     /// Run one frame: swap to the other arena, build a fresh tree + DrawCtx
@@ -306,7 +306,7 @@ pub const App = struct {
                 return null;
             },
             .key_down => |k| {
-                if (self.tree_ptr) |tree| self.handleKey(tree, k);
+                if (self.tree_ptr) |tree| try self.handleKey(tree, k);
                 return null;
             },
             .key_up => return null, // repeats arrive as key_down; nothing to clear
@@ -320,10 +320,10 @@ pub const App = struct {
     ///   Left/Right/Up/Down — adjust the focused slider (5% steps)
     ///   Home / End       — slider to min / max
     ///   Escape           — clear focus
-    fn handleKey(self: *App, tree: *const WidgetTree, k: KeyEvent) void {
+    fn handleKey(self: *App, tree: *const WidgetTree, k: KeyEvent) !void {
         switch (k.key) {
             .tab => {
-                if (k.shift) self.focusPrev(tree) else self.focusNext(tree);
+                if (k.shift) try self.focusPrev(tree) else try self.focusNext(tree);
             },
             .enter, .space => {
                 const fid = self.focus orelse return;
@@ -367,15 +367,15 @@ pub const App = struct {
     /// Move focus to the next/previous focusable node (button or slider)
     /// in the tree, wrapping around. Uses the LAST PRESENTED tree so the
     /// focus order matches what the user sees.
-    fn focusNext(self: *App, tree: *const WidgetTree) void {
-        self.focus = self.focusStep(tree, 1);
+    fn focusNext(self: *App, tree: *const WidgetTree) !void {
+        self.focus = try self.focusStep(tree, 1);
     }
 
-    fn focusPrev(self: *App, tree: *const WidgetTree) void {
-        self.focus = self.focusStep(tree, -1);
+    fn focusPrev(self: *App, tree: *const WidgetTree) !void {
+        self.focus = try self.focusStep(tree, -1);
     }
 
-    fn focusStep(self: *const App, tree: *const WidgetTree, dir: i32) ?Id {
+    fn focusStep(self: *const App, tree: *const WidgetTree, dir: i32) !?Id {
         // Count focusable nodes first, then size the buffer exactly — a
         // fixed cap would silently drop focusables past it. The slice
         // lives in the app's gpa for the duration of this call only.
@@ -384,7 +384,7 @@ pub const App = struct {
             if (isTraversable(n)) count += 1;
         }
         if (count == 0) return null;
-        const ids = self.gpa.alloc(Id, count) catch return null;
+        const ids = try self.gpa.alloc(Id, count);
         defer self.gpa.free(ids);
         var i: usize = 0;
         for (tree.nodes.items) |*n| {
@@ -522,6 +522,8 @@ pub const App = struct {
         time_ms: u64,
         gpu_frame: ?*GpuFrame,
     ) !FrameOutput {
+        const root_component = self.components.get(@enumFromInt(1)) orelse
+            return error.RootNotRegistered;
         // Type-confusion guard: register() recorded @typeName(T), and the
         // vtable's draw is type-erased — presenting with a DIFFERENT type
         // would dispatch the registered type's draw on the caller's memory
@@ -558,7 +560,6 @@ pub const App = struct {
         // frame's directory (state_prev) points into the other arena, still
         // alive — that is the store state() seeds from.
         const state_dir = try arena_alloc.create(StateDir);
-        const root_component = self.components.get(@enumFromInt(1)).?;
         const root_entry = try self.identity_registry.map.getOrPut(self.gpa, ComponentId.root);
         root_entry.value_ptr.component = root_component;
         root_entry.value_ptr.last_seen_frame = self.frame_generation;
@@ -683,6 +684,23 @@ pub const App = struct {
 
 // --- tests ---------------------------------------------------------------
 
+test "App: frame without a registered root returns RootNotRegistered" {
+    const Root = struct {
+        const Self = @This();
+
+        pub fn draw(_: *Self, _: *DrawCtx) !void {}
+    };
+
+    var app = App.init(std.testing.allocator);
+    defer app.deinit();
+
+    var root: Root = .{};
+    try std.testing.expectError(
+        error.RootNotRegistered,
+        app.frame(Root, &root, 1, .{ .width = 100, .height = 100 }),
+    );
+}
+
 test "App: frame rejects a NaN surface width before root draw" {
     const Root = struct {
         const Self = @This();
@@ -714,11 +732,10 @@ test "App: frame rejects a NaN surface width before root draw" {
 /// Increment button. Mirrors the §10 demo shape (minus the slider).
 const Counter = struct {
     count: u32 = 0,
-    // SAFETY: bufPrint fills label_buf before any read; the catch fallback never reads uninit.
-    label_buf: [32]u8 = undefined,
+    label_buf: [32]u8 = @splat(0),
 
     pub fn draw(self: *Counter, ctx: *DrawCtx) anyerror!void {
-        const text = std.fmt.bufPrint(&self.label_buf, "Count: {d}", .{self.count}) catch "err";
+        const text = try std.fmt.bufPrint(&self.label_buf, "Count: {d}", .{self.count});
         _ = try ctx.column(.{ .gap = 8 });
         defer ctx.pop();
         _ = try ctx.label(.{ .text = text });
@@ -752,19 +769,22 @@ test "App: three frames with click injection persist state across frames" {
     // while the tree is still valid (dies at the next frame's arena reset).
     const out1 = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
     defer if (out1.json) |j| std.testing.allocator.free(j);
-    try std.testing.expect(std.mem.indexOf(u8, out1.json.?, "Count: 0") != null);
+    const json1 = out1.json orelse return error.MissingFrameJson;
+    try std.testing.expect(std.mem.indexOf(u8, json1, "Count: 0") != null);
 
-    const btn = firstButton(out1.tree).?;
+    const btn = firstButton(out1.tree) orelse return error.MissingButton;
     app.click(out1.tree, btn);
 
     // Frames 2-3: the incremented count persists — no dirty tracking.
     const out2 = try app.frame(Counter, &counter, 2, .{ .width = 800, .height = 600 });
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expect(std.mem.indexOf(u8, out2.json.?, "Count: 1") != null);
+    const json2 = out2.json orelse return error.MissingFrameJson;
+    try std.testing.expect(std.mem.indexOf(u8, json2, "Count: 1") != null);
 
     const out3 = try app.frame(Counter, &counter, 3, .{ .width = 800, .height = 600 });
     defer if (out3.json) |j| std.testing.allocator.free(j);
-    try std.testing.expect(std.mem.indexOf(u8, out3.json.?, "Count: 1") != null);
+    const json3 = out3.json orelse return error.MissingFrameJson;
+    try std.testing.expect(std.mem.indexOf(u8, json3, "Count: 1") != null);
 }
 
 test "App: frame tree exposes button nodes owned by the registered root" {
@@ -803,7 +823,8 @@ test "App: click on an unknown id is a no-op and the next frame still renders" {
 
     const out2 = try app.frame(Counter, &counter, 2, .{ .width = 800, .height = 600 });
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expect(std.mem.indexOf(u8, out2.json.?, "Count: 0") != null);
+    const json = out2.json orelse return error.MissingFrameJson;
+    try std.testing.expect(std.mem.indexOf(u8, json, "Count: 0") != null);
 }
 
 /// Text of the first .label node with the given id (null when missing).
@@ -842,12 +863,14 @@ test "App: ctx.state persists per node across frames, resets after unmount" {
     // Frame 1: fresh node -> init 0, incremented to 1.
     const out1 = try app.frame(Comp, &comp, 1, .{ .width = 100, .height = 100 });
     defer if (out1.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(@as(u32, 1), comp.last.?.*);
+    const first_state = comp.last orelse return error.MissingState;
+    try std.testing.expectEqual(@as(u32, 1), first_state.*);
 
     // Frame 2: the last version (1) was copied over -> 2.
     const out2 = try app.frame(Comp, &comp, 2, .{ .width = 100, .height = 100 });
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(@as(u32, 2), comp.last.?.*);
+    const second_state = comp.last orelse return error.MissingState;
+    try std.testing.expectEqual(@as(u32, 2), second_state.*);
 
     // Frame 3: unmount — the node is not drawn; its state directory entry
     // dies with the frame.
@@ -860,7 +883,8 @@ test "App: ctx.state persists per node across frames, resets after unmount" {
     comp.show = true;
     const out4 = try app.frame(Comp, &comp, 4, .{ .width = 100, .height = 100 });
     defer if (out4.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(@as(u32, 1), comp.last.?.*);
+    const remounted_state = comp.last orelse return error.MissingState;
+    try std.testing.expectEqual(@as(u32, 1), remounted_state.*);
 }
 
 test "App: double-buffer — prev_tree is the previous frame's tree with stable ids" {
@@ -881,7 +905,7 @@ test "App: double-buffer — prev_tree is the previous frame's tree with stable 
             break;
         }
     }
-    const label_id = label1.?;
+    const label_id = label1 orelse return error.MissingLabel;
     const rect1 = blk: {
         for (out1.tree.nodes.items) |*n| {
             if (n.id == label_id) break :blk n.rect;
@@ -896,8 +920,13 @@ test "App: double-buffer — prev_tree is the previous frame's tree with stable 
 
     // prev_tree IS frame 1's tree — still fully readable after the swap.
     try std.testing.expect(out2.prev_tree == out1.tree);
-    try std.testing.expectEqualStrings("Count: 0", labelTextById(out2.prev_tree.?, label_id).?);
-    try std.testing.expectEqualStrings("Count: 1", labelTextById(out2.tree, label_id).?);
+    const previous_tree = out2.prev_tree orelse return error.MissingPreviousTree;
+    const previous_label = labelTextById(previous_tree, label_id) orelse
+        return error.MissingLabelText;
+    try std.testing.expectEqualStrings("Count: 0", previous_label);
+    const current_label = labelTextById(out2.tree, label_id) orelse
+        return error.MissingLabelText;
+    try std.testing.expectEqualStrings("Count: 1", current_label);
 
     // Same id, same rect — only the text differs: id-keyed diffing (dirty
     // flags, retained layout) can detect the change cheaply.
@@ -917,7 +946,10 @@ test "App: double-buffer — prev_tree is the previous frame's tree with stable 
     // Frame 1's tree is gone (its arena was reset) — but frame 2's tree
     // (out2.tree) is STILL alive as out3's prev_tree, so click dispatch and
     // hit-testing against the presented tree stay valid one frame longer.
-    try std.testing.expectEqualStrings("Count: 1", labelTextById(out3.prev_tree.?, label_id).?);
+    const previous_tree_after_swap = out3.prev_tree orelse return error.MissingPreviousTree;
+    const previous_label_after_swap = labelTextById(previous_tree_after_swap, label_id) orelse
+        return error.MissingLabelText;
+    try std.testing.expectEqualStrings("Count: 1", previous_label_after_swap);
 }
 
 test "App: driver — hover, click and slider drag through handle()" {
@@ -946,10 +978,11 @@ test "App: driver — hover, click and slider drag through handle()" {
 
     // The driver sizes the surface first; then frame 1 draws at 200x200.
     _ = try app.handle(Widgets, &widgets, .{ .resize = .{ .width = 200, .height = 200 } });
-    const out1 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out1 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
-    const button_id = firstButton(out1.tree).?;
+    const button_id = firstButton(out1.tree) orelse return error.MissingButton;
     const button_rect = widget.absoluteRect(out1.tree, button_id);
     try std.testing.expect(button_rect.w > 0);
     try std.testing.expect(button_rect.h > 0);
@@ -957,9 +990,11 @@ test "App: driver — hover, click and slider drag through handle()" {
     const button_y = button_rect.y + button_rect.h / 2;
 
     _ = try app.handle(Widgets, &widgets, .{ .mouse_move = .{ .x = button_x, .y = button_y } });
-    const out2 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
+    const out2 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 2, .time_ms = 16 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(button_id, out2.hover.?);
+    const hover_id = out2.hover orelse return error.MissingHoverTarget;
+    try std.testing.expectEqual(button_id, hover_id);
 
     // Click the button through the current laid-out hit box.
     _ = try app.handle(Widgets, &widgets, .{ .mouse_down = .{ .button = .left, .x = button_x, .y = button_y } });
@@ -1021,7 +1056,7 @@ test "App: mouse wheel scrolls the nearest ancestor and clamps offset" {
     });
     const out = (try app.handle(ScrollWidgets, &widgets, .{
         .frame = .{ .tick = 1, .time_ms = 0 },
-    })).?;
+    })) orelse return error.MissingFrameOutput;
     // Layout computes max_offset from content overflow. Set a bounded
     // limit here so this test isolates wheel scaling and clamping.
     widgets.state.max_offset = .{ 0, 60 };
@@ -1144,7 +1179,8 @@ test "App: keyboard — focus traversal, activate, slider arrows, escape" {
     _ = try app.register(Widgets, &widgets);
 
     _ = try app.handle(Widgets, &widgets, .{ .resize = .{ .width = 200, .height = 200 } });
-    const out1 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out1 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // Focusable order (append order): slider, button a, button b.
@@ -1169,9 +1205,11 @@ test "App: keyboard — focus traversal, activate, slider arrows, escape" {
 
     // Tab: focus the first focusable (the slider); frame 2 reports it.
     _ = try app.handle(Widgets, &widgets, .{ .key_down = .{ .key = .tab, .shift = false } });
-    const out2 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
+    const out2 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 2, .time_ms = 16 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(ids[0], out2.focus.?);
+    const focused_id = out2.focus orelse return error.MissingFocus;
+    try std.testing.expectEqual(ids[0], focused_id);
 
     // Tab: focus button a. Space: activate it -> clicks.
     _ = try app.handle(Widgets, &widgets, .{ .key_down = .{ .key = .tab, .shift = false } });
@@ -1187,7 +1225,8 @@ test "App: keyboard — focus traversal, activate, slider arrows, escape" {
 
     // Escape clears focus.
     _ = try app.handle(Widgets, &widgets, .{ .key_down = .{ .key = .escape, .shift = false } });
-    const out3 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
+    const out3 = (try app.handle(Widgets, &widgets, .{ .frame = .{ .tick = 3, .time_ms = 32 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?Id, null), out3.focus);
 }
@@ -1218,30 +1257,34 @@ test "App: focus/pressed cleared when a draw-order change renumbers ids" {
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
-    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // The button is the column's first child at (0,0,...); press it:
     // mouse_down focuses AND presses.
     _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = 5, .y = 5 } });
-    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
+    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out2.focus != null);
     try std.testing.expect(out2.pressed != null);
-    const stale = out2.focus.?;
+    const stale = out2.focus orelse return error.MissingFocus;
 
     // Insert the conditional node ABOVE the button: ids renumber, so the
     // stale id now names the LABEL. The stale focus/pressed are cleared —
     // never re-bound to the new occupant of the old position.
     comp.show_extra = true;
-    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
+    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?Id, null), out3.focus);
     try std.testing.expectEqual(@as(?Id, null), out3.pressed);
 
     // Sanity: the renumbering really happened — the stale id now belongs
     // to the label, and the button moved to a different id.
-    try std.testing.expect(out3.tree.nodeConst(stale).?.kind == .label);
+    const stale_node = out3.tree.nodeConst(stale) orelse return error.MissingStaleNode;
+    try std.testing.expect(stale_node.kind == .label);
     var button_moved = false;
     for (out3.tree.nodes.items) |*n| {
         if (n.kind == .button) button_moved = n.id != stale;
@@ -1269,7 +1312,8 @@ test "App: keyboard — no focus: Tab lands on the first, Shift-Tab on the last"
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
-    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
     const ids = blk: {
@@ -1286,17 +1330,21 @@ test "App: keyboard — no focus: Tab lands on the first, Shift-Tab on the last"
 
     // No focus + Tab -> the FIRST focusable.
     _ = try app.handle(Comp, &comp, .{ .key_down = .{ .key = .tab, .shift = false } });
-    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
+    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(ids[0], out2.focus.?);
+    const first_focus = out2.focus orelse return error.MissingFocus;
+    try std.testing.expectEqual(ids[0], first_focus);
 
     // No focus + Shift-Tab -> the LAST focusable (the old @mod(-2, count)
     // sentinel bug landed on count-2 instead of count-1).
     _ = try app.handle(Comp, &comp, .{ .key_down = .{ .key = .escape, .shift = false } });
     _ = try app.handle(Comp, &comp, .{ .key_down = .{ .key = .tab, .shift = true } });
-    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
+    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out3.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(ids[2], out3.focus.?);
+    const last_focus = out3.focus orelse return error.MissingFocus;
+    try std.testing.expectEqual(ids[2], last_focus);
 }
 
 test "App: mouse_leave clears pressed and drag_slider without a mouse_up" {
@@ -1319,22 +1367,26 @@ test "App: mouse_leave clears pressed and drag_slider without a mouse_up" {
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
-    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
-    const button_id = firstButton(out1.tree).?;
+    const button_id = firstButton(out1.tree) orelse return error.MissingButton;
     const button_rect = widget.absoluteRect(out1.tree, button_id);
     const button_x = button_rect.x + button_rect.w * 0.1;
     const button_y = button_rect.y + button_rect.h / 2;
     _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = button_x, .y = button_y } });
-    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })).?;
+    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 16 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out2.json) |j| std.testing.allocator.free(j);
-    try std.testing.expectEqual(button_id, out2.pressed.?);
+    const pressed_id = out2.pressed orelse return error.MissingPressedButton;
+    try std.testing.expectEqual(button_id, pressed_id);
 
     // The pointer leaves the window with the button still held; no mouse_up
     // ever arrives (Alt-Tab, WM grab, release outside). pressed clears.
     _ = try app.handle(Comp, &comp, .{ .mouse_leave = {} });
-    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })).?;
+    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 32 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(?Id, null), out3.pressed);
 
@@ -1382,7 +1434,8 @@ test "App: keyboard — Space on a focused slider jumps to max; Enter stays butt
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
-    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out1.json) |j| std.testing.allocator.free(j);
 
     // Tab -> focus the slider (first focusable); Space = End: value to max,
@@ -1418,7 +1471,8 @@ test "App: keyboard — focus traversal reaches the 70th focusable (no 64 cap)" 
     _ = try app.register(Many, &comp);
 
     _ = try app.handle(Many, &comp, .{ .resize = .{ .width = 200, .height = 600 } });
-    const out = (try app.handle(Many, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out = (try app.handle(Many, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out.json) |j| std.testing.allocator.free(j);
 
     var button_ids: [70]Id = undefined;
@@ -1436,11 +1490,13 @@ test "App: keyboard — focus traversal reaches the 70th focusable (no 64 cap)" 
     var last_focus: ?Id = null;
     for (0..70) |i| {
         _ = try app.handle(Many, &comp, .{ .key_down = .{ .key = .tab, .shift = false } });
-        const f = (try app.handle(Many, &comp, .{ .frame = .{ .tick = @intCast(2 + i), .time_ms = 0 } })).?;
+        const f = (try app.handle(Many, &comp, .{ .frame = .{ .tick = @intCast(2 + i), .time_ms = 0 } })) orelse
+            return error.MissingFrameOutput;
         defer if (f.json) |j| std.testing.allocator.free(j);
         last_focus = f.focus;
     }
-    try std.testing.expectEqual(button_ids[69], last_focus.?);
+    const final_focus = last_focus orelse return error.MissingFocus;
+    try std.testing.expectEqual(button_ids[69], final_focus);
 }
 
 test "App: register records the root type name — the present() type guard" {
@@ -1462,7 +1518,8 @@ test "App: register records the root type name — the present() type guard" {
     // in the runtime registry). Matching types compile and run normally.
     const out = try app.frame(Counter, &counter, 1, .{ .width = 800, .height = 600 });
     defer if (out.json) |j| std.testing.allocator.free(j);
-    try std.testing.expect(std.mem.indexOf(u8, out.json.?, "Count: 0") != null);
+    const json = out.json orelse return error.MissingFrameJson;
+    try std.testing.expect(std.mem.indexOf(u8, json, "Count: 0") != null);
 }
 
 test "App: persistent registries stay bounded across many frames (flat memory)" {
@@ -1499,7 +1556,8 @@ test "App: persistent registries stay bounded across many frames (flat memory)" 
     // The tree's node count is stable across frames (the last frame's tree
     // has the same shape as every other): column + 2 buttons + each
     // button's child label.
-    const last = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 151, .time_ms = 2400 } })).?;
+    const last = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 151, .time_ms = 2400 } })) orelse
+        return error.MissingFrameOutput;
     defer if (last.json) |j| std.testing.allocator.free(j);
     try std.testing.expectEqual(@as(usize, 5), last.tree.nodes.items.len); // column + 2 buttons + 2 labels
 }
@@ -1532,7 +1590,8 @@ test "present: press_alpha ramps over time and decays" {
     _ = try app.register(Comp, &comp);
 
     _ = try app.handle(Comp, &comp, .{ .resize = .{ .width = 200, .height = 200 } });
-    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })).?;
+    const out1 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out1.json) |j| std.testing.allocator.free(j);
     // First frame: dt = 0 (nothing happened between frames), so both
     // alphas sit exactly at 0.
@@ -1553,14 +1612,16 @@ test "present: press_alpha ramps over time and decays" {
     // 1-exp(-100/100) ≈ 0.632, one pole from 0 (tau 100ms).
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = center[0], .y = center[1] } });
     _ = try app.handle(Comp, &comp, .{ .mouse_down = .{ .button = .left, .x = center[0], .y = center[1] } });
-    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 100 } })).?;
+    const out2 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 2, .time_ms = 100 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out2.pressed != null);
     try std.testing.expectApproxEqAbs(@as(f32, 0.632), out2.press_alpha, 0.05);
     try std.testing.expect(out2.press_alpha > 0.5 and out2.press_alpha < 0.8);
 
     // A second pole at the same dt: 0.632 + (1-0.632)*0.632 ≈ 0.865.
-    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 200 } })).?;
+    const out3 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 3, .time_ms = 200 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out3.json) |j| std.testing.allocator.free(j);
     try std.testing.expectApproxEqAbs(@as(f32, 0.865), out3.press_alpha, 0.05);
     try std.testing.expect(out3.press_alpha > 0.8);
@@ -1568,7 +1629,8 @@ test "present: press_alpha ramps over time and decays" {
     // Release: the target drops to 0 and press_alpha decays one pole
     // toward it: 0.865 * exp(-100/100) ≈ 0.318.
     _ = try app.handle(Comp, &comp, .{ .mouse_up = .{ .button = .left, .x = center[0], .y = center[1] } });
-    const out4 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 4, .time_ms = 300 } })).?;
+    const out4 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 4, .time_ms = 300 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out4.json) |j| std.testing.allocator.free(j);
     try std.testing.expectApproxEqAbs(@as(f32, 0.318), out4.press_alpha, 0.05);
     try std.testing.expect(out4.press_alpha < 0.35);
@@ -1577,7 +1639,8 @@ test "present: press_alpha ramps over time and decays" {
     // hovering, tau 180ms) decays one pole toward 0: ≈0.465 — the fade
     // must still be mid-flight, not snapped.
     _ = try app.handle(Comp, &comp, .{ .mouse_leave = {} });
-    const out5 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 5, .time_ms = 400 } })).?;
+    const out5 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 5, .time_ms = 400 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out5.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(out5.hover_alpha > 0.3 and out5.hover_alpha < 0.6);
 
@@ -1585,7 +1648,8 @@ test "present: press_alpha ramps over time and decays" {
     // the fade ramps from the decayed value: 0.465 + (1-0.465)*0.426 ≈
     // 0.693 (past the midpoint, still easing).
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = center[0], .y = center[1] } });
-    const out6 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 6, .time_ms = 500 } })).?;
+    const out6 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 6, .time_ms = 500 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out6.json) |j| std.testing.allocator.free(j);
     try std.testing.expectApproxEqAbs(@as(f32, 0.693), out6.hover_alpha, 0.05);
     try std.testing.expect(out6.hover_alpha > 0.65);
@@ -1595,7 +1659,7 @@ test "present: press_alpha ramps over time and decays" {
     // The button's own label child is at the same position as the button —
     // scan for a label that is NOT inside the button's subtree.
     const label_center = blk: {
-        const btn_id: Id = out6.hover.?;
+        const btn_id: Id = out6.hover orelse return error.MissingHoverTarget;
         for (out6.tree.nodes.items) |*n| {
             if (n.kind != .label) continue;
             if (n.id == btn_id) continue;
@@ -1621,7 +1685,8 @@ test "present: press_alpha ramps over time and decays" {
         unreachable;
     };
     _ = try app.handle(Comp, &comp, .{ .mouse_move = .{ .x = label_center[0], .y = label_center[1] } });
-    const out7 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 7, .time_ms = 600 } })).?;
+    const out7 = (try app.handle(Comp, &comp, .{ .frame = .{ .tick = 7, .time_ms = 600 } })) orelse
+        return error.MissingFrameOutput;
     defer if (out7.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(!std.meta.eql(out7.hover, out6.hover));
     try std.testing.expectApproxEqAbs(@as(f32, 0.426), out7.hover_alpha, 0.05);
@@ -1662,10 +1727,13 @@ test "App: same-key component identity is stable across frames" {
     _ = try app.register(Root, &root);
     _ = try app.frame(Root, &root, 1, .{ .width = 100, .height = 100 });
     const child_identity = ComponentId.child(.root, .{ .static = "child" });
-    try std.testing.expectEqual(@as(u64, 1), app.identity_registry.map.get(child_identity).?.last_seen_frame);
+    const root_entry = app.identity_registry.map.get(child_identity) orelse
+        return error.MissingComponentIdentity;
+    try std.testing.expectEqual(@as(u64, 1), root_entry.last_seen_frame);
 
     _ = try app.frame(Root, &root, 2, .{ .width = 100, .height = 100 });
-    const entry = app.identity_registry.map.get(child_identity).?;
+    const entry = app.identity_registry.map.get(child_identity) orelse
+        return error.MissingComponentIdentity;
     try std.testing.expectEqual(child_identity, ComponentId.child(.root, .{ .static = "child" }));
     try std.testing.expectEqual(@as(u64, 2), entry.last_seen_frame);
 }

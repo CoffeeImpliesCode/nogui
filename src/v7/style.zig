@@ -244,6 +244,8 @@ pub const LengthPercentageAuto = union(enum) {
 };
 
 /// Generic width/height pair used by typed Taffy-like style fields.
+/// This PascalCase type factory follows Zig's type-returning function
+/// convention; its comptime parameter is used in the generated fields.
 pub fn Size(comptime T: type) type {
     return struct {
         width: T,
@@ -252,6 +254,8 @@ pub fn Size(comptime T: type) type {
 }
 
 /// Generic top/right/bottom/left rectangle used for insets and box sides.
+/// This PascalCase type factory follows Zig's type-returning function
+/// convention; its comptime parameter is used in the generated fields.
 pub fn Rect(comptime T: type) type {
     return struct {
         top: T,
@@ -274,6 +278,8 @@ pub const Overflow = enum { visible, hidden, clip, scroll, auto };
 pub const OverflowAxes = Size(Overflow);
 
 /// Distinguishes no override, a replacement value, and an explicit clear.
+/// This PascalCase type factory follows Zig's type-returning function
+/// convention; its comptime parameter is used in the generated union.
 pub fn ExplicitOverride(comptime T: type) type {
     return union(enum) {
         unspecified,
@@ -282,6 +288,9 @@ pub fn ExplicitOverride(comptime T: type) type {
     };
 }
 
+/// Return the explicit override type for a style field.
+/// This PascalCase type factory follows Zig's type-returning function
+/// convention.
 pub fn Override(comptime T: type) type {
     return ExplicitOverride(T);
 }
@@ -398,10 +407,6 @@ pub const ResolvedStyle = struct {
 };
 
 fn defaultDimensionSize() DimensionSize {
-    return .{ .width = .auto, .height = .auto };
-}
-
-fn defaultLengthPercentageAutoSize() LengthPercentageAutoSize {
     return .{ .width = .auto, .height = .auto };
 }
 

@@ -259,6 +259,20 @@ fn objNumber(obj: std.json.ObjectMap, name: []const u8) !f64 {
     return num(try objField(obj, name));
 }
 
+fn objObject(obj: std.json.ObjectMap, name: []const u8) !std.json.ObjectMap {
+    return switch (try objField(obj, name)) {
+        .object => |value| value,
+        else => error.WrongType,
+    };
+}
+
+fn objArray(obj: std.json.ObjectMap, name: []const u8) ![]const std.json.Value {
+    return switch (try objField(obj, name)) {
+        .array => |value| value.items,
+        else => error.WrongType,
+    };
+}
+
 const LengthPercentageView = struct {
     length: ?f32 = null,
     percent: ?f32 = null,
@@ -618,6 +632,16 @@ fn isLayered(tree: *const WidgetTree, id: Id) bool {
     return false;
 }
 
+fn isAncestor(tree: *const WidgetTree, ancestor: Id, descendant: Id) layout.LayoutError!bool {
+    var current_id = descendant;
+    while (current_id != .root) {
+        const current = tree.nodeConst(current_id) orelse return error.InvalidStyle;
+        if (current.parent == ancestor) return true;
+        current_id = current.parent;
+    }
+    return false;
+}
+
 pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -833,11 +857,13 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
         var boxes: std.ArrayList(TextBox) = .empty;
         defer boxes.deinit(allocator);
         for (nodes) |*n| {
-            const text = visualText(n);
-            if (text == null) continue;
-            if (text.?.len == 0) continue;
+            const text = visualText(n) orelse continue;
+            if (text.len == 0) continue;
             if (n.rect.w <= 0 or n.rect.h <= 0) continue;
-            try boxes.append(allocator, .{ .id = n.id, .rect = widget.contentRect(tree, n.id) });
+            try boxes.append(allocator, .{
+                .id = n.id,
+                .rect = try widget.contentRect(tree, n.id),
+            });
         }
         // Strictly-ordered pairs (i < j): each overlap is reported once.
         // Ancestor-descendant pairs are skipped: nested text nodes can
@@ -849,27 +875,11 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
                 const overlap_x = a.x < b.x + b.w - 0.001 and b.x < a.x + a.w - 0.001;
                 const overlap_y = a.y < b.y + b.h - 0.001 and b.y < a.y + a.h - 0.001;
                 if (!(overlap_x and overlap_y)) continue;
-                // Ancestor-descendant: walk desc's parent chain up to anc.
-                var skip = false;
-                var cur = tree.nodeConst(boxes.items[j].id).?.parent;
-                while (cur != .root) {
-                    if (cur == boxes.items[i].id) {
-                        skip = true;
-                        break;
-                    }
-                    cur = tree.nodeConst(cur).?.parent;
+                if ((try isAncestor(tree, boxes.items[i].id, boxes.items[j].id)) or
+                    (try isAncestor(tree, boxes.items[j].id, boxes.items[i].id)))
+                {
+                    continue;
                 }
-                if (!skip) {
-                    cur = tree.nodeConst(boxes.items[i].id).?.parent;
-                    while (cur != .root) {
-                        if (cur == boxes.items[j].id) {
-                            skip = true;
-                            break;
-                        }
-                        cur = tree.nodeConst(cur).?.parent;
-                    }
-                }
-                if (skip) continue;
                 if (isLayered(tree, boxes.items[i].id) or isLayered(tree, boxes.items[j].id)) continue;
                 try add(
                     "text overlap: id {d} and id {d}",
@@ -932,12 +942,14 @@ test "treeToJson: label text with quotes and backslashes round-trips" {
     try std.testing.expectEqual(@as(usize, 2), arr.items.len);
 
     const label_node = arr.items[0].object;
-    try std.testing.expectEqualStrings("label", label_node.get("kind").?.string);
-    try std.testing.expectEqualStrings(label_text, label_node.get("label").?.string);
+    try std.testing.expectEqualStrings("label", try objString(label_node, "kind"));
+    try std.testing.expectEqualStrings(label_text, try objString(label_node, "label"));
 
     const col_node = arr.items[1].object;
-    try std.testing.expectEqualStrings("column", col_node.get("kind").?.string);
-    try std.testing.expectEqual(@as(i64, 1), col_node.get("children").?.array.items[0].integer);
+    try std.testing.expectEqualStrings("column", try objString(col_node, "kind"));
+    const col_children = try objArray(col_node, "children");
+    try std.testing.expectEqual(@as(usize, 1), col_children.len);
+    try std.testing.expectEqual(@as(i64, 1), col_children[0].integer);
 }
 
 test "treeToJson: kind-specific fields appear only for their kinds" {
@@ -986,39 +998,43 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
 
     // Slider: label + value, no container fields.
     const slider_node = arr.items[0].object;
-    try std.testing.expectEqualStrings("slider", slider_node.get("kind").?.string);
-    try std.testing.expectEqualStrings("vol", slider_node.get("label").?.string);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.5), try num(slider_node.get("value").?), 1e-9);
+    try std.testing.expectEqualStrings("slider", try objString(slider_node, "kind"));
+    try std.testing.expectEqualStrings("vol", try objString(slider_node, "label"));
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 0.5),
+        try objNumber(slider_node, "value"),
+        1e-9,
+    );
     try std.testing.expect(slider_node.get("gap") == null);
     try std.testing.expect(slider_node.get("children") == null);
 
     // Button: label only.
     const button_node = arr.items[1].object;
-    try std.testing.expectEqualStrings("button", button_node.get("kind").?.string);
-    try std.testing.expectEqualStrings("go", button_node.get("label").?.string);
+    try std.testing.expectEqualStrings("button", try objString(button_node, "kind"));
+    try std.testing.expectEqualStrings("go", try objString(button_node, "label"));
     try std.testing.expect(button_node.get("value") == null);
     try std.testing.expect(button_node.get("gap") == null);
 
     // Row container: gap + children.
     const row_node = arr.items[2].object;
-    try std.testing.expectEqualStrings("row", row_node.get("kind").?.string);
-    const row_gap = row_node.get("gap").?.object;
-    try std.testing.expectApproxEqAbs(@as(f64, 3), try num(row_gap.get("length").?), 1e-9);
+    try std.testing.expectEqualStrings("row", try objString(row_node, "kind"));
+    const row_gap = try objObject(row_node, "gap");
+    try std.testing.expectApproxEqAbs(@as(f64, 3), try objNumber(row_gap, "length"), 1e-9);
     try std.testing.expect(row_gap.get("percent") == null);
-    const row_children = row_node.get("children").?.array;
-    try std.testing.expectEqual(@as(usize, 2), row_children.items.len);
-    try std.testing.expectEqual(@as(i64, 1), row_children.items[0].integer);
-    try std.testing.expectEqual(@as(i64, 2), row_children.items[1].integer);
+    const row_children = try objArray(row_node, "children");
+    try std.testing.expectEqual(@as(usize, 2), row_children.len);
+    try std.testing.expectEqual(@as(i64, 1), row_children[0].integer);
+    try std.testing.expectEqual(@as(i64, 2), row_children[1].integer);
 
     // Column container: gap + children, no label.
     const col_node = arr.items[3].object;
-    try std.testing.expectEqualStrings("column", col_node.get("kind").?.string);
-    const col_gap = col_node.get("gap").?.object;
-    try std.testing.expectApproxEqAbs(@as(f64, 5), try num(col_gap.get("length").?), 1e-9);
+    try std.testing.expectEqualStrings("column", try objString(col_node, "kind"));
+    const col_gap = try objObject(col_node, "gap");
+    try std.testing.expectApproxEqAbs(@as(f64, 5), try objNumber(col_gap, "length"), 1e-9);
     try std.testing.expect(col_gap.get("percent") == null);
-    const col_children = col_node.get("children").?.array;
-    try std.testing.expectEqual(@as(usize, 1), col_children.items.len);
-    try std.testing.expectEqual(@as(i64, 3), col_children.items[0].integer);
+    const col_children = try objArray(col_node, "children");
+    try std.testing.expectEqual(@as(usize, 1), col_children.len);
+    try std.testing.expectEqual(@as(i64, 3), col_children[0].integer);
     try std.testing.expect(col_node.get("label") == null);
 }
 test "treeToJson: percentage gap retains its canonical tag" {
@@ -1037,9 +1053,9 @@ test "treeToJson: percentage gap retains its canonical tag" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
     defer parsed.deinit();
 
-    const gap = parsed.value.array.items[0].object.get("gap").?.object;
+    const gap = try objObject(parsed.value.array.items[0].object, "gap");
     try std.testing.expect(gap.get("length") == null);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.25), try num(gap.get("percent").?), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), try objNumber(gap, "percent"), 1e-9);
 }
 
 test "treeToJsonWith: more than 32 child ids serialize in append order" {
@@ -1071,9 +1087,12 @@ test "treeToJsonWith: more than 32 child ids serialize in append order" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
     defer parsed.deinit();
 
-    const children = parsed.value.array.items[child_count].object.get("children").?.array;
-    try std.testing.expectEqual(child_count, children.items.len);
-    for (children.items, 0..) |child, child_index| {
+    const children = try objArray(
+        parsed.value.array.items[child_count].object,
+        "children",
+    );
+    try std.testing.expectEqual(child_count, children.len);
+    for (children, 0..) |child, child_index| {
         try std.testing.expectEqual(@as(i64, @intCast(child_index + 1)), child.integer);
     }
 }
@@ -1382,11 +1401,11 @@ test "treeToJson: rect values round-trip exactly" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
     defer parsed.deinit();
 
-    const r = parsed.value.array.items[0].object.get("rect").?.object;
-    try std.testing.expectEqual(@as(f64, 12.5), try num(r.get("x").?));
-    try std.testing.expectEqual(@as(f64, -3.25), try num(r.get("y").?));
-    try std.testing.expectEqual(@as(f64, 100), try num(r.get("w").?));
-    try std.testing.expectEqual(@as(f64, 200.75), try num(r.get("h").?));
+    const r = try objObject(parsed.value.array.items[0].object, "rect");
+    try std.testing.expectEqual(@as(f64, 12.5), try objNumber(r, "x"));
+    try std.testing.expectEqual(@as(f64, -3.25), try objNumber(r, "y"));
+    try std.testing.expectEqual(@as(f64, 100), try objNumber(r, "w"));
+    try std.testing.expectEqual(@as(f64, 200.75), try objNumber(r, "h"));
 }
 
 test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
@@ -1450,17 +1469,17 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
     defer diagnostic_parsed.deinit();
 
     const child_view = diagnostic_parsed.value.array.items[0].object;
-    const absolute = child_view.get("abs_rect").?.object;
-    try std.testing.expectEqual(@as(f64, 23), try num(absolute.get("x").?));
-    try std.testing.expectEqual(@as(f64, 39), try num(absolute.get("y").?));
-    try std.testing.expectEqual(@as(f64, 30), try num(absolute.get("w").?));
-    try std.testing.expectEqual(@as(f64, 12), try num(absolute.get("h").?));
+    const absolute = try objObject(child_view, "abs_rect");
+    try std.testing.expectEqual(@as(f64, 23), try objNumber(absolute, "x"));
+    try std.testing.expectEqual(@as(f64, 39), try objNumber(absolute, "y"));
+    try std.testing.expectEqual(@as(f64, 30), try objNumber(absolute, "w"));
+    try std.testing.expectEqual(@as(f64, 12), try objNumber(absolute, "h"));
 
-    const visual = child_view.get("vis_rect").?.object;
-    try std.testing.expectEqual(@as(f64, 23), try num(visual.get("x").?));
-    try std.testing.expectEqual(@as(f64, 39), try num(visual.get("y").?));
-    try std.testing.expectEqual(@as(f64, 30), try num(visual.get("w").?));
-    try std.testing.expectEqual(@as(f64, 12), try num(visual.get("h").?));
+    const visual = try objObject(child_view, "vis_rect");
+    try std.testing.expectEqual(@as(f64, 23), try objNumber(visual, "x"));
+    try std.testing.expectEqual(@as(f64, 39), try objNumber(visual, "y"));
+    try std.testing.expectEqual(@as(f64, 30), try objNumber(visual, "w"));
+    try std.testing.expectEqual(@as(f64, 12), try objNumber(visual, "h"));
 }
 
 test "renderAscii: nested node renders at its absolute position" {

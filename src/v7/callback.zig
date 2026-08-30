@@ -18,32 +18,40 @@ pub const UserCallback = struct {
 };
 
 /// Bind a method taking a typed owner and an integer payload.
-pub fn bind(comptime F: anytype, user_data: usize) UserCallback {
-    const function_info = @typeInfo(@TypeOf(F)).@"fn";
+pub fn bind(comptime callback_fn: anytype, user_data: usize) UserCallback {
+    const function_info = switch (@typeInfo(@TypeOf(callback_fn))) {
+        .@"fn" => |info| info,
+        else => @compileError("callback.bind expects a function"),
+    };
     comptime {
         if (function_info.params.len != 2) {
             @compileError("callback.bind expects a function with two parameters");
         }
-        const owner_type = function_info.params[0].type orelse
-            @compileError("callback.bind owner parameter must have a type");
+    }
+    const owner_type = function_info.params[0].type orelse
+        @compileError("callback.bind owner parameter must have a type");
+    const user_data_type = function_info.params[1].type orelse
+        @compileError("callback.bind user-data parameter must have a type");
+    const return_type = function_info.return_type orelse
+        @compileError("callback.bind return type must be explicit");
+    comptime {
         if (@typeInfo(owner_type) != .pointer) {
             @compileError("callback.bind owner parameter must be a pointer");
         }
-        const user_data_type = function_info.params[1].type orelse
-            @compileError("callback.bind user-data parameter must have a type");
         if (user_data_type != usize and user_data_type != u32 and user_data_type != u64) {
             @compileError("callback.bind user-data must be usize, u32, or u64");
+        }
+        if (return_type != void) {
+            @compileError("callback.bind expects a function returning void");
         }
     }
 
     return .{
         .invoke_fn = struct {
             fn invoke(owner: *anyopaque, data: usize) void {
-                const owner_type = function_info.params[0].type.?;
-                const user_data_type = function_info.params[1].type.?;
                 const typed_owner: owner_type = @ptrCast(@alignCast(owner));
                 const typed_data: user_data_type = @intCast(data);
-                @call(.auto, F, .{ typed_owner, typed_data });
+                @call(.auto, callback_fn, .{ typed_owner, typed_data });
             }
         }.invoke,
         .user_data = user_data,
@@ -51,11 +59,32 @@ pub fn bind(comptime F: anytype, user_data: usize) UserCallback {
 }
 
 /// Wrap any `fn (*T) void` into a type-erased callback.
-pub fn wrap(comptime F: anytype) *const fn (*anyopaque) void {
+pub fn wrap(comptime callback_fn: anytype) *const fn (*anyopaque) void {
+    const function_info = switch (@typeInfo(@TypeOf(callback_fn))) {
+        .@"fn" => |info| info,
+        else => @compileError("callback.wrap expects a function"),
+    };
+    comptime {
+        if (function_info.params.len != 1) {
+            @compileError("callback.wrap expects a function with one parameter");
+        }
+    }
+    const owner_type = function_info.params[0].type orelse
+        @compileError("callback.wrap owner parameter must have a type");
+    const return_type = function_info.return_type orelse
+        @compileError("callback.wrap return type must be explicit");
+    comptime {
+        if (@typeInfo(owner_type) != .pointer) {
+            @compileError("callback.wrap owner parameter must be a pointer");
+        }
+        if (return_type != void) {
+            @compileError("callback.wrap expects a function returning void");
+        }
+    }
+
     return struct {
         fn call(ptr: *anyopaque) void {
-            const P = @typeInfo(@TypeOf(F)).@"fn".params[0].type.?;
-            @call(.auto, F, .{@as(P, @ptrCast(@alignCast(ptr)))});
+            @call(.auto, callback_fn, .{@as(owner_type, @ptrCast(@alignCast(ptr)))});
         }
     }.call;
 }

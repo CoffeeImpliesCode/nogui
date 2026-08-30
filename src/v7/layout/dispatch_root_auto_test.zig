@@ -67,7 +67,8 @@ fn layoutFacade(tree: *WidgetTree, available: widget.Size) !void {
 }
 
 fn expectRect(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    try std.testing.expectEqual(expected, tree.nodeConst(id).?.rect);
+    const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(expected, node.rect);
 }
 
 test "dispatcher gives an auto-height mixed flex root its natural grid height" {

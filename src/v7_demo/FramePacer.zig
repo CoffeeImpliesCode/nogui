@@ -29,8 +29,8 @@
 //! 4. Return `sleep_ms` in ns — the recommended delay before polling input.
 //!
 //! Wrap the actual sleep in `beginSleep`/`endSleep` so it is excluded from
-//! the per-frame CPU time reported by `cpuS()` (the delta measurement still
-//! includes it — it IS the frame period).
+//! the non-blocked work estimate (the delta measurement still includes it —
+//! it IS part of the frame period).
 //!
 //! `refresh_rate_hz == 0` means "unknown": the pacer falls back to
 //! `refresh_rate_safe_hz` for pacing and `headroom_safe_ms` for headroom.
@@ -75,10 +75,6 @@ max_smoothed_s: f32 = 1.0 / 30.0,
 ds: f32,
 /// The unscaled smoothed delta time. Updated by `update`. Prefer `ds`.
 unscaled_ds: f32,
-/// The unsmoothed, unscaled delta time. Updated by `update`. Prefer `ds`.
-raw_ds: f32,
-/// The slop time (seconds). Updated by `update`.
-slop_s: f32 = 0.0,
 /// The frame timer (lapped per update).
 timer: Timer,
 /// Used to track sleep time.
@@ -126,7 +122,6 @@ pub fn init(io: Io, refresh_rate_hz: f32) FramePacer {
         .refresh_rate_hz = refresh_rate_hz,
         .unscaled_ds = warmed_delta_s,
         .ds = warmed_delta_s,
-        .raw_ds = warmed_delta_s,
         .timer = .start(io),
         .sleep_timer = .start(io),
     };
@@ -139,17 +134,14 @@ pub fn init(io: Io, refresh_rate_hz: f32) FramePacer {
 pub fn update(self: *FramePacer, io: Io, slop_ns: u64) u64 {
     // Lap the frame timer, get constants and convert to useful units.
     const delta_ns = self.timer.lap(io).toNanoseconds();
-    const delta_s = @as(f32, @floatFromInt(delta_ns)) / std.time.ns_per_s;
-    const delta_ms = @as(f32, @floatFromInt(delta_ns)) / std.time.ns_per_ms;
-    const slop_ms = @as(f32, @floatFromInt(slop_ns)) / std.time.ns_per_ms;
-    const slop_s = @as(f32, @floatFromInt(slop_ns)) / std.time.ns_per_s;
+    const delta_s = nanosecondsToUnitF32(std.time.ns_per_s, delta_ns);
+    const delta_ms = nanosecondsToUnitF32(std.time.ns_per_ms, delta_ns);
+    const slop_ms = nanosecondsToUnitF32(std.time.ns_per_ms, slop_ns);
     const headroom_ms = if (self.refresh_rate_hz == 0) self.headroom_safe_ms else self.headroom_ms;
     const rate_hz = if (self.refresh_rate_hz == 0) self.refresh_rate_safe_hz else self.refresh_rate_hz;
     const refresh_period_ms = 1000.0 / rate_hz;
 
     // Update the delta time and smoothed delta time.
-    self.raw_ds = delta_s;
-    self.slop_s = slop_s;
     self.unscaled_ds = lerp(self.unscaled_ds, @min(delta_s, self.max_smoothed_s), self.smoothed_rwa);
     self.ds = self.unscaled_ds * self.time_scale;
     self.sleep_s = self.sleep_accum_s;
@@ -199,8 +191,7 @@ pub fn update(self: *FramePacer, io: Io, slop_ns: u64) u64 {
 }
 
 fn sleepNsFromMs(sleep_ms: f32) ?u64 {
-    const sleep_ns_f32 = sleep_ms * std.time.ns_per_ms;
-    const sleep_ns: f64 = @floatCast(sleep_ns_f32);
+    const sleep_ns = @as(f64, sleep_ms) * @as(f64, std.time.ns_per_ms);
     const max_safe_ns = std.math.maxInt(u64) - 2048;
     const max_safe_ns_f64: f64 = @floatFromInt(max_safe_ns);
 
@@ -215,22 +206,38 @@ fn sleepNsFromMs(sleep_ms: f32) ?u64 {
     return @intFromFloat(bounded_ns);
 }
 
-/// Call this before sleeping the main thread for the sleep to not count
-/// against the calculated CPU time.
+fn nanosecondsToUnitF32(comptime unit_ns: u64, value_ns: i96) f32 {
+    // `Duration.toNanoseconds()` returns i96. Timers supply only its nonnegative
+    // domain, and even the maximum value stays finite in f32 after scaling by
+    // any positive integer unit.
+    std.debug.assert(value_ns >= 0);
+    comptime {
+        std.debug.assert(unit_ns > 0);
+        const maximum_scaled = @as(f64, @floatFromInt(std.math.maxInt(i96))) /
+            @as(f64, @floatFromInt(unit_ns));
+        std.debug.assert(std.math.isFinite(maximum_scaled));
+        std.debug.assert(maximum_scaled <= @as(f64, std.math.floatMax(f32)));
+    }
+    const scaled = @as(f64, @floatFromInt(value_ns)) /
+        @as(f64, @floatFromInt(unit_ns));
+    std.debug.assert(scaled >= 0.0);
+    std.debug.assert(std.math.isFinite(scaled));
+    std.debug.assert(scaled <= @as(f64, std.math.floatMax(f32)));
+    return @floatCast(scaled);
+}
+
+/// Call this before sleeping the main thread so the sleep is excluded from
+/// the next frame's non-blocked work estimate.
 pub fn beginSleep(self: *FramePacer, io: Io) void {
     self.sleep_timer.reset(io);
 }
 
 /// See `beginSleep`.
 pub fn endSleep(self: *FramePacer, io: Io) void {
-    self.sleep_accum_s += @as(f32, @floatFromInt(self.sleep_timer.read(io).toNanoseconds())) / std.time.ns_per_s;
-}
-
-/// Returns the time last frame spent on CPU work, not including time spent
-/// blocked on the GPU or time spent sleeping as accounted for by
-/// `beginSleep`/`endSleep`.
-pub fn cpuS(self: *const FramePacer) f32 {
-    return self.raw_ds - self.slop_s - self.sleep_s;
+    self.sleep_accum_s += nanosecondsToUnitF32(
+        std.time.ns_per_s,
+        self.sleep_timer.read(io).toNanoseconds(),
+    );
 }
 
 /// Linear interpolation `a + (b - a) * t`. Inlined from mr_geom's tween —

@@ -203,6 +203,14 @@ pub const Decoder = struct {
     resampler_buffered: bool,
     resampler_eof: bool,
 
+    const OpenResources = struct {
+        format_context: *c.AVFormatContext,
+        codec_context: *c.AVCodecContext,
+        resampler_context: *c.SwrContext,
+        audio_stream_index: c_int,
+        output_format: OutputFormat,
+    };
+
     /// Allocate packet and frame storage reused by every opened stream.
     pub fn init(gpa: std.mem.Allocator) InitError!Decoder {
         const packet = c.av_packet_alloc() orelse return error.PacketAllocationFailed;
@@ -252,7 +260,7 @@ pub const Decoder = struct {
         }
         errdefer closeFormat(next_format_context);
 
-        const format_context = next_format_context.?;
+        const format_context = next_format_context orelse return error.OpenInputFailed;
         if (c.avformat_find_stream_info(format_context, null) < 0) {
             return error.StreamInfoFailed;
         }
@@ -272,12 +280,9 @@ pub const Decoder = struct {
         const stream = format_context.streams[@intCast(stream_index)];
         const codec_parameters = stream.*.codecpar;
 
-        const next_codec_context: ?*c.AVCodecContext =
-            c.avcodec_alloc_context3(selected_codec);
-        if (next_codec_context == null) return error.CodecAllocationFailed;
-        errdefer freeCodec(next_codec_context);
-
-        const codec_context = next_codec_context.?;
+        const codec_context = c.avcodec_alloc_context3(selected_codec) orelse
+            return error.CodecAllocationFailed;
+        errdefer freeCodec(codec_context);
         if (c.avcodec_parameters_to_context(codec_context, codec_parameters) < 0) {
             return error.CodecParametersFailed;
         }
@@ -286,8 +291,8 @@ pub const Decoder = struct {
         }
 
         const output_format = try negotiateOutputFormat(.{
-            .sample_rate_hz = codec_context.sample_rate,
-            .channel_count = codec_context.ch_layout.nb_channels,
+            .sample_rate_hz = codec_context.*.sample_rate,
+            .channel_count = codec_context.*.ch_layout.nb_channels,
         });
         // SAFETY: av_channel_layout_default initializes output_layout before any read.
         var output_layout: c.AVChannelLayout = undefined;
@@ -304,9 +309,9 @@ pub const Decoder = struct {
             &output_layout,
             c.AV_SAMPLE_FMT_FLT,
             @as(c_int, @intCast(output_format.sample_rate_hz)),
-            &codec_context.ch_layout,
-            codec_context.sample_fmt,
-            codec_context.sample_rate,
+            &codec_context.*.ch_layout,
+            codec_context.*.sample_fmt,
+            codec_context.*.sample_rate,
             0,
             null,
         ) < 0) {
@@ -317,6 +322,8 @@ pub const Decoder = struct {
             return error.ResamplerAllocationFailed;
         if (c.swr_init(resampler_context) < 0) return error.ResamplerInitFailed;
 
+        // SAFETY: close releases stream resources but keeps Decoder storage live
+        // for this prepared stream and future reopen operations.
         self.close();
         self.path = next_path;
         self.format_context = format_context;
@@ -346,22 +353,33 @@ pub const Decoder = struct {
         self.resetReadState();
     }
 
+    fn openResources(self: *const Decoder) ?OpenResources {
+        if (self.path == null) return null;
+        const format_context = self.format_context orelse return null;
+        const codec_context = self.codec_context orelse return null;
+        const resampler_context = self.resampler_context orelse return null;
+        const audio_stream_index = self.audio_stream_index orelse return null;
+        const output_format = self.output_format orelse return null;
+        return .{
+            .format_context = format_context,
+            .codec_context = codec_context,
+            .resampler_context = resampler_context,
+            .audio_stream_index = audio_stream_index,
+            .output_format = output_format,
+        };
+    }
+
     pub fn isOpen(self: *const Decoder) bool {
-        return self.path != null and
-            self.format_context != null and
-            self.codec_context != null and
-            self.resampler_context != null and
-            self.audio_stream_index != null and
-            self.output_format != null;
+        return self.openResources() != null;
     }
 
     /// Seek the demuxer and reset every buffered decode stage.
     pub fn seek(self: *Decoder, position_sec: f32) SeekError!void {
-        if (!self.isOpen()) return error.NotOpen;
+        const resources = self.openResources() orelse return error.NotOpen;
         const target_us = seekTimestampUs(position_sec, self.duration_us) orelse
             return error.InvalidSeekPosition;
         const seek_result = c.avformat_seek_file(
-            self.format_context.?,
+            resources.format_context,
             -1,
             std.math.minInt(i64),
             target_us,
@@ -370,11 +388,11 @@ pub const Decoder = struct {
         );
         if (seek_result < 0) return error.SeekFailed;
 
-        c.avcodec_flush_buffers(self.codec_context.?);
+        c.avcodec_flush_buffers(resources.codec_context);
         c.av_frame_unref(self.frame);
         c.av_packet_unref(self.packet);
-        c.swr_close(self.resampler_context.?);
-        if (c.swr_init(self.resampler_context.?) < 0) {
+        c.swr_close(resources.resampler_context);
+        if (c.swr_init(resources.resampler_context) < 0) {
             self.close();
             return error.ResamplerResetFailed;
         }
@@ -384,24 +402,33 @@ pub const Decoder = struct {
     /// Return the next borrowed PCM chunk or an explicit end-of-stream marker.
     pub fn read(self: *Decoder) DecodeError!DecodeResult {
         self.pcm_sample_count = 0;
-        if (!self.isOpen()) return error.NotOpen;
+        const resources = self.openResources() orelse return error.NotOpen;
 
         while (true) {
             if (self.resampler_buffered) {
-                if (try self.drainReadySamples()) |chunk| return .{ .pcm = chunk };
+                if (try self.drainReadySamples(
+                    resources.resampler_context,
+                    resources.output_format,
+                )) |chunk| return .{ .pcm = chunk };
             }
 
             if (self.codec_eof) {
-                if (try self.flushResampler()) |chunk| return .{ .pcm = chunk };
+                if (try self.flushResampler(
+                    resources.resampler_context,
+                    resources.output_format,
+                )) |chunk| return .{ .pcm = chunk };
                 return .end_of_stream;
             }
 
             const receive_result = c.avcodec_receive_frame(
-                self.codec_context.?,
+                resources.codec_context,
                 self.frame,
             );
             if (receive_result == 0) {
-                if (try self.convertFrame()) |chunk| return .{ .pcm = chunk };
+                if (try self.convertFrame(
+                    resources.resampler_context,
+                    resources.output_format,
+                )) |chunk| return .{ .pcm = chunk };
                 continue;
             }
             if (receive_result == c.AVERROR_EOF) {
@@ -410,7 +437,11 @@ pub const Decoder = struct {
             }
             if (isAgain(receive_result)) {
                 if (self.flush_sent) return error.DecoderProtocolFailed;
-                try self.sendInput();
+                try self.sendInput(
+                    resources.format_context,
+                    resources.codec_context,
+                    resources.audio_stream_index,
+                );
                 continue;
             }
             return error.FrameReceiveFailed;
@@ -427,11 +458,16 @@ pub const Decoder = struct {
         self.resampler_eof = false;
     }
 
-    fn sendInput(self: *Decoder) DecodeError!void {
+    fn sendInput(
+        self: *Decoder,
+        format_context: *c.AVFormatContext,
+        codec_context: *c.AVCodecContext,
+        audio_stream_index: c_int,
+    ) DecodeError!void {
         while (true) {
             if (self.packet_pending) {
                 const send_result = c.avcodec_send_packet(
-                    self.codec_context.?,
+                    codec_context,
                     self.packet,
                 );
                 if (send_result == 0) {
@@ -445,7 +481,7 @@ pub const Decoder = struct {
 
             if (self.demux_eof) {
                 const send_result = c.avcodec_send_packet(
-                    self.codec_context.?,
+                    codec_context,
                     null,
                 );
                 if (send_result == 0 or send_result == c.AVERROR_EOF) {
@@ -457,7 +493,7 @@ pub const Decoder = struct {
             }
 
             const read_result = c.av_read_frame(
-                self.format_context.?,
+                format_context,
                 self.packet,
             );
             if (read_result == c.AVERROR_EOF) {
@@ -466,7 +502,7 @@ pub const Decoder = struct {
             }
             if (read_result < 0) return error.DemuxReadFailed;
 
-            if (self.packet.stream_index != self.audio_stream_index.?) {
+            if (self.packet.stream_index != audio_stream_index) {
                 c.av_packet_unref(self.packet);
                 continue;
             }
@@ -474,7 +510,11 @@ pub const Decoder = struct {
         }
     }
 
-    fn convertFrame(self: *Decoder) DecodeError!?PcmChunk {
+    fn convertFrame(
+        self: *Decoder,
+        resampler_context: *c.SwrContext,
+        output_format: OutputFormat,
+    ) DecodeError!?PcmChunk {
         defer c.av_frame_unref(self.frame);
         if (self.frame.nb_samples <= 0) return error.InvalidFrame;
         if (self.frame.extended_data == null) return error.InvalidFrame;
@@ -483,7 +523,7 @@ pub const Decoder = struct {
             @ptrCast(self.pcm[0..].ptr),
         };
         const frame_count = c.swr_convert(
-            self.resampler_context.?,
+            resampler_context,
             @ptrCast(&output_planes),
             @as(c_int, @intCast(pcm_frame_capacity)),
             @ptrCast(self.frame.extended_data),
@@ -493,19 +533,23 @@ pub const Decoder = struct {
         self.resampler_buffered =
             frame_count == @as(c_int, @intCast(pcm_frame_capacity));
         if (frame_count == 0) return null;
-        const chunk: ?PcmChunk = try self.pcmChunk(frame_count);
+        const chunk: ?PcmChunk = try self.pcmChunk(frame_count, output_format);
         return chunk;
     }
 
     /// Retrieve buffered samples without signaling end-of-input to swresample.
-    fn drainReadySamples(self: *Decoder) DecodeError!?PcmChunk {
+    fn drainReadySamples(
+        self: *Decoder,
+        resampler_context: *c.SwrContext,
+        output_format: OutputFormat,
+    ) DecodeError!?PcmChunk {
         var unused_byte: u8 = 0;
         var empty_input_planes = [_][*c]const u8{&unused_byte};
         var output_planes = [_][*c]u8{
             @ptrCast(self.pcm[0..].ptr),
         };
         const frame_count = c.swr_convert(
-            self.resampler_context.?,
+            resampler_context,
             @ptrCast(&output_planes),
             @as(c_int, @intCast(pcm_frame_capacity)),
             @ptrCast(&empty_input_planes),
@@ -515,18 +559,22 @@ pub const Decoder = struct {
         self.resampler_buffered =
             frame_count == @as(c_int, @intCast(pcm_frame_capacity));
         if (frame_count == 0) return null;
-        const chunk: ?PcmChunk = try self.pcmChunk(frame_count);
+        const chunk: ?PcmChunk = try self.pcmChunk(frame_count, output_format);
         return chunk;
     }
 
-    fn flushResampler(self: *Decoder) DecodeError!?PcmChunk {
+    fn flushResampler(
+        self: *Decoder,
+        resampler_context: *c.SwrContext,
+        output_format: OutputFormat,
+    ) DecodeError!?PcmChunk {
         if (self.resampler_eof) return null;
 
         var output_planes = [_][*c]u8{
             @ptrCast(self.pcm[0..].ptr),
         };
         const frame_count = c.swr_convert(
-            self.resampler_context.?,
+            resampler_context,
             @ptrCast(&output_planes),
             @as(c_int, @intCast(pcm_frame_capacity)),
             null,
@@ -537,22 +585,26 @@ pub const Decoder = struct {
             self.resampler_eof = true;
             return null;
         }
-        const chunk: ?PcmChunk = try self.pcmChunk(frame_count);
+        const chunk: ?PcmChunk = try self.pcmChunk(frame_count, output_format);
         return chunk;
     }
 
-    fn pcmChunk(self: *Decoder, frame_count_c: c_int) DecodeError!PcmChunk {
+    fn pcmChunk(
+        self: *Decoder,
+        frame_count_c: c_int,
+        output_format: OutputFormat,
+    ) DecodeError!PcmChunk {
         if (frame_count_c <= 0) return error.InvalidFrame;
         const frame_count: u32 = @intCast(frame_count_c);
         const sample_count = interleavedSampleCount(
             frame_count,
-            self.output_format.?,
+            output_format,
         ) catch return error.OutputCapacityExceeded;
         self.pcm_sample_count = sample_count;
         return .{
             .samples_interleaved = self.pcm[0..sample_count],
             .frame_count = frame_count,
-            .format = self.output_format.?,
+            .format = output_format,
         };
     }
 };
@@ -984,7 +1036,7 @@ pub fn decodeArtwork(
         return error.DecoderNotFound;
     const codec_context = c.avcodec_alloc_context3(codec) orelse
         return error.CodecAllocationFailed;
-    errdefer freeCodec(codec_context);
+    defer freeCodec(codec_context);
     if (c.avcodec_open2(codec_context, codec, null) < 0) return error.CodecOpenFailed;
 
     const packet = c.av_packet_alloc() orelse return error.PacketAllocationFailed;
@@ -1095,7 +1147,7 @@ pub fn probeMetadata(
     }
     defer closeFormat(format_context_optional);
 
-    const format_context = format_context_optional.?;
+    const format_context = format_context_optional orelse return error.OpenInputFailed;
     if (c.avformat_find_stream_info(format_context, null) < 0) {
         return error.StreamInfoFailed;
     }
@@ -1485,7 +1537,10 @@ test "attached picture metadata is copied from FFmpeg stream storage" {
     const source = [_]u8{ 9, 8, 7, 6 };
     @memcpy(@as([*]u8, @ptrCast(packet.*.data))[0..4], source[0..]);
 
-    var artwork = (try extractAttachedArtwork(std.testing.allocator, format_context)).?;
+    var artwork = (try extractAttachedArtwork(
+        std.testing.allocator,
+        format_context,
+    )) orelse return error.TestUnexpectedResult;
     defer artwork.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings(&.{ 9, 8, 7, 6 }, artwork.bytes);
     try std.testing.expectEqual(@as(u32, 2), artwork.width);
@@ -1549,7 +1604,7 @@ test "metadata block picture dictionary yields front-cover artwork" {
         std.testing.allocator,
         metadata,
         null,
-    )).?;
+    )) orelse return error.TestUnexpectedResult;
     defer artwork.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings(&.{ 9, 8, 7, 6 }, artwork.bytes);
     try std.testing.expectEqual(@as(u32, 4), artwork.width);
@@ -1576,7 +1631,7 @@ test "conventional coverart dictionary yields image dimensions" {
         std.testing.allocator,
         null,
         metadata,
-    )).?;
+    )) orelse return error.TestUnexpectedResult;
     defer artwork.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 4), artwork.width);
     try std.testing.expectEqual(@as(u32, 4), artwork.height);
@@ -1617,7 +1672,7 @@ test "conventional jpeg coverart dimensions come from the image header" {
         std.testing.allocator,
         metadata,
         null,
-    )).?;
+    )) orelse return error.TestUnexpectedResult;
     defer artwork.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 3), artwork.width);
     try std.testing.expectEqual(@as(u32, 2), artwork.height);

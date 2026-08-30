@@ -41,7 +41,7 @@ pub const CalculatorApp = struct {
     entry: [entry_capacity]u8 = undefined,
     entry_len: usize = 0,
     entering: bool = false,
-    /// Sticky error (division by zero); any key except `C` is ignored.
+    /// Sticky error (division by zero or malformed entry); any key except `C` is ignored.
     error_state: bool = false,
     keypad: Keypad = .{},
 
@@ -186,7 +186,7 @@ pub const CalculatorApp = struct {
 
     pub fn setOp(self: *CalculatorApp, op: Op) void {
         if (self.error_state) return;
-        const current = self.currentValue();
+        const current = self.currentValue() orelse return;
         if (self.pending != null and self.entering) {
             self.acc = apply(self.acc, current, self.pending.?);
         } else if (self.pending == null) {
@@ -200,7 +200,8 @@ pub const CalculatorApp = struct {
     pub fn equals(self: *CalculatorApp) void {
         if (self.error_state) return;
         const pending_op = self.pending orelse return;
-        const current = if (self.entering) self.currentValue() else self.acc;
+        var current = self.acc;
+        if (self.entering) current = self.currentValue() orelse return;
         self.acc = apply(self.acc, current, pending_op);
         self.pending = null;
         self.entering = false;
@@ -226,7 +227,8 @@ pub const CalculatorApp = struct {
     pub fn negate(self: *CalculatorApp) void {
         if (self.error_state) return;
         if (self.entering) {
-            self.replaceEntry(-self.currentValue());
+            const current = self.currentValue() orelse return;
+            self.replaceEntry(-current);
         } else {
             self.acc = -self.acc;
         }
@@ -235,7 +237,8 @@ pub const CalculatorApp = struct {
     pub fn percent(self: *CalculatorApp) void {
         if (self.error_state) return;
         if (self.entering) {
-            self.replaceEntry(self.currentValue() / 100);
+            const current = self.currentValue() orelse return;
+            self.replaceEntry(current / 100);
         } else {
             self.acc /= 100;
         }
@@ -250,11 +253,15 @@ pub const CalculatorApp = struct {
         self.entering = true;
     }
 
-    fn currentValue(self: *const CalculatorApp) f64 {
+    fn currentValue(self: *CalculatorApp) ?f64 {
         if (!self.entering) return self.acc;
         const text = self.entry[0..self.entry_len];
         if (text.len == 0) return 0;
-        return std.fmt.parseFloat(f64, text) catch 0;
+        return std.fmt.parseFloat(f64, text) catch {
+            // Malformed entry text is a sticky calculator error, not numeric zero.
+            self.error_state = true;
+            return null;
+        };
     }
 
     fn apply(a: f64, b: f64, op: Op) f64 {
@@ -386,7 +393,7 @@ test "digits build an entry, operators chain, equals resolves" {
     var app: CalculatorApp = .{};
     app.digit(1);
     app.digit(2);
-    try std.testing.expectEqual(@as(f64, 12), app.currentValue());
+    try std.testing.expectEqual(@as(?f64, 12), app.currentValue());
     app.setOp(.add);
     app.digit(3);
     app.digit(0);
@@ -419,16 +426,30 @@ test "division by zero raises the sticky error; C recovers" {
     try std.testing.expectEqual(@as(usize, 1), app.entry_len); // unchanged
     app.clear();
     app.digit(7);
-    try std.testing.expectEqual(@as(f64, 7), app.currentValue());
+    try std.testing.expectEqual(@as(?f64, 7), app.currentValue());
     try std.testing.expect(!app.error_state);
 }
+
+test "malformed entry raises the sticky error without applying an operation" {
+    var app: CalculatorApp = .{};
+    app.entry[0] = 'x';
+    app.entry_len = 1;
+    app.entering = true;
+
+    app.setOp(.add);
+
+    try std.testing.expect(app.error_state);
+    try std.testing.expect(app.pending == null);
+    try std.testing.expectEqual(@as(f64, 0), app.acc);
+}
+
 test "clear keeps the persistent keypad owner valid before the next frame" {
     var app: CalculatorApp = .{};
     app.keypad.owner = &app;
     app.digit(9);
     app.keypad.onKey(0); // C
     app.keypad.onKey(4); // 7
-    try std.testing.expectEqual(@as(f64, 7), app.currentValue());
+    try std.testing.expectEqual(@as(?f64, 7), app.currentValue());
 }
 
 test "leading zeros collapse and the dot stays single" {
@@ -446,11 +467,11 @@ test "unary keys and double zero update the active value" {
     var app: CalculatorApp = .{};
     app.digit(5);
     app.doubleZero();
-    try std.testing.expectEqual(@as(f64, 500), app.currentValue());
+    try std.testing.expectEqual(@as(?f64, 500), app.currentValue());
     app.negate();
-    try std.testing.expectEqual(@as(f64, -500), app.currentValue());
+    try std.testing.expectEqual(@as(?f64, -500), app.currentValue());
     app.percent();
-    try std.testing.expectEqual(@as(f64, -5), app.currentValue());
+    try std.testing.expectEqual(@as(?f64, -5), app.currentValue());
 }
 
 test "draw: tree contains every key and the display label" {

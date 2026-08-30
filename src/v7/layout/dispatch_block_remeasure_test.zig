@@ -62,7 +62,8 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 }
 
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    try expectRect(expected, tree.nodeConst(id).?.rect);
+    const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    try expectRect(expected, node.rect);
 }
 
 test "block float slot remeasures auto flex subtree at final width" {

@@ -469,10 +469,6 @@ fn scopedLabel(
     return component.label_id;
 }
 
-fn label(ctx: *DrawCtx, text: []const u8, key: ComponentKey) !Id {
-    return scopedLabel(ctx, text, key, .{ 1, 1, 1, 1 }, 0, 0);
-}
-
 fn labelSized(ctx: *DrawCtx, text: []const u8, font_size: f32, key: ComponentKey) !Id {
     return scopedLabel(ctx, text, key, .{ 1, 1, 1, 1 }, font_size, 0);
 }

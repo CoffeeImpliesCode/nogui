@@ -1628,13 +1628,6 @@ fn autoRepeatContentBasis(
     return @as(?f32, try finiteNonNegative(basis));
 }
 
-fn minimumDimension(value: style.Dimension) Error!f32 {
-    return switch (value) {
-        .length => |number| finiteNonNegative(number),
-        .percent, .auto, .min_content, .max_content, .fit_content => 0,
-    };
-}
-
 fn finiteSize(value: widget.Size) Error!widget.Size {
     return .{
         .width = try finiteNonNegative(value.width),
@@ -2290,7 +2283,7 @@ fn resolveIntrinsicBaselineShims(
         const child = &tree.nodes.items[item.index];
         const child_edges = try resolveEdges(child.style, content.width);
         try prepareBaselineChild(tree, item.*, content, item.natural.border, options, depth);
-        const baseline = nodeFirstBaseline(tree, item.index, item.natural.border, child_edges);
+        const baseline = try nodeFirstBaseline(tree, item.index, item.natural.border, child_edges);
         item.baseline = baseline;
         item.baseline_margin_top = item.margins.value.top;
         const ascent = try add(item.margins.value.top, baseline);
@@ -2557,7 +2550,7 @@ fn resolveFinalBaselineShims(
             depth,
         );
         item.baseline_margin_top = metrics.margin_values.top;
-        const baseline = nodeFirstBaseline(tree, item.index, metrics.size, metrics.edges);
+        const baseline = try nodeFirstBaseline(tree, item.index, metrics.size, metrics.edges);
         item.baseline = baseline;
         const ascent = try add(metrics.margin_values.top, baseline);
         const current = row_max_ascent.get(item.row.start) orelse 0;
@@ -2751,8 +2744,8 @@ fn placementFor(line: style.GridLine, explicit_count: usize) Error!AxisPlacement
 
     const start_line = try placementLine(line.start, explicit_count);
     const end_line = try placementLine(line.end, explicit_count);
-    const start_span = try placementSpan(line.start);
-    const end_span = try placementSpan(line.end);
+    const start_span = placementSpan(line.start);
+    const end_span = placementSpan(line.end);
 
     var logical_start: i32 = 0;
     var logical_end: i32 = 1;
@@ -2761,10 +2754,10 @@ fn placementFor(line: style.GridLine, explicit_count: usize) Error!AxisPlacement
         logical_end = if (end_line) |end|
             end
         else
-            try addLineSpan(start, end_span);
+            addLineSpan(start, end_span);
     } else if (end_line) |end| {
         logical_end = end;
-        logical_start = try subtractLineSpan(end, start_span);
+        logical_start = subtractLineSpan(end, start_span);
     } else {
         logical_end = @intCast(start_span);
     }
@@ -2779,7 +2772,7 @@ fn placementFor(line: style.GridLine, explicit_count: usize) Error!AxisPlacement
             logical_start = @as(i32, @intCast(grid_track_count_max - 1));
             logical_end = @intCast(grid_track_count_max);
         } else {
-            logical_end = try addLineSpan(logical_start, 1);
+            logical_end = addLineSpan(logical_start, 1);
         }
     }
 
@@ -2812,20 +2805,20 @@ fn clampLogicalLine(line: i64) i32 {
     return @intCast(line);
 }
 
-fn placementSpan(value: style.GridPlacement) Error!usize {
+fn placementSpan(value: style.GridPlacement) usize {
     return switch (value) {
         .span => |span| @min(grid_track_storage_max, @max(@as(usize, 1), @as(usize, span))),
         .auto, .line => 1,
     };
 }
 
-fn addLineSpan(line: i32, span: usize) Error!i32 {
+fn addLineSpan(line: i32, span: usize) i32 {
     const bounded_span = @min(span, grid_track_storage_max);
     const result = @as(i64, line) + @as(i64, @intCast(bounded_span));
     return clampLogicalLine(result);
 }
 
-fn subtractLineSpan(line: i32, span: usize) Error!i32 {
+fn subtractLineSpan(line: i32, span: usize) i32 {
     const bounded_span = @min(span, grid_track_storage_max);
     const result = @as(i64, line) - @as(i64, @intCast(bounded_span));
     return clampLogicalLine(result);
@@ -3254,12 +3247,12 @@ fn shiftPlacementIndices(
         placement.end = span;
         return;
     }
-    placement.start = try shiftedLineIndex(placement.logical_start, prepend);
-    placement.end = try shiftedLineIndex(placement.logical_end, prepend);
+    placement.start = shiftedLineIndex(placement.logical_start, prepend);
+    placement.end = shiftedLineIndex(placement.logical_end, prepend);
     if (placement.end <= placement.start) return error.InvalidStyle;
 }
 
-fn shiftedLineIndex(line: i32, prepend: usize) Error!usize {
+fn shiftedLineIndex(line: i32, prepend: usize) usize {
     const shifted = @as(i64, line) + @as(i64, @intCast(@min(prepend, grid_track_count_max)));
     if (shifted <= 0) return 0;
     if (shifted >= @as(i64, @intCast(grid_track_storage_max))) return grid_track_storage_max;
@@ -5477,13 +5470,12 @@ fn resolveFlexibleTracks(
         track.size = try nonNegative(size);
     }
 }
-
 fn nodeFirstBaseline(
     tree: *const widget.WidgetTree,
     child_index: usize,
     child_size: widget.Size,
     child_edges: Edges,
-) f32 {
+) Error!f32 {
     const node = &tree.nodes.items[child_index];
     if (node.first_baseline) |baseline| return baseline;
     switch (node.kind) {
@@ -5506,16 +5498,8 @@ fn nodeFirstBaseline(
                     if (tree.nodeIndex(grandchild_id)) |grandchild_index| {
                         const grandchild = &tree.nodes.items[grandchild_index];
                         if (grandchild.layout_hidden or grandchild.style.position == .absolute) continue;
-                        const grandchild_edges = resolveEdges(grandchild.style, child_size.width) catch Edges{
-                            .border = .{},
-                            .padding = .{},
-                            .raw_padding = .{},
-                            .horizontal = 0,
-                            .vertical = 0,
-                            .box_horizontal = 0,
-                            .box_vertical = 0,
-                        };
-                        const grandchild_baseline = nodeFirstBaseline(
+                        const grandchild_edges = try resolveEdges(grandchild.style, child_size.width);
+                        const grandchild_baseline = try nodeFirstBaseline(
                             tree,
                             grandchild_index,
                             .{ .width = grandchild.rect.w, .height = grandchild.rect.h },
@@ -5565,7 +5549,7 @@ fn writeGridBaseline(
     if (donor) |item| {
         const child = &tree.nodes.items[item.index];
         const child_edges = try resolveEdges(child.style, content.width);
-        const child_baseline = nodeFirstBaseline(
+        const child_baseline = try nodeFirstBaseline(
             tree,
             item.index,
             .{ .width = child.rect.w, .height = child.rect.h },
@@ -5856,12 +5840,6 @@ fn trackFraction(track: style.GridTrack) f32 {
     };
 }
 
-fn trackMinimumSum(tracks: []const style.GridTrack, basis: ?f32) Error!f32 {
-    var result: f32 = 0;
-    for (tracks) |track| result = try add(result, try trackMinimum(track, basis));
-    return result;
-}
-
 fn gapSpecified(value: style.LengthPercentage) bool {
     return switch (value) {
         .length => |number| number != 0,
@@ -6132,11 +6110,11 @@ fn absoluteAreaFor(
     const start_line = try placementLine(line.start, explicit_count);
     const end_line = try placementLine(line.end, explicit_count);
     const start_span: ?usize = if (line.start == .span)
-        placementSpan(line.start) catch null
+        placementSpan(line.start)
     else
         null;
     const end_span: ?usize = if (line.end == .span)
-        placementSpan(line.end) catch null
+        placementSpan(line.end)
     else
         null;
 
@@ -6146,7 +6124,7 @@ fn absoluteAreaFor(
     if (logical_start == null and line.start == .span) {
         if (end_line) |end| {
             if (start_span) |span| {
-                logical_start = subtractLineSpan(end, span) catch null;
+                logical_start = subtractLineSpan(end, span);
             }
         }
     }
@@ -6154,7 +6132,7 @@ fn absoluteAreaFor(
     if (logical_end == null and line.end == .span) {
         if (start_line) |start| {
             if (end_span) |span| {
-                logical_end = addLineSpan(start, span) catch null;
+                logical_end = addLineSpan(start, span);
             }
         }
     }
@@ -6167,17 +6145,17 @@ fn absoluteAreaFor(
             logical_end = old_start;
         }
         if (logical_end.? == logical_start.?) {
-            logical_end = addLineSpan(logical_start.?, 1) catch null;
+            logical_end = addLineSpan(logical_start.?, 1);
         }
     }
 
     const start_index: ?usize = if (logical_start) |logical| blk: {
-        const index = shiftedLineIndex(logical, prepend) catch break :blk null;
+        const index = shiftedLineIndex(logical, prepend);
         if (index > tracks.len) break :blk null;
         break :blk index;
     } else null;
     const end_index: ?usize = if (logical_end) |logical| blk: {
-        const index = shiftedLineIndex(logical, prepend) catch break :blk null;
+        const index = shiftedLineIndex(logical, prepend);
         if (index > tracks.len) break :blk null;
         break :blk index;
     } else null;
@@ -6485,9 +6463,10 @@ fn placeAbsolute(
         }
 
         const left_wins = left != null and (right == null or writing_direction == .ltr);
-        const x = if (left_wins)
-            try add(area_x, try add(left.?, margins.value.left))
-        else if (right) |value|
+        const x = if (left_wins) blk: {
+            const left_value = left orelse return error.InvalidStyle;
+            break :blk try add(area_x, try add(left_value, margins.value.left));
+        } else if (right) |value|
             try finite(area_x + area_width - value - margins.value.right - child_size.width)
         else if (writing_direction == .rtl and child.style.grid_justify_self == .auto and
             justify_items == .stretch)
@@ -6507,9 +6486,10 @@ fn placeAbsolute(
         };
 
         const top_wins = top != null;
-        const y = if (top_wins)
-            try add(area_y, try add(top.?, margins.value.top))
-        else if (bottom) |value|
+        const y = if (top_wins) blk: {
+            const top_value = top orelse return error.InvalidStyle;
+            break :blk try add(area_y, try add(top_value, margins.value.top));
+        } else if (bottom) |value|
             try finite(area_y + area_height - value - margins.value.bottom - child_size.height)
         else blk: {
             const free_height = try finite(
@@ -6722,14 +6702,14 @@ fn usedSize(
         width_edge_sum = edges.box_horizontal;
     }
     var result: widget.Size = .{
-        .width = if (width_resolved_border)
-            width.?
-        else
-            try sizingToBorder(width orelse 0, width_edge_sum, input.box_sizing),
-        .height = if (height_resolved_border)
-            height.?
-        else
-            try sizingToBorder(height orelse 0, height_edge_sum, input.box_sizing),
+        .width = if (width_resolved_border) blk: {
+            const resolved_width = width orelse return error.InvalidStyle;
+            break :blk resolved_width;
+        } else try sizingToBorder(width orelse 0, width_edge_sum, input.box_sizing),
+        .height = if (height_resolved_border) blk: {
+            const resolved_height = height orelse return error.InvalidStyle;
+            break :blk resolved_height;
+        } else try sizingToBorder(height orelse 0, height_edge_sum, input.box_sizing),
     };
     result.width = try clampAxisSize(
         input,
@@ -7061,16 +7041,6 @@ fn margin(value: style.LengthPercentageAuto, basis: ?f32) Error!f32 {
             break :blk finite(fraction * percentage_basis);
         },
     };
-}
-
-fn marginHorizontal(input: style.Style, basis: ?f32) Error!f32 {
-    const margins = try resolveMargins(input, basis);
-    return add(margins.value.left, margins.value.right);
-}
-
-fn marginVertical(input: style.Style, basis: ?f32) Error!f32 {
-    const margins = try resolveMargins(input, basis);
-    return add(margins.value.top, margins.value.bottom);
 }
 
 fn resolveInset(value: style.LengthPercentageAuto, basis: f32) Error!?f32 {

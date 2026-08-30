@@ -302,7 +302,8 @@ test "make: deinit adapter passes the receiver and allocator" {
     const c = Component.make(Comp, &comp);
 
     try std.testing.expect(c.vtable.deinit != null);
-    c.vtable.deinit.?(std.testing.allocator, c.ptr);
+    const deinit = c.vtable.deinit orelse return error.TestUnexpectedResult;
+    deinit(std.testing.allocator, c.ptr);
     try std.testing.expect(tracker.freed);
     try std.testing.expectEqual(std.testing.allocator, tracker.received_allocator);
 }

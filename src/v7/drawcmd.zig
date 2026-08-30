@@ -50,6 +50,7 @@ const ScrollState = @import("widget.zig").ScrollState;
 const visualBorderRect = @import("widget.zig").visualBorderRect;
 const visualContentRect = @import("widget.zig").visualContentRect;
 const geometryBoxEdges = @import("widget.zig").geometryBoxEdges;
+const Overflow = @import("style.zig").Overflow;
 
 /// One paint command: a solid fill (`ring = false`) or a border ring
 /// (`ring = true`). Typed `style` and `paint` values carry the geometry and
@@ -1041,7 +1042,6 @@ test "collectDrawCmds: scrolled descendants use visual paint and text clip coord
 }
 
 test "collectDrawCmds: style overflow modes clip descendants without scroll state" {
-    const Overflow = @import("style.zig").Overflow;
     const overflow_modes = [_]Overflow{ .hidden, .clip };
 
     for (overflow_modes) |overflow_mode| {
@@ -1085,7 +1085,6 @@ test "collectDrawCmds: style overflow modes clip descendants without scroll stat
 }
 
 test "collectDrawCmds: mixed overflow axes retain independent GPU clips" {
-    const Overflow = @import("style.zig").Overflow;
     const cases = [_]struct {
         width: Overflow,
         height: Overflow,

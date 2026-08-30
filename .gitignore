@@ -1,7 +1,7 @@
 .envrc
 .devenv/
 .direnv/
-notes/
+/notes
 .zig-cache/
 zig-out/
 zig-pkg/
@@ -11,6 +11,7 @@ graphify-out/
 .omo/
 .playwright-mcp/
 *.json
+docs/
 
 coverage-*.zcov
 __pycache__/

@@ -152,7 +152,7 @@ pub const SpotifyApp = struct {
         const count = self.activeTrackCount();
         if (count == 0) return;
 
-        const current_index = self.currentTrackIndex().?;
+        const current_index = self.currentTrackIndex() orelse return;
         self.current_track_idx = (current_index + 1) % count;
         self.progress_sec = 0;
         self.is_playing = true;
@@ -169,7 +169,7 @@ pub const SpotifyApp = struct {
         const count = self.activeTrackCount();
         if (count == 0) return;
 
-        const current_index = self.currentTrackIndex().?;
+        const current_index = self.currentTrackIndex() orelse return;
         self.current_track_idx = if (current_index > 0) current_index - 1 else count - 1;
         self.progress_sec = 0;
         self.is_playing = true;
@@ -483,7 +483,7 @@ test "Spotify compact generated sidebar labels use the final button width" {
             else => continue,
         };
         if (visual_label.len == 0) continue;
-        const parent_content = widget.contentRect(&tree, parent.id);
+        const parent_content = try widget.contentRect(&tree, parent.id);
         if (@abs(parent_content.w - theme.sidebar_compact_target_size) > epsilon) continue;
 
         compact_label_count += 1;
@@ -617,7 +617,7 @@ test "SpotifyApp generated album label stays inside its button at 1100x1160" {
     try std.testing.expect(max_width > 0);
 
     const label_rect = widget.absoluteRect(&tree, label_node.id);
-    const button_content_rect = widget.contentRect(&tree, button_node.id);
+    const button_content_rect = try widget.contentRect(&tree, button_node.id);
     const epsilon: f32 = 0.001;
     try std.testing.expect(label_rect.x >= button_content_rect.x - epsilon);
     try std.testing.expect(label_rect.y >= button_content_rect.y - epsilon);
@@ -692,7 +692,8 @@ test "SpotifyApp local tracks share rendered order and report unavailable playba
     try std.testing.expectEqual(@as(usize, 2), app.initLocalTracks(&local_tracks));
     try std.testing.expectEqualStrings("Local First", app.activeTracks()[0].title);
     app.selectTrack(1);
-    try std.testing.expectEqualStrings("Local Second", app.currentTrack().?.title);
+    const current_track = app.currentTrack() orelse return error.CurrentTrackUnavailable;
+    try std.testing.expectEqualStrings("Local Second", current_track.title);
 
     var empty_app: SpotifyApp = .{};
     const empty_tracks: [0]data.LocalTrack = .{};

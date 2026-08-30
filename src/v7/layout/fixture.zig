@@ -450,7 +450,11 @@ const TreeBuilder = struct {
             .scroll = scroll,
         });
         for (children.items) |child_id| {
-            try self.result.tree.appendChild(id, child_id);
+            // A missing parent means the fixture's preorder structure is malformed.
+            self.result.tree.appendChild(id, child_id) catch |append_error| switch (append_error) {
+                error.InvalidStyle => return error.InvalidFixture,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
         }
         self.result.source_ids[index] = id;
         return id;
@@ -506,12 +510,18 @@ test "fixture builder converts preorder nodes to a linked postorder tree" {
     };
     const root_id = try builder.buildRoot();
     const child_id = fixture_tree.source_ids[1];
-    try std.testing.expect(fixture_tree.tree.nodeIndex(child_id).? <
-        fixture_tree.tree.nodeIndex(root_id).?);
-    const root = fixture_tree.tree.nodeConst(root_id).?;
+    const child_index = fixture_tree.tree.nodeIndex(child_id) orelse
+        return error.TestUnexpectedResult;
+    const root_index = fixture_tree.tree.nodeIndex(root_id) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(child_index < root_index);
+    const root = fixture_tree.tree.nodeConst(root_id) orelse
+        return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), root.children.items.len);
     try std.testing.expectEqual(child_id, root.children.items[0]);
-    try std.testing.expectEqual(root_id, fixture_tree.tree.nodeConst(child_id).?.parent);
+    const child = fixture_tree.tree.nodeConst(child_id) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root_id, child.parent);
 }
 
 test "fixture scroll state allocations remain stable independently" {
@@ -530,7 +540,8 @@ test "fixture scroll state allocations remain stable independently" {
     );
     try std.testing.expectEqual(
         stable_state,
-        fixture_tree.resources.scroll_states_by_source[0].?,
+        fixture_tree.resources.scroll_states_by_source[0] orelse
+            return error.TestUnexpectedResult,
     );
     try std.testing.expectEqual(
         stable_state,
@@ -591,12 +602,16 @@ test "fixture builder attaches expected scroll axes without incidental state" {
         null,
     };
     for (expected_axes, 0..) |expected_axis, source_index| {
-        const node = fixture_tree.tree.nodeConst(fixture_tree.source_ids[source_index]).?;
+        const node = fixture_tree.tree.nodeConst(fixture_tree.source_ids[source_index]) orelse
+            return error.TestUnexpectedResult;
         const owned_state = fixture_tree.resources.scroll_states_by_source[source_index];
         if (expected_axis) |axis| {
-            const scroll = node.scroll.?;
+            const scroll = node.scroll orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(axis, scroll.axis);
-            try std.testing.expectEqual(owned_state.?, scroll.state);
+            try std.testing.expectEqual(
+                owned_state orelse return error.TestUnexpectedResult,
+                scroll.state,
+            );
         } else {
             try std.testing.expect(node.scroll == null);
             try std.testing.expect(owned_state == null);
@@ -671,7 +686,8 @@ test "fixture comparison requires matching optional scroll max offsets" {
     };
     _ = try builder.buildRoot();
 
-    const state = fixture_tree.resources.scroll_states_by_source[0].?;
+    const state = fixture_tree.resources.scroll_states_by_source[0] orelse
+        return error.TestUnexpectedResult;
     state.max_offset = .{ 7, 99 };
     try std.testing.expect(try compareFixtureTree(fixture_case, &fixture_tree));
 
@@ -686,7 +702,9 @@ test "fixture comparison requires matching optional scroll max offsets" {
 
     state.max_offset[0] = 7;
     fixture_tree.resources.scroll_states_by_source[0] = null;
-    fixture_tree.tree.node(fixture_tree.source_ids[0]).?.scroll = null;
+    const node = fixture_tree.tree.node(fixture_tree.source_ids[0]) orelse
+        return error.TestUnexpectedResult;
+    node.scroll = null;
     try std.testing.expect(!try compareFixtureTree(fixture_case, &fixture_tree));
 }
 
@@ -738,13 +756,17 @@ test "fixture rounded comparison derives size from absolute opposing edges" {
     };
     _ = try builder.buildRoot();
 
-    fixture_tree.tree.node(fixture_tree.source_ids[0]).?.rect = .{
+    const root_node = fixture_tree.tree.node(fixture_tree.source_ids[0]) orelse
+        return error.TestUnexpectedResult;
+    root_node.rect = .{
         .x = 40,
         .y = 20,
         .w = 70,
         .h = 20,
     };
-    fixture_tree.tree.node(fixture_tree.source_ids[1]).?.rect = .{
+    const child_node = fixture_tree.tree.node(fixture_tree.source_ids[1]) orelse
+        return error.TestUnexpectedResult;
+    child_node.rect = .{
         .x = -6.666668,
         .y = 0,
         .w = 33.333332,
@@ -753,13 +775,13 @@ test "fixture rounded comparison derives size from absolute opposing edges" {
     try std.testing.expect(try compareFixtureTree(fixture_case, &fixture_tree));
     expected[0] = .{ .x = 4, .y = 0, .width = 10, .height = 10 };
     expected[1] = .{ .x = 2, .y = 0, .width = 2, .height = 2 };
-    fixture_tree.tree.node(fixture_tree.source_ids[0]).?.rect = .{
+    root_node.rect = .{
         .x = 3.5,
         .y = 0,
         .w = 10,
         .h = 10,
     };
-    fixture_tree.tree.node(fixture_tree.source_ids[1]).?.rect = .{
+    child_node.rect = .{
         .x = 1.5,
         .y = 0,
         .w = 2,
@@ -1033,10 +1055,6 @@ fn applyFixtureAttributes(
 
 fn isGridTemplateAttribute(name: []const u8) bool {
     return std.mem.eql(u8, name, "grid-template-columns") or std.mem.eql(u8, name, "grid-template-rows");
-}
-
-fn isAxisGapAttribute(name: []const u8) bool {
-    return std.mem.eql(u8, name, "column-gap") or std.mem.eql(u8, name, "row-gap");
 }
 
 test "fixture Ahem breaks only at zero-width spaces" {
@@ -3281,13 +3299,6 @@ fn jsonString(value: std.json.Value) CaseError![]const u8 {
     };
 }
 
-fn pixelsF32(value: []const u8) CaseError!f32 {
-    const parsed = try parsePixels(value);
-    const result: f32 = @floatCast(parsed);
-    if (!std.math.isFinite(result)) return error.InvalidFixture;
-    return result;
-}
-
 fn finiteF32(value: f64) CaseError!f32 {
     if (!std.math.isFinite(value) or value < 0) return error.InvalidFixture;
     const result: f32 = @floatCast(value);
@@ -3363,18 +3374,6 @@ fn ahemLineCount(text: []const u8, available_width: f32) usize {
         }
     }
     return line_count;
-}
-
-fn parsePixels(value: []const u8) FixtureError!f64 {
-    if (value.len <= 2) return error.InvalidFixture;
-    if (!std.mem.endsWith(u8, value, "px")) return error.InvalidFixture;
-
-    const number = std.fmt.parseFloat(f64, value[0 .. value.len - 2]) catch {
-        return error.InvalidFixture;
-    };
-    if (!std.math.isFinite(number)) return error.InvalidFixture;
-    if (number < 0.0) return error.InvalidFixture;
-    return number;
 }
 
 fn validateExpectedRect(rect: Rect) FixtureError!void {

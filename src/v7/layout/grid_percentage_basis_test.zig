@@ -52,7 +52,7 @@ test "measureNatural resolves grid percentages from percentage basis" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
-    const root = tree.nodeConst(root_id).?;
+    const root = tree.nodeConst(root_id) orelse return error.TestUnexpectedResult;
     const measured = try grid.measureNatural(
         &tree,
         root,

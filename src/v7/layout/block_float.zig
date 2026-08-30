@@ -2145,12 +2145,14 @@ fn resolveContainerInitialSize(
     if (candidate.height == null) {
         candidate.height = 0;
     }
+    const candidate_width = candidate.width orelse return error.InvalidStyle;
+    const candidate_height = candidate.height orelse return error.InvalidStyle;
 
     const resolved = try sizing.clampSize(
         input_style,
         .{
-            .width = candidate.width.?,
-            .height = candidate.height.?,
+            .width = candidate_width,
+            .height = candidate_height,
         },
         context,
     );
@@ -2188,11 +2190,13 @@ fn resolveContainerAutoHeight(
         edges.box_vertical,
         input_style.box_sizing,
     );
+    const candidate_width = candidate.width orelse return error.InvalidStyle;
+    const candidate_height = candidate.height orelse return error.InvalidStyle;
     const resolved = try sizing.clampSize(
         resolved_style,
         .{
-            .width = candidate.width.?,
-            .height = candidate.height.?,
+            .width = candidate_width,
+            .height = candidate_height,
         },
         context,
     );
@@ -2369,11 +2373,13 @@ fn resolveChildSize(
         );
     }
 
+    const candidate_width = candidate.width orelse return error.InvalidStyle;
+    const candidate_height = candidate.height orelse return error.InvalidStyle;
     const resolved = try sizing.clampSize(
         input_style,
         .{
-            .width = candidate.width.?,
-            .height = candidate.height.?,
+            .width = candidate_width,
+            .height = candidate_height,
         },
         context,
     );
@@ -2704,18 +2710,22 @@ fn layoutAbsoluteChildren(
                     ),
                     child_size.width,
                 )
-            else
-                try addFinite(left.?, margins.left)
+            else blk: {
+                const value = left orelse return error.InvalidStyle;
+                break :blk try addFinite(value, margins.left);
+            }
         else if (left) |value|
             try addFinite(value, margins.left)
-        else
-            try subtractFinite(
+        else blk: {
+            const value = right orelse return error.InvalidStyle;
+            break :blk try subtractFinite(
                 try subtractFinite(
-                    try subtractFinite(area_width, right.?),
+                    try subtractFinite(area_width, value),
                     margins.right,
                 ),
                 child_size.width,
             );
+        };
         const child_y_area = if (top) |value|
             try addFinite(value, margins.top)
         else if (bottom) |value|
@@ -3602,9 +3612,6 @@ fn establishesIndependentFormattingContext(input_style: style.Style) bool {
     return establishesBfc(input_style);
 }
 
-fn physicalInlineStart(direction: style.Direction) PhysicalSide {
-    return if (direction == .ltr) .left else .right;
-}
 fn physicalTextAlignX(
     container_width: f32,
     child_width: f32,

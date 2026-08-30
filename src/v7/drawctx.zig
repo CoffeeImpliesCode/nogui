@@ -261,9 +261,16 @@ fn paintStyleFromOpts(opts: anytype, defaults: ?PaintStyle) PaintStyle {
     return PaintStyle.resolve(defaults orelse .{}, local);
 }
 
+/// `create()` inserts every returned id before any caller can use it. A
+/// missing node is therefore an internal tree invariant violation, not an
+/// optional API case; report it explicitly instead of using a bare unwrap.
+fn nodeAfterCreate(self: *DrawCtx, id: Id) *widget.WidgetNode {
+    return self.tree.node(id) orelse @panic("DrawCtx: created node is missing");
+}
+
 /// Set the generated button label's canonical flex bounds.
 fn setButtonLabelSizing(self: *DrawCtx, id: Id, opts: anytype) void {
-    const node = self.tree.node(id).?;
+    const node = nodeAfterCreate(self, id);
     const T = @TypeOf(opts);
     if (@hasField(T, "shrink")) node.style.shrink = opts.shrink;
     if (@hasField(T, "min_size")) {
@@ -277,7 +284,7 @@ fn setButtonLabelSizing(self: *DrawCtx, id: Id, opts: anytype) void {
 /// Seed a direct row child from its parent's shared column track. Explicit
 /// child Style values take precedence; tracks fill only automatic dimensions.
 fn seedSharedColumnStyle(self: *DrawCtx, id: Id) void {
-    const child = self.tree.node(id).?;
+    const child = nodeAfterCreate(self, id);
     if (child.parent == .root) return;
     const parent = self.tree.node(child.parent) orelse return;
     if (parent.kind != .row) return;
@@ -299,7 +306,7 @@ fn seedSharedColumnStyle(self: *DrawCtx, id: Id) void {
 fn setScrollOptions(self: *DrawCtx, id: Id, opts: anytype) void {
     const T = @TypeOf(opts);
     if (!@hasField(T, "scroll_state")) return;
-    const node = self.tree.node(id).?;
+    const node = nodeAfterCreate(self, id);
     node.paint.clip = true;
     node.scroll = .{
         .state = opts.scroll_state,
@@ -311,7 +318,7 @@ fn setScrollOptions(self: *DrawCtx, id: Id, opts: anytype) void {
 }
 
 fn setTextOptions(self: *DrawCtx, id: Id, opts: anytype) void {
-    const node = self.tree.node(id).?;
+    const node = nodeAfterCreate(self, id);
     const T = @TypeOf(opts);
     if (@hasField(T, "text_overflow")) {
         node.text_overflow = @as(TextOverflow, opts.text_overflow);
@@ -464,7 +471,7 @@ pub const DrawCtx = struct {
             optsFontId(opts),
         );
         if (@hasField(@TypeOf(opts), "columns")) {
-            self.tree.node(id).?.shared_columns = opts.columns;
+            nodeAfterCreate(self, id).shared_columns = opts.columns;
         }
         setScrollOptions(self, id, opts);
         self.descend(id);
@@ -584,7 +591,7 @@ pub const DrawCtx = struct {
 
         // Buttons center generated labels unless the caller overrides either
         // layout axis independently.
-        const node = self.tree.node(id).?;
+        const node = nodeAfterCreate(self, id);
         if (self.component_defaults.style == null) {
             node.style.justify = .center;
             node.style.@"align" = .center;
@@ -611,7 +618,9 @@ pub const DrawCtx = struct {
                             if (max_width > 0) {
                                 // A bounded button label may shrink to its parent's
                                 // final content box instead of its natural width.
-                                self.tree.node(label_id).?.style.min_size.width = .{ .length = 0 };
+                                nodeAfterCreate(self, label_id).style.min_size.width = .{
+                                    .length = 0,
+                                };
                             }
                         }
                     }
@@ -747,30 +756,8 @@ pub const DrawCtx = struct {
             p.* = init;
             return p;
         };
-        for (cur.items) |sr| {
-            // Provenance: every ptr was arena.create(T) (properly aligned)
-            // before being stored as *anyopaque — the alignCast can never
-            // fail; zbc flags it because it cannot track the provenance
-            // through the type erasure.
-            if (sr.key.eql(key)) return @ptrCast(@alignCast(sr.ptr));
-        }
-        const p = try self.arena.create(T);
-        var seeded = false;
-        if (self.state_prev) |prev| {
-            for (prev.items) |sr| {
-                if (sr.key.eql(key)) {
-                    @memcpy(
-                        @as([*]u8, @ptrCast(p))[0..@sizeOf(T)],
-                        @as([*]const u8, @ptrCast(sr.ptr))[0..@sizeOf(T)],
-                    );
-                    seeded = true;
-                    break;
-                }
-            }
-        }
-        if (!seeded) p.* = init;
-        try cur.append(self.arena, .{ .key = key, .ptr = p });
-        return p;
+        const value = try cur.getOrCreate(T, self.arena, self.state_prev, key, name, init);
+        return value;
     }
 
     /// Cursor descends into a container: it becomes the parent for nodes
@@ -804,16 +791,16 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
 
     // Children adjacency, in creation order. The button's label is the
     // BUTTON's child, not the column's.
-    const col_node = tree.node(col).?;
+    const col_node = tree.node(col) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), col_node.children.items.len);
     try std.testing.expectEqual(inner_label, col_node.children.items[0]);
     try std.testing.expectEqual(inner_button, col_node.children.items[1]);
 
     // The button's child is its label (a label node with the button's text).
-    const btn_node = tree.node(inner_button).?;
+    const btn_node = tree.node(inner_button) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), btn_node.children.items.len);
     const btn_label_id = btn_node.children.items[0];
-    const btn_label = tree.node(btn_label_id).?;
+    const btn_label = tree.node(btn_label_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(inner_button, btn_label.parent);
     try std.testing.expectEqualStrings("B", btn_label.kind.label.text);
 
@@ -841,7 +828,7 @@ test "DrawCtx: column wires 33 children in creation order" {
     }
     ctx.pop();
 
-    const parent = tree.node(column).?;
+    const parent = tree.node(column) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, child_ids.len), parent.children.items.len);
     try std.testing.expectEqualSlices(Id, &child_ids, parent.children.items);
 }
@@ -864,7 +851,7 @@ test "DrawCtx: pop() restores the cursor" {
     try std.testing.expectEqual(Id.root, tree.node(after).?.parent);
 
     // The column's children are unaffected by pop().
-    const col_node = tree.node(col).?;
+    const col_node = tree.node(col) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), col_node.children.items.len);
     try std.testing.expectEqual(inner, col_node.children.items[0]);
 }
@@ -944,7 +931,7 @@ test "DrawCtx: component() draws into the current cursor" {
     // ids: column = 1, component = 2, child label = 3.
     const nested: Id = @enumFromInt(3);
     try std.testing.expectEqual(col, tree2.node(nested).?.parent);
-    const col_node = tree2.node(col).?;
+    const col_node = tree2.node(col) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), col_node.children.items.len);
     try std.testing.expectEqual(nested, col_node.children.items[0]);
 }
@@ -981,8 +968,8 @@ test "DrawCtx: component defaults apply before local overrides and restore" {
 
     var styled: Styled = .{};
     try ctx.component(Styled, .{ .key = .{ .static = "styled" } }, &styled);
-    const first = tree.node(styled.first).?;
-    const second = tree.node(styled.second).?;
+    const first = tree.node(styled.first) orelse return error.TestUnexpectedResult;
+    const second = tree.node(styled.second) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(FlexDirection.row, first.style.direction);
     try std.testing.expect(std.meta.eql(
         @as(style.LengthPercentage, .{ .length = 12 }),
@@ -1090,10 +1077,10 @@ test "DrawCtx: nested component defaults replace and isolate parent scope" {
     var parent: Parent = .{ .child = &child };
     try ctx.component(Parent, .{ .key = .{ .static = "parent" } }, &parent);
 
-    const before = tree.node(parent.before_id).?;
-    const child_label = tree.node(child.label_id).?;
-    const bare_label = tree.node(bare.label_id).?;
-    const after = tree.node(parent.after_id).?;
+    const before = tree.node(parent.before_id) orelse return error.TestUnexpectedResult;
+    const child_label = tree.node(child.label_id) orelse return error.TestUnexpectedResult;
+    const bare_label = tree.node(bare.label_id) orelse return error.TestUnexpectedResult;
+    const after = tree.node(parent.after_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(FlexDirection.row, before.style.direction);
     try std.testing.expect(std.meta.eql(
         @as(style.LengthPercentage, .{ .length = 20 }),
@@ -1172,7 +1159,7 @@ test "DrawCtx: button label honors justify and align overrides" {
         .justify = .start,
         .@"align" = .end,
     });
-    const button_node = tree.node(button).?;
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
     const label_id = button_node.children.items[0];
 
     try std.testing.expectEqual(Justify.start, button_node.style.justify);
@@ -1223,10 +1210,12 @@ test "DrawCtx: semantic and visual labels are copied, empty override stays expli
     @memset(&slider_text, 'x');
     @memset(&visual_text, 'x');
 
-    const button_kind = tree.node(button).?.kind.button;
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
+    const button_kind = button_node.kind.button;
     try std.testing.expectEqualStrings("Button", button_kind.label);
     try std.testing.expectEqualStrings("Sem", button_kind.accessible_label.?);
-    const slider_kind = tree.node(slider).?.kind.slider;
+    const slider_node = tree.node(slider) orelse return error.TestUnexpectedResult;
+    const slider_kind = slider_node.kind.slider;
     try std.testing.expectEqualStrings("Slider", slider_kind.label);
     try std.testing.expectEqualStrings("Vis", slider_kind.visual_label.?);
     try std.testing.expectEqualStrings("", tree.node(hidden).?.kind.slider.visual_label.?);
@@ -1263,7 +1252,7 @@ test "DrawCtx: icon-only button stays interactive without a label child" {
         .available = .{ .width = 80, .height = 40 },
         .measure = null,
     });
-    const button_node = tree.node(button).?;
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
     const button_kind = button_node.kind.button;
     try std.testing.expectEqual(@as(usize, 0), button_node.children.items.len);
     try std.testing.expectEqualStrings("Play", button_kind.accessible_label.?);
@@ -1338,7 +1327,8 @@ test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
     };
     var counter: Counter = .{};
     const wired = try ctx.button(.{ .label = "go", .on_click = Counter.click });
-    const cb = tree.node(wired).?.kind.button.on_click.?;
+    const wired_node = tree.node(wired) orelse return error.TestUnexpectedResult;
+    const cb = wired_node.kind.button.on_click orelse return error.TestUnexpectedResult;
     cb(@ptrCast(&counter));
     try std.testing.expectEqual(@as(u32, 1), counter.n);
 }
@@ -1424,8 +1414,8 @@ test "DrawCtx: button label does not consume shared column track" {
     const sibling = try ctx.label(.{ .text = "sibling" });
     ctx.pop();
 
-    const button_node = tree.node(button).?;
-    const button_label = tree.node(button_node.children.items[0]).?;
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
+    const button_label = tree.node(button_node.children.items[0]) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f32, 1), button_node.style.grow);
     try std.testing.expectEqual(
         style.Dimension{ .length = 25 },
@@ -1566,7 +1556,7 @@ test "DrawCtx: absent typed fields retain defaults" {
     ctx.pop();
 
     for ([_]Id{ plain_label, plain_button, plain_slider, plain_spacer }) |id| {
-        const node = tree.node(id).?;
+        const node = tree.node(id) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(default_style.margin_inset, node.style.margin_inset);
         try std.testing.expectEqual(default_style.border_inset, node.style.border_inset);
         try std.testing.expectEqual(default_style.padding_inset, node.style.padding_inset);
@@ -1624,7 +1614,7 @@ test "DrawCtx: canonical flex basis and parent-axis minimums" {
     defer tree.deinit();
     var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
     const id = try ctx.label(.{ .text = "typed", .flex_basis = 30, .min_height = 12 });
-    const node = tree.node(id).?;
+    const node = tree.node(id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         style.Dimension{ .length = 30 },
         node.style.flex_basis,
@@ -1675,7 +1665,7 @@ test "DrawCtx: direct min height retains fixed and percentage dimensions" {
         .text = "fixed",
         .min_height = style.Dimension.fixed(18),
     });
-    const fixed = tree.node(fixed_id).?;
+    const fixed = tree.node(fixed_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         style.Dimension{ .length = 18 },
         fixed.style.min_size.height,
@@ -1686,7 +1676,7 @@ test "DrawCtx: direct min height retains fixed and percentage dimensions" {
         .text = "percent",
         .min_height = style.Dimension.percentage(0.5),
     });
-    const percent = tree.node(percent_id).?;
+    const percent = tree.node(percent_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         style.Dimension{ .percent = 0.5 },
         percent.style.min_size.height,
@@ -1728,7 +1718,8 @@ test "DrawCtx: canonical flex options translate into typed Style" {
     });
     ctx.pop();
 
-    const resolved = tree.node(id).?.style;
+    const node = tree.node(id) orelse return error.TestUnexpectedResult;
+    const resolved = node.style;
     try std.testing.expectEqual(style.FlexDirection.row_reverse, resolved.direction);
     try std.testing.expectEqual(style.FlexWrap.wrap_reverse, resolved.flex_wrap);
     try std.testing.expectEqual(style.AlignContent.space_around, resolved.align_content);
@@ -1755,7 +1746,8 @@ test "DrawCtx: grid constructor translates tracks placement and canonical gaps" 
         },
     });
     ctx.pop();
-    const resolved = tree.node(id).?.style;
+    const node = tree.node(id) orelse return error.TestUnexpectedResult;
+    const resolved = node.style;
     try std.testing.expectEqual(style.Display.grid, resolved.display);
     try std.testing.expectEqual(@as(usize, 2), resolved.grid_template_columns.len);
     try std.testing.expectEqual(

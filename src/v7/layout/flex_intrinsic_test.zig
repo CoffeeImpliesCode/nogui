@@ -60,6 +60,13 @@ fn expectSize(expected: widget.Size, actual: widget.Size) !void {
     try std.testing.expectApproxEqAbs(expected.height, actual.height, tolerance);
 }
 
+fn exactF32FromUsize(value: usize) f32 {
+    // An f32 represents every u24 value exactly.
+    std.debug.assert(value <= @as(usize, std.math.maxInt(u24)));
+    const bounded: u24 = @intCast(value);
+    return @floatFromInt(bounded);
+}
+
 const ProbeWidthMode = enum {
     definite,
     min_content,
@@ -92,9 +99,9 @@ const BreakableMeasureProbe = struct {
         }
 
         const min_content_width =
-            @as(f32, @floatFromInt(min_line_length)) * glyph_width;
+            exactF32FromUsize(min_line_length) * glyph_width;
         const max_content_width =
-            @as(f32, @floatFromInt(max_line_length)) * glyph_width;
+            exactF32FromUsize(max_line_length) * glyph_width;
         const requested_width: f32 = switch (input.available_space.width) {
             .definite => |width| blk: {
                 width_mode = .definite;
@@ -132,7 +139,7 @@ const BreakableMeasureProbe = struct {
 
         return .{
             .width = width,
-            .height = @as(f32, @floatFromInt(line_count)) * line_height,
+            .height = exactF32FromUsize(line_count) * line_height,
         };
     }
 };
@@ -256,7 +263,7 @@ test "measureNatural scopes intrinsic height to auto-sized flex container" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
-    const outer = tree.nodeConst(outer_id).?;
+    const outer = tree.nodeConst(outer_id) orelse return error.TestUnexpectedResult;
     const measured = try flex.measureNatural(
         &tree,
         outer,
@@ -297,7 +304,7 @@ test "measureNatural defers percentage margins below intrinsic auto width" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
-    const outer = tree.nodeConst(outer_id).?;
+    const outer = tree.nodeConst(outer_id) orelse return error.TestUnexpectedResult;
     const measured = try flex.measureNatural(
         &tree,
         outer,
@@ -356,9 +363,10 @@ test "max-content forwards definite child cross maximum" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
+    const container = tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
     const measured = try flex.measureNatural(
         &tree,
-        tree.nodeConst(container_id).?,
+        container,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },
@@ -428,9 +436,10 @@ test "max-content ignores transferred cross max for contribution" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
+    const container = tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
     const measured = try flex.measureNatural(
         &tree,
-        tree.nodeConst(container_id).?,
+        container,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },
@@ -497,9 +506,10 @@ test "max-content uses aspect-derived preferred main with zero basis" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
+    const container = tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
     const measured = try flex.measureNatural(
         &tree,
-        tree.nodeConst(container_id).?,
+        container,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },
@@ -555,9 +565,10 @@ test "max-content measures automatic minimum under min-content main mode" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
+    const container = tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
     const measured = try flex.measureNatural(
         &tree,
-        tree.nodeConst(container_id).?,
+        container,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },

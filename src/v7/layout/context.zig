@@ -370,14 +370,16 @@ pub const LayoutContext = struct {
             self.grid_cache_initialized_items = 0;
             self.grid_cache_next_replacement = 0;
         }
-        const words = self.grid_cache_words.?;
+        const words = self.grid_cache_words orelse return error.InvalidStyle;
         const items: [*]T = @ptrCast(words.ptr);
         return items[0..count];
     }
 };
 
 fn storageByteCount(comptime T: type, count: usize) LayoutError!usize {
-    return std.math.mul(usize, @sizeOf(T), count) catch error.InvalidStyle;
+    return std.math.mul(usize, @sizeOf(T), count) catch |err| switch (err) {
+        error.Overflow => error.InvalidStyle,
+    };
 }
 
 fn storageWordCount(comptime T: type, count: usize) LayoutError!usize {

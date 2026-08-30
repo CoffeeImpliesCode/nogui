@@ -632,6 +632,9 @@ pub const SvgView = struct {
 
             // A zero-extent curve set (a single point) has no ink: skip
             // the path like the glyph engine skips zero-size glyphs.
+            // `sweepers.append` above succeeded, so this pop cannot be
+            // empty. Keep the postcondition unwrap: an empty result would
+            // indicate corruption of this local list, not external input.
             if (sweeper.curve_w == 0 and sweeper.curve_h == 0) {
                 var orphan = sweepers.pop().?;
                 orphan.deinit();
@@ -705,6 +708,9 @@ pub const SvgView = struct {
                 //   y: bbox.y - (curve_bottom + curve_h) .. + curve_h.
                 const ink_x = bbox.x + sweeper.curve_left;
                 const ink_y = bbox.y - (sweeper.curve_bottom + sweeper.curve_h);
+                // The current path's sweeper was appended before this
+                // rect append, so failure leaves exactly one orphan to pop.
+                // Null would mean corruption of the local ownership list.
                 rect_list.append(a, .{
                     .dst = .{ ink_x - 2, ink_y - 2, sweeper.curve_w + 4, sweeper.curve_h + 4 },
                     .src = .{ 0, 0, 1, 1 },
@@ -749,17 +755,22 @@ pub const SvgView = struct {
                 ) == .close_path;
                 const edge_list = try buildStrokeOutline(a, sweep_curves, path.stroke_width / 2, closed);
                 const edge_buf_size: u64 = @sizeOf(StrokeEdge) * edge_list.len + 16;
-                const edge_buf = try gpu.gpuMalloc(edge_buf_size, 16, .default);
-                errdefer gpu.gpuFree(edge_buf);
-                const edge_dst: [*]u8 = @ptrCast(@alignCast(edge_buf.cpu));
-                @as(*u32, @ptrCast(@alignCast(edge_dst))).* = @intCast(edge_list.len);
-                @as(*u32, @ptrCast(@alignCast(edge_dst + 4))).* = 0;
-                if (edge_list.len > 0) {
-                    const edges_src: [*]const StrokeEdge = edge_list.ptr;
-                    const edges_out: [*]StrokeEdge = @ptrCast(@alignCast(edge_dst + 8));
-                    @memcpy(edges_out[0..edge_list.len], edges_src[0..edge_list.len]);
-                }
-                try stroke_edge_bufs.append(a, edge_buf);
+                const edge_buf = upload: {
+                    const buf = try gpu.gpuMalloc(edge_buf_size, 16, .default);
+                    errdefer gpu.gpuFree(buf);
+                    const edge_dst: [*]u8 = @ptrCast(@alignCast(buf.cpu));
+                    @as(*u32, @ptrCast(@alignCast(edge_dst))).* = @intCast(edge_list.len);
+                    @as(*u32, @ptrCast(@alignCast(edge_dst + 4))).* = 0;
+                    if (edge_list.len > 0) {
+                        const edges_src: [*]const StrokeEdge = edge_list.ptr;
+                        const edges_out: [*]StrokeEdge = @ptrCast(@alignCast(edge_dst + 8));
+                        @memcpy(edges_out[0..edge_list.len], edges_src[0..edge_list.len]);
+                    }
+                    // The list takes ownership only after append succeeds.
+                    // Leaving this block normally cancels the local cleanup.
+                    try stroke_edge_bufs.append(a, buf);
+                    break :upload buf;
+                };
                 try stroke_edge_bdas.append(a, edge_buf.gpu);
                 try stroke_curve_bdas.append(a, sweeper.curve_buf_bda);
                 // Keep the PRISTINE edges (the buildStrokeOutline output,
@@ -772,6 +783,9 @@ pub const SvgView = struct {
                 try stroke_band_bufs.append(a, null);
                 try stroke_band_bdas.append(a, 0);
                 const w = path.stroke_width;
+                // The current path's sweeper was appended before this
+                // rect append, so failure leaves exactly one orphan to pop.
+                // Null would mean corruption of the local ownership list.
                 rect_list.append(a, .{
                     .dst = .{ bbox.x - w / 2 - 2, bbox.y - w / 2 - 2, @ceil(bbox.w) + w + 4, @ceil(bbox.h) + w + 4 },
                     .src = .{ 0, 0, 1, 1 },
@@ -1017,8 +1031,19 @@ pub const SvgView = struct {
         const has_interior = bands.interior[2] > 0 and bands.interior[3] > 0;
         var bda: u64 = 0;
         if (bands.row_count > 0 or has_interior) {
-            const band_size: u64 = 32 + 8 * @as(u64, bands.row_count) + 4 * @as(u64, bands.indices.len);
-            const maybe_buf = self.gpu.gpuMalloc(band_size, 16, .default) catch null;
+            const band_size: u64 = 32 + 8 * @as(u64, bands.row_count) +
+                4 * @as(u64, bands.indices.len);
+            // Band storage is an optional optimization. If either the
+            // temporary build or GPU allocation fails, the material's zero
+            // BDA selects the existing full-loop sweep path.
+            const maybe_buf = self.gpu.gpuMalloc(band_size, 16, .default) catch |err| switch (err) {
+                error.OutOfMemory => null,
+                error.DeviceLost => null,
+                error.SurfaceInvalid => null,
+                error.ShaderCompileFailed => null,
+                error.InvalidHandle => null,
+                error.BackendError => null,
+            };
             if (maybe_buf) |new_buf| {
                 if (self.band_bufs[i]) |old| self.gpu.gpuFree(old);
                 self.band_bufs[i] = new_buf;
@@ -1080,8 +1105,19 @@ pub const SvgView = struct {
         defer self.gpa.free(bands.indices);
         var bda: u64 = 0;
         if (bands.row_count > 0) {
-            const band_size: u64 = 32 + 8 * @as(u64, bands.row_count) + 4 * @as(u64, bands.indices.len);
-            const maybe_buf = self.gpu.gpuMalloc(band_size, 16, .default) catch null;
+            const band_size: u64 = 32 + 8 * @as(u64, bands.row_count) +
+                4 * @as(u64, bands.indices.len);
+            // Band storage is an optional optimization. If either the
+            // temporary build or GPU allocation fails, the material's zero
+            // BDA selects the existing full-loop stroke path.
+            const maybe_buf = self.gpu.gpuMalloc(band_size, 16, .default) catch |err| switch (err) {
+                error.OutOfMemory => null,
+                error.DeviceLost => null,
+                error.SurfaceInvalid => null,
+                error.ShaderCompileFailed => null,
+                error.InvalidHandle => null,
+                error.BackendError => null,
+            };
             if (maybe_buf) |new_buf| {
                 if (self.stroke_band_bufs[j]) |old| self.gpu.gpuFree(old);
                 self.stroke_band_bufs[j] = new_buf;
@@ -1193,7 +1229,7 @@ test "line_to converts to the degenerate conic" {
         .{ .move_to = .{ .abs = true, .x = 0, .y = 0 } },
         .{ .line_to = .{ .abs = true, .x = 10, .y = 0 } },
     }, .{ .x = 0, .y = 0, .w = 10, .h = 0 });
-    const curves = (try convertPath(a, &path)).?;
+    const curves = (try convertPath(a, &path)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 1), curves.len);
     try expectCurve(curves[0], .{ 0, 0 }, .{ 5, 0 }, .{ 10, 0 });
 }
@@ -1206,7 +1242,7 @@ test "cubic_to splits into two conics at t=0.5" {
         .{ .move_to = .{ .abs = true, .x = 0, .y = 0 } },
         .{ .cubic_to = .{ .abs = true, .x1 = 0, .y1 = 10, .x2 = 10, .y2 = 10, .x = 10, .y = 0 } },
     }, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
-    const curves = (try convertPath(a, &path)).?;
+    const curves = (try convertPath(a, &path)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 2), curves.len);
     // The shared point is the curve's midpoint B(0.5) = (5, 7.5); the
     // conic controls are the de Casteljau midpoints (0,5) and (7.5,7.5).
@@ -1225,7 +1261,7 @@ test "smooth_cubic_to reflects the previous cubic's control" {
         // (10,10) = (10,-10); the split's shared point = (15,-7.5).
         .{ .smooth_cubic_to = .{ .abs = true, .x2 = 20, .y2 = -10, .x = 20, .y = 0 } },
     }, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
-    const curves = (try convertPath(a, &path)).?;
+    const curves = (try convertPath(a, &path)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 4), curves.len);
     try expectCurve(curves[2], .{ 10, 0 }, .{ 10, -5 }, .{ 15, -7.5 });
     try expectCurve(curves[3], .{ 15, -7.5 }, .{ 17.5, -7.5 }, .{ 20, 0 });
@@ -1241,7 +1277,7 @@ test "smooth_cubic_to without a preceding cubic starts at the current point" {
         // point (SVG 2 §8.3.8) — the first conic degenerates toward it.
         .{ .smooth_cubic_to = .{ .abs = true, .x2 = 15, .y2 = 15, .x = 15, .y = 5 } },
     }, .{ .x = 5, .y = 5, .w = 10, .h = 10 });
-    const curves = (try convertPath(a, &path)).?;
+    const curves = (try convertPath(a, &path)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 2), curves.len);
     // The split's shared point is the curve's midpoint B(0.5) = (10, 8.75);
     // the second conic's control is the de Casteljau midpoint (12.5, 10).
@@ -1259,7 +1295,7 @@ test "relative horizontal/vertical and close_path resolve against the current po
         .{ .vertical_to = .{ .abs = false, .y = -2 } },
         .{ .close_path = {} },
     }, .{ .x = 1, .y = -1, .w = 5, .h = 2 });
-    const curves = (try convertPath(a, &path)).?;
+    const curves = (try convertPath(a, &path)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), curves.len);
     try expectCurve(curves[0], .{ 1, 1 }, .{ 3.5, 1 }, .{ 6, 1 });
     try expectCurve(curves[1], .{ 6, 1 }, .{ 6, 0 }, .{ 6, -1 });

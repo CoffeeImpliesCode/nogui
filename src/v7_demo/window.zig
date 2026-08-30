@@ -173,11 +173,13 @@ fn dispatchRootPrecisionKey(comptime T: type, root: *T) bool {
 /// default z=0 behind every box).
 const SvgCard = struct { rect: Rect, layer: u32 };
 
-fn svgCardRect(tree: *const WidgetTree) SvgCard {
+fn svgCardRect(tree: *const WidgetTree) error{InvalidStyle}!SvgCard {
     if (ui.svg_box_id) |id_raw| {
         const id: Id = @enumFromInt(id_raw);
         for (tree.nodes.items) |n| {
-            if (n.id == id) return .{ .rect = contentRect(tree, id), .layer = n.paint.layer };
+            if (n.id == id) {
+                return .{ .rect = try contentRect(tree, id), .layer = n.paint.layer };
+            }
         }
     }
     return .{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .layer = 0 };
@@ -1222,7 +1224,7 @@ fn buildSliceRects(
     // are the glyph-style quads with the per-path materials from the
     // shared buffer's SVG region.
     if (svg_view) |sv| {
-        const card = svgCardRect(tree);
+        const card = try svgCardRect(tree);
         const card_rect = card.rect;
         const vb = sv.boundsRect();
         if (card_rect.w > 0 and card_rect.h > 0 and vb.w > 0 and vb.h > 0) {

@@ -119,7 +119,7 @@ test "auto intrinsic block height leaves flex percentage height indefinite" {
     defer context.deinit();
     const measured = try block_float.measureNatural(
         &tree,
-        tree.nodeConst(root_id).?,
+        tree.nodeConst(root_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 200 },
@@ -194,7 +194,7 @@ test "definite Block availability does not define an auto percentage axis" {
     defer context.deinit();
     const measured = try block_float.measureNatural(
         &tree,
-        tree.nodeConst(root_id).?,
+        tree.nodeConst(root_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 100, .height = 200 },
             .percentage_basis = .{ .width = 100, .height = 200 },
@@ -242,7 +242,7 @@ test "content-sized block root does not reconstruct an unknown axis" {
     defer context.deinit();
     const measured = try block_float.measureNatural(
         &tree,
-        tree.nodeConst(root_id).?,
+        tree.nodeConst(root_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },
@@ -296,7 +296,7 @@ test "inherent block root known border overrides style" {
     defer context.deinit();
     const measured = try block_float.measureNatural(
         &tree,
-        tree.nodeConst(root_id).?,
+        tree.nodeConst(root_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },
@@ -354,7 +354,7 @@ test "content-sized block root floors known border by edges and gutter" {
     defer context.deinit();
     const measured = try block_float.measureNatural(
         &tree,
-        tree.nodeConst(root_id).?,
+        tree.nodeConst(root_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },
@@ -414,7 +414,7 @@ test "block root sizing override does not leak to descendants" {
     defer context.deinit();
     const measured = try block_float.measureNatural(
         &tree,
-        tree.nodeConst(root_id).?,
+        tree.nodeConst(root_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 100, .height = 100 },

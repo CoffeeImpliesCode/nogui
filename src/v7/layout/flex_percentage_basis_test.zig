@@ -52,9 +52,10 @@ test "measureNatural resolves flex percentages from request basis" {
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
+    const root = tree.nodeConst(root_id) orelse return error.TestUnexpectedResult;
     const measured = try flex.measureNatural(
         &tree,
-        tree.nodeConst(root_id).?,
+        root,
         .{
             .available = .{ .width = 100, .height = 100 },
             .percentage_basis = .{ .width = 200, .height = 200 },

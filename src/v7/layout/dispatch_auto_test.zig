@@ -66,7 +66,8 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 }
 
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    try expectRect(expected, tree.nodeConst(id).?.rect);
+    const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    try expectRect(expected, node.rect);
 }
 
 test "fixed block root forces auto-height flex width and keeps natural height" {
@@ -296,10 +297,14 @@ test "hidden auto mixed subtree remains zero" {
     try tree.appendChild(hidden_id, grid_id);
     try tree.appendChild(root_id, hidden_id);
     try tree.appendChild(root_id, visible_id);
-    tree.node(leaf_id).?.rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 };
-    tree.node(flex_id).?.rect = .{ .x = 2, .y = 3, .w = 4, .h = 5 };
-    tree.node(grid_id).?.rect = .{ .x = 3, .y = 4, .w = 5, .h = 6 };
-    tree.node(hidden_id).?.rect = .{ .x = 4, .y = 5, .w = 6, .h = 7 };
+    const leaf = tree.node(leaf_id) orelse return error.TestUnexpectedResult;
+    leaf.rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 };
+    const flex = tree.node(flex_id) orelse return error.TestUnexpectedResult;
+    flex.rect = .{ .x = 2, .y = 3, .w = 4, .h = 5 };
+    const grid = tree.node(grid_id) orelse return error.TestUnexpectedResult;
+    grid.rect = .{ .x = 3, .y = 4, .w = 5, .h = 6 };
+    const hidden = tree.node(hidden_id) orelse return error.TestUnexpectedResult;
+    hidden.rect = .{ .x = 4, .y = 5, .w = 6, .h = 7 };
 
     try layout(&tree, .{ .width = 100, .height = 20 });
 

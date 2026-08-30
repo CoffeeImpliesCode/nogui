@@ -65,7 +65,8 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 }
 
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    try expectRect(expected, tree.nodeConst(id).?.rect);
+    const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    try expectRect(expected, node.rect);
 }
 
 fn unreachableMeasureNode(
@@ -806,8 +807,10 @@ test "display none parent recursively zeroes its child" {
     try tree.appendChild(hidden_id, child_id);
     try tree.appendChild(root_id, hidden_id);
     try tree.appendChild(root_id, visible_id);
-    tree.node(child_id).?.rect = .{ .x = 7, .y = 9, .w = 25, .h = 12 };
-    tree.node(hidden_id).?.rect = .{ .x = 3, .y = 4, .w = 50, .h = 40 };
+    const child = tree.node(child_id) orelse return error.TestUnexpectedResult;
+    child.rect = .{ .x = 7, .y = 9, .w = 25, .h = 12 };
+    const hidden = tree.node(hidden_id) orelse return error.TestUnexpectedResult;
+    hidden.rect = .{ .x = 3, .y = 4, .w = 50, .h = 40 };
 
     try layoutContainer(&tree, hidden_id, 50, 40);
     try expectRelative(&tree, child_id, .{});
@@ -2771,7 +2774,8 @@ test "prepared pass updates scroll limits after recursive child geometry" {
         },
         .overflow = .{ .width = .scroll, .height = .scroll },
     });
-    tree.node(root_id).?.scroll = .{ .state = &scroll_state, .axis = .both };
+    const root = tree.node(root_id) orelse return error.TestUnexpectedResult;
+    root.scroll = .{ .state = &scroll_state, .axis = .both };
     try tree.appendChild(nested_id, descendant_id);
     try tree.appendChild(root_id, nested_id);
 
@@ -2821,23 +2825,25 @@ test "prepared pass classifies once and lays out many containers without allocat
     }
 
     for (hidden_ids, child_ids, 0..) |hidden_id, child_id, index| {
-        tree.node(hidden_id).?.rect = .{
+        const hidden = tree.node(hidden_id) orelse return error.TestUnexpectedResult;
+        hidden.rect = .{
             .x = @floatFromInt(index),
             .y = 2,
             .w = 20,
             .h = 10,
         };
-        tree.node(child_id).?.rect = .{
+        const child = tree.node(child_id) orelse return error.TestUnexpectedResult;
+        child.rect = .{
             .x = 3,
             .y = 4,
             .w = 10,
             .h = 5,
         };
-        tree.node(hidden_id).?.resolved_box_edges = .{
+        hidden.resolved_box_edges = .{
             .border = .{},
             .padding = .{},
         };
-        tree.node(child_id).?.resolved_box_edges = .{
+        child.resolved_box_edges = .{
             .border = .{},
             .padding = .{},
         };
@@ -2862,7 +2868,8 @@ test "prepared pass classifies once and lays out many containers without allocat
         try std.testing.expect(tree.nodeConst(child_id).?.resolved_box_edges == null);
     }
 
-    tree.node(hidden_ids[0]).?.style.display = .block;
+    const first_hidden = tree.node(hidden_ids[0]) orelse return error.TestUnexpectedResult;
+    first_hidden.style.display = .block;
     try std.testing.expect(tree.nodeConst(hidden_ids[0]).?.layout_hidden);
     try std.testing.expect(tree.nodeConst(child_ids[0]).?.layout_hidden);
 
@@ -2911,7 +2918,9 @@ test "block: vertical percentage padding and margin resolve against containing b
     try pass.layoutContainer(root_id, definiteContext(400, 200), null);
 
     // Padding should resolve against width (400): top = 40, bottom = 20, left = 20, right = 20
-    const resolved_padding = tree.nodeConst(child_id).?.resolved_box_edges.?.padding;
+    const child = tree.nodeConst(child_id) orelse return error.TestUnexpectedResult;
+    const resolved_edges = child.resolved_box_edges orelse return error.TestUnexpectedResult;
+    const resolved_padding = resolved_edges.padding;
     try std.testing.expectApproxEqAbs(@as(f32, 40), resolved_padding.top, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 20), resolved_padding.bottom, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 20), resolved_padding.left, 0.001);
@@ -5146,7 +5155,7 @@ test "intrinsic auto width packs a same-side float run in a nested shrink-to-fit
         .layout_node = unreachableLayoutNode,
     };
     defer context.deinit();
-    const shrink = tree.nodeConst(shrink_id).?;
+    const shrink = tree.nodeConst(shrink_id) orelse return error.TestUnexpectedResult;
     const measured = try block_float.measureNatural(
         &tree,
         shrink,

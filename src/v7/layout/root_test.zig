@@ -6,6 +6,10 @@ const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const layout = @import("root.zig");
 
+fn testNode(tree: *widget.WidgetTree, id: Id) !*widget.WidgetNode {
+    return tree.node(id) orelse error.TestUnexpectedResult;
+}
+
 fn layoutTreeMeasure(text: []const u8, _: layout.MeasureInput) widget.Size {
     return .{
         .width = @floatFromInt(text.len * 5),
@@ -471,9 +475,9 @@ test "layoutTree clears hidden grid subtree geometry" {
     try tree.appendChild(hidden_id, grid_id);
     try tree.appendChild(root_id, hidden_id);
 
-    tree.node(hidden_id).?.rect = .{ .x = 1, .y = 2, .w = 30, .h = 40 };
-    tree.node(grid_id).?.rect = .{ .x = 3, .y = 4, .w = 20, .h = 10 };
-    tree.node(leaf_id).?.rect = .{ .x = 5, .y = 6, .w = 10, .h = 8 };
+    (try testNode(&tree, hidden_id)).rect = .{ .x = 1, .y = 2, .w = 30, .h = 40 };
+    (try testNode(&tree, grid_id)).rect = .{ .x = 3, .y = 4, .w = 20, .h = 10 };
+    (try testNode(&tree, leaf_id)).rect = .{ .x = 5, .y = 6, .w = 10, .h = 8 };
 
     try layout.layoutTree(&tree, .{
         .allocator = std.testing.allocator,
@@ -481,9 +485,9 @@ test "layoutTree clears hidden grid subtree geometry" {
         .measure = layoutTreeMeasure,
     });
 
-    try std.testing.expectEqual(widget.Rect{}, tree.node(hidden_id).?.rect);
-    try std.testing.expectEqual(widget.Rect{}, tree.node(grid_id).?.rect);
-    try std.testing.expectEqual(widget.Rect{}, tree.node(leaf_id).?.rect);
+    try std.testing.expectEqual(widget.Rect{}, (try testNode(&tree, hidden_id)).rect);
+    try std.testing.expectEqual(widget.Rect{}, (try testNode(&tree, grid_id)).rect);
+    try std.testing.expectEqual(widget.Rect{}, (try testNode(&tree, leaf_id)).rect);
 }
 
 test "layoutTree dispatches an eligible grid root through modular grid" {
@@ -877,8 +881,8 @@ test "layoutTree reserves RTL vertical scrollbar gutter" {
         .measure = layoutTreeMeasure,
     });
 
-    const root_rect = tree.node(root_id).?.rect;
-    const child_rect = tree.node(child_id).?.rect;
+    const root_rect = (try testNode(&tree, root_id)).rect;
+    const child_rect = (try testNode(&tree, child_id)).rect;
     const child_absolute = widget.absoluteRect(&tree, child_id);
     try std.testing.expectEqual(@as(f32, 100), root_rect.w);
     try std.testing.expectEqual(@as(f32, 0), child_rect.x);
@@ -934,8 +938,8 @@ test "layoutTree grows capped minmax track to natural width" {
         .measure = layoutTreeMeasure,
     });
 
-    const root_rect = tree.node(root_id).?.rect;
-    const child_rect = tree.node(child_id).?.rect;
+    const root_rect = (try testNode(&tree, root_id)).rect;
+    const child_rect = (try testNode(&tree, child_id)).rect;
     try std.testing.expectEqual(@as(f32, 100), root_rect.w);
     try std.testing.expectEqual(@as(f32, 40), child_rect.w);
     try std.testing.expect(child_rect.w <= 50);
@@ -989,8 +993,8 @@ test "layoutTree floors fit-content maximum at fixed minimum" {
         .measure = layoutTreeMeasure,
     });
 
-    const root_rect = tree.node(root_id).?.rect;
-    const child_rect = tree.node(child_id).?.rect;
+    const root_rect = (try testNode(&tree, root_id)).rect;
+    const child_rect = (try testNode(&tree, child_id)).rect;
     try std.testing.expectEqual(@as(f32, 100), root_rect.w);
     try std.testing.expectEqual(@as(f32, 60), child_rect.w);
 }

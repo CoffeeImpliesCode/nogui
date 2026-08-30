@@ -164,7 +164,8 @@ test "root component defaults scope only the root draw" {
     try erased.vtable.draw(erased.ptr, &ctx);
     ctx.component_defaults = .{};
 
-    const node = tree.node(root_component.label_id).?;
+    const node = tree.node(root_component.label_id) orelse
+        return error.TestUnexpectedResult;
     try std.testing.expectEqual(FlexDirection.row, node.style.direction);
     try std.testing.expectEqual(style.LengthPercentage{ .length = 9 }, node.style.gap);
     try std.testing.expectEqual([4]f32{ 0.25, 0.5, 0.75, 1 }, node.paint.fill);

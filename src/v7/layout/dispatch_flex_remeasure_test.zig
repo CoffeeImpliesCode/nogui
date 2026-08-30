@@ -62,7 +62,8 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 }
 
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    try expectRect(expected, tree.nodeConst(id).?.rect);
+    const actual = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    try expectRect(expected, actual.rect);
 }
 
 test "flex bridge remeasures mixed block after main-axis shrink" {

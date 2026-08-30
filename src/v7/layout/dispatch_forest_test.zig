@@ -58,7 +58,8 @@ fn layout(tree: *WidgetTree, available: widget.Size) !void {
 }
 
 fn expectRect(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    const actual = tree.nodeConst(id).?.rect;
+    const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    const actual = node.rect;
     const tolerance: f32 = 0.001;
     try std.testing.expectApproxEqAbs(expected.x, actual.x, tolerance);
     try std.testing.expectApproxEqAbs(expected.y, actual.y, tolerance);
@@ -353,7 +354,10 @@ test "forest absolute and hidden roots do not consume flow" {
 
     const hidden_style = fixedStyle(.none, 30, 20);
     try appendNode(&tree, hidden_id, .root, hidden_style, .{ .column = .{} });
-    tree.node(hidden_id).?.rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 };
+    {
+        const hidden = tree.node(hidden_id) orelse return error.TestUnexpectedResult;
+        hidden.rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 };
+    }
 
     try appendNode(
         &tree,
@@ -369,10 +373,13 @@ test "forest absolute and hidden roots do not consume flow" {
     try expectRect(&tree, absolute_right_id, .{ .x = 84, .y = 66, .w = 10, .h = 8 });
     try expectRect(&tree, hidden_id, .{});
     try expectRect(&tree, flow_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
-    try std.testing.expect(tree.node(hidden_id).?.layout_hidden);
+    const hidden = tree.nodeConst(hidden_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(hidden.layout_hidden);
+    const absolute_left =
+        tree.nodeConst(absolute_left_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         widget.absoluteRect(&tree, absolute_left_id),
-        tree.node(absolute_left_id).?.rect,
+        absolute_left.rect,
     );
 }
 

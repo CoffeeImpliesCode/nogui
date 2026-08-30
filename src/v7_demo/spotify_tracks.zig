@@ -60,8 +60,8 @@ fn columnsFor(spec: layout.Spec) *const widget.SharedColumns {
     };
 }
 
-fn constrainIdentityText(tree: *widget.WidgetTree, id: Id, max_width: ?f32) void {
-    const node = tree.node(id).?;
+fn constrainIdentityText(tree: *widget.WidgetTree, id: Id, max_width: ?f32) error{InvalidStyle}!void {
+    const node = tree.node(id) orelse return error.InvalidStyle;
     node.style.shrink = 1;
     node.style.min_size.width = .{ .length = 0 };
     node.text_overflow = .ellipsis;
@@ -223,9 +223,13 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                     .transparent = !is_active,
                     .text_overflow = .ellipsis,
                 });
-                const title_button_node = ctx.tree.node(title_button).?;
-                std.debug.assert(title_button_node.children.items.len == 1);
-                constrainIdentityText(ctx.tree, title_button_node.children.items[0], identity_text_max_width);
+                const title_button_node = ctx.tree.node(title_button) orelse return error.InvalidStyle;
+                if (title_button_node.children.items.len != 1) return error.InvalidStyle;
+                try constrainIdentityText(
+                    ctx.tree,
+                    title_button_node.children.items[0],
+                    identity_text_max_width,
+                );
                 const artist_label = try ctx.label(.{
                     .text = track.artist,
                     .color = theme.c_text_sec,
@@ -235,7 +239,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                     .min_height = 0,
                     .text_overflow = .ellipsis,
                 });
-                constrainIdentityText(ctx.tree, artist_label, identity_text_max_width);
+                try constrainIdentityText(ctx.tree, artist_label, identity_text_max_width);
             }
         }
 
@@ -253,9 +257,9 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .transparent = !is_active,
                 .text_overflow = .ellipsis,
             });
-            const album_button_node = ctx.tree.node(album_button).?;
-            std.debug.assert(album_button_node.children.items.len == 1);
-            constrainIdentityText(
+            const album_button_node = ctx.tree.node(album_button) orelse return error.InvalidStyle;
+            if (album_button_node.children.items.len != 1) return error.InvalidStyle;
+            try constrainIdentityText(
                 ctx.tree,
                 album_button_node.children.items[0],
                 track_album_text_width_max,

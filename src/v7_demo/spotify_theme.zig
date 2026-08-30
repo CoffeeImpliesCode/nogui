@@ -4,12 +4,9 @@ const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
 pub const srgbToOklab = @import("text.zig").srgbToOklab;
 pub const Id = nogui.Id;
-const UserCallback = nogui.UserCallback;
 
 /// Outer breathing room between the application surface and its chrome.
 pub const app_inset: f32 = 8;
-/// Separation between the primary workspace regions.
-pub const workspace_gap: f32 = app_inset;
 /// Width of the complete library sidebar in the full desktop layout.
 pub const sidebar_width_full: f32 = 280;
 /// Width of the navigation-only sidebar in compact layouts.
@@ -93,8 +90,6 @@ pub const c_card_bg: [4]f32 = .{ 0.09, 0.09, 0.09, 1.0 };
 pub const c_card_elevated: [4]f32 = .{ 0.14, 0.14, 0.14, 1.0 };
 pub const c_hover: [4]f32 = .{ 0.16, 0.16, 0.16, 1.0 };
 pub const c_active_row: [4]f32 = .{ 0.165, 0.165, 0.165, 1.0 };
-/// Table surfaces stay close to the page so individual tracks do not form wells.
-pub const c_track_inactive_bg: [4]f32 = c_bg;
 pub const c_track_active_bg: [4]f32 = .{ 0.10, 0.10, 0.10, 1.0 };
 pub const c_table_divider: [4]f32 = .{ 1.0, 1.0, 1.0, 0.06 };
 pub const playlist_artwork_size: f32 = 32.0;
@@ -124,19 +119,6 @@ pub const c_card_hover: [4]f32 = c_hover;
 pub const c_accent_bright: [4]f32 = c_accent_hover;
 pub const c_hero_top: [4]f32 = c_hero_grad_top;
 pub const c_hero_bot: [4]f32 = c_hero_grad_bot;
-
-pub fn spotifyCard(ctx: *DrawCtx, grow: f32, fill: [4]f32, clip: bool) !Id {
-    return ctx.column(.{
-        .grow = grow,
-        .clip = clip,
-        .fill = fill,
-        .gradient = srgbToOklab(fill),
-        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = c_border,
-        .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
-        .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
-    });
-}
 
 const artwork_gradients = [_][2][4]f32{
     .{ .{ 0.69, 0.12, 0.52, 1.0 }, .{ 0.25, 0.08, 0.48, 1.0 } },
@@ -199,127 +181,4 @@ pub fn drawArtworkTile(
     });
     _ = try ctx.spacer(.{ .size = size * 0.18 });
     return tile;
-}
-
-pub fn spotifyButton(ctx: *DrawCtx, text: []const u8, active: bool, handler: anytype) !Id {
-    const color = if (active) c_accent else c_text_sec;
-    const fill = if (active) c_hover else c_card_bg;
-    const border_color = if (active) c_accent else c_border;
-    if (comptime @TypeOf(handler) == UserCallback) {
-        return ctx.button(.{
-            .label = text,
-            .on_click_with_data = handler,
-            .color = color,
-            .padding = .{ .left = 12, .right = 12, .top = 6, .bottom = 6 },
-            .radius = .{ .top = 6, .right = 6, .bottom = 6, .left = 6 },
-            .fill = fill,
-            .gradient = srgbToOklab(fill),
-            .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-            .border_color = border_color,
-            .font_size = 13,
-        });
-    }
-    return ctx.button(.{
-        .label = text,
-        .on_click = handler,
-        .color = color,
-        .padding = .{ .left = 12, .right = 12, .top = 6, .bottom = 6 },
-        .radius = .{ .top = 6, .right = 6, .bottom = 6, .left = 6 },
-        .fill = fill,
-        .gradient = srgbToOklab(fill),
-        .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        .border_color = border_color,
-        .font_size = 13,
-    });
-}
-
-pub fn pillButton(ctx: *DrawCtx, text: []const u8, active: bool, on_click: anytype) !Id {
-    if (active) {
-        return ctx.button(.{
-            .label = text,
-            .on_click = on_click,
-            .color = c_bg,
-            .padding = .{ .left = 12, .right = 12, .top = 4, .bottom = 4 },
-            .radius = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 },
-            .fill = c_text,
-            .gradient = srgbToOklab(c_text),
-            .font_size = 12,
-        });
-    }
-    return ctx.button(.{
-        .label = text,
-        .on_click = on_click,
-        .color = c_text,
-        .padding = .{ .left = 12, .right = 12, .top = 4, .bottom = 4 },
-        .radius = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 },
-        .fill = c_card_hover,
-        .gradient = srgbToOklab(c_card_hover),
-        .font_size = 12,
-    });
-}
-
-pub fn drawTrackActions(
-    comptime on_click: anytype,
-    ctx: *DrawCtx,
-    index_label: []const u8,
-    title_label: []const u8,
-    album_label: []const u8,
-    date_label: []const u8,
-    duration_label: []const u8,
-    num_color: [4]f32,
-    title_color: [4]f32,
-    row_fill: [4]f32,
-) !void {
-    _ = try ctx.button(.{
-        .label = index_label,
-        .on_click = on_click,
-        .color = num_color,
-        .padding = .{ .left = 6, .right = 6, .top = 2, .bottom = 2 },
-        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
-        .fill = row_fill,
-        .gradient = srgbToOklab(row_fill),
-        .font_size = 12,
-    });
-    _ = try ctx.button(.{
-        .label = title_label,
-        .on_click = on_click,
-        .color = title_color,
-        .padding = .{ .left = 6, .right = 16, .top = 2, .bottom = 2 },
-        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
-        .fill = row_fill,
-        .gradient = srgbToOklab(row_fill),
-        .font_size = 13,
-    });
-    _ = try ctx.button(.{
-        .label = album_label,
-        .on_click = on_click,
-        .color = c_text_sec,
-        .padding = .{ .left = 8, .right = 16, .top = 2, .bottom = 2 },
-        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
-        .fill = row_fill,
-        .gradient = srgbToOklab(row_fill),
-        .font_size = 12,
-        .max_width = track_album_text_width_max,
-        .text_overflow = .ellipsis,
-    });
-    _ = try ctx.button(.{
-        .label = date_label,
-        .on_click = on_click,
-        .color = c_text_muted,
-        .padding = .{ .left = 0, .right = 16, .top = 2, .bottom = 2 },
-        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
-        .fill = row_fill,
-        .gradient = srgbToOklab(row_fill),
-        .font_size = 12,
-    });
-    _ = try ctx.button(.{
-        .label = duration_label,
-        .on_click = on_click,
-        .color = c_text_sec,
-        .padding = .{ .left = 0, .right = 0, .top = 2, .bottom = 2 },
-        .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
-        .fill = row_fill,
-        .gradient = srgbToOklab(row_fill),
-        .font_size = 12,
-    });
 }

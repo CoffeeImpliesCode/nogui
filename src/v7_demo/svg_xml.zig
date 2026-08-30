@@ -266,6 +266,8 @@ fn attrTransform(node: [*c]c.xmlNode) ?[6]f32 {
         v.* = std.fmt.parseFloat(f32, it.next() orelse return null) catch return null;
     }
     if (it.next() != null) return null; // trailing junk
+    // The fixed array is returned by value: Zig copies all six scalars into
+    // the caller's result; no pointer into this stack frame escapes.
     return m;
 }
 
@@ -274,7 +276,12 @@ fn attrTransform(node: [*c]c.xmlNode) ?[6]f32 {
 fn attrFloat(node: [*c]c.xmlNode, name: [*c]const u8) ?f32 {
     const raw = c.xmlGetProp(node, name) orelse return null;
     defer if (c.xmlFree) |free_fn| free_fn(raw);
-    return std.fmt.parseFloat(f32, std.mem.span(raw)) catch null;
+    // Invalid SVG size attributes are intentionally treated as absent. This
+    // is the parser's documented tolerant-input behavior, not an ignored
+    // operational failure.
+    return std.fmt.parseFloat(f32, std.mem.span(raw)) catch |err| switch (err) {
+        error.InvalidCharacter => null,
+    };
 }
 
 /// Parse the viewBox attribute: exactly four numbers separated by wsp —
@@ -291,6 +298,8 @@ fn attrViewBox(node: [*c]c.xmlNode) ?[4]f32 {
         out[count] = std.fmt.parseFloat(f32, tok) catch return null;
         count += 1;
     }
+    // Like attrTransform, this fixed array is copied into the optional
+    // return value; it does not retain stack storage.
     return if (count == 4) out else null;
 }
 
@@ -408,7 +417,8 @@ test "viewBox attribute" {
     const t = std.testing;
     var doc = try parseSvg(t.allocator, "<svg viewBox=\"0 0 100 100\"><path d=\"M0 0 Z\"/></svg>");
     defer doc.deinit();
-    try t.expectEqual([4]f32{ 0, 0, 100, 100 }, doc.view_box.?);
+    const view_box = doc.view_box orelse return error.TestUnexpectedResult;
+    try t.expectEqual([4]f32{ 0, 0, 100, 100 }, view_box);
 }
 
 test "namespaced path elements" {

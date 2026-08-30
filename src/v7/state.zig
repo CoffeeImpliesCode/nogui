@@ -3,9 +3,10 @@
 //!
 //! The double-buffered arenas do the persistence: the previous frame's T
 //! still lives in the other arena while the current frame builds, so
-//! `ctx.state(name, T, init)` can memcpy the last version straight out of
-//! it. The only bookkeeping is a per-frame directory of (key -> pointer)
-//! entries — itself arena-allocated, swapped like the arenas:
+//! `ctx.state(T, name, init)` can copy the last version after validating its
+//! metadata. The per-frame directory maps a component key and full state name
+//! to a typed storage header. The directory itself is arena-allocated and
+//! swapped:
 //!
 //!   - component live last frame -> the new frame copy is seeded from the
 //!     previous frame's pointer (the "last version").
@@ -17,8 +18,8 @@
 //! the current frame's directory, so when it reappears the "previous frame"
 //! directory no longer mentions it and it starts from init again.
 //!
-//! Keys are (component identity, name hash): the name is component-local,
-//! and only the hash is stored — the name slice never outlives its frame.
+//! The hashed key keeps lookup cheap; each entry also owns the full name so a
+//! hash collision cannot merge two logical state values.
 
 const std = @import("std");
 
@@ -39,81 +40,304 @@ pub fn hashName(name: []const u8) u64 {
     return std.hash.Wyhash.hash(0, name);
 }
 
-/// One live state value: where the caller's *T lives (a frame arena) and
-/// its key. The pointer stays valid as long as its arena does.
-pub const StateRef = struct {
-    key: Key,
-    ptr: *anyopaque,
+/// Metadata and the type tag are validated before any pointer reconstruction
+/// or value copy. This keeps type erasure local to the directory boundary.
+pub const Error = error{StateTypeMismatch} || std.mem.Allocator.Error;
+
+/// A distinct marker is emitted for every monomorphized T. The anchor field
+/// keeps equal-layout types distinct while the marker address is allocation-
+/// free and stable for the lifetime of the process.
+fn TypeTag(comptime T: type) type {
+    return struct {
+        type_anchor: *const T,
+        var marker: u8 = 0;
+    };
+}
+
+fn typeTag(comptime T: type) *const anyopaque {
+    return @ptrCast(&TypeTag(T).marker);
+}
+
+const StateHeader = struct {
+    name: []const u8,
+    type_tag: *const anyopaque,
+    value_size: usize,
+    value_alignment: usize,
+
+    fn init(comptime T: type, name: []const u8) StateHeader {
+        return .{
+            .name = name,
+            .type_tag = typeTag(T),
+            .value_size = @sizeOf(T),
+            .value_alignment = @alignOf(T),
+        };
+    }
+
+    fn matchesType(self: StateHeader, comptime T: type) bool {
+        if (self.type_tag != typeTag(T)) return false;
+        if (self.value_size != @sizeOf(T)) return false;
+        if (self.value_alignment != @alignOf(T)) return false;
+        return true;
+    }
+
+    fn asValue(self: *StateHeader, comptime T: type) error{StateTypeMismatch}!*T {
+        if (!self.matchesType(T)) return error.StateTypeMismatch;
+        const storage: *StateStorage(T) = @fieldParentPtr("header", self);
+        return &storage.value;
+    }
+
+    fn asValueConst(
+        self: *const StateHeader,
+        comptime T: type,
+    ) error{StateTypeMismatch}!*const T {
+        if (!self.matchesType(T)) return error.StateTypeMismatch;
+        const storage: *const StateStorage(T) = @fieldParentPtr("header", self);
+        return &storage.value;
+    }
 };
 
-/// Per-frame directory of live state values. Allocated from the frame
-/// arena by App; the App swaps `state_prev` to it at the end of the frame,
-/// so next frame's state() can seed from these pointers while the arena is
-/// still alive.
-pub const StateDir = std.ArrayList(StateRef);
+fn StateStorage(comptime T: type) type {
+    return struct {
+        header: StateHeader,
+        value: T,
+    };
+}
+
+const StateRef = struct {
+    key: Key,
+    header: *StateHeader,
+};
+
+/// Per-frame directory of live state values. Entries and their storage belong
+/// to the frame arena. The full name, exact type tag, size, and alignment make
+/// typed recovery independent of hash uniqueness and validate it first.
+pub const StateDir = struct {
+    entries: std.ArrayList(StateRef) = .empty,
+
+    pub const empty: StateDir = .{ .entries = .empty };
+
+    pub fn deinit(self: *StateDir, allocator: std.mem.Allocator) void {
+        self.entries.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn find(self: *const StateDir, key: Key, name: []const u8) ?*const StateRef {
+        for (self.entries.items) |*state_ref| {
+            if (!state_ref.key.eql(key)) continue;
+            if (std.mem.eql(u8, state_ref.header.name, name)) return state_ref;
+        }
+        return null;
+    }
+
+    pub fn getOrCreate(
+        self: *StateDir,
+        comptime T: type,
+        arena: std.mem.Allocator,
+        previous: ?*const StateDir,
+        key: Key,
+        name: []const u8,
+        init: T,
+    ) Error!*T {
+        if (self.find(key, name)) |state_ref| {
+            return state_ref.header.asValue(T);
+        }
+
+        var previous_value: ?*const T = null;
+        if (previous) |previous_dir| {
+            if (previous_dir.find(key, name)) |state_ref| {
+                previous_value = try state_ref.header.asValueConst(T);
+            }
+        }
+
+        try self.entries.ensureUnusedCapacity(arena, 1);
+        const owned_name = try arena.dupe(u8, name);
+        const storage = try arena.create(StateStorage(T));
+        storage.* = .{
+            .header = .init(T, owned_name),
+            .value = if (previous_value) |value| value.* else init,
+        };
+        self.entries.appendAssumeCapacity(.{
+            .key = key,
+            .header = &storage.header,
+        });
+        return &storage.value;
+    }
+};
 
 // --- tests -----------------------------------------------------------------
 
 const testing = std.testing;
 
-/// Scan a directory for the first ref matching `key`.
-fn find(dir: *const StateDir, key: Key) ?*anyopaque {
-    for (dir.items) |sr| {
-        if (sr.key.eql(key)) return sr.ptr;
-    }
-    return null;
+test "StateDir: compatible retrieval preserves pointer identity and mutations" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var current: StateDir = .empty;
+    defer current.deinit(arena.allocator());
+    const key: Key = .{ .component = ComponentId.root, .name_hash = hashName("count") };
+
+    const first = try current.getOrCreate(u32, arena.allocator(), null, key, "count", 1);
+    first.* = 7;
+    const second = try current.getOrCreate(u32, arena.allocator(), null, key, "count", 99);
+
+    try testing.expectEqual(first, second);
+    try testing.expectEqual(@as(u32, 7), second.*);
+    try testing.expectEqual(@as(usize, 1), current.entries.items.len);
 }
 
-test "StateDir: same key twice in one frame resolves to the same pointer" {
-    var dir: StateDir = .empty;
-    defer dir.deinit(testing.allocator);
-    const key: Key = .{ .component = ComponentId.root, .name_hash = 7 };
+test "StateDir: component-local keys keep equal names independent" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var current: StateDir = .empty;
+    defer current.deinit(arena.allocator());
+    const name = "count";
+    const name_hash = hashName(name);
+    const child = ComponentId.child(ComponentId.root, .{ .static = "child" });
+    const root_key: Key = .{ .component = ComponentId.root, .name_hash = name_hash };
+    const child_key: Key = .{ .component = child, .name_hash = name_hash };
 
-    var a: u32 = 0;
-    var b: u32 = 0;
-    try dir.append(testing.allocator, .{ .key = key, .ptr = &a });
-    try dir.append(testing.allocator, .{ .key = key, .ptr = &b });
+    const root_value = try current.getOrCreate(
+        u32,
+        arena.allocator(),
+        null,
+        root_key,
+        name,
+        1,
+    );
+    const child_value = try current.getOrCreate(
+        u32,
+        arena.allocator(),
+        null,
+        child_key,
+        name,
+        2,
+    );
 
-    // The FIRST ref wins — a later state() call in the same frame must
-    // return the same copy, not a second one.
-    try testing.expectEqual(@as(*anyopaque, @ptrCast(&a)), find(&dir, key).?);
-    try testing.expectEqual(@as(usize, 2), dir.items.len);
+    try testing.expect(root_value != child_value);
+    try testing.expectEqual(@as(u32, 1), root_value.*);
+    try testing.expectEqual(@as(u32, 2), child_value.*);
 }
 
-test "StateDir: keys are component-local — same name, different components, no clash" {
-    var dir: StateDir = .empty;
-    defer dir.deinit(testing.allocator);
-    const name_hash = hashName("count");
+test "StateDir: previous frame seeds a typed current-frame copy" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var previous: StateDir = .empty;
+    defer previous.deinit(arena.allocator());
+    var current: StateDir = .empty;
+    defer current.deinit(arena.allocator());
+    const key: Key = .{ .component = ComponentId.root, .name_hash = hashName("value") };
 
-    const component_a: Key = .{ .component = ComponentId.root, .name_hash = name_hash };
-    const child_identity = ComponentId.child(ComponentId.root, .{ .static = "child" });
-    const component_b: Key = .{ .component = child_identity, .name_hash = name_hash };
-    var a: u32 = 1;
-    var b: u32 = 2;
-    try dir.append(testing.allocator, .{ .key = component_a, .ptr = &a });
-    try dir.append(testing.allocator, .{ .key = component_b, .ptr = &b });
+    const stored = try previous.getOrCreate(u32, arena.allocator(), null, key, "value", 1);
+    stored.* = 42;
+    const copy = try current.getOrCreate(
+        u32,
+        arena.allocator(),
+        &previous,
+        key,
+        "value",
+        0,
+    );
 
-    try testing.expectEqual(@as(*anyopaque, @ptrCast(&a)), find(&dir, component_a).?);
-    try testing.expectEqual(@as(*anyopaque, @ptrCast(&b)), find(&dir, component_b).?);
-    const missing = ComponentId.child(ComponentId.root, .{ .static = "missing" });
-    try testing.expectEqual(
-        @as(?*anyopaque, null),
-        find(&dir, .{ .component = missing, .name_hash = name_hash }),
+    try testing.expect(copy != stored);
+    try testing.expectEqual(@as(u32, 42), copy.*);
+}
+
+test "StateDir: equal-layout and previous-frame type mismatches are rejected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var previous: StateDir = .empty;
+    defer previous.deinit(arena.allocator());
+    var current: StateDir = .empty;
+    defer current.deinit(arena.allocator());
+    const key: Key = .{ .component = ComponentId.root, .name_hash = hashName("value") };
+
+    _ = try previous.getOrCreate(u32, arena.allocator(), null, key, "value", 7);
+    try testing.expectError(
+        error.StateTypeMismatch,
+        previous.getOrCreate(f32, arena.allocator(), null, key, "value", 0),
+    );
+    try testing.expectError(
+        error.StateTypeMismatch,
+        current.getOrCreate(u64, arena.allocator(), &previous, key, "value", 0),
+    );
+    try testing.expectEqual(@as(usize, 0), current.entries.items.len);
+}
+
+test "StateDir: same-frame type mismatches reject without replacing storage" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var current: StateDir = .empty;
+    defer current.deinit(arena.allocator());
+    const key: Key = .{ .component = ComponentId.root, .name_hash = hashName("value") };
+
+    const value = try current.getOrCreate(u32, arena.allocator(), null, key, "value", 7);
+    try testing.expectError(
+        error.StateTypeMismatch,
+        current.getOrCreate(f32, arena.allocator(), null, key, "value", 0),
+    );
+    const value_again = try current.getOrCreate(u32, arena.allocator(), null, key, "value", 0);
+
+    try testing.expectEqual(value, value_again);
+    try testing.expectEqual(@as(usize, 1), current.entries.items.len);
+}
+
+test "StateDir: stored size and alignment metadata are validated" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var current: StateDir = .empty;
+    defer current.deinit(arena.allocator());
+    const key: Key = .{ .component = ComponentId.root, .name_hash = hashName("value") };
+
+    _ = try current.getOrCreate(u32, arena.allocator(), null, key, "value", 7);
+    const header = current.entries.items[0].header;
+    header.value_size += 1;
+    try testing.expectError(
+        error.StateTypeMismatch,
+        current.getOrCreate(u32, arena.allocator(), null, key, "value", 0),
+    );
+    header.value_size = @sizeOf(u32);
+    header.value_alignment += 1;
+    try testing.expectError(
+        error.StateTypeMismatch,
+        current.getOrCreate(u32, arena.allocator(), null, key, "value", 0),
     );
 }
 
-test "StateDir: seeding copies the previous frame's bytes" {
-    var prev: StateDir = .empty;
-    defer prev.deinit(testing.allocator);
-    const key: Key = .{ .component = ComponentId.root, .name_hash = 9 };
+test "StateDir: full names disambiguate a forced hash collision" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var current: StateDir = .empty;
+    defer current.deinit(arena.allocator());
+    const colliding_key: Key = .{ .component = ComponentId.root, .name_hash = 1 };
 
-    var stored: f32 = 2.5;
-    try prev.append(testing.allocator, .{ .key = key, .ptr = &stored });
+    const alpha = try current.getOrCreate(
+        u32,
+        arena.allocator(),
+        null,
+        colliding_key,
+        "alpha",
+        11,
+    );
+    const beta = try current.getOrCreate(
+        u32,
+        arena.allocator(),
+        null,
+        colliding_key,
+        "beta",
+        22,
+    );
 
-    // The previous frame's pointer still lives (its arena is double-
-    // buffered), so a fresh copy seeds from it byte-for-byte.
-    var copy: f32 = 0;
-    const found = find(&prev, key).?;
-    @memcpy(std.mem.asBytes(&copy), @as([*]const u8, @ptrCast(found))[0..@sizeOf(f32)]);
-    try testing.expectEqual(@as(f32, 2.5), copy);
+    const alpha_again = try current.getOrCreate(
+        u32,
+        arena.allocator(),
+        null,
+        colliding_key,
+        "alpha",
+        99,
+    );
+    try testing.expectEqual(alpha, alpha_again);
+    try testing.expectEqual(@as(u32, 11), alpha_again.*);
+    try testing.expect(alpha != beta);
+    try testing.expectEqual(@as(u32, 11), alpha.*);
+    try testing.expectEqual(@as(u32, 22), beta.*);
+    try testing.expectEqual(@as(usize, 2), current.entries.items.len);
 }

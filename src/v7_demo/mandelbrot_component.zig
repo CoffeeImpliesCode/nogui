@@ -127,10 +127,12 @@ pub const MandelbrotComponent = struct {
         self.refreshRect();
         const heap = self.descriptor_heap orelse return error.DescriptorHeapUnavailable;
         if (!self.gpu_ready) return error.MandelbrotGpuUnavailable;
+        const shader = self.shader orelse return error.MandelbrotGpuUnavailable;
+        const params_buf = self.params_buf orelse return error.MandelbrotGpuUnavailable;
 
         const zone = tracy.Zone.begin(.{ .name = "mandelbrot", .src = @src() });
         defer zone.end();
-        const params: *MandelParams = @ptrCast(@alignCast(self.params_buf.?.cpu));
+        const params: *MandelParams = @ptrCast(@alignCast(params_buf.cpu));
         params.* = .{
             .size = .{ texture_width, texture_height },
             .center = self.center,
@@ -141,7 +143,7 @@ pub const MandelbrotComponent = struct {
         };
 
         const command_buffer = frame.command_buffer;
-        command_buffer.setComputeShader(self.shader.?);
+        command_buffer.setComputeShader(shader);
         command_buffer.bindDescriptorSets(heap);
         command_buffer.dispatch(self.params_bda, texture_width / 8, texture_height / 8, 1);
         command_buffer.barrier(.{ .compute = true }, .{ .fragment = true }, .{});
@@ -291,4 +293,25 @@ test "MandelbrotComponent: deinitGpu unregisters before texture teardown" {
     try std.testing.expectEqual(@as(?u32, null), component.bindless_index);
     try std.testing.expectEqual(@as(?u32, 23), probe.observed_index);
     try std.testing.expect(probe.observed_cleared);
+}
+
+test "MandelbrotComponent: frameGpu reports missing shader state" {
+    var component: MandelbrotComponent = .{
+        .gpu_ready = true,
+        .descriptor_heap = .{},
+    };
+    var gpu: noapi.Gpu = undefined;
+    var endpoint: GpuEndpoint = .{ .gpu = &gpu };
+    var command_buffer: noapi.CommandBuffer = undefined;
+    var frame: GpuFrame = .{
+        .endpoint = &endpoint,
+        .command_buffer = &command_buffer,
+        .extent = .{ .width = texture_width, .height = texture_height },
+        .frame_index = 0,
+    };
+
+    try std.testing.expectError(
+        error.MandelbrotGpuUnavailable,
+        component.frameGpu(&frame),
+    );
 }

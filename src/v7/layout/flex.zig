@@ -3440,15 +3440,17 @@ fn usedSize(
                 input.box_sizing,
             );
     }
+    const resolved_width = width orelse return error.InvalidStyle;
+    const resolved_height = height orelse return error.InvalidStyle;
     var result: widget.Size = .{
         .width = if (dimensionIntrinsic(input.size.width))
-            try add(width.?, edges.horizontal)
+            try add(resolved_width, edges.horizontal)
         else
-            try sizingToBorder(width.?, width_edge_sum, input.box_sizing),
+            try sizingToBorder(resolved_width, width_edge_sum, input.box_sizing),
         .height = if (dimensionIntrinsic(input.size.height))
-            try add(height.?, edges.vertical)
+            try add(resolved_height, edges.vertical)
         else
-            try sizingToBorder(height.?, height_edge_sum, input.box_sizing),
+            try sizingToBorder(resolved_height, height_edge_sum, input.box_sizing),
     };
     result.width = try clampSize(
         input,
@@ -3962,13 +3964,6 @@ fn gapMainValue(
     return selectAxisGap(axis, node.style.gap);
 }
 
-fn gapMain(
-    node: *const widget.WidgetNode,
-    axes: Axes,
-    basis: ?f32,
-) sizing.Error!f32 {
-    return resolveGap(gapMainValue(node, axes), basis);
-}
 fn mainWritingReverse(axes: Axes, direction: style.Direction) bool {
     return axes.horizontal and direction == .rtl;
 }

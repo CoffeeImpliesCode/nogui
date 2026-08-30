@@ -71,7 +71,8 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 track.artwork_seed,
                 track.artwork_texture_index,
             );
-            ctx.tree.node(artwork_tile).?.style.padding_inset.bottom = .{ .length = 0 };
+            const artwork_node = ctx.tree.node(artwork_tile) orelse return error.InvalidStyle;
+            artwork_node.style.padding_inset.bottom = .{ .length = 0 };
         }
         _ = try ctx.label(.{
             .text = track.title,

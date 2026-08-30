@@ -69,7 +69,8 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 }
 
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    try expectRect(expected, tree.nodeConst(id).?.rect);
+    const actual = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    try expectRect(expected, actual.rect);
 }
 
 const CountedLeafMeasure = struct {
@@ -1751,8 +1752,12 @@ test "fractional grow clamp preserves initial free-space scale" {
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
     try expectRelative(&tree, second_id, .{ .x = 10, .y = 0, .w = 20, .h = 10 });
 
-    const container_rect = tree.nodeConst(container_id).?.rect;
-    const second_rect = tree.nodeConst(second_id).?.rect;
+    const container_node =
+        tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
+    const second_node =
+        tree.nodeConst(second_id) orelse return error.TestUnexpectedResult;
+    const container_rect = container_node.rect;
+    const second_rect = second_node.rect;
     try std.testing.expectApproxEqAbs(
         @as(f32, 70),
         container_rect.w - second_rect.x - second_rect.w,
@@ -1796,8 +1801,12 @@ test "initial minimum freeze preserves initial free-space scale" {
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 20, .h = 10 });
     try expectRelative(&tree, second_id, .{ .x = 20, .y = 0, .w = 20, .h = 10 });
 
-    const container_rect = tree.nodeConst(container_id).?.rect;
-    const second_rect = tree.nodeConst(second_id).?.rect;
+    const container_node =
+        tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
+    const second_node =
+        tree.nodeConst(second_id) orelse return error.TestUnexpectedResult;
+    const container_rect = container_node.rect;
+    const second_rect = second_node.rect;
     try std.testing.expectApproxEqAbs(
         @as(f32, 60),
         container_rect.w - second_rect.x - second_rect.w,
@@ -1848,8 +1857,12 @@ test "grow violation selection freezes only the dominant minimum" {
     try expectRelative(&tree, second_id, .{ .x = 5, .y = 0, .w = 90, .h = 10 });
     try expectRelative(&tree, third_id, .{ .x = 95, .y = 0, .w = 5, .h = 10 });
 
-    const container_rect = tree.nodeConst(container_id).?.rect;
-    const third_rect = tree.nodeConst(third_id).?.rect;
+    const container_node =
+        tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
+    const third_node =
+        tree.nodeConst(third_id) orelse return error.TestUnexpectedResult;
+    const container_rect = container_node.rect;
+    const third_rect = third_node.rect;
     try std.testing.expectApproxEqAbs(
         @as(f32, 0),
         container_rect.w - third_rect.x - third_rect.w,
@@ -1894,8 +1907,12 @@ test "fractional shrink factors preserve raw negative free space" {
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 46, .h = 10 });
     try expectRelative(&tree, second_id, .{ .x = 46, .y = 0, .w = 46, .h = 10 });
 
-    const container_rect = tree.nodeConst(container_id).?.rect;
-    const second_rect = tree.nodeConst(second_id).?.rect;
+    const container_node =
+        tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
+    const second_node =
+        tree.nodeConst(second_id) orelse return error.TestUnexpectedResult;
+    const container_rect = container_node.rect;
+    const second_rect = second_node.rect;
     try std.testing.expectApproxEqAbs(
         @as(f32, 12),
         second_rect.x + second_rect.w - container_rect.w,
@@ -2723,7 +2740,8 @@ test "zero-area absolute child does not contribute scroll extent" {
             .height = .{ .length = 100 },
         },
     });
-    tree.node(container_id).?.scroll = .{ .state = &scroll_state, .axis = .horizontal };
+    const container = tree.node(container_id) orelse return error.TestUnexpectedResult;
+    container.scroll = .{ .state = &scroll_state, .axis = .horizontal };
     try tree.appendChild(container_id, absolute_id);
 
     try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
@@ -2731,7 +2749,7 @@ test "zero-area absolute child does not contribute scroll extent" {
     try expectRelative(&tree, absolute_id, .{ .x = 90, .y = 0, .w = 20, .h = 0 });
     try std.testing.expectEqual(
         widget.Size{ .width = 0, .height = 0 },
-        tree.nodeConst(container_id).?.layout_content_size,
+        container.layout_content_size,
     );
     try std.testing.expectEqual([2]f32{ 0, 0 }, scroll_state.max_offset);
 }
@@ -3966,7 +3984,8 @@ test "automatic minimum does not stretch across auto margins" {
         @as(?f32, 100),
         AutomaticMinimumAutoMarginProbe.min_content_available_height,
     );
-    try std.testing.expectEqual(@as(f32, 20), tree.nodeConst(child_id).?.rect.w);
+    const child = tree.nodeConst(child_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f32, 20), child.rect.w);
 }
 
 test "Flex measurement propagates allocation failure" {
@@ -4007,11 +4026,12 @@ test "Flex measurement propagates allocation failure" {
     };
     defer context.deinit();
 
+    const container = tree.nodeConst(container_id) orelse return error.TestUnexpectedResult;
     try std.testing.expectError(
         error.OutOfMemory,
         flex.measureNatural(
             &tree,
-            tree.nodeConst(container_id).?,
+            container,
             .{
                 .available = .{ .width = 100, .height = 100 },
                 .percentage_basis = .{ .width = 100, .height = 100 },

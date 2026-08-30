@@ -548,15 +548,17 @@ fn placeAbsoluteRoot(
         insets.left != null and insets.right != null;
     const height_from_insets = node.style.size.height == .auto and
         insets.top != null and insets.bottom != null;
-    var width = if (width_from_insets)
-        try rootSizeFromInsets(
+    var width = if (width_from_insets) blk: {
+        const left = insets.left orelse return error.InvalidStyle;
+        const right = insets.right orelse return error.InvalidStyle;
+        break :blk try rootSizeFromInsets(
             available.width,
-            insets.left.?,
-            insets.right.?,
+            left,
+            right,
             item.margins.left,
             item.margins.right,
-        )
-    else if (node.style.size.width == .auto)
+        );
+    } else if (node.style.size.width == .auto)
         item.natural.border.width
     else
         item.width;
@@ -601,16 +603,17 @@ fn placeAbsoluteRoot(
         available,
         edges,
     );
-    var height = if (height_from_insets)
-        try rootSizeFromInsets(
+    var height = if (height_from_insets) blk: {
+        const top = insets.top orelse return error.InvalidStyle;
+        const bottom = insets.bottom orelse return error.InvalidStyle;
+        break :blk try rootSizeFromInsets(
             available.height,
-            insets.top.?,
-            insets.bottom.?,
+            top,
+            bottom,
             item.margins.top,
             item.margins.bottom,
-        )
-    else
-        base_height;
+        );
+    } else base_height;
 
     if (node.style.aspect_ratio) |ratio| {
         if (!std.math.isFinite(ratio) or ratio <= 0) return error.InvalidStyle;

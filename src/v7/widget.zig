@@ -344,8 +344,10 @@ pub const WidgetTree = struct {
     }
 
     /// Append a child id through the tree-owned frame allocator.
+    /// Missing parent IDs are malformed tree input and return
+    /// `error.InvalidStyle`.
     pub fn appendChild(self: *WidgetTree, parent: Id, child: Id) !void {
-        const parent_node = self.node(parent).?;
+        const parent_node = self.node(parent) orelse return error.InvalidStyle;
         try parent_node.children.append(self.allocator, child);
     }
 
@@ -558,9 +560,10 @@ pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
 
 /// Absolute CONTENT box of a node: the absolute border box inset by the
 /// node's own border + padding. Where children live and text draws.
-pub fn contentRect(tree: *const WidgetTree, id: Id) Rect {
+/// Missing IDs are malformed tree input and return `error.InvalidStyle`.
+pub fn contentRect(tree: *const WidgetTree, id: Id) error{InvalidStyle}!Rect {
+    const node = tree.nodeConst(id) orelse return error.InvalidStyle;
     const border_rect = absoluteRect(tree, id);
-    const node = tree.nodeConst(id).?;
     return contentBoxRect(border_rect, node);
 }
 
@@ -587,6 +590,18 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     try std.testing.expectEqual(@as(?*WidgetNode, null), tree.node(@enumFromInt(99)));
     try std.testing.expectEqual(@as(usize, 1), tree.node(id1).?.children.items.len);
     try std.testing.expectEqual(id2, tree.node(id1).?.children.items[0]);
+}
+
+test "WidgetTree: malformed IDs return InvalidStyle instead of panicking" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const missing_id: Id = @enumFromInt(99);
+    try std.testing.expectError(
+        error.InvalidStyle,
+        tree.appendChild(missing_id, @enumFromInt(1)),
+    );
+    try std.testing.expectError(error.InvalidStyle, contentRect(&tree, missing_id));
 }
 
 test "WidgetTree: moving a node to the end reindexes shifted nodes" {
@@ -719,12 +734,12 @@ test "absoluteRect: walks parent content boxes through border+padding" {
     );
 
     // Label content box: its own border+padding are zero, so identical.
-    const c = contentRect(&tree, label);
+    const c = try contentRect(&tree, label);
     try std.testing.expectEqual(r, c);
 
     // Row content box: absolute border box (18,18,100,40) inset by its
     // border (4,1,2,3).
-    const rc = contentRect(&tree, row);
+    const rc = try contentRect(&tree, row);
     try std.testing.expectEqual(
         Rect{ .x = 18 + 4, .y = 18 + 1, .w = 100 - 6, .h = 40 - 4 },
         rc,

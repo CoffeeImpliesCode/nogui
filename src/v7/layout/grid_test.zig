@@ -112,7 +112,8 @@ fn expectRect(expected: Rect, actual: Rect) !void {
 }
 
 fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
-    try expectRect(expected, tree.nodeConst(id).?.rect);
+    const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
+    try expectRect(expected, node.rect);
 }
 
 fn measureLabel(text: []const u8, _: layout_context.MeasureInput) widget.Size {
@@ -180,7 +181,8 @@ test "grid explicit spans and negative lines select requested tracks" {
         .start = .{ .line = 1 },
         .end = .{ .line = 2 },
     };
-    tree.node(spanning_id).?.style = spanning_style;
+    const spanning_node = tree.node(spanning_id) orelse return error.TestUnexpectedResult;
+    spanning_node.style = spanning_style;
 
     var negative_style = leafStyle();
     negative_style.grid_column = .{
@@ -191,7 +193,8 @@ test "grid explicit spans and negative lines select requested tracks" {
         .start = .{ .line = 1 },
         .end = .{ .line = 2 },
     };
-    tree.node(negative_id).?.style = negative_style;
+    const negative_node = tree.node(negative_id) orelse return error.TestUnexpectedResult;
+    negative_node.style = negative_style;
 
     try appendContainer(&tree, container_id, .root, fixedContainer(90, 10, columns[0..], rows[0..]));
     try tree.appendChild(container_id, spanning_id);
@@ -356,11 +359,12 @@ test "grid mixed tracks resolve fixed percent auto minmax and fr" {
 
     const item_ids = [_]Id{ fixed_id, percent_id, intrinsic_id, minmax_id, fraction_id };
     for (item_ids, 0..) |id, index| {
-        tree.node(id).?.style.grid_column = .{
+        const node = tree.node(id) orelse return error.TestUnexpectedResult;
+        node.style.grid_column = .{
             .start = .{ .line = @intCast(index + 1) },
             .end = .{ .line = @intCast(index + 2) },
         };
-        tree.node(id).?.style.grid_row = .{
+        node.style.grid_row = .{
             .start = .{ .line = 1 },
             .end = .{ .line = 2 },
         };
@@ -462,7 +466,8 @@ test "grid absolute insets and nested scroll geometry remain relative" {
 
     const inner = fixedContainer(100, 60, inner_columns[0..], inner_rows[0..]);
     try appendContainer(&tree, inner_id, outer_id, inner);
-    tree.node(inner_id).?.scroll = .{ .state = &scroll_state, .axis = .both };
+    const inner_node = tree.node(inner_id) orelse return error.TestUnexpectedResult;
+    inner_node.scroll = .{ .state = &scroll_state, .axis = .both };
     try tree.appendChild(inner_id, overflowing_id);
     try tree.appendChild(inner_id, absolute_id);
 
@@ -874,7 +879,7 @@ test "grid measureNatural treats indefinite fit-content percentage as unbounded"
     defer context.deinit();
     const measured = try grid.measureNatural(
         &tree,
-        tree.nodeConst(container_id).?,
+        tree.nodeConst(container_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 60, .height = 20 },
             .percentage_basis = .{ .width = null, .height = 20 },
@@ -1062,14 +1067,16 @@ test "grid baseline alignment aligns items with differing font sizes to shared b
     first.size = .{ .width = .{ .length = 60 }, .height = .{ .length = 20 } };
     first.grid_align_self = .baseline;
     try appendLeaf(&tree, first_id, container_id, first, .{ .label = .{ .text = "First" } });
-    tree.node(first_id).?.font_size = 20;
+    const first_node = tree.node(first_id) orelse return error.TestUnexpectedResult;
+    first_node.font_size = 20;
 
     // Second item: font_size 40 -> ascent = 40 * 0.8 = 32
     var second = leafStyle();
     second.size = .{ .width = .{ .length = 60 }, .height = .{ .length = 40 } };
     second.grid_align_self = .baseline;
     try appendLeaf(&tree, second_id, container_id, second, .{ .label = .{ .text = "Second" } });
-    tree.node(second_id).?.font_size = 40;
+    const second_node = tree.node(second_id) orelse return error.TestUnexpectedResult;
+    second_node.font_size = 40;
 
     var container = fixedContainer(160, 60, columns[0..], rows[0..]);
     container.grid_align_items = .baseline;
@@ -1192,8 +1199,9 @@ test "grid fr floor freeze respects track base before redistribution" {
     try appendLeaf(&tree, first_id, container_id, first_style, .{ .spacer = .{} });
 
     try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
-    tree.node(second_id).?.style.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
-    tree.node(second_id).?.style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    const second_node = tree.node(second_id) orelse return error.TestUnexpectedResult;
+    second_node.style.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    second_node.style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
 
     try appendContainer(&tree, container_id, .root, fixedContainer(200, 20, columns[0..], rows[0..]));
     try tree.appendChild(container_id, first_id);
@@ -1231,8 +1239,9 @@ test "grid minmax track clamps at max before fr track absorbs remainder" {
     try appendLeaf(&tree, first_id, container_id, first_style, .{ .spacer = .{} });
 
     try appendLeaf(&tree, second_id, container_id, leafStyle(), .{ .spacer = .{} });
-    tree.node(second_id).?.style.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
-    tree.node(second_id).?.style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
+    const second_node = tree.node(second_id) orelse return error.TestUnexpectedResult;
+    second_node.style.grid_column = .{ .start = .{ .line = 2 }, .end = .{ .line = 3 } };
+    second_node.style.grid_row = .{ .start = .{ .line = 1 }, .end = .{ .line = 2 } };
 
     try appendContainer(&tree, container_id, .root, fixedContainer(200, 20, columns[0..], rows[0..]));
     try tree.appendChild(container_id, first_id);
@@ -3452,8 +3461,15 @@ test "grid negative align-content distribution preserves signed row offsets in R
             const child_index = child_number - 1;
             const row_index = child_index / 3;
             const column_index = child_index % 3;
-            const expected_y = scenario.first_row_y + @as(f32, @floatFromInt(row_index * 50));
-            const expected_x: f32 = @floatFromInt(80 - column_index * 30);
+            const row_offset_px = row_index * 50;
+            std.debug.assert(row_offset_px <= 100);
+            const row_offset_f64: f64 = @floatFromInt(row_offset_px);
+            const row_offset_f32: f32 = @floatCast(row_offset_f64);
+            const expected_y = scenario.first_row_y + row_offset_f32;
+            const column_offset_px = column_index * 30;
+            std.debug.assert(column_offset_px <= 60);
+            const column_position_f64: f64 = @floatFromInt(80 - column_offset_px);
+            const expected_x: f32 = @floatCast(column_position_f64);
             try expectRelative(&tree, child_id, .{
                 .x = expected_x,
                 .y = expected_y,
@@ -4007,7 +4023,7 @@ test "definite Grid availability does not define an auto percentage axis" {
 
     const measured = try grid.measureNatural(
         &tree,
-        tree.nodeConst(container_id).?,
+        tree.nodeConst(container_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 10, .height = 200 },
             .percentage_basis = .{ .width = 10, .height = null },
@@ -4830,10 +4846,10 @@ test "grid border-box leaf measurement reports content-box known width" {
         ContentBoxMeasureProbe.measure,
     );
 
-    try std.testing.expect(ContentBoxMeasureProbe.known_width != null);
+    const known_width = ContentBoxMeasureProbe.known_width orelse return error.TestUnexpectedResult;
     try std.testing.expectApproxEqAbs(
         @as(f32, 80),
-        ContentBoxMeasureProbe.known_width.?,
+        known_width,
         @as(f32, 0.001),
     );
 }
@@ -5103,10 +5119,13 @@ test "grid direct relayout clears a subtree hidden after first layout" {
     inner.overflow.width = .scroll;
     inner.scrollbar_width = 10;
     try appendContainer(&tree, inner_id, outer_id, inner);
-    tree.node(inner_id).?.scroll = .{
-        .state = &scroll_state,
-        .axis = .horizontal,
-    };
+    {
+        const inner_node = tree.node(inner_id) orelse return error.TestUnexpectedResult;
+        inner_node.scroll = .{
+            .state = &scroll_state,
+            .axis = .horizontal,
+        };
+    }
     try tree.appendChild(inner_id, overflowing_id);
 
     try appendContainer(
@@ -5119,19 +5138,40 @@ test "grid direct relayout clears a subtree hidden after first layout" {
 
     try layoutContainer(&tree, outer_id, .{ .width = 80, .height = 20 }, null);
 
-    try std.testing.expect(tree.nodeConst(inner_id).?.resolved_box_edges != null);
-    try std.testing.expect(tree.nodeConst(inner_id).?.layout_content_size.width > 0);
-    try std.testing.expect(tree.nodeConst(inner_id).?.first_baseline != null);
+    {
+        const inner_node_after_first_layout =
+            tree.nodeConst(inner_id) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(inner_node_after_first_layout.resolved_box_edges != null);
+        try std.testing.expect(inner_node_after_first_layout.layout_content_size.width > 0);
+        try std.testing.expect(inner_node_after_first_layout.first_baseline != null);
+    }
     try std.testing.expect(scroll_state.max_offset[0] > 0);
 
-    tree.node(inner_id).?.style.display = .none;
+    {
+        const inner_node_before_hidden_layout =
+            tree.node(inner_id) orelse return error.TestUnexpectedResult;
+        inner_node_before_hidden_layout.style.display = .none;
+    }
     try layoutContainer(&tree, outer_id, .{ .width = 80, .height = 20 }, null);
 
     try expectRelative(&tree, inner_id, .{});
     try expectRelative(&tree, overflowing_id, .{});
-    try std.testing.expectEqual(widget.Size{ .width = 0, .height = 0 }, tree.nodeConst(inner_id).?.layout_content_size);
-    try std.testing.expectEqual(@as(?widget.ResolvedBoxEdges, null), tree.nodeConst(inner_id).?.resolved_box_edges);
-    try std.testing.expectEqual(@as(?f32, null), tree.nodeConst(inner_id).?.first_baseline);
+    {
+        const inner_node_after_hidden_layout =
+            tree.nodeConst(inner_id) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            widget.Size{ .width = 0, .height = 0 },
+            inner_node_after_hidden_layout.layout_content_size,
+        );
+        try std.testing.expectEqual(
+            @as(?widget.ResolvedBoxEdges, null),
+            inner_node_after_hidden_layout.resolved_box_edges,
+        );
+        try std.testing.expectEqual(
+            @as(?f32, null),
+            inner_node_after_hidden_layout.first_baseline,
+        );
+    }
     try std.testing.expectEqual([2]f32{ 0, 0 }, scroll_state.max_offset);
 }
 
@@ -5235,7 +5275,7 @@ test "grid content sizing ignores root constraints and stays on the target" {
 
     const measured = try grid.measureNatural(
         &tree,
-        tree.nodeConst(container_id).?,
+        tree.nodeConst(container_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 300, .height = 300 },
             .percentage_basis = .{ .width = 300, .height = 300 },
@@ -5297,7 +5337,7 @@ test "grid content sizing does not leak through nested grid children" {
 
     _ = try grid.measureNatural(
         &tree,
-        tree.nodeConst(outer_id).?,
+        tree.nodeConst(outer_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 300, .height = 300 },
             .percentage_basis = .{ .width = 300, .height = 300 },
@@ -5357,7 +5397,7 @@ test "grid content sizing converts known border only at the leaf callback" {
 
     const measured = try grid.measureNatural(
         &tree,
-        tree.nodeConst(leaf_id).?,
+        tree.nodeConst(leaf_id) orelse return error.TestUnexpectedResult,
         .{
             .available = .{ .width = 300, .height = 300 },
             .percentage_basis = .{ .width = 300, .height = 300 },
@@ -5430,7 +5470,7 @@ test "grid measurement cache identifies the complete sizing request" {
         const calls_before = CacheIdentityProbe.calls;
         _ = try grid.measureNatural(
             &tree,
-            tree.nodeConst(leaf_id).?,
+            tree.nodeConst(leaf_id) orelse return error.TestUnexpectedResult,
             request,
             &context,
         );
@@ -5439,7 +5479,7 @@ test "grid measurement cache identifies the complete sizing request" {
 
         _ = try grid.measureNatural(
             &tree,
-            tree.nodeConst(leaf_id).?,
+            tree.nodeConst(leaf_id) orelse return error.TestUnexpectedResult,
             request,
             &context,
         );
