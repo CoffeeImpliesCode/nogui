@@ -221,6 +221,20 @@ pub fn build(b: *std.Build) void {
     const run_v7_tests = b.addRunArtifact(v7_tests);
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_v7_tests.step);
+    const perf_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7_demo/perf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nogui", .module = mod },
+            },
+        }),
+    });
+    perf_tests.root_module.addOptions("v7_options", v7_options);
+    const run_perf_tests = b.addRunArtifact(perf_tests);
+    test_step.dependOn(&run_perf_tests.step);
 
     const fixture_exe = b.addExecutable(.{
         .name = "fixture",
