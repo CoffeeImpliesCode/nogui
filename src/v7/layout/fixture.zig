@@ -26,6 +26,7 @@ pub const FixtureSummary = struct {
     passed: usize = 0,
     failed: usize = 0,
     unsupported: usize = 0,
+    unsupported_sha256: [32]u8 = undefined,
 };
 
 pub const FixtureError = error{
@@ -166,8 +167,11 @@ fn runFiltered(
 
     try validateCorpus(allocator, parsed_corpus.value, parsed_manifest.value);
     try validateSelection(parsed_corpus.value.cases, parsed_manifest.value.selection);
+    var unsupported_hasher = std.crypto.hash.sha2.Sha256.init(.{});
     if (count) |maximum| {
-        if (maximum == 0) return .{};
+        if (maximum == 0) {
+            return .{ .unsupported_sha256 = emptyUnsupportedSha256() };
+        }
     }
 
     var summary: FixtureSummary = .{};
@@ -196,6 +200,10 @@ fn runFiltered(
                         "fixture\tunsupported\t{s}\t{s}\n",
                         .{ fixture_case.id, fixture_case.variant },
                     );
+                    unsupported_hasher.update(fixture_case.id);
+                    unsupported_hasher.update("\t");
+                    unsupported_hasher.update(fixture_case.variant);
+                    unsupported_hasher.update("\n");
                     summary.unsupported += 1;
                     continue;
                 },
@@ -224,8 +232,16 @@ fn runFiltered(
     }
 
     if (!found) return error.FixtureNotFound;
+    unsupported_hasher.final(&summary.unsupported_sha256);
     return summary;
 }
+fn emptyUnsupportedSha256() [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
 fn readCorpusFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) FixtureError![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(
         io,

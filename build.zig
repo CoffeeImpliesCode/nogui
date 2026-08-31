@@ -210,6 +210,25 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_v7_tests.step);
 
+    const fixture_exe = b.addExecutable(.{
+        .name = "fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7/fixture_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nogui", .module = mod },
+                .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
+            },
+        }),
+    });
+    fixture_exe.root_module.addOptions("fixture_options", fixture_options);
+    const run_fixture = b.addRunArtifact(fixture_exe);
+    const fixture_step = b.step("fixture", "Run the fixture oracle");
+    fixture_step.dependOn(&run_fixture.step);
+
     const v7_text_tests = b.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
