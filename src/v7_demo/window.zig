@@ -649,7 +649,6 @@ fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Texture
         .format = .rgba32_float,
     }, buf, .{ .size = .{ demo_tex_size, demo_tex_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
     try gpu.waitIdle();
 
     return registry.register(gpa, tex);
@@ -707,7 +706,6 @@ fn uploadArtworkTexture(
         .format = .rgba32_float,
     }, staging, .{ .size = .{ decoded.width, decoded.height, 1 } });
     try gpu.queueSubmit(&.{command});
-    gpu.commandsEnd(command);
     try gpu.waitIdle();
 
     return registry.register(gpa, texture);
@@ -779,7 +777,6 @@ fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Te
         .format = .rgba32_float,
     }, buf, .{ .size = .{ tiger_ref_size, tiger_ref_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
     try gpu.waitIdle();
 
     ui.tiger_ref_idx = try registry.register(gpa, tex);
@@ -2223,7 +2220,6 @@ pub fn runShot(
     });
 
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
     try gpu.waitIdle();
 
     // --gpu-sort-verify: the REVERSED bag must produce the paint-order
@@ -2237,7 +2233,6 @@ pub fn runShot(
         var cmd2 = try gpu.commandsBegin();
         cmd2.memCopy(perm_rb, gui_renderer.permutationBuffer(), @as(u64, n) * @sizeOf(u32));
         try gpu.queueSubmit(&.{cmd2});
-        gpu.commandsEnd(cmd2);
         try gpu.waitIdle();
         const got: [*]const u32 = @ptrCast(@alignCast(perm_rb.cpu));
         const RectSort = struct {

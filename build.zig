@@ -416,4 +416,12 @@ pub fn build(b: *std.Build) void {
         "/bin/sh", "-c", "find src/v7 src/v7_demo -name '*.zig' | ~/.local/bin/zlint -S --deny-warnings",
     });
     lint_step.dependOn(&zlint_cmd.step);
+
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate documentation");
+    docs_step.dependOn(&install_docs.step);
 }
