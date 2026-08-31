@@ -10,6 +10,13 @@ pub fn build(b: *std.Build) void {
     const cov_rt = b.option([]const u8, "coverage-rt", "zig-cov-rt path") orelse null;
     const test_filter = b.option([]const u8, "test-filter", "Run tests matching a name substring");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
+    const v7_tracy = b.option(bool, "v7-tracy", "Enable Tracy in v7-demo") orelse false;
+    const v7_gpu_timestamps = b.option(bool, "v7-gpu-timestamps", "Enable v7 GPU timestamps") orelse false;
+    const v7_perf_counters = b.option(bool, "v7-perf-counters", "Enable mechanism counters") orelse false;
+    const v7_options = b.addOptions();
+    v7_options.addOption(bool, "tracy", v7_tracy);
+    v7_options.addOption(bool, "gpu_timestamps", v7_gpu_timestamps);
+    v7_options.addOption(bool, "perf_counters", v7_perf_counters);
     const fixture_filter = b.option([]const u8, "fixture-filter", "Run one normalized Taffy source");
     const fixture_options = b.addOptions();
     fixture_options.addOption([]const u8, "filter", fixture_filter orelse "");
@@ -21,6 +28,7 @@ pub fn build(b: *std.Build) void {
     const freetype_dep = b.dependency("freetype", .{ .target = target, .optimize = optimize });
     const harfbuzz_dep = b.dependency("harfbuzz", .{ .target = target, .optimize = optimize });
     const libxml2_dep = b.dependency("libxml2", .{ .target = target, .optimize = optimize });
+    const tracy_impl_mod = tracy.module(if (v7_tracy) "tracy_impl_enabled" else "tracy_impl_disabled");
 
     // ── noapi module (borrowed from dependency) ────────────
     const noapi_mod = noapi_dep.module("noapi");
@@ -42,6 +50,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "tracy", .module = tracy.module("tracy") },
         },
     });
+    mod.addOptions("v7_options", v7_options);
 
     // Library artifact for C dep propagation
     const lib = b.addLibrary(.{ .name = "nogui", .root_module = mod });
@@ -61,6 +70,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addOptions("v7_options", v7_options);
     exe.root_module.linkLibrary(lib);
 
     b.installArtifact(exe);
@@ -91,7 +101,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sdl3", .module = sdl3.module("sdl3") },
                 .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
                 .{ .name = "tracy", .module = tracy.module("tracy") },
-                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_enabled") },
+                .{ .name = "tracy_impl", .module = tracy_impl_mod },
             },
         }),
         // The LLVM codegen backend: the tracy client's stack capture +
@@ -99,6 +109,7 @@ pub fn build(b: *std.Build) void {
         // backend's DWARF is incomplete).
         .use_llvm = true,
     });
+    v7_demo.root_module.addOptions("v7_options", v7_options);
     v7_demo.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_demo.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     // libxml2 (the SVG parser's XML layer): link the hermetic build + emit
@@ -199,6 +210,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    v7_tests.root_module.addOptions("v7_options", v7_options);
     v7_tests.root_module.addOptions("fixture_options", fixture_options);
     if (coverage) {
         v7_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
@@ -225,6 +237,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     fixture_exe.root_module.addOptions("fixture_options", fixture_options);
+    fixture_exe.root_module.addOptions("v7_options", v7_options);
     const run_fixture = b.addRunArtifact(fixture_exe);
     const fixture_step = b.step("fixture", "Run the fixture oracle");
     fixture_step.dependOn(&run_fixture.step);
@@ -245,6 +258,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    v7_text_tests.root_module.addOptions("v7_options", v7_options);
     v7_text_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_text_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     if (coverage) {
@@ -272,6 +286,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    v7_ui_tests.root_module.addOptions("v7_options", v7_options);
     v7_ui_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_ui_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     if (coverage) {
@@ -299,6 +314,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    v7_spotify_tests.root_module.addOptions("v7_options", v7_options);
     v7_spotify_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_spotify_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     if (coverage) {
@@ -327,6 +343,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     v7_calculator_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_calculator_tests.root_module.addOptions("v7_options", v7_options);
     v7_calculator_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     if (coverage) {
         v7_calculator_tests.use_llvm = true;
@@ -353,6 +370,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     v7_svg_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_svg_tests.root_module.addOptions("v7_options", v7_options);
     v7_svg_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     v7_svg_tests.root_module.linkLibrary(libxml2_dep.artifact("xml2"));
     v7_svg_tests.root_module.addIncludePath(libxml2_dep.artifact("xml2").getEmittedIncludeTree());
@@ -382,6 +400,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe_tests.root_module.addOptions("v7_options", v7_options);
     exe_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     exe_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     exe_tests.root_module.linkSystemLibrary("avformat", .{});

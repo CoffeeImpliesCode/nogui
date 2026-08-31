@@ -2,6 +2,7 @@
 //! See notes/v7-prototype-spec.md.
 const std = @import("std");
 const noapi = @import("noapi");
+const perf_counters = @import("perf_counters.zig");
 
 pub const Id = @import("id.zig").Id;
 pub const ComponentKey = @import("key.zig").ComponentKey;
@@ -33,6 +34,10 @@ pub const ComponentRegistry = @import("component.zig").ComponentRegistry;
 pub const TextureRegistry = @import("runtime.zig").TextureRegistry;
 pub const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
 pub const GpuFrame = @import("runtime.zig").GpuFrame;
+pub const Counter = perf_counters.Counter;
+pub const Counters = perf_counters.Counters;
+pub const Snapshot = perf_counters.Snapshot;
+pub const Sink = perf_counters.Sink;
 pub const style = @import("style.zig");
 pub const Display = style.Display;
 pub const Position = style.Position;
@@ -111,6 +116,7 @@ pub const widget = @import("widget.zig");
 pub const runtime = @import("runtime.zig");
 
 test {
+    _ = @import("perf_counters.zig");
     _ = @import("drawcmd.zig");
     _ = @import("input.zig");
     _ = @import("headless.zig");

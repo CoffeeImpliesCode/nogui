@@ -29,10 +29,12 @@ const noapi = @import("noapi");
 const vk = noapi.vk;
 const Io = std.Io;
 
+const v7_options = @import("v7_options");
 const nogui = @import("nogui");
 const App = nogui.App;
 const Event = nogui.Event;
 const tracy = @import("tracy");
+const perf = @import("perf.zig");
 const FramePacer = @import("FramePacer.zig").FramePacer;
 const Id = nogui.Id;
 const DrawCmd = nogui.drawcmd.DrawCmd;
@@ -1347,7 +1349,14 @@ pub fn run(
     gpu_sort_verify: bool,
     max_frames: ?u32,
     audio_tracks: ?[]const LocalTrack,
+    perf_config: ?perf.Config,
 ) !void {
+    const finite_frames: ?u32 = if (perf_config) |config| blk: {
+        const validated = try perf.Config.validate(config);
+        break :blk switch (validated.mode) {
+            .offscreen, .presented => validated.warmup_frames + validated.sample_frames,
+        };
+    } else max_frames;
     if (ui.gpu_remount_smoke) {
         if (comptime T != ui.TodoApp) return error.GpuRemountSmokeRequiresTodo;
     }
@@ -1428,7 +1437,7 @@ pub fn run(
         .frames_in_flight = 3,
         .app_name = "v7-demo",
         .validation = false,
-        .timestamp_queries = true, // Tracy GPU zones (--frames profiling)
+        .timestamp_queries = v7_options.gpu_timestamps,
         .loader = .{
             .get_instance_proc_addr = @ptrCast(get_proc_addr),
             .get_instance_extensions = &getExts,
@@ -1549,6 +1558,7 @@ pub fn run(
     // present, matching noapi's command-buffer rotation.
     var frame_index: u32 = 0;
     var last_frame_ms: u64 = 0;
+    var perf_frame_count: u32 = 0;
     var should_close = false;
     var remount_smoke_phase: GpuRemountSmokePhase = .initial_visible;
     var remount_smoke_initial_slot: ?u32 = null;
@@ -1946,7 +1956,11 @@ pub fn run(
         pacer_sleep_ns = pacer.update(io, gw.slopNs());
         if (ui.gpu_remount_smoke and remount_smoke_phase == .complete) break;
 
-        if (max_frames) |mf| {
+        if (perf_config != null) {
+            const frame_limit = finite_frames orelse return error.InvalidPerfFrames;
+            perf_frame_count += 1;
+            if (perf_frame_count >= frame_limit) break;
+        } else if (max_frames) |mf| {
             if (tick >= mf) break;
         }
     }
