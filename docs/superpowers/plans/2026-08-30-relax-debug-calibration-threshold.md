@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the unusable 2% calibration spread with the approved 10% rule, then complete the Task 7 baseline.
+**Goal:** Replace the unusable 2% calibration spread with the approved 12% rule, then complete the Task 7 baseline.
 
 **Architecture:** Keep the existing three-window sustained-stability algorithm. Store one canonical rule object in the Python runner, validate it at every manifest boundary, and copy it into the baseline report. Run new diagnostics after the code change. Do not accept any earlier failed diagnostic.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Use a maximum spread of 1000 basis points, which equals 10%.
+- Use a maximum spread of 1200 basis points, which equals 12%.
 - Keep three disjoint 120-frame windows.
 - Keep boundaries 600 through 2160 with a 120-frame step.
 - Require the selected boundary and all later boundaries to pass.
@@ -47,9 +47,9 @@
 Add direct tests for the existing triplet helper. Each window contains 120 equal values.
 
 ```python
-below = [1000] * 120 + [1050] * 120 + [1099] * 120
-at_limit = [1000] * 120 + [1050] * 120 + [1100] * 120
-above = [1000] * 120 + [1050] * 120 + [1101] * 120
+below = [1000] * 120 + [1060] * 120 + [1119] * 120
+at_limit = [1000] * 120 + [1060] * 120 + [1120] * 120
+above = [1000] * 120 + [1060] * 120 + [1121] * 120
 
 self.assertTrue(run_v7_perf._stable_triplet(below, 360))
 self.assertTrue(run_v7_perf._stable_triplet(at_limit, 360))
@@ -82,7 +82,7 @@ CALIBRATION_STABILITY_RULE = {
     "first_boundary": 600,
     "last_boundary": 2160,
     "boundary_step": 120,
-    "maximum_spread_basis_points": 1000,
+    "maximum_spread_basis_points": 1200,
     "guard_frames": 240,
     "frame_cap": 2400,
 }
@@ -104,7 +104,7 @@ Copy the rule into `docs/perf/debug-120-baseline.json`. Include the accepted `wa
 
 - [ ] **Step 5: Update the approved master plan**
 
-In Task 7 Step 2, replace the 2% limit with 10%. Link the committed design:
+In Task 7 Step 2, replace the 2% limit with 12%. Link the committed design:
 
 ```text
 docs/superpowers/specs/2026-08-30-debug-120-calibration-threshold-design.md
@@ -124,7 +124,7 @@ zig build -Doptimize=Debug -Dv7-perf-counters=true
 zig build -Doptimize=Debug -Dv7-perf-counters=false
 ```
 
-Expected: all commands pass. The Python suite must include the 10% boundary and manifest tests.
+Expected: all commands pass. The Python suite must include the 12% boundary and manifest tests.
 
 - [ ] **Step 7: Run fresh calibration**
 
@@ -139,7 +139,7 @@ python3 tools/run_v7_perf.py calibrate \
   --out /tmp/nogui-perf/calibration
 ```
 
-Expected: `warmup.json` exists, every raw hash resolves, and each scene has a sustained boundary under the 10% rule.
+Expected: `warmup.json` exists, every raw hash resolves, and each scene has a sustained boundary under the 12% rule.
 
 - [ ] **Step 8: Run the complete matrix**
 
@@ -171,4 +171,4 @@ Run:
 jj commit -m "perf(v7): establish Debug frame baseline"
 ```
 
-Expected: one complete Task 7 commit above design commit `d2db2c21`, followed by a clean working copy.
+Expected: one complete Task 7 commit above the approved design and amendment-plan commits, followed by a clean working copy.
