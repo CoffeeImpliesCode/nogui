@@ -651,7 +651,6 @@ fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Texture
         .format = .rgba32_float,
     }, buf, .{ .size = .{ demo_tex_size, demo_tex_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
     try gpu.waitIdle();
 
     return registry.register(gpa, tex);
@@ -709,7 +708,6 @@ fn uploadArtworkTexture(
         .format = .rgba32_float,
     }, staging, .{ .size = .{ decoded.width, decoded.height, 1 } });
     try gpu.queueSubmit(&.{command});
-    gpu.commandsEnd(command);
     try gpu.waitIdle();
 
     return registry.register(gpa, texture);
@@ -781,7 +779,6 @@ fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Te
         .format = .rgba32_float,
     }, buf, .{ .size = .{ tiger_ref_size, tiger_ref_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
     try gpu.waitIdle();
 
     ui.tiger_ref_idx = try registry.register(gpa, tex);
@@ -1275,13 +1272,51 @@ fn buildSliceRects(
     // after the tree pass) get their true positions too.
     for (out.items, 0..) |*r, i| r.order = @intCast(i);
 }
+/// Collect one frame's draw commands and convert them into renderer scene rects.
+/// The caller owns `out`; temporary draw commands are released before return.
+fn buildFrameScene(
+    gpa: std.mem.Allocator,
+    text_engine: *TextEngine,
+    svg_view: ?*SvgView,
+    icon_cache: ?*const IconCache,
+    frame: *const nogui.FrameOutput,
+    out: *std.ArrayList(SceneRect),
+    gpu_sort_verify: bool,
+) !void {
+    // The clip-stack walk appends the frame's clip rects to the tree
+    // (the tree is const-typed in FrameOutput; the per-frame clip list
+    // is the renderer's legitimate scratch — collectDrawCmds extends it
+    // and stamps clip ids, never touches layout state).
+    const base_cmds = try collectDrawCmds(
+        gpa,
+        @constCast(frame.tree),
+        frame.pressed,
+        frame.press_alpha,
+    );
+    defer gpa.free(base_cmds);
+    try buildSliceRects(
+        gpa,
+        text_engine,
+        svg_view,
+        icon_cache,
+        base_cmds,
+        frame.tree,
+        frame.hover,
+        frame.hover_alpha,
+        frame.focus,
+        out,
+    );
+    // --gpu-sort-verify: submit the bag in REVERSE paint order — the
+    // CS1 sort (stable on (z, order)) must restore the paint order.
+    if (gpu_sort_verify) std.mem.reverse(SceneRect, out.items);
+}
 
 /// Render the current app frame into the offscreen Oklab target. Shared by
 /// run() (presented via the blit pass) and runShot() (read back).
 /// `texture_heap` is the GUI texture heap (the bindless textures the
 /// fragment shader samples) — bound ONCE per frame before the renderer draw;
 /// the blit pass binds its own heap later.
-fn renderPass1(
+fn recordFrameScene(
     gui_renderer: *Renderer,
     cmd: *noapi.CommandBuffer,
     slice_rects: []const SceneRect,
@@ -1333,6 +1368,26 @@ fn renderPass1(
     // Renderer.draw records the one indirect GUI draw inside the pass.
     gui_renderer.draw(cmd, sw, sh);
     cmd.setBlendEnable(false);
+    cmd.endRendering();
+}
+
+fn recordColorConversion(
+    cmd: *noapi.CommandBuffer,
+    destination: noapi.TextureHandle,
+    surface_size: noapi.Extent2D,
+    blit_vert: noapi.Shader,
+    blit_frag: noapi.Shader,
+    blit_heap: noapi.DescriptorHeap,
+) void {
+    cmd.beginRendering(.{ .color_attachments = &.{
+        .{ .texture = destination, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
+    }, .render_area_size = .{ surface_size.width, surface_size.height } });
+
+    cmd.setShaders(blit_vert, blit_frag);
+    cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
+    cmd.bindDescriptorSets(blit_heap);
+    cmd.setBlendEnable(false);
+    cmd.draw(noapi.PushData{}, 3, 1);
     cmd.endRendering();
 }
 
@@ -1876,35 +1931,21 @@ pub fn run(
         }
         defer if (out.json) |j| gpa.free(j);
 
-        // Slice rects: draw commands → solid rects, then glyphs on top.
-        // The clip-stack walk appends the frame's clip rects to the tree
-        // (the tree is const-typed in FrameOutput; the per-frame clip list
-        // is the renderer's legitimate scratch — collectDrawCmds extends it
-        // and stamps clip ids, never touches layout state).
-        const base_cmds = try collectDrawCmds(gpa, @constCast(out.tree), out.pressed, out.press_alpha);
-        defer gpa.free(base_cmds);
         var slice_rects = std.ArrayList(SceneRect).empty;
         defer slice_rects.deinit(gpa);
-        try buildSliceRects(
+        try buildFrameScene(
             gpa,
             &text_engine,
             &svg_view,
             &icon_cache,
-            base_cmds,
-            out.tree,
-            out.hover,
-            out.hover_alpha,
-            out.focus,
+            &out,
             &slice_rects,
+            gpu_sort_verify,
         );
-        // --gpu-sort-verify: submit the bag in REVERSE paint order — the
-        // CS1 sort (stable on (z, order)) must restore the paint order,
-        // so the frame renders byte-identical to the ordered submission.
-        if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
 
         // Pass 1: GUI into the offscreen Oklab target.
         cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
-        try renderPass1(
+        try recordFrameScene(
             &gui_renderer,
             &cmd,
             slice_rects.items,
@@ -1920,17 +1961,14 @@ pub fn run(
 
         // Pass 2: blit the Oklab target to the swapchain (converts to sRGB).
         cmd.beginZone(.{ .name = "blit_gpu", .src = @src() });
-        const sc = gw.currentImage();
-        cmd.beginRendering(.{ .color_attachments = &.{
-            .{ .texture = sc, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
-        }, .render_area_size = .{ size.width, size.height } });
-
-        cmd.setShaders(blit_vert, blit_frag);
-        cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
-        cmd.bindDescriptorSets(blit_heap);
-        cmd.setBlendEnable(false);
-        cmd.draw(noapi.PushData{}, 3, 1);
-        cmd.endRendering();
+        recordColorConversion(
+            &cmd,
+            gw.currentImage(),
+            size,
+            blit_vert,
+            blit_frag,
+            blit_heap,
+        );
         cmd.endZone();
 
         const frame_result = try gw.endFrame(.{ .blit_to_swapchain = true });
@@ -2173,7 +2211,7 @@ pub fn runShot(
         .frame_index = 0,
     };
     dispatchRootFrame(T, root, 1200);
-    const out = try app.frameWithGpuAtTime(
+    var out = try app.frameWithGpuAtTime(
         T,
         root,
         1,
@@ -2186,36 +2224,32 @@ pub fn runShot(
     );
     defer if (out.json) |j| gpa.free(j);
 
-    const base_cmds = try collectDrawCmds(gpa, @constCast(out.tree), null, 0);
-    defer gpa.free(base_cmds);
-    var slice_rects = std.ArrayList(SceneRect).empty;
-    defer slice_rects.deinit(gpa);
-    const hover_id = if (hover) |p| hitTest(out.tree, p) else null;
     // Static shot: the hover ring renders at full alpha when a node is
     // hovered (no easing in a one-frame shot); 0 otherwise.
-    const hover_alpha: f32 = if (hover_id != null) 1 else 0;
-    try buildSliceRects(
+    out.pressed = null;
+    out.press_alpha = 0;
+    out.hover = if (hover) |p| hitTest(out.tree, p) else null;
+    out.hover_alpha = if (out.hover != null) 1 else 0;
+    out.focus = null;
+
+    var slice_rects = std.ArrayList(SceneRect).empty;
+    defer slice_rects.deinit(gpa);
+    try buildFrameScene(
         gpa,
         &text_engine,
         &svg_view,
         &icon_cache,
-        base_cmds,
-        out.tree,
-        hover_id,
-        hover_alpha,
-        null,
+        &out,
         &slice_rects,
+        gpu_sort_verify,
     );
-    // --gpu-sort-verify: submit the bag in REVERSE paint order — the CS1
-    // sort must restore it, so the shot stays byte-identical.
-    if (gpu_sort_verify) std.mem.reverse(SceneRect, slice_rects.items);
 
     // Readback buffer: one rgba32_float pixel per screen pixel.
     const pixel_bytes: u64 = @as(u64, surface_size.width) * surface_size.height * 4 * @sizeOf(f32);
     const readback = try gpu.gpuMalloc(pixel_bytes, 64, .readback);
     defer gpu.gpuFree(readback);
 
-    try renderPass1(
+    try recordFrameScene(
         &gui_renderer,
         &cmd,
         slice_rects.items,
@@ -2237,7 +2271,6 @@ pub fn runShot(
     });
 
     try gpu.queueSubmit(&.{cmd});
-    gpu.commandsEnd(cmd);
     try gpu.waitIdle();
 
     // --gpu-sort-verify: the REVERSED bag must produce the paint-order
@@ -2251,7 +2284,6 @@ pub fn runShot(
         var cmd2 = try gpu.commandsBegin();
         cmd2.memCopy(perm_rb, gui_renderer.permutationBuffer(), @as(u64, n) * @sizeOf(u32));
         try gpu.queueSubmit(&.{cmd2});
-        gpu.commandsEnd(cmd2);
         try gpu.waitIdle();
         const got: [*]const u32 = @ptrCast(@alignCast(perm_rb.cpu));
         const RectSort = struct {
