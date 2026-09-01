@@ -4,7 +4,7 @@
 
 **Goal:** Replace the unusable 2% calibration spread with the approved 12% rule, then complete the Task 7 baseline.
 
-**Architecture:** Keep the existing three-window sustained-stability algorithm. Store one canonical rule object in the Python runner, validate it at every manifest boundary, and copy it into the baseline report. Run new diagnostics after the code change. Do not accept any earlier failed diagnostic.
+**Architecture:** Keep the existing three-window sustained-stability algorithm. Store one canonical rule object in the Python runner, validate it at every manifest boundary, and copy it into the baseline report. If the host never sustains the limit, use the explicit 2400-frame capped-unstable fallback. Run new diagnostics after the code change. Do not accept any earlier failed diagnostic.
 
 **Tech Stack:** Python 3 standard library, Zig 0.16.0, Jujutsu, JSONL raw artifacts, Tracy.
 
@@ -16,6 +16,8 @@
 - Require the selected boundary and all later boundaries to pass.
 - Keep the 240-frame guard and the 2400-frame cap.
 - Keep all 120 FPS budgets and candidate acceptance rules unchanged.
+- If any scene has no sustained boundary, use 2400 warm-up frames and mark the manifest `capped_unstable`.
+- Store all boundary spreads and a null boundary for each unstable scene.
 - Use integer arithmetic for spread checks.
 - Reject a missing or different stability rule in `warmup.json`.
 - Do not reuse the five failed calibration attempts as accepted data.
@@ -39,6 +41,8 @@
 **Interfaces:**
 - Produces `CALIBRATION_STABILITY_RULE`, a JSON-compatible mapping with the exact approved values.
 - Produces `warmup.json.stability_rule` with that exact mapping.
+- Produces `warmup.json.stability_status` as `sustained` or `capped_unstable`.
+- Produces `warmup.json.diagnostics[scene].boundary` as an integer or null.
 - Requires the matrix loader to validate and copy the rule.
 - Leaves raw JSONL sample schemas and frame budgets unchanged.
 
@@ -56,6 +60,8 @@ self.assertTrue(run_v7_perf._stable_triplet(at_limit, 360))
 self.assertFalse(run_v7_perf._stable_triplet(above, 360))
 ```
 
+
+Add tests that a null scene boundary selects 2400 frames and `capped_unstable`. Reject inconsistent status, boundary, and warm-up combinations.
 Add tests that reject a missing rule and the former 2% value. Add a matrix-report test that checks exact rule copying.
 
 - [ ] **Step 2: Run the tests and verify RED**
@@ -98,9 +104,9 @@ Keep the existing all-zero special case.
 
 - [ ] **Step 4: Validate and propagate the rule**
 
-Write `stability_rule` into `warmup.json`. Make the warm-up loader require exact key and value equality with `CALIBRATION_STABILITY_RULE`.
+Write `stability_rule`, `stability_status`, every scene boundary, and every boundary spread into `warmup.json`. Make the warm-up loader require exact rule equality and consistent status. A capped manifest must use 2400 frames and contain at least one null scene boundary.
 
-Copy the rule into `docs/perf/debug-120-baseline.json`. Include the accepted `warmup.json` SHA-256 in the baseline report. Do not add this rule to raw frame records.
+Copy the rule and status into `docs/perf/debug-120-baseline.json`. Include the accepted `warmup.json` SHA-256 in the baseline report. Do not add this rule to raw frame records.
 
 - [ ] **Step 5: Update the approved master plan**
 
@@ -110,7 +116,7 @@ In Task 7 Step 2, replace the 2% limit with 12%. Link the committed design:
 docs/superpowers/specs/2026-08-30-debug-120-calibration-threshold-design.md
 ```
 
-Do not change the windows, boundaries, sustained requirement, guard, cap, matrix size, or budgets.
+Do not change the windows, boundaries, sustained test, guard, cap, matrix size, budgets, or candidate pair acceptance. The fallback records instability instead of suppressing it.
 
 - [ ] **Step 6: Run focused tests and builds**
 
@@ -139,7 +145,7 @@ python3 tools/run_v7_perf.py calibrate \
   --out /tmp/nogui-perf/calibration
 ```
 
-Expected: `warmup.json` exists, every raw hash resolves, and each scene has a sustained boundary under the 12% rule.
+Expected: `warmup.json` exists and every raw hash resolves. Each scene has a sustained boundary, or the manifest is `capped_unstable` with 2400 warm-up frames and at least one null boundary.
 
 - [ ] **Step 8: Run the complete matrix**
 

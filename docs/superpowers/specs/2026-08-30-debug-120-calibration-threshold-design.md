@@ -34,7 +34,7 @@ Keep all other calibration rules unchanged:
 - Require the selected boundary and all later boundaries to pass.
 - Add a 240-frame guard to the latest selected boundary.
 - Cap the warm-up at 2400 frames.
-- Stop if any scene has no sustained stable boundary.
+- If any scene has no sustained boundary, use the capped-unstable fallback.
 
 The tool must use integer arithmetic. A triplet passes when:
 
@@ -44,12 +44,16 @@ The tool must use integer arithmetic. A triplet passes when:
 
 The 12% rule changes warm-up selection only. It does not change the 120 FPS budget or any qualification threshold.
 
+The fallback sets the global warm-up to 2400 frames. It does not claim that the host became stable. The matrix can run, but all reports must keep the unstable status.
+
 ## Manifest contract
 
 The warm-up manifest must contain this required object:
 
 ```json
 {
+  "stability_status": "capped_unstable",
+  "warmup_frames": 2400,
   "stability_rule": {
     "window_frames": 120,
     "window_count": 3,
@@ -63,7 +67,7 @@ The warm-up manifest must contain this required object:
 }
 ```
 
-The parser must reject a missing or different rule. The baseline report must copy this object and reference the warm-up manifest hash.
+The parser must reject a missing or different rule. `stability_status` must be `sustained` or `capped_unstable`. A capped manifest must use 2400 warm-up frames and contain at least one scene with a null boundary. The baseline report must copy the status and rule, then reference the warm-up manifest hash.
 
 Raw diagnostic files remain unchanged. Their hashes continue to identify the source measurements.
 
@@ -72,13 +76,14 @@ Raw diagnostic files remain unchanged. Their hashes continue to identify the sou
 1. The calibration runner creates fresh clean and GPU diagnostic blocks.
 2. The strict raw parser validates both blocks.
 3. The calibration code computes each triplet with the 12% rule.
-4. The sustained-boundary selector chooses one boundary for each scene.
-5. The selector adds the fixed guard to the latest scene boundary.
-6. The runner writes `warmup.json` with the full rule and all raw hashes.
-7. The matrix validates the rule before it starts any process block.
-8. The baseline report copies the rule and references all source hashes.
+4. The sustained-boundary selector returns one boundary or null for each scene.
+5. If all scenes have boundaries, the selector adds the fixed guard to the latest boundary.
+6. If any scene has a null boundary, the selector uses 2400 frames and marks the run capped-unstable.
+7. The runner writes `warmup.json` with the status, full rule, boundary spreads, and all raw hashes.
+8. The matrix validates the status and rule before it starts any process block.
+9. The baseline report copies the status and rule, then references all source hashes.
 
-A failed calibration must not create `warmup.json`. The matrix must not accept a failed or old manifest.
+A child, parser, identity, or artifact failure must not create `warmup.json`. A missing sustained boundary is not hidden as success. It creates a valid capped-unstable manifest. The matrix must not accept a malformed or old manifest.
 
 ## Verification
 
@@ -92,10 +97,13 @@ Add tests for these cases:
 - The manifest parser rejects the former 2% rule.
 - The manifest parser rejects a missing rule.
 - The matrix copies the exact accepted rule into its report.
+- A missing scene boundary selects 2400 frames and `capped_unstable`.
+- A capped manifest without a null boundary is rejected.
+- A sustained manifest with a null boundary is rejected.
 
 Run calibration from scratch after the code change. Do not reuse the five failed diagnostics as accepted data.
 
-Run the full matrix only after the new calibration passes.
+Run the full matrix only after the new calibration writes a valid sustained or capped-unstable manifest.
 
 ## Non-goals
 
