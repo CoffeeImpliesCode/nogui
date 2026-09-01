@@ -431,6 +431,35 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     test_step.dependOn(&run_exe_tests.step);
 
+    const v7_window_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/v7_demo/window.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "noapi", .module = noapi_mod },
+                .{ .name = "v7_render", .module = v7_render_mod },
+                .{ .name = "nogui", .module = mod },
+                .{ .name = "sdl3", .module = sdl3.module("sdl3") },
+                .{ .name = "harfbuzz", .module = harfbuzz_dep.module("harfbuzz") },
+                .{ .name = "tracy", .module = tracy.module("tracy") },
+                .{ .name = "tracy_impl", .module = tracy.module("tracy_impl_disabled") },
+            },
+        }),
+    });
+    v7_window_tests.root_module.addOptions("v7_options", v7_options);
+    v7_window_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
+    v7_window_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    v7_window_tests.root_module.linkSystemLibrary("avformat", .{});
+    v7_window_tests.root_module.linkSystemLibrary("avcodec", .{});
+    v7_window_tests.root_module.linkSystemLibrary("avutil", .{});
+    v7_window_tests.root_module.linkSystemLibrary("swresample", .{});
+    v7_window_tests.root_module.linkSystemLibrary("swscale", .{});
+    v7_window_tests.root_module.addIncludePath(libxml2_dep.artifact("xml2").getEmittedIncludeTree());
+    const run_v7_window_tests = b.addRunArtifact(v7_window_tests);
+    test_step.dependOn(&run_v7_window_tests.step);
+
     // ── Layout check ──────────────────────────────
     const layout_check_step = b.step("layout-check", "Verify the headless layout against notes/layout-golden.json");
     const layout_check_cmd = b.addRunArtifact(v7_demo);

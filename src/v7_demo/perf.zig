@@ -18,7 +18,7 @@ pub const Config = struct {
     sample_frames: u32 = 1000,
     output_path: []const u8,
 
-    pub fn validate(config: Config) error{InvalidPerfFrames, InvalidPerfOutput}!Config {
+    pub fn validate(config: Config) error{ InvalidPerfFrames, InvalidPerfOutput }!Config {
         if (config.sample_frames == 0) return error.InvalidPerfFrames;
         if (config.warmup_frames > std.math.maxInt(u32) - config.sample_frames) {
             return error.InvalidPerfFrames;
@@ -27,7 +27,7 @@ pub const Config = struct {
         return config;
     }
 
-    pub fn totalFrames(config: Config) error{InvalidPerfFrames, InvalidPerfOutput}!u32 {
+    pub fn totalFrames(config: Config) error{ InvalidPerfFrames, InvalidPerfOutput }!u32 {
         const validated = try validate(config);
         return validated.warmup_frames + validated.sample_frames;
     }
@@ -36,6 +36,78 @@ pub const Config = struct {
 pub const Phase = enum {
     warmup,
     sample,
+};
+
+pub const slot_count: u64 = 3;
+
+/// Return the timeline value required before reusing a three-slot target.
+/// The first three frames have no predecessor in the ring and therefore do
+/// not wait. A submitted frame signals `frame_id + 1`.
+pub fn slotWaitValue(frame_id: u64, slots: u64) ?u64 {
+    if (slots == 0 or frame_id < slots) return null;
+    return frame_id - slots + 1;
+}
+
+pub const SlotScheduler = struct {
+    last_frame_id: ?u64 = null,
+    last_timeline_value: ?u64 = null,
+
+    pub fn next(
+        self: *SlotScheduler,
+        frame_id: u64,
+        timeline_value: u64,
+        slots: u64,
+    ) error{
+        InvalidSlotCount,
+        NonMonotonicFrameId,
+        NonMonotonicTimelineValue,
+    }!?u64 {
+        if (slots == 0) return error.InvalidSlotCount;
+        if (self.last_frame_id) |previous| {
+            if (frame_id <= previous) return error.NonMonotonicFrameId;
+        }
+        if (self.last_timeline_value) |previous| {
+            if (timeline_value <= previous) return error.NonMonotonicTimelineValue;
+        }
+        self.last_frame_id = frame_id;
+        self.last_timeline_value = timeline_value;
+        return slotWaitValue(frame_id, slots);
+    }
+};
+
+pub const QuerySlotScheduler = struct {
+    frame_ids: [slot_count]?u64 = .{ null, null, null },
+
+    pub fn begin(self: *QuerySlotScheduler, frame_id: u64) error{QuerySlotMismatch}!?u64 {
+        if (frame_id < slot_count) return null;
+        const slot: usize = @intCast(frame_id % slot_count);
+        const expected_frame_id = frame_id - slot_count;
+        const completed_frame_id = self.frame_ids[slot] orelse return error.QuerySlotMismatch;
+        if (completed_frame_id != expected_frame_id) return error.QuerySlotMismatch;
+        self.frame_ids[slot] = null;
+        return completed_frame_id;
+    }
+
+    pub fn submitted(self: *QuerySlotScheduler, frame_id: u64) error{QuerySlotBusy}!void {
+        const slot: usize = @intCast(frame_id % slot_count);
+        if (self.frame_ids[slot] != null) return error.QuerySlotBusy;
+        self.frame_ids[slot] = frame_id;
+    }
+};
+
+pub const PresentIdTracker = struct {
+    last_present_id: u64 = 0,
+
+    pub fn observe(self: *PresentIdTracker, present_id: u64) error{
+        InvalidPresentationId,
+        DuplicatePresentationId,
+        NonMonotonicPresentationId,
+    }!void {
+        if (present_id == 0) return error.InvalidPresentationId;
+        if (present_id == self.last_present_id) return error.DuplicatePresentationId;
+        if (present_id < self.last_present_id) return error.NonMonotonicPresentationId;
+        self.last_present_id = present_id;
+    }
 };
 
 pub const FrameSample = struct {
@@ -66,8 +138,7 @@ pub const FrameSample = struct {
             .cpu_compute_ns = 0,
             .mechanisms = if (v7_options.perf_counters)
                 .{ .values = .{0} ** std.meta.fields(perf_counters.Counter).len }
-            else
-                {},
+            else {},
             .slop_ns = 0,
         };
     }
@@ -86,6 +157,10 @@ pub const RecorderError = error{
     InvalidTimestampPeriod,
     TimestampConversionOverflow,
     PresentTimestampNotIncreasing,
+    PartialPresentFeedback,
+    InvalidPresentationId,
+    DuplicatePresentationId,
+    NonMonotonicPresentationId,
     PresentModeRequired,
     PresentSlopTooLarge,
     GpuTimestampsDisabled,
@@ -98,6 +173,94 @@ pub fn checkedAdd(lhs: u64, rhs: u64) error{TimestampOverflow}!u64 {
     if (result[1] != 0) return error.TimestampOverflow;
     return result[0];
 }
+
+pub fn presentIdForFrame(base: u64, frame_id: u64) error{TimestampOverflow}!u64 {
+    return checkedAdd(base, frame_id);
+}
+
+pub fn frameIdForPresentId(
+    present_id: u64,
+    base: u64,
+    total_frames: u64,
+) RecorderError!u64 {
+    if (present_id < base) return error.InvalidPresentationId;
+    const frame_id = present_id - base;
+    if (frame_id >= total_frames) return error.InvalidFrameId;
+    return frame_id;
+}
+
+pub const PresentPreflightError = error{
+    TimestampOverflow,
+    PresentTimingFallbackLimit,
+};
+
+pub const PresentPreflightIds = struct {
+    reserved_id: u64 = 1,
+    fallback_attempts: u8 = 0,
+
+    const max_fallback_attempts: u8 = 1;
+
+    pub fn reservedId(self: *const PresentPreflightIds) u64 {
+        return self.reserved_id;
+    }
+
+    pub fn recordedBase(self: *const PresentPreflightIds) PresentPreflightError!u64 {
+        return presentIdForFrame(self.reserved_id, 1);
+    }
+
+    pub fn afterUnavailable(
+        self: *PresentPreflightIds,
+        timing_supported: bool,
+    ) PresentPreflightError!?u64 {
+        if (!timing_supported) return null;
+        if (self.fallback_attempts >= max_fallback_attempts) {
+            return error.PresentTimingFallbackLimit;
+        }
+        self.reserved_id = try checkedAdd(self.reserved_id, 1);
+        self.fallback_attempts += 1;
+        return self.reserved_id;
+    }
+};
+
+pub const present_preflight_deadline_ns: u64 = 5_000_000_000;
+
+pub fn presentPreflightDeadlineExpired(elapsed_ns: u64) bool {
+    return elapsed_ns >= present_preflight_deadline_ns;
+}
+
+pub const PresentPreflightState = struct {
+    ids: PresentPreflightIds = .{},
+    mode_epoch: u8 = 0,
+
+    pub fn reservedId(self: *const PresentPreflightState) u64 {
+        return self.ids.reservedId();
+    }
+
+    pub fn recordedBase(self: *const PresentPreflightState) PresentPreflightError!u64 {
+        return self.ids.recordedBase();
+    }
+
+    pub fn deadlineExpired(_: *const PresentPreflightState, elapsed_ns: u64) bool {
+        return presentPreflightDeadlineExpired(elapsed_ns);
+    }
+
+    pub fn afterUnavailable(
+        self: *PresentPreflightState,
+        timing_supported: bool,
+    ) PresentPreflightError!?u64 {
+        const fallback_id = try self.ids.afterUnavailable(timing_supported);
+        if (fallback_id != null) {
+            const result = @addWithOverflow(self.mode_epoch, @as(u8, 1));
+            if (result[1] != 0) return error.TimestampOverflow;
+            self.mode_epoch = result[0];
+        }
+        return fallback_id;
+    }
+
+    pub fn modeEpoch(self: *const PresentPreflightState) u8 {
+        return self.mode_epoch;
+    }
+};
 
 pub fn checkedSub(lhs: u64, rhs: u64) error{TimestampUnderflow}!u64 {
     if (rhs > lhs) return error.TimestampUnderflow;
@@ -192,6 +355,13 @@ pub const Recorder = struct {
 
     pub fn setPresentationTimingSupported(self: *Recorder, supported: bool) void {
         self.presentation_timing_supported = supported;
+    }
+    pub fn markPresentTimingUnavailable(self: *Recorder) RecorderError!void {
+        if (self.mode != .presented) return error.PresentModeRequired;
+        if (self.count != self.samples.len) return error.MissingFrameMetric;
+        if (self.next_present_frame_id != 0) return error.PartialPresentFeedback;
+        self.presentation_timing_supported = false;
+        while (self.next_present_frame_id < @as(u64, @intCast(self.samples.len))) : (self.next_present_frame_id += 1) {}
     }
 
     pub fn append(self: *Recorder, sample: FrameSample) RecorderError!void {
@@ -419,7 +589,7 @@ pub fn parseConfig(request: CliRequest) error{
     PerfFlagConflict,
     InvalidPerfFrames,
     InvalidPerfOutput,
-}! ?Config {
+}!?Config {
     const perf_requested = request.mode != null or request.warmup_frames != null or
         request.sample_frames != null or request.output_path != null or request.duplicate_flag;
     if (!perf_requested) return null;
@@ -529,8 +699,7 @@ test "perf recorder computes non-overlapping CPU capacity" {
         .cpu_compute_ns = 100,
         .mechanisms = if (v7_options.perf_counters)
             .{ .values = .{0} ** std.meta.fields(perf_counters.Counter).len }
-        else
-            {},
+        else {},
         .slop_ns = 0,
     };
     try testing.expectEqual(@as(u64, 100), try computeNs(&sample));
@@ -548,8 +717,7 @@ test "perf recorder rejects present slop above submit duration" {
         .cpu_present_slop_ns = 4,
         .mechanisms = if (v7_options.perf_counters)
             .{ .values = .{0} ** std.meta.fields(perf_counters.Counter).len }
-        else
-            {},
+        else {},
         .slop_ns = 0,
     };
     try testing.expectError(error.PresentSlopTooLarge, computeNs(&sample));
@@ -707,4 +875,185 @@ test "perf recorder preserves cumulative presented slop" {
     }
     try recorder.attachPresent(0, 0);
     try recorder.validateComplete();
+}
+
+test "perf slot scheduler waits only before reuse" {
+    try testing.expectEqual(@as(?u64, null), slotWaitValue(0, 3));
+    try testing.expectEqual(@as(?u64, null), slotWaitValue(2, 3));
+    try testing.expectEqual(@as(?u64, 1), slotWaitValue(3, 3));
+    try testing.expectEqual(@as(?u64, 2), slotWaitValue(4, 3));
+}
+
+test "perf slot scheduler rejects non-monotonic timeline values" {
+    var scheduler: SlotScheduler = .{};
+    try testing.expectEqual(@as(?u64, null), try scheduler.next(0, 1, 3));
+    try testing.expectError(error.NonMonotonicTimelineValue, scheduler.next(1, 1, 3));
+}
+
+test "perf slot recorder rejects duplicate frame IDs" {
+    var recorder = try Recorder.init(testing.allocator, 2);
+    defer recorder.deinit();
+    var sample = FrameSample.empty(.warmup, 0);
+    sample.cpu_slot_wait_ns = 0;
+    try recorder.append(sample);
+    try testing.expectError(error.InvalidFrameId, recorder.append(sample));
+}
+
+test "perf slot recorder rejects non-monotonic presentation IDs" {
+    var recorder = try Recorder.init(testing.allocator, 2);
+    defer recorder.deinit();
+    recorder.setMode(.presented);
+    var first = FrameSample.empty(.warmup, 0);
+    first.cpu_acquire_ns = 0;
+    first.cpu_present_slop_ns = 0;
+    try recorder.append(first);
+    var second = FrameSample.empty(.sample, 1);
+    second.cpu_acquire_ns = 0;
+    second.cpu_present_slop_ns = 0;
+    try recorder.append(second);
+    try recorder.attachPresent(0, 10);
+    try testing.expectError(error.PresentTimestampNotIncreasing, recorder.attachPresent(1, 10));
+}
+
+test "perf recorder downgrades unavailable presentation timing before metrics" {
+    var recorder = try Recorder.init(testing.allocator, 2);
+    defer recorder.deinit();
+    recorder.setMode(.presented);
+    var warmup = FrameSample.empty(.warmup, 0);
+    warmup.cpu_acquire_ns = 0;
+    warmup.cpu_present_slop_ns = 0;
+    try recorder.append(warmup);
+    var sample = FrameSample.empty(.sample, 1);
+    sample.cpu_acquire_ns = 0;
+    sample.cpu_present_slop_ns = 0;
+    try recorder.append(sample);
+    if (v7_options.gpu_timestamps) {
+        try recorder.attachGpu(0, 0, 1, 1.0, 64);
+        try recorder.attachGpu(1, 1, 2, 1.0, 64);
+    }
+
+    try recorder.markPresentTimingUnavailable();
+
+    try testing.expect(!recorder.presentation_timing_supported);
+    try testing.expectEqual(@as(u64, 2), recorder.next_present_frame_id);
+    try testing.expectEqual(@as(?u64, null), recorder.samples[0].present_interval_ns);
+    try testing.expectEqual(@as(?u64, null), recorder.samples[1].present_interval_ns);
+    try recorder.validateComplete();
+}
+
+test "perf recorder rejects unavailable timing after one presentation metric" {
+    var recorder = try Recorder.init(testing.allocator, 1);
+    defer recorder.deinit();
+    recorder.setMode(.presented);
+    var sample = FrameSample.empty(.sample, 0);
+    sample.cpu_acquire_ns = 0;
+    sample.cpu_present_slop_ns = 0;
+    try recorder.append(sample);
+    try recorder.attachPresent(0, 10);
+
+    try testing.expectError(
+        error.PartialPresentFeedback,
+        recorder.markPresentTimingUnavailable(),
+    );
+}
+
+test "perf presented query slots resolve only after fence reuse" {
+    var slots: QuerySlotScheduler = .{};
+    try testing.expectEqual(@as(?u64, null), try slots.begin(0));
+    try slots.submitted(0);
+    try testing.expectEqual(@as(?u64, null), try slots.begin(1));
+    try slots.submitted(1);
+    try testing.expectEqual(@as(?u64, null), try slots.begin(2));
+    try slots.submitted(2);
+    try testing.expectEqual(@as(?u64, 0), try slots.begin(3));
+    try slots.submitted(3);
+    try testing.expectEqual(@as(?u64, 1), try slots.begin(4));
+}
+
+test "perf presented query slots reject overwrite before recycle" {
+    var slots: QuerySlotScheduler = .{};
+    try slots.submitted(0);
+    try testing.expectError(error.QuerySlotBusy, slots.submitted(3));
+
+    var missing: QuerySlotScheduler = .{};
+    try testing.expectError(error.QuerySlotMismatch, missing.begin(3));
+}
+
+test "perf presented IDs reserve preflight and map recorded frames" {
+    try testing.expectEqual(@as(u64, 2), try presentIdForFrame(2, 0));
+    try testing.expectEqual(@as(u64, 3), try presentIdForFrame(2, 1));
+    try testing.expectEqual(@as(u64, 1), try frameIdForPresentId(3, 2, 4));
+    try testing.expectError(error.InvalidPresentationId, frameIdForPresentId(1, 2, 4));
+    try testing.expectError(error.InvalidFrameId, frameIdForPresentId(6, 2, 4));
+    try testing.expectError(error.TimestampOverflow, presentIdForFrame(std.math.maxInt(u64), 1));
+}
+
+test "perf preflight timestamp is discarded before first recorded interval" {
+    var recorder = try Recorder.init(testing.allocator, 2);
+    defer recorder.deinit();
+    recorder.setMode(.presented);
+    var first = FrameSample.empty(.sample, 0);
+    first.cpu_acquire_ns = 0;
+    first.cpu_present_slop_ns = 0;
+    try recorder.append(first);
+    var second = FrameSample.empty(.sample, 1);
+    second.cpu_acquire_ns = 0;
+    second.cpu_present_slop_ns = 0;
+    try recorder.append(second);
+
+    try recorder.attachPresent(0, 100);
+    try recorder.attachPresent(1, 200);
+    try testing.expectEqual(@as(?u64, null), recorder.samples[0].present_interval_ns);
+    try testing.expectEqual(@as(?u64, 100), recorder.samples[1].present_interval_ns);
+}
+
+test "perf preflight IDs advance once for supported fallback" {
+    var ids: PresentPreflightIds = .{};
+    try testing.expectEqual(@as(u64, 1), ids.reservedId());
+
+    try testing.expectEqual(@as(u64, 2), try ids.recordedBase());
+    try testing.expectEqual(@as(?u64, 2), try ids.afterUnavailable(true));
+    try testing.expectEqual(@as(u64, 2), ids.reservedId());
+    try testing.expectEqual(@as(u64, 3), try ids.recordedBase());
+    try testing.expectError(error.PresentTimingFallbackLimit, ids.afterUnavailable(true));
+}
+
+test "perf preflight IDs stop when timing is unsupported" {
+    var ids: PresentPreflightIds = .{};
+    try testing.expectEqual(@as(?u64, null), try ids.afterUnavailable(false));
+    try testing.expectEqual(@as(u64, 1), ids.reservedId());
+    try testing.expectEqual(@as(u64, 2), try ids.recordedBase());
+}
+
+test "perf preflight IDs reject overflow without advancing" {
+    var ids: PresentPreflightIds = .{ .reserved_id = std.math.maxInt(u64) };
+    try testing.expectError(error.TimestampOverflow, ids.recordedBase());
+    try testing.expectError(error.TimestampOverflow, ids.afterUnavailable(true));
+    try testing.expectEqual(std.math.maxInt(u64), ids.reservedId());
+}
+
+test "perf preflight deadline spans repeated out-of-date retries" {
+    var state: PresentPreflightState = .{};
+    try testing.expectEqual(@as(u8, 0), state.modeEpoch());
+    try testing.expect(!state.deadlineExpired(4_999_999_999));
+    try testing.expect(state.deadlineExpired(5_000_000_000));
+    try testing.expectEqual(@as(u8, 0), state.modeEpoch());
+    try testing.expectEqual(@as(?u64, 2), try state.afterUnavailable(true));
+    try testing.expectEqual(@as(u8, 1), state.modeEpoch());
+    try testing.expect(!state.deadlineExpired(0));
+}
+
+test "perf preflight deadline resets only after supported fallback" {
+    var state: PresentPreflightState = .{};
+    try testing.expectEqual(@as(?u64, null), try state.afterUnavailable(false));
+    try testing.expectEqual(@as(u8, 0), state.modeEpoch());
+    try testing.expectEqual(@as(?u64, 2), try state.afterUnavailable(true));
+    try testing.expectError(error.PresentTimingFallbackLimit, state.afterUnavailable(true));
+    try testing.expectEqual(@as(u8, 1), state.modeEpoch());
+}
+
+test "perf preflight deadline rejects late positive feedback" {
+    var state: PresentPreflightState = .{};
+    try testing.expect(!state.deadlineExpired(4_999_999_999));
+    try testing.expect(state.deadlineExpired(5_000_000_000));
 }

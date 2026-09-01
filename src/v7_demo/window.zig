@@ -35,6 +35,7 @@ const App = nogui.App;
 const Event = nogui.Event;
 const tracy = @import("tracy");
 const perf = @import("perf.zig");
+const calculator_ui = @import("calculator.zig");
 const FramePacer = @import("FramePacer.zig").FramePacer;
 const Id = nogui.Id;
 const DrawCmd = nogui.drawcmd.DrawCmd;
@@ -47,7 +48,7 @@ const sliderVisualLabel = nogui.widget.sliderVisualLabel;
 const contentRect = nogui.widget.contentRect;
 const visualContentRect = nogui.visualContentRect;
 const IconId = nogui.widget.IconId;
-const collectDrawCmds = nogui.drawcmd.collectDrawCmds;
+const collectDrawCmdsInto = nogui.drawcmd.collectDrawCmdsInto;
 const MouseButton = nogui.event.MouseButton;
 const Key = nogui.event.Key;
 const hitTest = nogui.hitTest; // runShot's forced --hover
@@ -1273,7 +1274,7 @@ fn buildSliceRects(
     for (out.items, 0..) |*r, i| r.order = @intCast(i);
 }
 /// Collect one frame's draw commands and convert them into renderer scene rects.
-/// The caller owns `out`; temporary draw commands are released before return.
+/// The caller owns the temporary draw-command storage.
 fn buildFrameScene(
     gpa: std.mem.Allocator,
     text_engine: *TextEngine,
@@ -1283,23 +1284,46 @@ fn buildFrameScene(
     out: *std.ArrayList(SceneRect),
     gpu_sort_verify: bool,
 ) !void {
-    // The clip-stack walk appends the frame's clip rects to the tree
-    // (the tree is const-typed in FrameOutput; the per-frame clip list
-    // is the renderer's legitimate scratch — collectDrawCmds extends it
-    // and stamps clip ids, never touches layout state).
-    const base_cmds = try collectDrawCmds(
+    var draw_cmds: std.ArrayList(DrawCmd) = .empty;
+    defer draw_cmds.deinit(gpa);
+    const capacity = std.math.mul(usize, frame.tree.nodes.items.len, 3) catch return error.OutOfMemory;
+    try draw_cmds.ensureTotalCapacity(gpa, capacity);
+    try buildFrameSceneInto(
         gpa,
+        text_engine,
+        svg_view,
+        icon_cache,
+        frame,
+        out,
+        &draw_cmds,
+        gpu_sort_verify,
+    );
+}
+
+/// Convert a laid-out tree into scene rects using caller-owned draw commands.
+/// The command list is cleared and filled without allocation or free.
+fn buildFrameSceneInto(
+    gpa: std.mem.Allocator,
+    text_engine: *TextEngine,
+    svg_view: ?*SvgView,
+    icon_cache: ?*const IconCache,
+    frame: *const nogui.FrameOutput,
+    out: *std.ArrayList(SceneRect),
+    draw_cmds: *std.ArrayList(DrawCmd),
+    gpu_sort_verify: bool,
+) !void {
+    try collectDrawCmdsInto(
         @constCast(frame.tree),
         frame.pressed,
         frame.press_alpha,
+        draw_cmds,
     );
-    defer gpa.free(base_cmds);
     try buildSliceRects(
         gpa,
         text_engine,
         svg_view,
         icon_cache,
-        base_cmds,
+        draw_cmds.items,
         frame.tree,
         frame.hover,
         frame.hover_alpha,
@@ -1391,21 +1415,151 @@ fn recordColorConversion(
     cmd.endRendering();
 }
 
+const PerfResources = struct {
+    gpa: std.mem.Allocator,
+    io: Io,
+    gpu: *noapi.Gpu,
+    text_engine: *TextEngine,
+    gui_renderer: *Renderer,
+    tex_registry: *TextureRegistry,
+    svg_view: *SvgView,
+    icon_cache: *IconCache,
+    gpu_endpoint: *nogui.GpuEndpoint,
+    blit_vert: noapi.Shader,
+    blit_frag: noapi.Shader,
+    blit_sampler: u64,
+};
+
+pub const OffscreenSlots = struct {
+    pub const count: usize = 3;
+    pub const query_count: u32 = 6;
+
+    gpu: *noapi.Gpu,
+    oklab_targets: [count]noapi.TextureHandle = undefined,
+    srgb_targets: [count]noapi.TextureHandle = undefined,
+    blit_heaps: [count]noapi.DescriptorHeap = undefined,
+    timeline: noapi.Semaphore = undefined,
+    timestamp_queries: ?noapi.TimestampQuerySet = null,
+    oklab_count: usize = 0,
+    srgb_count: usize = 0,
+    blit_heap_count: usize = 0,
+    timeline_created: bool = false,
+
+    pub fn init(gpu: *noapi.Gpu, blit_sampler: u64) !OffscreenSlots {
+        var slots: OffscreenSlots = .{ .gpu = gpu };
+        errdefer slots.deinit();
+
+        while (slots.oklab_count < count) : (slots.oklab_count += 1) {
+            slots.oklab_targets[slots.oklab_count] = try gpu.textureCreate(.{
+                .dimensions = .{ perf_width, perf_height, 1 },
+                .format = render_target_format,
+                .usage = .{ .sampled = true, .color_attachment = true },
+            });
+        }
+        while (slots.srgb_count < count) : (slots.srgb_count += 1) {
+            slots.srgb_targets[slots.srgb_count] = try gpu.textureCreate(.{
+                .dimensions = .{ perf_width, perf_height, 1 },
+                .format = .rgba8_srgb,
+                .usage = .{ .sampled = true, .color_attachment = true },
+            });
+        }
+        slots.timeline = try gpu.semaphoreCreate(0);
+        slots.timeline_created = true;
+
+        while (slots.blit_heap_count < count) : (slots.blit_heap_count += 1) {
+            const slot = slots.blit_heap_count;
+            const heap = try gpu.descHeapCreate(1, 0, 1);
+            slots.blit_heaps[slot] = heap;
+            const source_descriptor = gpu.textureViewDescriptor(
+                slots.oklab_targets[slot],
+                .{},
+            );
+            gpu.descHeapSetTextures(heap, 0, &.{source_descriptor});
+            gpu.descHeapSetSamplers(heap, 0, &.{blit_sampler});
+        }
+
+        if (comptime v7_options.gpu_timestamps) {
+            if (gpu.timestampInfo() == null) return error.GpuTimestampUnavailable;
+            slots.timestamp_queries = try gpu.timestampQuerySetCreate(query_count);
+        }
+        return slots;
+    }
+
+    pub fn deinit(self: *OffscreenSlots) void {
+        if (self.timestamp_queries) |queries| {
+            self.gpu.timestampQuerySetDestroy(queries);
+        }
+        if (self.timeline_created) self.gpu.semaphoreDestroy(self.timeline);
+        var index = self.blit_heap_count;
+        while (index > 0) {
+            index -= 1;
+            self.gpu.descHeapDestroy(self.blit_heaps[index]);
+        }
+        index = self.srgb_count;
+        while (index > 0) {
+            index -= 1;
+            self.gpu.textureDestroy(self.srgb_targets[index]);
+        }
+        index = self.oklab_count;
+        while (index > 0) {
+            index -= 1;
+            self.gpu.textureDestroy(self.oklab_targets[index]);
+        }
+        self.* = undefined;
+    }
+};
+
+const perf_width: u32 = 954;
+const perf_height: u32 = 1044;
+const perf_extent: noapi.Extent2D = .{ .width = perf_width, .height = perf_height };
+const perf_draw_cmd_capacity: usize = 16 * 1024;
+
+pub const RunOptions = struct {
+    subpixel: bool = false,
+    quad_debug: bool = false,
+    bgr_order: bool = false,
+    damp_chroma: bool = true,
+    gpu_sort_verify: bool = false,
+    max_frames: ?u32 = null,
+    audio_tracks: ?[]const LocalTrack = null,
+    perf: ?perf.Config = null,
+
+    pub fn validate(self: RunOptions) (error{
+        PerfOptionConflict,
+        InvalidPerfFrames,
+        InvalidPerfOutput,
+    } || perf.RecorderError)!RunOptions {
+        if (self.perf) |config| {
+            _ = try perf.Config.validate(config);
+            if (self.subpixel) return error.PerfOptionConflict;
+            if (self.quad_debug) return error.PerfOptionConflict;
+            if (self.bgr_order) return error.PerfOptionConflict;
+            if (!self.damp_chroma) return error.PerfOptionConflict;
+            if (self.gpu_sort_verify) return error.PerfOptionConflict;
+            if (self.max_frames != null) return error.PerfOptionConflict;
+            if (self.audio_tracks != null) return error.PerfOptionConflict;
+        }
+        return self;
+    }
+};
+
 /// Run the graphical demo. Blocks until the window closes.
 /// Generic over the root component (any type with pub draw(self, ctx) !void).
 pub fn run(
     comptime T: type,
     app: *App,
     root: *T,
-    subpixel: bool,
-    quad_debug: bool,
-    bgr: bool,
-    damp: bool,
-    gpu_sort_verify: bool,
-    max_frames: ?u32,
-    audio_tracks: ?[]const LocalTrack,
-    perf_config: ?perf.Config,
+    options: RunOptions,
 ) !void {
+    const validated_options = try options.validate();
+    const subpixel = validated_options.subpixel;
+    const quad_debug = validated_options.quad_debug;
+    const bgr = validated_options.bgr_order;
+    const damp = validated_options.damp_chroma;
+    const gpu_sort_verify = validated_options.gpu_sort_verify;
+    const max_frames = validated_options.max_frames;
+    const audio_tracks = validated_options.audio_tracks;
+    const perf_config = validated_options.perf;
     const finite_frames: ?u32 = if (perf_config) |config| blk: {
         const validated = try perf.Config.validate(config);
         break :blk switch (validated.mode) {
@@ -1463,9 +1617,17 @@ pub fn run(
     };
     var audio_seek_sent: ?AudioSeek = null;
 
-    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 1100, 1160, .{ .resizable = true });
+    const perf_window = perf_config != null;
+    const perf_offscreen = if (perf_config) |config| config.mode == .offscreen else false;
+    const window_width: u32 = if (perf_window) perf_width else 1100;
+    const window_height: u32 = if (perf_window) perf_height else 1160;
+    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", window_width, window_height, .{
+        .resizable = !perf_window,
+        .hidden = perf_offscreen,
+        .vulkan = true,
+    });
     defer sdl_win.deinit();
-    try sdl_win.show();
+    if (!perf_offscreen) try sdl_win.show();
 
     // Vulkan loader via SDL3.
     try sdl3.vulkan.loadLibrary(null);
@@ -1500,13 +1662,6 @@ pub fn run(
         .io = io,
     });
     defer gpu.deinit();
-
-    // Surface (the .extent wrapper is required by Surface.init).
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
-    defer gw.deinit();
-    const win_id = try sdl_win.getId();
 
     // Text engine owns FreeType, per-size font states, and the glyph
     // material buffer. Renderer owns the quad shaders and draw buffers.
@@ -1552,20 +1707,17 @@ pub fn run(
     var icon_cache = try IconCache.init(gpa, &gpu, &text_engine);
     defer icon_cache.deinit(&gpu);
 
-    // Blit pass: fullscreen triangle + Oklab→sRGB fragment shader, with a
-    // descriptor heap holding the render-target texture + nearest sampler.
+    // Blit shaders are common to both perf modes. Descriptor heaps are owned
+    // by the active runner so offscreen owns exactly one heap per slot.
     const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
     defer gpu.shaderDestroy(blit_vert);
     const blit_frag = try gpu.shaderCreate(blit_oklab_f.spv, .fragment, "main", "blit_oklab");
     defer gpu.shaderDestroy(blit_frag);
-    const blit_heap = try gpu.descHeapCreate(8, 0, 1);
-    defer gpu.descHeapDestroy(blit_heap);
     const blit_sampler = gpu.samplerDescriptor(.{
         .min_filter = .nearest,
         .mag_filter = .nearest,
         .mip_filter = .nearest,
     });
-    gpu.descHeapSetSamplers(blit_heap, 0, &.{blit_sampler});
 
     // Offscreen Oklab render target, recreated on resize.
     var render_target: noapi.TextureHandle = .{};
@@ -1588,6 +1740,77 @@ pub fn run(
     };
     try app.attachGpu(&gpu_endpoint);
     defer app.detachGpu();
+
+    if (perf_config) |config| {
+        const resources: PerfResources = .{
+            .gpa = gpa,
+            .io = io,
+            .gpu = &gpu,
+            .text_engine = &text_engine,
+            .gui_renderer = &gui_renderer,
+            .tex_registry = &tex_registry,
+            .svg_view = &svg_view,
+            .icon_cache = &icon_cache,
+            .gpu_endpoint = &gpu_endpoint,
+            .blit_vert = blit_vert,
+            .blit_frag = blit_frag,
+            .blit_sampler = blit_sampler,
+        };
+        var recorder = try perf.Recorder.init(gpa, try config.totalFrames());
+        defer recorder.deinit();
+
+        const metadata = switch (config.mode) {
+            .offscreen => try runOffscreenPerf(T, app, root, &resources, config, &recorder),
+            .presented => blk: {
+                const sdl_surface = try sdl3.vulkan.Surface.init(
+                    sdl_win,
+                    @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+                    null,
+                );
+                const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
+                var gw = try noapi.Surface.init(&gpu, surface, .{
+                    .extent = perf_extent,
+                    .present_mode = .fifo,
+                });
+                defer gw.deinit();
+                const refresh_hz: ?f32 = refresh: {
+                    const disp = sdl_win.getDisplayForWindow() catch break :refresh null;
+                    const display_mode = disp.getCurrentMode() catch break :refresh null;
+                    const value = display_mode.refresh_rate orelse break :refresh null;
+                    break :refresh if (value > 0.0) value else null;
+                };
+                const blit_heap = try gpu.descHeapCreate(8, 0, 1);
+                defer gpu.descHeapDestroy(blit_heap);
+                gpu.descHeapSetSamplers(blit_heap, 0, &.{blit_sampler});
+                break :blk try runPresentedPerf(
+                    T,
+                    app,
+                    root,
+                    &resources,
+                    config,
+                    &recorder,
+                    &gw,
+                    blit_heap,
+                    refresh_hz,
+                );
+            },
+        };
+        try writePerfArtifact(T, config, &recorder, metadata, io, gpa);
+        return;
+    }
+
+    const blit_heap = try gpu.descHeapCreate(8, 0, 1);
+    defer gpu.descHeapDestroy(blit_heap);
+    gpu.descHeapSetSamplers(blit_heap, 0, &.{blit_sampler});
+    const sdl_surface = try sdl3.vulkan.Surface.init(
+        sdl_win,
+        @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+        null,
+    );
+    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
+    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
+    defer gw.deinit();
+    const win_id = try sdl_win.getId();
 
     // Frame pacer (Phase 2 — tier-2 frame pacing). The FIFO swapchain is
     // vsync-paced and blocks the CPU on the GPU once the image queue is
@@ -2059,6 +2282,957 @@ fn writePpm(gpa: std.mem.Allocator, io: Io, path: []const u8, pixels: [*]const f
 /// to a readback buffer and write the result as a P6 PPM at `path`. Same
 /// init as run(), minus the event loop and the swapchain blit. FreeType
 /// glyphs render into the shot — this is the text-renders proof.
+const PerfRunMetadata = struct {
+    present_feedback: bool,
+    refresh_hz: ?f32,
+};
+
+fn perfNow(io: Io) Io.Timestamp {
+    return Io.Timestamp.now(io, .awake);
+}
+
+fn perfElapsed(start: Io.Timestamp, end: Io.Timestamp) perf.RecorderError!u64 {
+    const delta = end.toNanoseconds() - start.toNanoseconds();
+    if (delta < 0) return error.TimestampUnderflow;
+    return std.math.cast(u64, delta) orelse error.TimestampOverflow;
+}
+
+fn perfFrameTimeMs(frame_id: u64) perf.RecorderError!u64 {
+    const product = @mulWithOverflow(frame_id, @as(u64, 1000));
+    if (product[1] != 0) return error.TimestampOverflow;
+    return product[0] / 120;
+}
+
+fn beginPerfRoot(phase: perf.Phase) tracy.Zone {
+    return switch (phase) {
+        .warmup => tracy.Zone.begin(.{ .name = "perfWarmupFrame", .src = @src() }),
+        .sample => tracy.Zone.begin(.{ .name = "perfSampleFrame", .src = @src() }),
+    };
+}
+
+fn drainPerfSetupEvents() void {
+    while (sdl3.events.poll()) |_| {}
+}
+
+fn isPerfEventRejected(name: []const u8) bool {
+    const window_event = std.mem.startsWith(u8, name, "window_");
+    const display_event = std.mem.startsWith(u8, name, "display_");
+    if (display_event) return false;
+    return !window_event or
+        std.mem.eql(u8, name, "window_resized") or
+        std.mem.eql(u8, name, "window_pixel_size_changed") or
+        std.mem.eql(u8, name, "window_minimized") or
+        std.mem.eql(u8, name, "window_close_requested") or
+        std.mem.eql(u8, name, "window_mouse_leave");
+}
+
+fn rejectPerfEvents() !void {
+    while (sdl3.events.poll()) |event| {
+        if (isPerfEventRejected(@tagName(event))) {
+            return error.PerfUnexpectedEvent;
+        }
+    }
+}
+
+test "perf event classifier rejects mouse leave input" {
+    try std.testing.expect(isPerfEventRejected("mouse_motion"));
+    try std.testing.expect(isPerfEventRejected("window_mouse_leave"));
+    try std.testing.expect(isPerfEventRejected("window_resized"));
+    try std.testing.expect(!isPerfEventRejected("window_focus_gained"));
+    try std.testing.expect(!isPerfEventRejected("display_current_mode_changed"));
+}
+const perf_first_recorded_present_id: u64 = 2;
+
+fn stabilizePerfSurface(
+    io: Io,
+    surface: *noapi.Surface,
+    submitted_gpu_work: *bool,
+    start: Io.Timestamp,
+) !void {
+    while (true) {
+        drainPerfSetupEvents();
+        const schedule = surface.beginFrame() catch |err| switch (err) {
+            error.OutOfDateKHR => {
+                if (try perfElapsed(start, perfNow(io)) >= 5_000_000_000) {
+                    return error.PerfSurfaceUnstable;
+                }
+                sdl3.timer.delayMilliseconds(1);
+                continue;
+            },
+            else => return err,
+        };
+        _ = schedule;
+        if (!std.meta.eql(surface.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+        _ = surface.commandsBegin();
+        submitted_gpu_work.* = true;
+        const frame_result = try surface.endFrame(.{ .blit_to_swapchain = true });
+        if (!frame_result.present_out_of_date) {
+            drainPerfSetupEvents();
+            return;
+        }
+        if (try perfElapsed(start, perfNow(io)) >= 5_000_000_000) {
+            return error.PerfSurfaceUnstable;
+        }
+        sdl3.timer.delayMilliseconds(1);
+    }
+}
+
+const PerfPreflightPoll = enum {
+    feedback,
+    retry,
+    unsupported,
+    timeout,
+};
+
+fn pollPerfPreflightFeedback(
+    io: Io,
+    surface: *noapi.Surface,
+    feedback_buffer: []noapi.PresentFeedback,
+    start: Io.Timestamp,
+    expected_present_id: u64,
+) !PerfPreflightPoll {
+    while (true) {
+        drainPerfSetupEvents();
+        const feedback_count = surface.pollPresentFeedback(feedback_buffer) catch |err| switch (err) {
+            error.PresentTimingDataUnavailable => {
+                return if (surface.supportsPresentTiming()) .retry else .unsupported;
+            },
+            else => return err,
+        };
+        const elapsed = try perfElapsed(start, perfNow(io));
+        if (perf.presentPreflightDeadlineExpired(elapsed)) return .timeout;
+        if (feedback_count != 0) {
+            if (feedback_count != 1 or feedback_buffer[0].present_id != expected_present_id) {
+                return error.InvalidPresentationId;
+            }
+            if (feedback_buffer[0].actual_present_ns == 0) return error.InvalidTimestamp;
+            return .feedback;
+        }
+        sdl3.timer.delayMilliseconds(1);
+    }
+}
+
+fn preflightPerfPresentation(
+    io: Io,
+    surface: *noapi.Surface,
+    submitted_gpu_work: *bool,
+) !?u64 {
+    if (!surface.supportsPresentTiming()) return null;
+    var preflight_state: perf.PresentPreflightState = .{};
+    var mode_start = perfNow(io);
+    var feedback_buffer: [64]noapi.PresentFeedback = undefined;
+    while (true) {
+        if (preflight_state.deadlineExpired(try perfElapsed(mode_start, perfNow(io)))) {
+            return error.PerfTimingFeedbackTimeout;
+        }
+        drainPerfSetupEvents();
+        const schedule = surface.beginFrame() catch |err| switch (err) {
+            error.OutOfDateKHR => {
+                try stabilizePerfSurface(io, surface, submitted_gpu_work, mode_start);
+                continue;
+            },
+            else => return err,
+        };
+        _ = schedule;
+        if (!std.meta.eql(surface.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+        _ = surface.commandsBegin();
+        submitted_gpu_work.* = true;
+        const timing_id = preflight_state.reservedId();
+        const frame_result = surface.endFrame(.{
+            .blit_to_swapchain = true,
+            .timing_id = timing_id,
+        }) catch |err| switch (err) {
+            error.OutOfDateKHR => {
+                try stabilizePerfSurface(io, surface, submitted_gpu_work, mode_start);
+                continue;
+            },
+            else => return err,
+        };
+        if (frame_result.present_out_of_date) {
+            try stabilizePerfSurface(io, surface, submitted_gpu_work, mode_start);
+            continue;
+        }
+
+        const feedback_start = perfNow(io);
+        switch (try pollPerfPreflightFeedback(
+            io,
+            surface,
+            feedback_buffer[0..],
+            feedback_start,
+            timing_id,
+        )) {
+            .feedback => {
+                drainPerfSetupEvents();
+                return try preflight_state.recordedBase();
+            },
+            .retry => {
+                const fallback_id = (try preflight_state.afterUnavailable(true)) orelse unreachable;
+                _ = fallback_id;
+                mode_start = perfNow(io);
+            },
+            .unsupported => {
+                drainPerfSetupEvents();
+                return null;
+            },
+            .timeout => return error.PerfTimingFeedbackTimeout,
+        }
+    }
+}
+
+const PerfFeedbackQueue = struct {
+    records: [64]noapi.PresentFeedback = undefined,
+    count: usize = 0,
+    last_observed_id: u64 = 0,
+
+    fn lessThan(_: void, lhs: noapi.PresentFeedback, rhs: noapi.PresentFeedback) bool {
+        return lhs.present_id < rhs.present_id;
+    }
+
+    fn push(
+        self: *PerfFeedbackQueue,
+        feedback: []const noapi.PresentFeedback,
+        total_frames: u64,
+        present_id_base: u64,
+    ) perf.RecorderError!void {
+        for (feedback) |record| {
+            _ = try perf.frameIdForPresentId(record.present_id, present_id_base, total_frames);
+            if (record.present_id <= self.last_observed_id) {
+                if (record.present_id == self.last_observed_id) {
+                    return error.DuplicatePresentationId;
+                }
+                return error.NonMonotonicPresentationId;
+            }
+            for (self.records[0..self.count]) |queued| {
+                if (queued.present_id == record.present_id) {
+                    return error.DuplicatePresentationId;
+                }
+            }
+            if (self.count == self.records.len) return error.TooManySamples;
+            self.records[self.count] = record;
+            self.count += 1;
+            self.last_observed_id = record.present_id;
+        }
+        std.sort.insertion(noapi.PresentFeedback, self.records[0..self.count], {}, lessThan);
+    }
+
+    fn attachReady(
+        self: *PerfFeedbackQueue,
+        recorder: *perf.Recorder,
+        next_frame_id: *u64,
+        present_id_base: u64,
+    ) perf.RecorderError!void {
+        while (self.count > 0) {
+            const expected_id = try perf.presentIdForFrame(present_id_base, next_frame_id.*);
+            const record = self.records[0];
+            if (record.present_id < expected_id) return error.DuplicatePresentationId;
+            if (record.present_id > expected_id) break;
+            try recorder.attachPresent(next_frame_id.*, record.actual_present_ns);
+            next_frame_id.* = try perf.checkedAdd(next_frame_id.*, 1);
+            self.count -= 1;
+            if (self.count > 0) {
+                std.mem.copyForwards(
+                    noapi.PresentFeedback,
+                    self.records[0..self.count],
+                    self.records[1 .. self.count + 1],
+                );
+            }
+        }
+    }
+};
+
+fn pollPerfPresentFeedback(
+    surface: *noapi.Surface,
+    feedback_queue: *PerfFeedbackQueue,
+    feedback_buffer: []noapi.PresentFeedback,
+    recorder: *perf.Recorder,
+    total_frames: u64,
+    next_present_frame_id: *u64,
+    present_id_base: u64,
+) !bool {
+    const feedback_count = surface.pollPresentFeedback(feedback_buffer) catch |err| switch (err) {
+        error.PresentTimingDataUnavailable => {
+            if (next_present_frame_id.* != 0 or feedback_queue.count != 0) {
+                return error.PartialPresentFeedback;
+            }
+            if (surface.supportsPresentTiming()) return error.PresentTimingCapabilityChanged;
+            return false;
+        },
+        else => return err,
+    };
+    if (feedback_count == 0) return true;
+    try feedback_queue.push(feedback_buffer[0..feedback_count], total_frames, present_id_base);
+    try feedback_queue.attachReady(recorder, next_present_frame_id, present_id_base);
+    return true;
+}
+
+const PerfMachine = struct {
+    cpu_model: []u8 = &.{},
+    online_cpu_set: []u8 = &.{},
+    requested_affinity: []u32 = &.{},
+    process_affinity: []u32 = &.{},
+    kernel: []u8 = &.{},
+    cpu_governor: ?[]u8 = null,
+    gpu: []u8 = &.{},
+    driver: []u8 = &.{},
+
+    fn deinit(self: *PerfMachine, gpa: std.mem.Allocator) void {
+        if (self.cpu_model.len != 0) gpa.free(self.cpu_model);
+        if (self.online_cpu_set.len != 0) gpa.free(self.online_cpu_set);
+        if (self.process_affinity.len != 0) gpa.free(self.process_affinity);
+        if (self.kernel.len != 0) gpa.free(self.kernel);
+        if (self.cpu_governor) |governor| gpa.free(governor);
+        if (self.gpu.len != 0) gpa.free(self.gpu);
+        if (self.driver.len != 0) gpa.free(self.driver);
+        self.* = .{};
+    }
+};
+
+const PerfReportedRefresh = struct {
+    refresh_hz: f32,
+};
+
+const PerfRuntimeHeader = struct {
+    scene: []const u8,
+    mode: []const u8,
+    instrumentation_flags: struct {
+        tracy: bool,
+        gpu_timestamps: bool,
+        perf_counters: bool,
+    },
+    child_argv: []const []const u8,
+    cpu_model: []const u8,
+    online_cpu_set: []const u8,
+    requested_affinity: []const u32,
+    process_affinity: []const u32,
+    kernel: []const u8,
+    cpu_governor: ?[]const u8,
+    gpu: []const u8,
+    driver: []const u8,
+    extent: struct {
+        width: u32,
+        height: u32,
+    },
+    present_mode: []const u8,
+    reported_refresh_data: ?PerfReportedRefresh,
+    present_feedback: bool,
+    warmup_frames: u32,
+    sample_count: u32,
+};
+
+fn readPerfAbsolute(gpa: std.mem.Allocator, io: Io, path: []const u8) ![]u8 {
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ "/run/current-system/sw/bin/cat", path } });
+    gpa.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| {
+            if (code != 0) {
+                gpa.free(result.stdout);
+                return error.PerfMetadataUnavailable;
+            }
+        },
+        else => {
+            gpa.free(result.stdout);
+            return error.PerfMetadataUnavailable;
+        },
+    }
+    return result.stdout;
+}
+
+fn dupeTrimmed(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    return gpa.dupe(u8, std.mem.trim(u8, bytes, " \t\r\n"));
+}
+
+fn queryPerfGpu(gpa: std.mem.Allocator, io: Io) !struct { gpu: []u8, driver: []u8 } {
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ "/run/current-system/sw/bin/lspci", "-nnk" } });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.PerfMetadataUnavailable,
+        else => return error.PerfMetadataUnavailable,
+    }
+
+    var device: ?[]const u8 = null;
+    var driver: ?[]const u8 = null;
+    var in_display_device = false;
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.indexOf(u8, trimmed, "VGA compatible controller") != null or
+            std.mem.indexOf(u8, trimmed, "3D controller") != null)
+        {
+            device = trimmed;
+            in_display_device = true;
+            continue;
+        }
+        if (in_display_device and std.mem.startsWith(u8, trimmed, "Kernel driver in use:")) {
+            driver = std.mem.trim(u8, trimmed["Kernel driver in use:".len..], " \t\r");
+            break;
+        }
+        if (trimmed.len != 0 and line.len == trimmed.len) in_display_device = false;
+    }
+    const gpu_name = try gpa.dupe(u8, device orelse return error.PerfMetadataUnavailable);
+    errdefer gpa.free(gpu_name);
+    const driver_name = try gpa.dupe(u8, driver orelse return error.PerfMetadataUnavailable);
+    return .{ .gpu = gpu_name, .driver = driver_name };
+}
+
+fn capturePerfMachine(gpa: std.mem.Allocator, io: Io) !PerfMachine {
+    var machine: PerfMachine = .{};
+    errdefer machine.deinit(gpa);
+
+    const cpuinfo = try readPerfAbsolute(gpa, io, "/proc/cpuinfo");
+    defer gpa.free(cpuinfo);
+    const model_marker = "model name";
+    const model_start = std.mem.indexOf(u8, cpuinfo, model_marker) orelse
+        return error.PerfMetadataUnavailable;
+    const model_line_start = model_start + model_marker.len;
+    const model_line_end = std.mem.indexOfScalarPos(u8, cpuinfo, model_line_start, '\n') orelse cpuinfo.len;
+    const model_line = std.mem.trim(u8, cpuinfo[model_line_start..model_line_end], " \t\r:");
+    if (model_line.len == 0) return error.PerfMetadataUnavailable;
+    machine.cpu_model = try gpa.dupe(u8, model_line);
+
+    const online = try readPerfAbsolute(gpa, io, "/sys/devices/system/cpu/online");
+    defer gpa.free(online);
+    machine.online_cpu_set = try dupeTrimmed(gpa, online);
+
+    const cpu_set = try std.posix.sched_getaffinity(0);
+    const affinity_count: usize = @intCast(std.posix.CPU_COUNT(cpu_set));
+    if (affinity_count == 0) return error.PerfMetadataUnavailable;
+    machine.process_affinity = try gpa.alloc(u32, affinity_count);
+    var index: usize = 0;
+    const word_bits = @bitSizeOf(@TypeOf(cpu_set[0]));
+    for (cpu_set, 0..) |word, word_index| {
+        var bits = word;
+        while (bits != 0) {
+            const bit: usize = @intCast(@ctz(bits));
+            machine.process_affinity[index] = @intCast(word_index * word_bits + bit);
+            index += 1;
+            bits &= bits - 1;
+        }
+    }
+    if (index != affinity_count) return error.PerfMetadataUnavailable;
+    machine.requested_affinity = machine.process_affinity;
+
+    const uts = std.posix.uname();
+    machine.kernel = try gpa.dupe(u8, std.mem.sliceTo(&uts.release, 0));
+    machine.cpu_governor = if (readPerfAbsolute(gpa, io, "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")) |governor| blk: {
+        defer gpa.free(governor);
+        break :blk try dupeTrimmed(gpa, governor);
+    } else |_| null;
+    const gpu = try queryPerfGpu(gpa, io);
+    machine.gpu = gpu.gpu;
+    machine.driver = gpu.driver;
+    return machine;
+}
+
+fn perfSceneName(comptime T: type) []const u8 {
+    if (comptime T == spotify_ui.SpotifyApp) return "spotify";
+    if (comptime T == calculator_ui.CalculatorApp) return "calculator";
+    if (comptime T == ui.TigerApp) return "tiger";
+    if (comptime T == ui.TestStrokesApp) return "strokes";
+    return "todo";
+}
+
+fn writePerfArtifact(
+    comptime T: type,
+    config: perf.Config,
+    recorder: *const perf.Recorder,
+    metadata: PerfRunMetadata,
+    io: Io,
+    gpa: std.mem.Allocator,
+) !void {
+    var machine = try capturePerfMachine(gpa, io);
+    defer machine.deinit(gpa);
+    const executable = try std.process.executablePathAlloc(io, gpa);
+    defer gpa.free(executable);
+    var warmup_buffer: [32]u8 = undefined;
+    var sample_buffer: [32]u8 = undefined;
+    const warmup_text = std.fmt.bufPrint(&warmup_buffer, "{d}", .{config.warmup_frames}) catch unreachable;
+    const sample_text = std.fmt.bufPrint(&sample_buffer, "{d}", .{config.sample_frames}) catch unreachable;
+    var child_argv_storage: [11][]const u8 = undefined;
+    var child_argc: usize = 0;
+    child_argv_storage[child_argc] = executable;
+    child_argc += 1;
+    const scene = perfSceneName(T);
+    if (!std.mem.eql(u8, scene, "todo")) {
+        child_argv_storage[child_argc] =
+            if (std.mem.eql(u8, scene, "spotify"))
+                "--spotify"
+            else if (std.mem.eql(u8, scene, "calculator"))
+                "--calculator"
+            else if (std.mem.eql(u8, scene, "tiger"))
+                "--tiger"
+            else if (std.mem.eql(u8, scene, "strokes"))
+                "--strokes"
+            else
+                unreachable;
+        child_argc += 1;
+    }
+    child_argv_storage[child_argc] = "--perf-mode";
+    child_argc += 1;
+    child_argv_storage[child_argc] = if (config.mode == .offscreen) "offscreen" else "presented";
+    child_argc += 1;
+    child_argv_storage[child_argc] = "--perf-warmup";
+    child_argc += 1;
+    child_argv_storage[child_argc] = warmup_text;
+    child_argc += 1;
+    child_argv_storage[child_argc] = "--perf-frames";
+    child_argc += 1;
+    child_argv_storage[child_argc] = sample_text;
+    child_argc += 1;
+    child_argv_storage[child_argc] = "--perf-out";
+    child_argc += 1;
+    child_argv_storage[child_argc] = config.output_path;
+    child_argc += 1;
+
+    const header: PerfRuntimeHeader = .{
+        .scene = scene,
+        .mode = if (config.mode == .offscreen) "offscreen" else "presented",
+        .instrumentation_flags = .{
+            .tracy = tracy.enabled,
+            .gpu_timestamps = v7_options.gpu_timestamps,
+            .perf_counters = v7_options.perf_counters,
+        },
+        .child_argv = child_argv_storage[0..child_argc],
+        .cpu_model = machine.cpu_model,
+        .online_cpu_set = machine.online_cpu_set,
+        .requested_affinity = machine.requested_affinity,
+        .process_affinity = machine.process_affinity,
+        .kernel = machine.kernel,
+        .cpu_governor = machine.cpu_governor,
+        .gpu = machine.gpu,
+        .driver = machine.driver,
+        .extent = .{ .width = perf_width, .height = perf_height },
+        .present_mode = "fifo",
+        .reported_refresh_data = if (metadata.refresh_hz) |refresh_hz|
+            .{ .refresh_hz = refresh_hz }
+        else
+            null,
+        .present_feedback = metadata.present_feedback,
+        .warmup_frames = config.warmup_frames,
+        .sample_count = config.sample_frames,
+    };
+
+    var file = try Io.Dir.cwd().createFile(io, config.output_path, .{ .truncate = true });
+    defer file.close(io);
+    var backing: [16 * 1024]u8 = undefined;
+    var writer = file.writer(io, &backing);
+    try std.json.Stringify.value(header, .{}, &writer.interface);
+    try writer.interface.writeByte('\n');
+    try recorder.writeJsonl(&writer.interface);
+    try writer.interface.flush();
+}
+
+const PerfAppFrame = struct {
+    out: nogui.FrameOutput,
+};
+
+fn buildPerfAppFrame(
+    comptime T: type,
+    app: *App,
+    root: *T,
+    resources: *const PerfResources,
+    cmd: *noapi.CommandBuffer,
+    frame_id: u64,
+) !PerfAppFrame {
+    ui.fps = 120.0;
+    const time_ms = try perfFrameTimeMs(frame_id);
+    dispatchRootFrame(T, root, time_ms);
+    var gpu_frame: nogui.GpuFrame = .{
+        .endpoint = resources.gpu_endpoint,
+        .command_buffer = cmd,
+        .extent = perf_extent,
+        .frame_index = @intCast(frame_id % 3),
+    };
+    const out = try app.frameWithGpuAtTime(
+        T,
+        root,
+        @intCast(frame_id + 1),
+        time_ms,
+        .{ .width = @floatFromInt(perf_width), .height = @floatFromInt(perf_height) },
+        &gpu_frame,
+    );
+    return .{ .out = out };
+}
+
+fn buildPerfScene(
+    resources: *const PerfResources,
+    out: *const nogui.FrameOutput,
+    rects: *std.ArrayList(SceneRect),
+    draw_cmds: *std.ArrayList(DrawCmd),
+    gpu_sort_verify: bool,
+) !void {
+    rects.clearRetainingCapacity();
+    try buildFrameSceneInto(
+        resources.gpa,
+        resources.text_engine,
+        resources.svg_view,
+        resources.icon_cache,
+        out,
+        rects,
+        draw_cmds,
+        gpu_sort_verify,
+    );
+}
+
+fn attachGpuQueries(
+    gpu: *noapi.Gpu,
+    query_set: noapi.TimestampQuerySet,
+    recorder: *perf.Recorder,
+    frame_id: u64,
+) !void {
+    if (comptime v7_options.gpu_timestamps) {
+        const timestamp_info = gpu.timestampInfo() orelse return error.GpuTimestampUnavailable;
+        var timestamps: [2]u64 = undefined;
+        const first: u32 = @intCast((frame_id % 3) * 2);
+        try gpu.timestampQuerySetRead(query_set, first, &timestamps);
+        try recorder.attachGpu(
+            frame_id,
+            timestamps[0],
+            timestamps[1],
+            timestamp_info.period_ns,
+            timestamp_info.valid_bits,
+        );
+    }
+}
+
+fn waitPerfTimelineOrPanic(gpu: *noapi.Gpu, timeline: noapi.Semaphore, value: u64) void {
+    gpu.semaphoreWait(timeline, value) catch |err| {
+        std.debug.panic("perf resource cleanup could not wait for timeline: {s}", .{@errorName(err)});
+    };
+}
+
+fn runOffscreenPerf(
+    comptime T: type,
+    app: *App,
+    root: *T,
+    resources: *const PerfResources,
+    config: perf.Config,
+    recorder: *perf.Recorder,
+) !PerfRunMetadata {
+    const total_frames = try config.totalFrames();
+    recorder.mode = .offscreen;
+    recorder.presentation_timing_supported = false;
+    var slots = try OffscreenSlots.init(resources.gpu, resources.blit_sampler);
+    var highest_submitted_timeline: u64 = 0;
+    var timeline_waited = false;
+    defer {
+        if (highest_submitted_timeline != 0 and !timeline_waited) {
+            waitPerfTimelineOrPanic(resources.gpu, slots.timeline, highest_submitted_timeline);
+        }
+        slots.deinit();
+    }
+    var queue: noapi.Queue = .{ .gpu = resources.gpu };
+    var query_slots: perf.QuerySlotScheduler = .{};
+    var scene_rects = std.ArrayList(SceneRect).empty;
+    defer scene_rects.deinit(resources.gpa);
+    var draw_cmds: std.ArrayList(DrawCmd) = .empty;
+    defer draw_cmds.deinit(resources.gpa);
+    try draw_cmds.ensureTotalCapacity(resources.gpa, perf_draw_cmd_capacity);
+
+    drainPerfSetupEvents();
+    var frame_id: u64 = 0;
+    while (frame_id < total_frames) : (frame_id += 1) {
+        try rejectPerfEvents();
+        const phase: perf.Phase = if (frame_id < config.warmup_frames) .warmup else .sample;
+        var root_zone = beginPerfRoot(phase);
+        defer root_zone.end();
+
+        const slot: usize = @intCast(frame_id % OffscreenSlots.count);
+        var slot_waited = false;
+        var slot_wait_start: Io.Timestamp = undefined;
+        var app_start: Io.Timestamp = undefined;
+        if (perf.slotWaitValue(frame_id, OffscreenSlots.count)) |wait_value| {
+            slot_wait_start = perfNow(resources.io);
+            try resources.gpu.semaphoreWait(slots.timeline, wait_value);
+            app_start = perfNow(resources.io);
+            slot_waited = true;
+        } else {
+            app_start = perfNow(resources.io);
+        }
+        if (comptime v7_options.gpu_timestamps) {
+            if (try query_slots.begin(frame_id)) |completed_frame| {
+                const query_set = slots.timestamp_queries orelse return error.GpuTimestampUnavailable;
+                try attachGpuQueries(resources.gpu, query_set, recorder, completed_frame);
+            }
+        }
+        var cmd = try resources.gpu.commandsBegin();
+        if (comptime v7_options.gpu_timestamps) {
+            const query_set = slots.timestamp_queries orelse return error.GpuTimestampUnavailable;
+            const first: u32 = @intCast(slot * 2);
+            try cmd.timestampReset(query_set, first, 2);
+            try cmd.timestampWrite(query_set, first, .all_commands_start);
+        }
+        var app_frame = try buildPerfAppFrame(T, app, root, resources, &cmd, frame_id);
+        defer if (app_frame.out.json) |json| resources.gpa.free(json);
+        const scene_start = perfNow(resources.io);
+        try buildPerfScene(resources, &app_frame.out, &scene_rects, &draw_cmds, false);
+        const record_start = perfNow(resources.io);
+        try recordFrameScene(
+            resources.gui_renderer,
+            &cmd,
+            scene_rects.items,
+            app_frame.out.tree.clip_rects[0..app_frame.out.tree.clip_count],
+            slots.oklab_targets[slot],
+            perf_extent,
+            resources.tex_registry.heap,
+        );
+        cmd.barrier(.{ .color_output = true }, .{ .fragment = true }, .{});
+        recordColorConversion(
+            &cmd,
+            slots.srgb_targets[slot],
+            perf_extent,
+            resources.blit_vert,
+            resources.blit_frag,
+            slots.blit_heaps[slot],
+        );
+        if (comptime v7_options.gpu_timestamps) {
+            const query_set = slots.timestamp_queries orelse return error.GpuTimestampUnavailable;
+            const first: u32 = @intCast(slot * 2);
+            try cmd.timestampWrite(query_set, first + 1, .all_commands_end);
+            try query_slots.submitted(frame_id);
+        }
+        const submit_start = perfNow(resources.io);
+        try queue.submitSignal(&.{cmd}, slots.timeline, frame_id + 1);
+        const submit_end = perfNow(resources.io);
+        highest_submitted_timeline = frame_id + 1;
+
+        var sample = perf.FrameSample.empty(phase, frame_id);
+        sample.cpu_app_layout_ns = try perfElapsed(app_start, scene_start);
+        sample.cpu_scene_ns = try perfElapsed(scene_start, record_start);
+        sample.cpu_record_ns = try perfElapsed(record_start, submit_start);
+        sample.cpu_submit_present_ns = try perfElapsed(submit_start, submit_end);
+        const slot_wait_ns = if (slot_waited) try perfElapsed(slot_wait_start, app_start) else 0;
+        sample.cpu_slot_wait_ns = slot_wait_ns;
+        sample.slop_ns = slot_wait_ns;
+        sample.cpu_compute_ns = try perf.computeNs(&sample);
+        try recorder.append(sample);
+        tracy.frameMark(null);
+    }
+
+    try resources.gpu.semaphoreWait(slots.timeline, total_frames);
+    timeline_waited = true;
+    if (comptime v7_options.gpu_timestamps) {
+        while (recorder.next_gpu_frame_id < @as(u64, total_frames)) {
+            const frame = recorder.next_gpu_frame_id;
+            const query_set = slots.timestamp_queries orelse return error.GpuTimestampUnavailable;
+            try attachGpuQueries(resources.gpu, query_set, recorder, frame);
+        }
+    }
+    return .{ .present_feedback = false, .refresh_hz = null };
+}
+
+fn runPresentedPerf(
+    comptime T: type,
+    app: *App,
+    root: *T,
+    resources: *const PerfResources,
+    config: perf.Config,
+    recorder: *perf.Recorder,
+    gw: *noapi.Surface,
+    blit_heap: noapi.DescriptorHeap,
+    refresh_hz: ?f32,
+) !PerfRunMetadata {
+    const total_frames = try config.totalFrames();
+    if (!std.meta.eql(gw.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+    var render_target: noapi.TextureHandle = .{};
+    var render_target_width: u32 = 0;
+    var render_target_height: u32 = 0;
+    var timestamp_queries: ?noapi.TimestampQuerySet = null;
+    var submitted_gpu_work = false;
+    var gpu_work_waited = false;
+    defer {
+        if (submitted_gpu_work and !gpu_work_waited) {
+            resources.gpu.waitIdle() catch |err| {
+                std.debug.panic("perf resource cleanup could not wait for GPU: {s}", .{@errorName(err)});
+            };
+        }
+        if (timestamp_queries) |queries| resources.gpu.timestampQuerySetDestroy(queries);
+        if (render_target.texture.id != 0) resources.gpu.textureDestroy(render_target);
+    }
+    drainPerfSetupEvents();
+    sdl3.timer.delayMilliseconds(10);
+    try stabilizePerfSurface(resources.io, gw, &submitted_gpu_work, perfNow(resources.io));
+    var present_id_base = perf_first_recorded_present_id;
+    const preflight_base = try preflightPerfPresentation(resources.io, gw, &submitted_gpu_work);
+    var present_feedback_live = false;
+    if (preflight_base) |base| {
+        present_id_base = base;
+        present_feedback_live = true;
+    }
+    if (!present_feedback_live) {
+        try stabilizePerfSurface(resources.io, gw, &submitted_gpu_work, perfNow(resources.io));
+    }
+
+    recorder.mode = .presented;
+    recorder.presentation_timing_supported = present_feedback_live;
+    try ensureRenderTarget(
+        resources.gpu,
+        &render_target,
+        &render_target_width,
+        &render_target_height,
+        perf_width,
+        perf_height,
+        blit_heap,
+    );
+    if (comptime v7_options.gpu_timestamps) {
+        timestamp_queries = try resources.gpu.timestampQuerySetCreate(OffscreenSlots.query_count);
+    }
+
+    var scene_rects = std.ArrayList(SceneRect).empty;
+    defer scene_rects.deinit(resources.gpa);
+    var draw_cmds: std.ArrayList(DrawCmd) = .empty;
+    defer draw_cmds.deinit(resources.gpa);
+    try draw_cmds.ensureTotalCapacity(resources.gpa, perf_draw_cmd_capacity);
+    var query_slots: perf.QuerySlotScheduler = .{};
+    var feedback_queue = PerfFeedbackQueue{};
+    var feedback_buffer: [64]noapi.PresentFeedback = undefined;
+    var next_present_frame_id: u64 = 0;
+    var frame_id: u64 = 0;
+    while (frame_id < total_frames) : (frame_id += 1) {
+        if (frame_id == 0) {
+            drainPerfSetupEvents();
+        } else {
+            try rejectPerfEvents();
+        }
+        const phase: perf.Phase = if (frame_id < config.warmup_frames) .warmup else .sample;
+        var root_zone = beginPerfRoot(phase);
+        defer root_zone.end();
+
+        const acquire_start = perfNow(resources.io);
+        _ = try gw.beginFrame();
+        if (!std.meta.eql(gw.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+        const app_start = perfNow(resources.io);
+        if (comptime v7_options.gpu_timestamps) {
+            if (try query_slots.begin(frame_id)) |completed_frame| {
+                const query_set = timestamp_queries orelse return error.GpuTimestampUnavailable;
+                try attachGpuQueries(resources.gpu, query_set, recorder, completed_frame);
+            }
+        }
+        var cmd = gw.commandsBegin();
+        if (comptime v7_options.gpu_timestamps) {
+            const query_set = timestamp_queries orelse return error.GpuTimestampUnavailable;
+            const first: u32 = @intCast((frame_id % 3) * 2);
+            try cmd.timestampReset(query_set, first, 2);
+            try cmd.timestampWrite(query_set, first, .all_commands_start);
+        }
+        var app_frame = try buildPerfAppFrame(T, app, root, resources, &cmd, frame_id);
+        defer if (app_frame.out.json) |json| resources.gpa.free(json);
+        const scene_start = perfNow(resources.io);
+        try buildPerfScene(resources, &app_frame.out, &scene_rects, &draw_cmds, false);
+        const record_start = perfNow(resources.io);
+        try recordFrameScene(
+            resources.gui_renderer,
+            &cmd,
+            scene_rects.items,
+            app_frame.out.tree.clip_rects[0..app_frame.out.tree.clip_count],
+            render_target,
+            perf_extent,
+            resources.tex_registry.heap,
+        );
+        cmd.barrier(.{ .color_output = true }, .{ .fragment = true }, .{});
+        recordColorConversion(
+            &cmd,
+            gw.currentImage(),
+            perf_extent,
+            resources.blit_vert,
+            resources.blit_frag,
+            blit_heap,
+        );
+        if (comptime v7_options.gpu_timestamps) {
+            const query_set = timestamp_queries orelse return error.GpuTimestampUnavailable;
+            const first: u32 = @intCast((frame_id % 3) * 2);
+            try cmd.timestampWrite(query_set, first + 1, .all_commands_end);
+            try query_slots.submitted(frame_id);
+        }
+        const submit_start = perfNow(resources.io);
+        const slop_before = gw.slopNs();
+        submitted_gpu_work = true;
+        const frame_result = try gw.endFrame(.{
+            .blit_to_swapchain = true,
+            .timing_id = if (present_feedback_live)
+                try perf.presentIdForFrame(present_id_base, frame_id)
+            else
+                null,
+        });
+        const slop_after = gw.slopNs();
+        const submit_end = perfNow(resources.io);
+        if (frame_result.present_out_of_date) return error.OutOfDateKHR;
+
+        const acquire_ns = try perfElapsed(acquire_start, app_start);
+        const app_layout_ns = try perfElapsed(app_start, scene_start);
+        const scene_ns = try perfElapsed(scene_start, record_start);
+        const record_ns = try perfElapsed(record_start, submit_start);
+        const submit_ns = try perfElapsed(submit_start, submit_end);
+        const present_slop_ns = try perf.presentSlopNs(slop_before, slop_after, submit_ns);
+
+        var sample = perf.FrameSample.empty(phase, frame_id);
+        sample.cpu_acquire_ns = acquire_ns;
+        sample.cpu_app_layout_ns = app_layout_ns;
+        sample.cpu_scene_ns = scene_ns;
+        sample.cpu_record_ns = record_ns;
+        sample.cpu_submit_present_ns = submit_ns;
+        sample.cpu_present_slop_ns = present_slop_ns;
+        sample.slop_ns = slop_after;
+        sample.cpu_compute_ns = try perf.computeNs(&sample);
+        try recorder.append(sample);
+
+        if (present_feedback_live) {
+            if (!try pollPerfPresentFeedback(
+                gw,
+                &feedback_queue,
+                feedback_buffer[0..],
+                recorder,
+                total_frames,
+                &next_present_frame_id,
+                present_id_base,
+            )) {
+                present_feedback_live = false;
+            }
+        }
+        tracy.frameMark(null);
+    }
+
+    if (present_feedback_live) {
+        const drain_start = perfNow(resources.io);
+        while (next_present_frame_id < @as(u64, total_frames)) {
+            try rejectPerfEvents();
+            if (!try pollPerfPresentFeedback(
+                gw,
+                &feedback_queue,
+                feedback_buffer[0..],
+                recorder,
+                total_frames,
+                &next_present_frame_id,
+                present_id_base,
+            )) {
+                present_feedback_live = false;
+                break;
+            }
+            if (try perfElapsed(drain_start, perfNow(resources.io)) >= 5_000_000_000) {
+                return error.MissingFrameMetric;
+            }
+            sdl3.timer.delayMilliseconds(1);
+        }
+    }
+    if (!present_feedback_live) {
+        try recorder.markPresentTimingUnavailable();
+    } else if (feedback_queue.count != 0) {
+        return error.MissingFrameMetric;
+    }
+
+    if (submitted_gpu_work) {
+        try resources.gpu.waitIdle();
+        gpu_work_waited = true;
+    }
+    if (comptime v7_options.gpu_timestamps) {
+        const query_set = timestamp_queries orelse return error.GpuTimestampUnavailable;
+        while (recorder.next_gpu_frame_id < @as(u64, total_frames)) {
+            try attachGpuQueries(resources.gpu, query_set, recorder, recorder.next_gpu_frame_id);
+        }
+    }
+    return .{ .present_feedback = recorder.presentation_timing_supported, .refresh_hz = refresh_hz };
+}
+
 pub fn runShot(
     comptime T: type,
     app: *App,
@@ -2321,4 +3495,73 @@ pub fn runShot(
     // Convert Oklab floats → sRGB bytes and write the PPM.
     const pixels: [*]const f32 = @ptrCast(@alignCast(readback.cpu));
     try writePpm(gpa, io, path, pixels, surface_size.width, surface_size.height);
+}
+
+test "perf slot run options accept only fixed render defaults" {
+    const config: perf.Config = .{
+        .mode = .offscreen,
+        .warmup_frames = 1,
+        .sample_frames = 1,
+        .output_path = "/tmp/nogui-perf.jsonl",
+    };
+    _ = try (RunOptions{ .perf = config }).validate();
+    try std.testing.expectError(
+        error.PerfOptionConflict,
+        (RunOptions{ .subpixel = true, .perf = config }).validate(),
+    );
+    try std.testing.expectError(
+        error.PerfOptionConflict,
+        (RunOptions{ .quad_debug = true, .perf = config }).validate(),
+    );
+    try std.testing.expectError(
+        error.PerfOptionConflict,
+        (RunOptions{ .bgr_order = true, .perf = config }).validate(),
+    );
+    try std.testing.expectError(
+        error.PerfOptionConflict,
+        (RunOptions{ .damp_chroma = false, .perf = config }).validate(),
+    );
+    try std.testing.expectError(
+        error.PerfOptionConflict,
+        (RunOptions{ .gpu_sort_verify = true, .perf = config }).validate(),
+    );
+    try std.testing.expectError(
+        error.PerfOptionConflict,
+        (RunOptions{ .max_frames = 1, .perf = config }).validate(),
+    );
+    try std.testing.expectError(
+        error.PerfOptionConflict,
+        (RunOptions{ .audio_tracks = &.{}, .perf = config }).validate(),
+    );
+}
+
+test "perf feedback queue reserves preflight ID and preserves gaps" {
+    var queue = PerfFeedbackQueue{};
+    const preflight = [_]noapi.PresentFeedback{
+        .{ .present_id = 1, .actual_present_ns = 10 },
+    };
+    try std.testing.expectError(error.InvalidPresentationId, queue.push(preflight[0..], 2, 2));
+    try std.testing.expectEqual(@as(usize, 0), queue.count);
+
+    const gap = [_]noapi.PresentFeedback{
+        .{ .present_id = 3, .actual_present_ns = 30 },
+    };
+    try queue.push(gap[0..], 2, 2);
+    try std.testing.expectEqual(@as(usize, 1), queue.count);
+
+    var recorder = try perf.Recorder.init(std.testing.allocator, 2);
+    defer recorder.deinit();
+    recorder.setMode(.presented);
+    var first = perf.FrameSample.empty(.sample, 0);
+    first.cpu_acquire_ns = 0;
+    first.cpu_present_slop_ns = 0;
+    try recorder.append(first);
+    var second = perf.FrameSample.empty(.sample, 1);
+    second.cpu_acquire_ns = 0;
+    second.cpu_present_slop_ns = 0;
+    try recorder.append(second);
+    var next_frame_id: u64 = 0;
+    try queue.attachReady(&recorder, &next_frame_id, 2);
+    try std.testing.expectEqual(@as(u64, 0), next_frame_id);
+    try std.testing.expectEqual(@as(usize, 1), queue.count);
 }

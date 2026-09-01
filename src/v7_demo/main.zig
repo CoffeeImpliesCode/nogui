@@ -230,70 +230,35 @@ pub fn main(init: std.process.Init) !void {
                 ui.TestStrokesApp,
                 &app,
                 &strokes,
-                false,
-                false,
-                false,
-                true,
-                false,
-                null,
-                null,
-                config,
+                .{ .perf = config },
             );
         } else if (tiger_mode) {
             try window_backend.run(
                 ui.TigerApp,
                 &app,
                 &tiger,
-                false,
-                false,
-                false,
-                true,
-                false,
-                null,
-                null,
-                config,
+                .{ .perf = config },
             );
         } else if (spotify_mode) {
             try window_backend.run(
                 spotify_ui.SpotifyApp,
                 &app,
                 &spotify,
-                false,
-                false,
-                false,
-                true,
-                false,
-                null,
-                null,
-                config,
+                .{ .perf = config },
             );
         } else if (calc_mode) {
             try window_backend.run(
                 calculator_ui.CalculatorApp,
                 &app,
                 &calc,
-                false,
-                false,
-                false,
-                true,
-                false,
-                null,
-                null,
-                config,
+                .{ .perf = config },
             );
         } else {
             try window_backend.run(
                 ui.TodoApp,
                 &app,
                 &todo,
-                false,
-                false,
-                false,
-                true,
-                false,
-                null,
-                null,
-                config,
+                .{ .perf = config },
             );
         }
         return;
@@ -308,14 +273,13 @@ pub fn main(init: std.process.Init) !void {
             ui.TodoApp,
             &app,
             &todo,
-            subpixel,
-            quad_debug,
-            bgr,
-            damp,
-            gpu_sort_verify,
-            null,
-            null,
-            null,
+            .{
+                .subpixel = subpixel,
+                .quad_debug = quad_debug,
+                .bgr_order = bgr,
+                .damp_chroma = damp,
+                .gpu_sort_verify = gpu_sort_verify,
+            },
         ) catch |e| {
             std.log.err("gpu-remount-smoke failed: {s}", .{@errorName(e)});
             return e;
@@ -388,14 +352,14 @@ pub fn main(init: std.process.Init) !void {
                 ui.TestStrokesApp,
                 &app,
                 &strokes,
-                subpixel,
-                quad_debug,
-                bgr,
-                damp,
-                gpu_sort_verify,
-                n,
-                null,
-                null,
+                .{
+                    .subpixel = subpixel,
+                    .quad_debug = quad_debug,
+                    .bgr_order = bgr,
+                    .damp_chroma = damp,
+                    .gpu_sort_verify = gpu_sort_verify,
+                    .max_frames = n,
+                },
             ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
@@ -424,14 +388,13 @@ pub fn main(init: std.process.Init) !void {
             ui.TestStrokesApp,
             &app,
             &strokes,
-            subpixel,
-            quad_debug,
-            bgr,
-            damp,
-            gpu_sort_verify,
-            null,
-            null,
-            null,
+            .{
+                .subpixel = subpixel,
+                .quad_debug = quad_debug,
+                .bgr_order = bgr,
+                .damp_chroma = damp,
+                .gpu_sort_verify = gpu_sort_verify,
+            },
         );
         return;
     }
@@ -443,14 +406,14 @@ pub fn main(init: std.process.Init) !void {
                 ui.TigerApp,
                 &app,
                 &tiger,
-                subpixel,
-                quad_debug,
-                bgr,
-                damp,
-                gpu_sort_verify,
-                n,
-                null,
-                null,
+                .{
+                    .subpixel = subpixel,
+                    .quad_debug = quad_debug,
+                    .bgr_order = bgr,
+                    .damp_chroma = damp,
+                    .gpu_sort_verify = gpu_sort_verify,
+                    .max_frames = n,
+                },
             ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
@@ -479,14 +442,13 @@ pub fn main(init: std.process.Init) !void {
             ui.TigerApp,
             &app,
             &tiger,
-            subpixel,
-            quad_debug,
-            bgr,
-            damp,
-            gpu_sort_verify,
-            null,
-            null,
-            null,
+            .{
+                .subpixel = subpixel,
+                .quad_debug = quad_debug,
+                .bgr_order = bgr,
+                .damp_chroma = damp,
+                .gpu_sort_verify = gpu_sort_verify,
+            },
         );
         return;
     }
@@ -546,14 +508,14 @@ pub fn main(init: std.process.Init) !void {
                 spotify_ui.SpotifyApp,
                 &app,
                 &spotify,
-                subpixel,
-                quad_debug,
-                bgr,
-                damp,
-                gpu_sort_verify,
-                null,
-                audio_tracks,
-                null,
+                .{
+                    .subpixel = subpixel,
+                    .quad_debug = quad_debug,
+                    .bgr_order = bgr,
+                    .damp_chroma = damp,
+                    .gpu_sort_verify = gpu_sort_verify,
+                    .audio_tracks = audio_tracks,
+                },
             );
             return;
         }
@@ -562,14 +524,14 @@ pub fn main(init: std.process.Init) !void {
                 spotify_ui.SpotifyApp,
                 &app,
                 &spotify,
-                subpixel,
-                quad_debug,
-                bgr,
-                damp,
-                gpu_sort_verify,
-                n,
-                null,
-                null,
+                .{
+                    .subpixel = subpixel,
+                    .quad_debug = quad_debug,
+                    .bgr_order = bgr,
+                    .damp_chroma = damp,
+                    .gpu_sort_verify = gpu_sort_verify,
+                    .max_frames = n,
+                },
             ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
@@ -602,14 +564,14 @@ pub fn main(init: std.process.Init) !void {
                 calculator_ui.CalculatorApp,
                 &app,
                 &calc,
-                subpixel,
-                quad_debug,
-                bgr,
-                damp,
-                gpu_sort_verify,
-                n,
-                null,
-                null,
+                .{
+                    .subpixel = subpixel,
+                    .quad_debug = quad_debug,
+                    .bgr_order = bgr,
+                    .damp_chroma = damp,
+                    .gpu_sort_verify = gpu_sort_verify,
+                    .max_frames = n,
+                },
             ) catch |e| {
                 std.log.err("run failed: {s}", .{@errorName(e)});
                 return e;
@@ -638,20 +600,30 @@ pub fn main(init: std.process.Init) !void {
             calculator_ui.CalculatorApp,
             &app,
             &calc,
-            subpixel,
-            quad_debug,
-            bgr,
-            damp,
-            gpu_sort_verify,
-            null,
-            null,
-            null,
+            .{
+                .subpixel = subpixel,
+                .quad_debug = quad_debug,
+                .bgr_order = bgr,
+                .damp_chroma = damp,
+                .gpu_sort_verify = gpu_sort_verify,
+            },
         );
         return;
     }
 
     if (window_mode) {
-        try window_backend.run(ui.TodoApp, &app, &todo, subpixel, quad_debug, bgr, damp, gpu_sort_verify, null, null, null);
+        try window_backend.run(
+            ui.TodoApp,
+            &app,
+            &todo,
+            .{
+                .subpixel = subpixel,
+                .quad_debug = quad_debug,
+                .bgr_order = bgr,
+                .damp_chroma = damp,
+                .gpu_sort_verify = gpu_sort_verify,
+            },
+        );
         return;
     }
 
@@ -660,14 +632,14 @@ pub fn main(init: std.process.Init) !void {
             ui.TodoApp,
             &app,
             &todo,
-            subpixel,
-            quad_debug,
-            bgr,
-            damp,
-            gpu_sort_verify,
-            n,
-            null,
-            null,
+            .{
+                .subpixel = subpixel,
+                .quad_debug = quad_debug,
+                .bgr_order = bgr,
+                .damp_chroma = damp,
+                .gpu_sort_verify = gpu_sort_verify,
+                .max_frames = n,
+            },
         ) catch |e| {
             std.log.err("run failed: {s}", .{@errorName(e)});
             return e;
