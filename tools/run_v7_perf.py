@@ -27,7 +27,19 @@ TRACY_HOST = "127.0.0.1"
 PERF_WIDTH = 954
 PERF_HEIGHT = 1044
 PERF_PRESENT_MODE = "fifo"
-CALIBRATION_FRAMES = 2_400
+PERF_CHILD_TIMEOUT_S = 1_800.0
+PERF_TRACY_EXPORT_TIMEOUT_S = 120.0
+CALIBRATION_STABILITY_RULE = {
+    "window_frames": 120,
+    "window_count": 3,
+    "first_boundary": 600,
+    "last_boundary": 2160,
+    "boundary_step": 120,
+    "maximum_spread_basis_points": 1200,
+    "guard_frames": 240,
+    "frame_cap": 2400,
+}
+CALIBRATION_FRAMES = CALIBRATION_STABILITY_RULE["frame_cap"]
 QUALIFICATION_BLOCKS = 300
 QUALIFICATION_FRAMES = 1_000
 SHADER_FILES = (
@@ -319,10 +331,21 @@ def _validate_shader_hashes(value: Any, name: str = "shader_hashes") -> dict[str
     return {shader: _require_sha256(hashes[shader], f"{name}.{shader}") for shader in SHADER_FILES}
 
 
+def _validate_stability_rule(value: Any) -> dict[str, int]:
+    rule = _require_object(value, "stability rule")
+    if set(rule) != set(CALIBRATION_STABILITY_RULE):
+        raise ProtocolError("warm-up stability rule does not match canonical rule")
+    for name, expected in CALIBRATION_STABILITY_RULE.items():
+        actual = rule[name]
+        if isinstance(actual, bool) or not isinstance(actual, int) or actual != expected:
+            raise ProtocolError("warm-up stability rule does not match canonical rule")
+    return dict(CALIBRATION_STABILITY_RULE)
+
+
 def _validate_warmup_rule(value: Any) -> dict[str, Any]:
     rule = _require_object(value, "warmup_rule")
     frames = _require_u64(rule.get("frames"), "warmup_rule.frames")
-    if frames > CALIBRATION_FRAMES:
+    if frames > CALIBRATION_STABILITY_RULE["frame_cap"]:
         raise ProtocolError("warmup_rule.frames exceeds calibration limit")
     if frames == 0:
         if rule.get("kind") != "calibration":
@@ -722,39 +745,110 @@ def _median(values: list[int]) -> int:
     return (lower + upper) // 2
 
 
-def _stable_triplet(values: Sequence[int], boundary: int) -> bool:
-    if boundary < 360 or boundary > 2_160 or boundary % 120 != 0:
+def _calibration_boundaries() -> tuple[int, ...]:
+    return tuple(range(
+        CALIBRATION_STABILITY_RULE["first_boundary"],
+        CALIBRATION_STABILITY_RULE["last_boundary"]
+        + CALIBRATION_STABILITY_RULE["boundary_step"],
+        CALIBRATION_STABILITY_RULE["boundary_step"],
+    ))
+
+
+def _triplet_medians(values: Sequence[int], boundary: int) -> list[int]:
+    window_frames = CALIBRATION_STABILITY_RULE["window_frames"]
+    window_count = CALIBRATION_STABILITY_RULE["window_count"]
+    minimum_boundary = window_frames * window_count
+    if boundary < minimum_boundary:
         raise ProtocolError("stability boundary is outside the calibration range")
-    medians = [
-        _median(list(values[boundary - 360 : boundary - 240])),
-        _median(list(values[boundary - 240 : boundary - 120])),
-        _median(list(values[boundary - 120 : boundary])),
+    if boundary > CALIBRATION_STABILITY_RULE["last_boundary"]:
+        raise ProtocolError("stability boundary is outside the calibration range")
+    if boundary % CALIBRATION_STABILITY_RULE["boundary_step"] != 0:
+        raise ProtocolError("stability boundary is outside the calibration range")
+    return [
+        _median(list(values[
+            boundary - window_frames * (window_count - index) :
+            boundary - window_frames * (window_count - index - 1)
+        ]))
+        for index in range(window_count)
     ]
+
+
+def _triplet_spread_basis_points(medians: Sequence[int]) -> int | None:
+    minimum = min(medians)
+    maximum = max(medians)
+    if minimum == 0:
+        return 0 if maximum == 0 else None
+    return (maximum - minimum) * 10_000 // minimum
+
+
+def _triplet_is_stable(medians: Sequence[int]) -> bool:
     minimum = min(medians)
     maximum = max(medians)
     if minimum == 0:
         return maximum == 0
-    return (maximum - minimum) * 100 <= minimum * 2
+    return (
+        (maximum - minimum) * 10_000
+        <= minimum * CALIBRATION_STABILITY_RULE["maximum_spread_basis_points"]
+    )
+
+
+def _stable_triplet(values: Sequence[int], boundary: int) -> bool:
+    return _triplet_is_stable(_triplet_medians(values, boundary))
+
+
+def calibration_stability_audit(
+    cpu_values: Sequence[int],
+    gpu_values: Sequence[int] | None = None,
+) -> list[dict[str, Any]]:
+    frame_cap = CALIBRATION_STABILITY_RULE["frame_cap"]
+    if len(cpu_values) != frame_cap:
+        raise ProtocolError(f"calibration requires exactly {frame_cap:,} diagnostic frames")
+    if gpu_values is not None and len(gpu_values) != frame_cap:
+        raise ProtocolError(f"GPU calibration requires exactly {frame_cap:,} diagnostic frames")
+    audit: list[dict[str, Any]] = []
+    for boundary in _calibration_boundaries():
+        cpu_medians = _triplet_medians(cpu_values, boundary)
+        gpu_medians = (
+            _triplet_medians(gpu_values, boundary)
+            if gpu_values is not None
+            else None
+        )
+        cpu_spread = _triplet_spread_basis_points(cpu_medians)
+        gpu_spread = (
+            _triplet_spread_basis_points(gpu_medians)
+            if gpu_medians is not None
+            else None
+        )
+        cpu_stable = _triplet_is_stable(cpu_medians)
+        gpu_stable = gpu_medians is None or _triplet_is_stable(gpu_medians)
+        audit.append({
+            "boundary": boundary,
+            "cpu_spread_basis_points": cpu_spread,
+            "gpu_spread_basis_points": gpu_spread,
+            "stable": cpu_stable and gpu_stable,
+        })
+    return audit
 
 
 def sustained_stable_boundary(
     cpu_values: Sequence[int],
     gpu_values: Sequence[int] | None = None,
 ) -> int:
-    if len(cpu_values) != CALIBRATION_FRAMES:
-        raise ProtocolError("calibration requires exactly 2,400 diagnostic frames")
-    if gpu_values is not None and len(gpu_values) != CALIBRATION_FRAMES:
-        raise ProtocolError("GPU calibration requires exactly 2,400 diagnostic frames")
-    boundaries = tuple(range(600, 2_161, 120))
-    stable: list[bool] = []
-    for boundary in boundaries:
-        cpu_stable = _stable_triplet(cpu_values, boundary)
-        gpu_stable = gpu_values is None or _stable_triplet(gpu_values, boundary)
-        stable.append(cpu_stable and gpu_stable)
-    for index, boundary in enumerate(boundaries):
-        if all(stable[index:]):
-            return boundary
+    audit = calibration_stability_audit(cpu_values, gpu_values)
+    for index, observation in enumerate(audit):
+        if all(item["stable"] for item in audit[index:]):
+            return int(observation["boundary"])
     raise ProtocolError("no sustained stable calibration boundary")
+def sustained_boundary_or_none(
+    cpu_values: Sequence[int],
+    gpu_values: Sequence[int] | None = None,
+) -> int | None:
+    try:
+        return sustained_stable_boundary(cpu_values, gpu_values)
+    except ProtocolError as exc:
+        if str(exc) != "no sustained stable calibration boundary":
+            raise
+        return None
 
 
 def select_warmup_frames(boundaries: Sequence[int]) -> int:
@@ -763,7 +857,22 @@ def select_warmup_frames(boundaries: Sequence[int]) -> int:
     latest = max(boundaries)
     if latest < 0:
         raise ProtocolError("stable boundary must be non-negative")
-    return min(latest + 240, 2_400)
+    return min(
+        latest + CALIBRATION_STABILITY_RULE["guard_frames"],
+        CALIBRATION_STABILITY_RULE["frame_cap"],
+    )
+
+
+def select_calibration_warmup(
+    boundaries: Sequence[int | None],
+) -> tuple[int, str]:
+    if not boundaries:
+        raise ProtocolError("at least one calibration boundary is required")
+    if any(boundary is None for boundary in boundaries):
+        return CALIBRATION_STABILITY_RULE["frame_cap"], "capped_unstable"
+    stable_boundaries = [boundary for boundary in boundaries if boundary is not None]
+    return select_warmup_frames(stable_boundaries), "sustained"
+
 
 
 def calibration_scenes(scene: str | None) -> tuple[tuple[str, ...], bool]:
@@ -1773,6 +1882,60 @@ def _snapshot_manifest(
     _immutable_json(manifest_path, manifest)
     return _load_snapshot(manifest_path)
 
+def _validate_stability_audit(
+    value: Any,
+    scene: str,
+) -> list[dict[str, Any]]:
+    audit_value = value
+    if not isinstance(audit_value, list):
+        raise ProtocolError(f"diagnostics.{scene}.stability audit must be a JSON array")
+    expected_boundaries = _calibration_boundaries()
+    if len(audit_value) != len(expected_boundaries):
+        raise ProtocolError(f"diagnostics.{scene}.stability audit has an invalid length")
+    audit: list[dict[str, Any]] = []
+    for expected_boundary, value_at_boundary in zip(expected_boundaries, audit_value):
+        entry = _require_object(
+            value_at_boundary,
+            f"diagnostics.{scene}.stability audit entry",
+        )
+        expected_keys = {
+            "boundary",
+            "cpu_spread_basis_points",
+            "gpu_spread_basis_points",
+            "stable",
+        }
+        if set(entry) != expected_keys:
+            raise ProtocolError(f"diagnostics.{scene}.stability audit has unexpected keys")
+        boundary = _require_u64(
+            entry["boundary"],
+            f"diagnostics.{scene}.stability audit boundary",
+        )
+        if boundary != expected_boundary:
+            raise ProtocolError(f"diagnostics.{scene}.stability audit boundary mismatch")
+        cpu_spread = entry["cpu_spread_basis_points"]
+        if cpu_spread is not None:
+            cpu_spread = _require_u64(
+                cpu_spread,
+                f"diagnostics.{scene}.stability audit CPU spread",
+            )
+        gpu_spread = entry["gpu_spread_basis_points"]
+        if gpu_spread is not None:
+            gpu_spread = _require_u64(
+                gpu_spread,
+                f"diagnostics.{scene}.stability audit GPU spread",
+            )
+        stable = _require_bool(
+            entry["stable"],
+            f"diagnostics.{scene}.stability audit stable",
+        )
+        audit.append({
+            "boundary": boundary,
+            "cpu_spread_basis_points": cpu_spread,
+            "gpu_spread_basis_points": gpu_spread,
+            "stable": stable,
+        })
+    return audit
+
 
 def _load_warmup(path: str | Path) -> dict[str, Any]:
     manifest_path = Path(path)
@@ -1783,14 +1946,20 @@ def _load_warmup(path: str | Path) -> dict[str, Any]:
         raise ProtocolError("unsupported warm-up manifest schema_version")
     if manifest.get("acceptance") is not True:
         raise ProtocolError("warm-up manifest is not an acceptance calibration")
+    stability_rule = _validate_stability_rule(manifest.get("stability_rule"))
+    manifest["stability_rule"] = stability_rule
+    stability_status = manifest.get("stability_status")
+    if stability_status not in ("sustained", "capped_unstable"):
+        raise ProtocolError("warm-up stability status is invalid")
+    manifest["stability_status"] = stability_status
     mode = manifest.get("mode")
     if mode not in ("offscreen", "presented"):
         raise ProtocolError("warm-up manifest mode is invalid")
     diagnostic_frames = _require_u64(manifest.get("diagnostic_frames"), "diagnostic_frames")
-    if diagnostic_frames != CALIBRATION_FRAMES:
+    if diagnostic_frames != CALIBRATION_STABILITY_RULE["frame_cap"]:
         raise ProtocolError("warm-up manifest requires exactly 2,400 diagnostic frames")
     warmup_frames = _require_u64(manifest.get("warmup_frames"), "warmup_frames")
-    if warmup_frames == 0 or warmup_frames > CALIBRATION_FRAMES:
+    if warmup_frames == 0 or warmup_frames > CALIBRATION_STABILITY_RULE["frame_cap"]:
         raise ProtocolError("warmup_frames must be between one and 2,400")
     seed = _require_u64(manifest.get("seed"), "warm-up seed")
     diagnostics = _require_object(manifest.get("diagnostics"), "diagnostics")
@@ -1798,7 +1967,8 @@ def _load_warmup(path: str | Path) -> dict[str, Any]:
         raise ProtocolError("warm-up diagnostics must cover all five scenes")
     hashes = _require_object(manifest.get("diagnostic_hashes"), "diagnostic_hashes")
     expected_hashes: dict[str, str] = {}
-    expected_boundaries: list[int] = []
+    expected_boundaries: list[int | None] = []
+    expected_audits: dict[str, list[dict[str, Any]]] = {}
     expected_orders: dict[str, list[str]] = {}
     diagnostic_blocks: dict[tuple[str, str], Path] = {}
     for scene in SCENES:
@@ -1807,8 +1977,15 @@ def _load_warmup(path: str | Path) -> dict[str, Any]:
         if set(order) != {"clean", "gpu"} or len(order) != 2:
             raise ProtocolError(f"diagnostics.{scene}.order must contain clean and gpu")
         expected_orders[scene] = order
+        boundary_value = diagnostic.get("boundary")
         expected_boundaries.append(
-            _require_u64(diagnostic.get("boundary"), f"diagnostics.{scene}.boundary")
+            None
+            if boundary_value is None
+            else _require_u64(boundary_value, f"diagnostics.{scene}.boundary")
+        )
+        expected_audits[scene] = _validate_stability_audit(
+            diagnostic.get("stability"),
+            scene,
         )
         for profile in ("clean", "gpu"):
             descriptor = _require_object(
@@ -1846,7 +2023,7 @@ def _load_warmup(path: str | Path) -> dict[str, Any]:
         )
     if declared_hashes != expected_hashes:
         raise ProtocolError("warm-up diagnostic hash manifest does not match descriptors")
-    actual_boundaries: list[int] = []
+    actual_boundaries: list[int | None] = []
     parsed_blocks: dict[tuple[str, str], ProcessBlock] = {}
     common_machine: dict[str, Any] | None = None
     for scene in SCENES:
@@ -1887,16 +2064,25 @@ def _load_warmup(path: str | Path) -> dict[str, Any]:
     for scene in SCENES:
         clean_block = parsed_blocks[(scene, "clean")]
         gpu_block = parsed_blocks[(scene, "gpu")]
-        actual_boundaries.append(
-            sustained_stable_boundary(
-                _sample_values(clean_block, "cpu_compute_ns"),
-                _sample_values(gpu_block, "gpu_execute_ns"),
-            )
-        )
+        cpu_values = _sample_values(clean_block, "cpu_compute_ns")
+        gpu_values = _sample_values(gpu_block, "gpu_execute_ns")
+        actual_audit = calibration_stability_audit(cpu_values, gpu_values)
+        if actual_audit != expected_audits[scene]:
+            raise ProtocolError(f"warm-up stability audit mismatch: {scene}")
+        actual_boundaries.append(sustained_boundary_or_none(cpu_values, gpu_values))
     if actual_boundaries != expected_boundaries:
         raise ProtocolError("warm-up diagnostic boundary mismatch")
-    if select_warmup_frames(actual_boundaries) != warmup_frames:
-        raise ProtocolError("warm-up frame selection does not match diagnostics")
+    if any(boundary is None for boundary in actual_boundaries):
+        if stability_status != "capped_unstable":
+            raise ProtocolError("warm-up stability status does not match diagnostics")
+        if warmup_frames != CALIBRATION_STABILITY_RULE["frame_cap"]:
+            raise ProtocolError("capped unstable warm-up must use the diagnostic frame cap")
+    else:
+        if stability_status != "sustained":
+            raise ProtocolError("warm-up stability status does not match diagnostics")
+        stable_boundaries = [boundary for boundary in actual_boundaries if boundary is not None]
+        if select_warmup_frames(stable_boundaries) != warmup_frames:
+            raise ProtocolError("warm-up frame selection does not match diagnostics")
     return manifest
 
 
@@ -1988,6 +2174,7 @@ def _run_demo_block(
             raise ProtocolError("artifact variant is not a safe path component")
         label += f"-{artifact_variant}"
     out.mkdir(parents=True, exist_ok=True)
+    (out / "raw").mkdir(parents=True, exist_ok=True)
     final_path = out / "raw" / f"{scene}-{profile}-{mode}-{label}.jsonl"
     launch_path = final_path.with_name(final_path.name + ".partial")
     writing_path = final_path.with_name(final_path.name + ".writing")
@@ -2022,8 +2209,8 @@ def _run_demo_block(
                 trace_path=trace_path,
                 csv_path=csv_path,
                 sample_roots=sample_frames,
-                process_timeout_s=600.0,
-                export_timeout_s=120.0,
+                process_timeout_s=PERF_CHILD_TIMEOUT_S,
+                export_timeout_s=PERF_TRACY_EXPORT_TIMEOUT_S,
                 requested_affinity=expected_affinity,
                 runner=runner,
                 publish=False,
@@ -2042,7 +2229,7 @@ def _run_demo_block(
         else:
             run_checked(
                 argv,
-                timeout_s=600.0,
+                timeout_s=PERF_CHILD_TIMEOUT_S,
                 runner=runner,
                 affinity=expected_affinity,
             )
@@ -2235,6 +2422,7 @@ def _build_parser() -> argparse.ArgumentParser:
     matrix.add_argument("--report", type=Path, required=True)
     matrix.add_argument("--out", type=Path, required=True)
     matrix.add_argument("--mode", choices=("offscreen", "presented"), default="offscreen")
+    matrix.add_argument("--affinity", type=parse_cpu_list)
     pair = subparsers.add_parser("pair")
     for profile in PAIR_PROFILES:
         pair.add_argument(f"--baseline-{profile}-manifest", type=Path, required=True)
@@ -2265,13 +2453,28 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_cpu_list(value: str) -> list[int]:
     values: list[int] = []
     for token in value.split(","):
-        try:
-            cpu = int(token, 10)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError("affinity must contain integers") from exc
-        if cpu < 0:
-            raise argparse.ArgumentTypeError("affinity must be non-negative")
-        values.append(cpu)
+        if "-" in token:
+            parts = token.split("-")
+            if len(parts) != 2 or not all(parts):
+                raise argparse.ArgumentTypeError("affinity must contain integers")
+            try:
+                start = int(parts[0], 10)
+                end = int(parts[1], 10)
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError("affinity must contain integers") from exc
+            if start < 0 or end < 0:
+                raise argparse.ArgumentTypeError("affinity must be non-negative")
+            if end < start:
+                raise argparse.ArgumentTypeError("affinity ranges must be ascending")
+            values.extend(range(start, end + 1))
+        else:
+            try:
+                cpu = int(token, 10)
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError("affinity must contain integers") from exc
+            if cpu < 0:
+                raise argparse.ArgumentTypeError("affinity must be non-negative")
+            values.append(cpu)
     if values != sorted(set(values)):
         raise argparse.ArgumentTypeError("affinity must be sorted and unique")
     return values
@@ -2393,7 +2596,7 @@ def _run_calibrate_command(args: argparse.Namespace) -> int:
     )
     calibration_rule = {"frames": 0, "kind": "calibration"}
     diagnostics: dict[str, Any] = {}
-    boundaries: list[int] = []
+    boundaries: list[int | None] = []
     snapshots = {"clean": clean, "gpu": gpu}
     for scene, order in zip(scenes, orders):
         blocks: dict[str, ProcessBlock] = {}
@@ -2411,18 +2614,19 @@ def _run_calibrate_command(args: argparse.Namespace) -> int:
                 expected_identity=reference_machine,
                 warmup_rule=calibration_rule,
             )
-        boundary = sustained_stable_boundary(
-            _sample_values(blocks["clean"], "cpu_compute_ns"),
-            _sample_values(blocks["gpu"], "gpu_execute_ns"),
-        )
+        cpu_values = _sample_values(blocks["clean"], "cpu_compute_ns")
+        gpu_values = _sample_values(blocks["gpu"], "gpu_execute_ns")
+        stability = calibration_stability_audit(cpu_values, gpu_values)
+        boundary = sustained_boundary_or_none(cpu_values, gpu_values)
         boundaries.append(boundary)
         diagnostics[scene] = {
             "order": list(order),
             "clean": _diagnostic_descriptor(blocks["clean"], args.out),
             "gpu": _diagnostic_descriptor(blocks["gpu"], args.out),
             "boundary": boundary,
+            "stability": stability,
         }
-    warmup_frames = select_warmup_frames(boundaries)
+    warmup_frames, stability_status = select_calibration_warmup(boundaries)
     diagnostic_hashes = {
         descriptor["path"]: descriptor["sha256"]
         for diagnostic in diagnostics.values()
@@ -2436,6 +2640,8 @@ def _run_calibrate_command(args: argparse.Namespace) -> int:
         "acceptance": acceptance,
         "mode": args.mode,
         "diagnostics": diagnostics,
+        "stability_rule": dict(CALIBRATION_STABILITY_RULE),
+        "stability_status": stability_status,
         "diagnostic_hashes": diagnostic_hashes,
     }
     _immutable_json(args.out / "warmup.json", warmup)
@@ -2515,6 +2721,8 @@ def _run_matrix_command(args: argparse.Namespace) -> int:
         "frames": args.frames,
         "warmup_frames": warmup["warmup_frames"],
         "warmup_manifest_sha256": warmup_rule["manifest_sha256"],
+        "stability_rule": dict(warmup["stability_rule"]),
+        "stability_status": warmup["stability_status"],
         "scenes": list(SCENES),
         "summaries": summaries,
     }

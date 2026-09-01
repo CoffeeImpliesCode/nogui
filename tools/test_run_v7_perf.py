@@ -20,6 +20,17 @@ HASH_A = "a" * 64
 HASH_B = "b" * 64
 HASH_C = "c" * 64
 
+TEST_STABILITY_RULE = {
+    "window_frames": 120,
+    "window_count": 3,
+    "first_boundary": 600,
+    "last_boundary": 2160,
+    "boundary_step": 120,
+    "maximum_spread_basis_points": 1200,
+    "guard_frames": 240,
+    "frame_cap": 2400,
+}
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -162,6 +173,20 @@ def write_warmup_manifest(root: Path, *, warmup_frames: int = 840) -> Path:
         scene_diagnostics: dict[str, object] = {
             "order": order,
             "boundary": 600,
+            "stability": [
+                {
+                    "boundary": boundary,
+                    "cpu_spread_basis_points": 0,
+                    "gpu_spread_basis_points": 0,
+                    "stable": True,
+                }
+                for boundary in range(
+                    perf.CALIBRATION_STABILITY_RULE["first_boundary"],
+                    perf.CALIBRATION_STABILITY_RULE["last_boundary"]
+                    + perf.CALIBRATION_STABILITY_RULE["boundary_step"],
+                    perf.CALIBRATION_STABILITY_RULE["boundary_step"],
+                )
+            ],
         }
         for profile in ("clean", "gpu"):
             path = raw / f"{scene}-{profile}.jsonl"
@@ -201,6 +226,8 @@ def write_warmup_manifest(root: Path, *, warmup_frames: int = 840) -> Path:
         "diagnostics": diagnostics,
         "mode": "offscreen",
         "diagnostic_hashes": hashes,
+        "stability_rule": dict(TEST_STABILITY_RULE),
+        "stability_status": "sustained",
     }
     path = root / "warmup.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -681,6 +708,130 @@ class ProtocolReviewRegressionTests(unittest.TestCase):
         )
         self.snapshot = perf._load_snapshot(self.snapshot_path)
 
+    def test_calibration_accepts_twelve_percent(self) -> None:
+        below = [1000] * 120 + [1050] * 120 + [1119] * 120
+        at_limit = [1000] * 120 + [1050] * 120 + [1120] * 120
+        above = [1000] * 120 + [1050] * 120 + [1121] * 120
+        all_zero = [0] * 360
+        mixed_zero = [0] * 240 + [1] * 120
+
+        self.assertTrue(perf._stable_triplet(below, 360))
+        self.assertTrue(perf._stable_triplet(at_limit, 360))
+        self.assertFalse(perf._stable_triplet(above, 360))
+        self.assertTrue(perf._stable_triplet(all_zero, 360))
+        self.assertFalse(perf._stable_triplet(mixed_zero, 360))
+
+    def test_calibration_fallback_caps_missing_boundary(self) -> None:
+        self.assertEqual(
+            perf.select_calibration_warmup([600, 720]),
+            (960, "sustained"),
+        )
+        self.assertEqual(
+            perf.select_calibration_warmup([600, None]),
+            (2400, "capped_unstable"),
+        )
+
+    def test_warmup_requires_stability_status_and_audit(self) -> None:
+        missing_status_path = write_warmup_manifest(self.root / "missing-status")
+        missing_status = json.loads(missing_status_path.read_text(encoding="utf-8"))
+        del missing_status["stability_status"]
+        missing_status_path.write_text(json.dumps(missing_status), encoding="utf-8")
+        with self.assertRaisesRegex(perf.ProtocolError, "stability status"):
+            perf._load_warmup(missing_status_path)
+
+        invalid_status_path = write_warmup_manifest(self.root / "invalid-status")
+        invalid_status = json.loads(invalid_status_path.read_text(encoding="utf-8"))
+        invalid_status["stability_status"] = "stable"
+        invalid_status_path.write_text(json.dumps(invalid_status), encoding="utf-8")
+        with self.assertRaisesRegex(perf.ProtocolError, "stability status"):
+            perf._load_warmup(invalid_status_path)
+
+        missing_audit_path = write_warmup_manifest(self.root / "missing-audit")
+        missing_audit = json.loads(missing_audit_path.read_text(encoding="utf-8"))
+        del missing_audit["diagnostics"]["todo"]["stability"]
+        missing_audit_path.write_text(json.dumps(missing_audit), encoding="utf-8")
+        with self.assertRaisesRegex(perf.ProtocolError, "stability audit"):
+            perf._load_warmup(missing_audit_path)
+
+        capped_without_null_path = write_warmup_manifest(self.root / "capped-without-null")
+        capped_without_null = json.loads(
+            capped_without_null_path.read_text(encoding="utf-8")
+        )
+        capped_without_null["stability_status"] = "capped_unstable"
+        capped_without_null["warmup_frames"] = 2400
+        capped_without_null_path.write_text(json.dumps(capped_without_null), encoding="utf-8")
+        with self.assertRaisesRegex(perf.ProtocolError, "stability status"):
+            perf._load_warmup(capped_without_null_path)
+
+        sustained_with_null_path = write_warmup_manifest(self.root / "sustained-with-null")
+        sustained_with_null = json.loads(
+            sustained_with_null_path.read_text(encoding="utf-8")
+        )
+        sustained_with_null["diagnostics"]["todo"]["boundary"] = None
+        sustained_with_null_path.write_text(
+            json.dumps(sustained_with_null),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(perf.ProtocolError, "boundary"):
+            perf._load_warmup(sustained_with_null_path)
+
+    def test_warmup_requires_stability_rule(self) -> None:
+        valid_path = write_warmup_manifest(self.root / "valid-stability-rule")
+        self.assertEqual(
+            perf._load_warmup(valid_path)["stability_rule"],
+            TEST_STABILITY_RULE,
+        )
+
+        missing_path = write_warmup_manifest(self.root / "missing-stability-rule")
+        missing = json.loads(missing_path.read_text(encoding="utf-8"))
+        del missing["stability_rule"]
+        missing_path.write_text(json.dumps(missing), encoding="utf-8")
+        with self.assertRaisesRegex(perf.ProtocolError, "stability rule"):
+            perf._load_warmup(missing_path)
+
+        former_path = write_warmup_manifest(self.root / "former-stability-rule")
+        former = json.loads(former_path.read_text(encoding="utf-8"))
+        former["stability_rule"]["maximum_spread_basis_points"] = 200
+        former_path.write_text(json.dumps(former), encoding="utf-8")
+        with self.assertRaisesRegex(perf.ProtocolError, "stability rule"):
+            perf._load_warmup(former_path)
+
+    def test_matrix_copies_stability_rule(self) -> None:
+        warmup_path = write_warmup_manifest(self.root / "matrix-warmup")
+        output = self.root / "matrix"
+        report_path = output / "report.json"
+        block = valid_block(self.root / "matrix-block")
+        snapshots = {
+            profile: self.snapshot
+            for profile in ("clean", "tracy", "gpu", "mechanism")
+        }
+        args = argparse.Namespace(
+            warmup_from=warmup_path,
+            out=output,
+            blocks=1,
+            seed=7,
+            mode="offscreen",
+            frames=1,
+            report=report_path,
+        )
+        with (
+            mock.patch.object(
+                perf,
+                "_required_snapshot_profiles",
+                return_value=snapshots,
+            ),
+            mock.patch.object(perf, "_run_demo_block", return_value=block),
+        ):
+            self.assertEqual(perf._run_matrix_command(args), 0)
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["stability_rule"], TEST_STABILITY_RULE)
+        self.assertEqual(report["stability_status"], "sustained")
+        self.assertEqual(
+            report["warmup_manifest_sha256"],
+            perf.sha256_file(warmup_path),
+        )
+
     def test_calibration_zero_warmup_summary_ignores_global_frame_zero(self) -> None:
         path = self.root / "calibration.jsonl"
         header = valid_header(sample_count=1)
@@ -807,6 +958,29 @@ class ProtocolReviewRegressionTests(unittest.TestCase):
             warmup_rule=warmup_rule,
         )
         self.assertEqual(block.header["warmup_rule"], warmup_rule)
+
+    def test_child_output_parent_exists_before_launch(self) -> None:
+        child_runner = self._child_runner()
+
+        def runner(argv: list[str], **kwargs: object) -> object:
+            output = Path(argv[argv.index("--perf-out") + 1])
+            self.assertTrue(output.parent.is_dir())
+            return child_runner(argv, **kwargs)
+
+        block = perf._run_demo_block(
+            self.snapshot,
+            scene="todo",
+            mode="offscreen",
+            warmup_frames=0,
+            sample_frames=1,
+            block_id=0,
+            order_position=0,
+            seed=7,
+            out=self.root / "raw-parent",
+            runner=runner,
+            warmup_rule={"frames": 0, "kind": "calibration"},
+        )
+        self.assertEqual(block.path.parent.name, "raw")
 
     def test_raw_paths_are_fresh_and_pair_variants_are_distinct(self) -> None:
         runner = self._child_runner()
@@ -1711,6 +1885,8 @@ class CommandExecutionRegressionTests(unittest.TestCase):
 
     def test_all_handlers_execute_with_fake_children_and_publish_artifacts(self) -> None:
         fake_children: list[tuple[str, str]] = []
+        child_timeouts: list[float] = []
+        tracy_timeouts: list[float] = []
         fake_snapshots: list[perf.Snapshot] = []
         binary_profiles: dict[str, str] = {}
         for snapshot in self.snapshots.values():
@@ -1741,8 +1917,11 @@ class CommandExecutionRegressionTests(unittest.TestCase):
 
         def fake_child_runner(
             argv: list[str],
-            **_: object,
+            **kwargs: object,
         ) -> subprocess.CompletedProcess[str]:
+            timeout = kwargs.get("timeout")
+            if timeout is not None:
+                child_timeouts.append(float(timeout))
             profile = binary_profiles[str(Path(argv[0]))]
             mode = argv[argv.index("--perf-mode") + 1]
             warmup_frames = int(argv[argv.index("--perf-warmup") + 1])
@@ -1784,6 +1963,7 @@ class CommandExecutionRegressionTests(unittest.TestCase):
 
         def fake_tracy(**kwargs: object) -> dict[str, object]:
             demo_argv = list(kwargs["demo_argv"])
+            tracy_timeouts.append(float(kwargs["process_timeout_s"]))
             fake_child_runner(demo_argv)
             trace = Path(kwargs["trace_path"])
             csv_path = Path(kwargs["csv_path"])
@@ -1897,8 +2077,17 @@ class CommandExecutionRegressionTests(unittest.TestCase):
             self.assertTrue(path.is_file(), path)
         for path in self.root.rglob("*"):
             self.assertFalse(path.name.endswith((".partial", ".writing")), path)
+        self.assertTrue(child_timeouts)
+        self.assertEqual(set(child_timeouts), {perf.PERF_CHILD_TIMEOUT_S})
+        self.assertTrue(tracy_timeouts)
+        self.assertEqual(set(tracy_timeouts), {perf.PERF_CHILD_TIMEOUT_S})
 
 class OrderingAndCommandTests(unittest.TestCase):
+    def test_affinity_ranges_expand_sorted_cpu_sets(self) -> None:
+        self.assertEqual(perf.parse_cpu_list("6-7,10"), [6, 7, 10])
+        with self.assertRaises(argparse.ArgumentTypeError):
+            perf.parse_cpu_list("7-6")
+
     def test_matrix_orders_balance_each_observer_against_clean(self) -> None:
         cells = ("clean", "tracy", "gpu", "mechanism")
         orders = perf.balanced_cell_orders(cells, block_count=4, seed=7, control="clean")
@@ -2032,6 +2221,8 @@ class OrderingAndCommandTests(unittest.TestCase):
             ["calibrate", "--frames", "2400", "--seed", "0x10", "--out", "/tmp/c"],
             [
                 "matrix",
+                "--affinity",
+                "6-7",
                 "--warmup-from",
                 "warmup.json",
                 "--blocks",
@@ -2103,6 +2294,7 @@ class CalibrationTests(unittest.TestCase):
         values = [1_000_000] * 2400
         self.assertEqual(perf.sustained_stable_boundary(values), 600)
     def test_calibration_rejects_extra_diagnostics(self) -> None:
+
         with self.assertRaisesRegex(perf.ProtocolError, "exactly"):
             perf.sustained_stable_boundary([1_000_000] * 2401)
         with self.assertRaisesRegex(perf.ProtocolError, "exactly"):
@@ -2110,6 +2302,17 @@ class CalibrationTests(unittest.TestCase):
                 [1_000_000] * 2400,
                 [1_000_000] * 2401,
             )
+    def test_calibration_audit_records_all_boundary_spreads(self) -> None:
+        cpu = [1_000_000] * 2400
+        gpu = [2_000_000] * 2400
+        audit = perf.calibration_stability_audit(cpu, gpu)
+        self.assertEqual(len(audit), 14)
+        self.assertEqual(audit[0], {
+            "boundary": 600,
+            "cpu_spread_basis_points": 0,
+            "gpu_spread_basis_points": 0,
+            "stable": True,
+        })
 
     def test_gpu_metric_must_also_be_sustained_stable(self) -> None:
         cpu = [1_000_000] * 2400

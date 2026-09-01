@@ -1,4 +1,5 @@
 const std = @import("std");
+const v7_options = @import("v7_options");
 
 const counter_count = std.meta.fields(Counter).len;
 
@@ -64,23 +65,33 @@ pub const Snapshot = struct {
 
 pub fn Sink(comptime enabled: bool) type {
     return if (enabled) struct {
-        counters: *Counters,
+        counters: ?*Counters,
 
-        pub fn init(counters: *Counters) @This() {
+        pub fn init(counters: ?*Counters) @This() {
             return .{ .counters = counters };
         }
 
-        pub fn add(self: *@This(), counter: Counter, amount: u64) void {
-            self.counters.add(counter, amount);
+        pub fn add(self: *const @This(), counter: Counter, amount: u64) void {
+            if (self.counters) |counters| counters.add(counter, amount);
+        }
+
+        pub fn pointer(self: *const @This()) ?*Counters {
+            return self.counters;
         }
     } else struct {
-        pub fn init(_: *Counters) @This() {
+        pub fn init(_: ?*Counters) @This() {
             return .{};
         }
 
-        pub fn add(_: *@This(), _: Counter, _: u64) void {}
+        pub fn add(_: *const @This(), _: Counter, _: u64) void {}
+
+        pub fn pointer(_: *const @This()) ?*Counters {
+            return null;
+        }
     };
 }
+
+pub const CounterSink = Sink(v7_options.perf_counters);
 
 comptime {
     std.debug.assert(std.meta.fields(Counter).len == 15);

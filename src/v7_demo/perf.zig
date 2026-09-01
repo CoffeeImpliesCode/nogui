@@ -5,7 +5,7 @@ const perf_counters = struct {
     pub const Counter = nogui.Counter;
     pub const Snapshot = nogui.Snapshot;
 };
-const v7_options = @import("v7_options");
+const v7_options = nogui.options;
 
 pub const Mode = enum {
     offscreen,

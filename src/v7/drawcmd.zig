@@ -95,6 +95,8 @@ const no_clip: u32 = 0xFFFFFFFF;
 fn clipContains(tree: *const WidgetTree, container: Id, node_id: Id) bool {
     var cur = node_id;
     while (cur != .root) {
+        tree.addCounter(.ancestor_reads, 1);
+        tree.addCounter(.node_comparisons, 1);
         if (cur == container) return true;
         const n = tree.nodeConst(cur) orelse return false;
         cur = n.parent;
@@ -321,6 +323,31 @@ pub fn collectDrawCmdsInto(
         });
     }
     return;
+}
+
+test "draw command collection counters record node comparisons" {
+    var counters: @import("perf_counters.zig").Counters = .{};
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    tree.setCounterSink(&counters);
+    const node_id: Id = @enumFromInt(1);
+    try tree.appendNode(.{
+        .id = node_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .w = 20, .h = 20 },
+    });
+    var list: std.ArrayList(DrawCmd) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try list.ensureTotalCapacity(std.testing.allocator, 3);
+    try collectDrawCmdsInto(&tree, null, 0, &list);
+    try std.testing.expect(tree.nodeConst(node_id) != null);
+    const snapshot = try counters.snapshot();
+    if (comptime @import("v7_options").perf_counters) {
+        try std.testing.expect(snapshot.value(.node_comparisons) > 0);
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.node_comparisons));
+    }
 }
 
 /// Linear interpolation between two RGBA colors: a + (b - a) * t.

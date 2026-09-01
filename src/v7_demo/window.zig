@@ -29,8 +29,9 @@ const noapi = @import("noapi");
 const vk = noapi.vk;
 const Io = std.Io;
 
-const v7_options = @import("v7_options");
 const nogui = @import("nogui");
+const v7_options = nogui.options;
+const CounterSink = nogui.CounterSink;
 const App = nogui.App;
 const Event = nogui.Event;
 const tracy = @import("tracy");
@@ -180,6 +181,7 @@ fn svgCardRect(tree: *const WidgetTree) error{InvalidStyle}!SvgCard {
     if (ui.svg_box_id) |id_raw| {
         const id: Id = @enumFromInt(id_raw);
         for (tree.nodes.items) |n| {
+            tree.addCounter(.svg_card_node_comparisons, 1);
             if (n.id == id) {
                 return .{ .rect = try contentRect(tree, id), .layer = n.paint.layer };
             }
@@ -784,6 +786,14 @@ fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Te
 
     ui.tiger_ref_idx = try registry.register(gpa, tex);
 }
+fn noteSceneGrowth(out: *const std.ArrayList(SceneRect), counter_sink: *const CounterSink) void {
+    if (out.items.len != out.capacity) return;
+    counter_sink.add(.slice_rect_growth_events, 1);
+    counter_sink.add(
+        .slice_rect_growth_copy_bytes,
+        @as(u64, @intCast(out.items.len)) * @sizeOf(SceneRect),
+    );
+}
 /// 1. Every DrawCmd rect becomes a SceneRect. Ring cmds (borders) get a
 ///    rounded-rect ring material (type 2, full box radius + border width +
 ///    border-box size); radius-bearing fill cmds get a rounded-rect fill
@@ -813,6 +823,7 @@ fn buildSliceRects(
     focus_id: ?Id,
     out: *std.ArrayList(SceneRect),
 ) !void {
+    const counter_sink = text_engine.counterSink();
     const zone = tracy.Zone.begin(.{ .name = "buildSliceRects", .src = @src() });
     defer zone.end();
     // Rounded-rect material slots, allocated from the top of the buffer
@@ -830,6 +841,7 @@ fn buildSliceRects(
     const glyph_slots = text_engine.glyphSlotCount();
 
     for (cmds) |cmd| {
+        counter_sink.add(.draw_cmd_value_bind_bytes, @sizeOf(DrawCmd));
         const paint = cmd.paint;
         const corner_l: f32 = if (cmd.ring)
             paint.radius.left
@@ -898,6 +910,7 @@ fn buildSliceRects(
                 cmd.rect.h,
             );
             material_index = material_slot;
+            noteSceneGrowth(out, counter_sink);
             try out.append(gpa, .{
                 .dst = .{
                     cmd.rect.x - feather,
@@ -935,6 +948,7 @@ fn buildSliceRects(
             material_index = material_slot;
         }
 
+        noteSceneGrowth(out, counter_sink);
         try out.append(gpa, .{
             .dst = .{ cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h },
             .src = .{ 0, 0, 1, 1 },
@@ -980,6 +994,7 @@ fn buildSliceRects(
                 r.h,
                 .{ 0, 0, 0, 0 },
             );
+            noteSceneGrowth(out, counter_sink);
             try out.append(gpa, .{
                 .dst = .{ r.x, r.y, progress_w, r.h },
                 .src = .{ 0, 0, 1, 1 },
@@ -1007,6 +1022,7 @@ fn buildSliceRects(
             thumb.h,
             .{ 0, 0, 0, 0 },
         );
+        noteSceneGrowth(out, counter_sink);
         try out.append(gpa, .{
             .dst = .{ thumb.x, thumb.y, thumb.w, thumb.h },
             .src = .{ 0, 0, 1, 1 },
@@ -1024,6 +1040,7 @@ fn buildSliceRects(
     // glyphs so it never overdraws the text at the box edges.
     if (hover_id) |hid| {
         for (tree.nodes.items) |*n| {
+            counter_sink.add(.hover_focus_node_comparisons, 1);
             if (n.id != hid) continue;
             const r = visualBorderRect(tree, n.id);
             if (r.w <= 0 or r.h <= 0) break;
@@ -1041,6 +1058,7 @@ fn buildSliceRects(
                 r.h,
                 .{ 0, 0, 0, 0 },
             );
+            noteSceneGrowth(out, counter_sink);
             try out.append(gpa, .{
                 .dst = .{ r.x, r.y, r.w, r.h },
                 .src = .{ 0, 0, 1, 1 },
@@ -1065,6 +1083,7 @@ fn buildSliceRects(
     // Focus ring: a 2px cyan rounded ring around the keyboard-focused node.
     if (focus_id) |fid| {
         for (tree.nodes.items) |*n| {
+            counter_sink.add(.hover_focus_node_comparisons, 1);
             if (n.id != fid) continue;
             const r = visualBorderRect(tree, n.id);
             if (r.w <= 0 or r.h <= 0) break;
@@ -1082,6 +1101,7 @@ fn buildSliceRects(
                 r.h,
                 .{ 0, 0, 0, 0 },
             );
+            noteSceneGrowth(out, counter_sink);
             try out.append(gpa, .{
                 .dst = .{ r.x, r.y, r.w, r.h },
                 .src = .{ 0, 0, 1, 1 },
@@ -1202,6 +1222,7 @@ fn buildSliceRects(
             const ox = content.x + (content.w - bounds.w) / 2 - bounds.x;
             const oy = content.y + (content.h - bounds.h) / 2 - bounds.y;
             for (view.rects()) |r| {
+                noteSceneGrowth(out, counter_sink);
                 try out.append(gpa, .{
                     .dst = .{ ox + r.dst[0], oy + r.dst[1], r.dst[2], r.dst[3] },
                     .src = r.src,
@@ -1247,6 +1268,7 @@ fn buildSliceRects(
             //     card_rect.x, card_rect.y, card_rect.w, card_rect.h, scale
             // });
             for (sv.rects()) |r| {
+                noteSceneGrowth(out, counter_sink);
                 try out.append(gpa, .{
                     .dst = .{ ox + r.dst[0] * scale, oy + r.dst[1] * scale, r.dst[2] * scale, r.dst[3] * scale },
                     .src = .{ 0, 0, 1, 1 },
@@ -1428,6 +1450,7 @@ const PerfResources = struct {
     blit_vert: noapi.Shader,
     blit_frag: noapi.Shader,
     blit_sampler: u64,
+    counters: if (v7_options.perf_counters) *nogui.Counters else void,
 };
 
 pub const OffscreenSlots = struct {
@@ -1701,6 +1724,13 @@ pub fn run(
     else
         try initSvgView(gpa, &gpu, &text_engine);
     defer svg_view.deinit(&gpu);
+    var perf_counters_storage: if (v7_options.perf_counters) nogui.Counters else void =
+        if (v7_options.perf_counters) .{} else {};
+    if (comptime v7_options.perf_counters) {
+        app.setCounterSink(&perf_counters_storage);
+        text_engine.setCounterSink(&perf_counters_storage);
+        svg_view.setCounterSink(&perf_counters_storage);
+    }
     // Transport icons share TextEngine's material buffer but are initialized
     // only in the interactive window. No parsing or GPU allocation occurs
     // in the frame loop.
@@ -1755,6 +1785,7 @@ pub fn run(
             .blit_vert = blit_vert,
             .blit_frag = blit_frag,
             .blit_sampler = blit_sampler,
+            .counters = if (comptime v7_options.perf_counters) &perf_counters_storage else {},
         };
         var recorder = try perf.Recorder.init(gpa, try config.totalFrames());
         defer recorder.deinit();
@@ -2962,11 +2993,15 @@ fn runOffscreenPerf(
             try cmd.timestampReset(query_set, first, 2);
             try cmd.timestampWrite(query_set, first, .all_commands_start);
         }
+        if (comptime v7_options.perf_counters) resources.counters.reset();
         var app_frame = try buildPerfAppFrame(T, app, root, resources, &cmd, frame_id);
         defer if (app_frame.out.json) |json| resources.gpa.free(json);
         const scene_start = perfNow(resources.io);
         try buildPerfScene(resources, &app_frame.out, &scene_rects, &draw_cmds, false);
         const record_start = perfNow(resources.io);
+        const mechanism_snapshot = if (comptime v7_options.perf_counters)
+            try resources.counters.snapshot()
+        else {};
         try recordFrameScene(
             resources.gui_renderer,
             &cmd,
@@ -2998,6 +3033,7 @@ fn runOffscreenPerf(
 
         var sample = perf.FrameSample.empty(phase, frame_id);
         sample.cpu_app_layout_ns = try perfElapsed(app_start, scene_start);
+        if (comptime v7_options.perf_counters) sample.mechanisms = mechanism_snapshot;
         sample.cpu_scene_ns = try perfElapsed(scene_start, record_start);
         sample.cpu_record_ns = try perfElapsed(record_start, submit_start);
         sample.cpu_submit_present_ns = try perfElapsed(submit_start, submit_end);
@@ -3115,11 +3151,15 @@ fn runPresentedPerf(
             try cmd.timestampReset(query_set, first, 2);
             try cmd.timestampWrite(query_set, first, .all_commands_start);
         }
+        if (comptime v7_options.perf_counters) resources.counters.reset();
         var app_frame = try buildPerfAppFrame(T, app, root, resources, &cmd, frame_id);
         defer if (app_frame.out.json) |json| resources.gpa.free(json);
         const scene_start = perfNow(resources.io);
         try buildPerfScene(resources, &app_frame.out, &scene_rects, &draw_cmds, false);
         const record_start = perfNow(resources.io);
+        const mechanism_snapshot = if (comptime v7_options.perf_counters)
+            try resources.counters.snapshot()
+        else {};
         try recordFrameScene(
             resources.gui_renderer,
             &cmd,
@@ -3166,6 +3206,7 @@ fn runPresentedPerf(
         const present_slop_ns = try perf.presentSlopNs(slop_before, slop_after, submit_ns);
 
         var sample = perf.FrameSample.empty(phase, frame_id);
+        if (comptime v7_options.perf_counters) sample.mechanisms = mechanism_snapshot;
         sample.cpu_acquire_ns = acquire_ns;
         sample.cpu_app_layout_ns = app_layout_ns;
         sample.cpu_scene_ns = scene_ns;
@@ -3564,4 +3605,31 @@ test "perf feedback queue reserves preflight ID and preserves gaps" {
     try queue.attachReady(&recorder, &next_frame_id, 2);
     try std.testing.expectEqual(@as(u64, 0), next_frame_id);
     try std.testing.expectEqual(@as(usize, 1), queue.count);
+}
+
+test "scene append counters record allocation growth" {
+    var counters: nogui.Counters = .{};
+    var sink = CounterSink.init(&counters);
+    var rects: std.ArrayList(SceneRect) = .empty;
+    defer rects.deinit(std.testing.allocator);
+    noteSceneGrowth(&rects, &sink);
+    try rects.append(std.testing.allocator, .{
+        .dst = .{ 0, 0, 0, 0 },
+        .src = .{ 0, 0, 1, 1 },
+        .corners = .{ 0, 0, 0, 0 },
+        .color = .{ 0, 0, 0, 1 },
+        .curve = .{ 0, 0, 0, 0 },
+        .material_index = 0,
+    });
+    const snapshot = try counters.snapshot();
+    if (comptime v7_options.perf_counters) {
+        try std.testing.expectEqual(@as(u64, 1), snapshot.value(.slice_rect_growth_events));
+        try std.testing.expectEqual(
+            @as(u64, 0),
+            snapshot.value(.slice_rect_growth_copy_bytes),
+        );
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.slice_rect_growth_events));
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.slice_rect_growth_copy_bytes));
+    }
 }

@@ -3,6 +3,9 @@
 const std = @import("std");
 const noapi = @import("noapi");
 const perf_counters = @import("perf_counters.zig");
+const v7_options = @import("v7_options");
+pub const CounterSink = perf_counters.Sink(v7_options.perf_counters);
+pub const options = v7_options;
 
 pub const Id = @import("id.zig").Id;
 pub const ComponentKey = @import("key.zig").ComponentKey;

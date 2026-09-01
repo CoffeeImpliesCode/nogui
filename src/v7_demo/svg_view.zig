@@ -55,12 +55,14 @@
 //! Demo-side only: like text.zig, this file MAY import the v7 core.
 
 const std = @import("std");
+const tracy = @import("tracy");
 const noapi = @import("noapi");
 const svg = @import("svg.zig");
 const svg_xml = @import("svg_xml.zig");
 const renderer = @import("v7_render");
 const SceneRect = renderer.SceneRect;
 const nogui = @import("nogui");
+const CounterSink = nogui.CounterSink;
 pub const Rect = nogui.widget.Rect;
 const srgbToOklab = @import("text.zig").srgbToOklab;
 
@@ -524,6 +526,7 @@ pub const SvgView = struct {
     /// The per-stroke widths (user units, unscaled) + the count.
     stroke_widths: []const f32,
     stroke_count: usize,
+    counter_sink: CounterSink = CounterSink.init(null),
     /// The stroke's offset-outline edge buffers (mode 2 — the exact Cairo
     /// reference): one GPU buffer per stroked path holding the band's
     /// boundary edges, plus their BDAs and the curve BDAs (to restore the
@@ -897,6 +900,10 @@ pub const SvgView = struct {
         };
     }
 
+    pub fn setCounterSink(self: *SvgView, counters: ?*nogui.Counters) void {
+        self.counter_sink = CounterSink.init(counters);
+    }
+
     /// Bake the fit scale into the GPU curve buffers. The shader's
     /// TYPE_GLYPH branch sweeps the 1x1 px window against the curves in
     /// PIXEL space (the glyph outlines are extracted at the pixel size),
@@ -908,10 +915,12 @@ pub const SvgView = struct {
     /// marching quads) and `oversize` (the AA band / marching-quad
     /// half-extent in px), written into the stroke materials' win_w/win_h
     /// fields (unused by the shader otherwise). Per-frame tunable for the
-    /// stroke test scene.
     pub fn setStrokeStyle(self: *SvgView, algo: u32, oversize: f32) void {
+        const zone = tracy.Zone.begin(.{ .name = "svgStrokeUpdate", .src = @src() });
+        defer zone.end();
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
         for (0..self.stroke_widths.len) |j| {
+            self.counter_sink.add(.svg_stroke_write_attempts, 1);
             const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
             const offset = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "win_w");
             @as(*f32, @ptrCast(@alignCast(dst + offset))).* = @floatFromInt(algo);
@@ -922,6 +931,7 @@ pub const SvgView = struct {
             const bda_off = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "curve_bda");
             const bda = if (algo == 2) self.stroke_edge_bdas[j] else self.stroke_curve_bdas[j];
             @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
+            self.counter_sink.add(.svg_stroke_writes, 3);
         }
     }
 
@@ -1395,4 +1405,26 @@ test "setScale re-derives the stroke edges from the pristine outline" {
     }
     try testing.expectEqual(pristine[0].x0, buf[0].x0);
     try testing.expectEqual(pristine[1].x0, buf[1].x0);
+}
+
+test "stroke style counters record attempted writes" {
+    var counters: nogui.Counters = .{};
+    var material_bytes: [256]u8 = undefined;
+    const stroke_widths = [_]f32{1};
+    var view: SvgView = undefined;
+    view.materials = .{ .cpu = &material_bytes };
+    view.base_slot = 0;
+    view.paths_len = 0;
+    view.stroke_widths = &stroke_widths;
+    view.counter_sink = CounterSink.init(&counters);
+
+    view.setStrokeStyle(1, 2);
+    const snapshot = try counters.snapshot();
+    if (comptime nogui.options.perf_counters) {
+        try testing.expectEqual(@as(u64, 1), snapshot.value(.svg_stroke_write_attempts));
+        try testing.expectEqual(@as(u64, 3), snapshot.value(.svg_stroke_writes));
+    } else {
+        try testing.expectEqual(@as(u64, 0), snapshot.value(.svg_stroke_write_attempts));
+        try testing.expectEqual(@as(u64, 0), snapshot.value(.svg_stroke_writes));
+    }
 }

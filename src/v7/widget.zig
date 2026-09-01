@@ -2,6 +2,8 @@
 //! per-frame widget tree.
 //! Per the prototype spec (notes/v7-prototype-spec.md §2).
 const std = @import("std");
+const perf_counters = @import("perf_counters.zig");
+const CounterSink = perf_counters.CounterSink;
 
 const Id = @import("id.zig").Id;
 const callback = @import("callback.zig");
@@ -318,9 +320,21 @@ pub const WidgetTree = struct {
     // SAFETY: written only via pushClipRect before any read; clip_count tracks the filled count
     clip_rects: [64]ClipRect = undefined,
     clip_count: u32 = 0,
+    counter_sink: CounterSink = CounterSink.init(null),
 
     pub fn init(allocator: std.mem.Allocator) WidgetTree {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .counter_sink = CounterSink.init(null),
+        };
+    }
+
+    pub fn setCounterSink(self: *WidgetTree, counters: ?*perf_counters.Counters) void {
+        self.counter_sink = CounterSink.init(counters);
+    }
+
+    pub fn addCounter(self: *const WidgetTree, counter: perf_counters.Counter, amount: u64) void {
+        self.counter_sink.add(counter, amount);
     }
 
     pub fn deinit(self: *WidgetTree) void {
@@ -356,14 +370,16 @@ pub const WidgetTree = struct {
     pub fn nodeIndex(self: *const WidgetTree, id: Id) ?usize {
         if (self.id_index.get(id)) |stored_index| {
             const index: usize = @intCast(stored_index);
-            if (index < self.nodes.items.len and self.nodes.items[index].id == id) {
-                return index;
+            if (index < self.nodes.items.len) {
+                self.counter_sink.add(.node_comparisons, 1);
+                if (self.nodes.items[index].id == id) return index;
             }
         } else if (self.id_index.count() == self.nodes.items.len) {
             return null;
         }
 
         for (self.nodes.items, 0..) |node_value, index| {
+            self.counter_sink.add(.node_comparisons, 1);
             if (node_value.id == id) return index;
         }
         return null;
@@ -480,6 +496,7 @@ pub fn absoluteBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
     var oy: f32 = 0;
     var cur = id;
     while (cur != .root) {
+        tree.counter_sink.add(.ancestor_reads, 1);
         const n = tree.nodeConst(cur) orelse break;
         ox += n.rect.x;
         oy += n.rect.y;
@@ -506,6 +523,7 @@ pub fn visualBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
     var oy: f32 = 0;
     var cur = id;
     while (cur != .root) {
+        tree.counter_sink.add(.ancestor_reads, 1);
         const n = tree.nodeConst(cur) orelse break;
         ox += n.rect.x;
         oy += n.rect.y;
@@ -547,6 +565,7 @@ pub fn pointInClipAxes(rect: Rect, axes: ClipAxes, pos: [2]f32) bool {
 pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
     var cur = id;
     while (cur != .root) {
+        tree.counter_sink.add(.ancestor_reads, 1);
         const node = tree.nodeConst(cur) orelse break;
         if (!pointInClipAxes(
             visualBorderRect(tree, cur),
@@ -590,6 +609,38 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     try std.testing.expectEqual(@as(?*WidgetNode, null), tree.node(@enumFromInt(99)));
     try std.testing.expectEqual(@as(usize, 1), tree.node(id1).?.children.items.len);
     try std.testing.expectEqual(id2, tree.node(id1).?.children.items[0]);
+}
+
+test "WidgetTree counters record node lookup and ancestor reads" {
+    var counters: @import("perf_counters.zig").Counters = .{};
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    tree.setCounterSink(&counters);
+    const root_id: Id = @enumFromInt(1);
+    const child_id: Id = @enumFromInt(2);
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 1, .y = 2, .w = 10, .h = 10 },
+    });
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "x" } },
+        .parent = root_id,
+        .rect = .{ .x = 3, .y = 4, .w = 5, .h = 6 },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    _ = absoluteBorderOrigin(&tree, child_id);
+    const snapshot = try counters.snapshot();
+    if (comptime @import("v7_options").perf_counters) {
+        try std.testing.expect(snapshot.value(.node_comparisons) > 0);
+        try std.testing.expect(snapshot.value(.ancestor_reads) > 0);
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.node_comparisons));
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.ancestor_reads));
+    }
 }
 
 test "WidgetTree: malformed IDs return InvalidStyle instead of panicking" {
