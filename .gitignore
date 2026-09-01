@@ -1,7 +1,7 @@
 .envrc
 .devenv/
 .direnv/
-/notes
+/agent-notes
 .zig-cache/
 zig-out/
 zig-pkg/

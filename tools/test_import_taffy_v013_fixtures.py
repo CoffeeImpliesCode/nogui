@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -18,6 +19,9 @@ if IMPORTER_SPEC is None or IMPORTER_SPEC.loader is None:
     raise RuntimeError(f"cannot load importer from {IMPORTER_PATH}")
 importer = importlib.util.module_from_spec(IMPORTER_SPEC)
 IMPORTER_SPEC.loader.exec_module(importer)
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+CHECKED_IN_CORPUS = REPOSITORY_ROOT / "testdata" / "taffy-v0.13.0"
 
 FIXTURE_SOURCE = "test_fixtures/leaf/minimal.html"
 VARIANTS = (
@@ -78,6 +82,83 @@ class ImportTaffyFixturesTests(unittest.TestCase):
 
     def _read_json(self, relative_path: str) -> dict[str, object]:
         return json.loads((self.output / relative_path).read_text(encoding="utf-8"))
+
+    def test_import_vendors_exact_sources_and_prunes_only_previously_managed_files(
+        self,
+    ) -> None:
+        source_bytes = b"<!doctype html>\r\n<div id=\"test-root\">exact bytes</div>\r\n"
+        (self.source / FIXTURE_SOURCE).write_bytes(source_bytes)
+
+        stale_relative = "test_fixtures/leaf/removed.html"
+        stale_path = self.output / "upstream" / stale_relative
+        stale_path.parent.mkdir(parents=True)
+        stale_path.write_bytes(b"obsolete")
+        unrelated_path = self.output / "upstream" / "local-note.txt"
+        unrelated_path.write_bytes(b"keep")
+        (self.output / "MANIFEST.json").write_text(
+            json.dumps(
+                {
+                    "sources": [
+                        {
+                            "path": stale_relative,
+                            "sha256": hashlib.sha256(b"obsolete").hexdigest(),
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self._run_import()
+
+        vendored_path = self.output / "upstream" / FIXTURE_SOURCE
+        self.assertEqual(vendored_path.read_bytes(), source_bytes)
+        self.assertFalse(stale_path.exists())
+        self.assertEqual(unrelated_path.read_bytes(), b"keep")
+        manifest = self._read_json("MANIFEST.json")
+        self.assertEqual(
+            manifest["sources"],
+            [
+                {
+                    "path": FIXTURE_SOURCE,
+                    "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                }
+            ],
+        )
+
+    def test_checked_in_upstream_sources_match_pinned_manifest(self) -> None:
+        manifest = json.loads(
+            (CHECKED_IN_CORPUS / "MANIFEST.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["upstream_commit"], importer.PINNED_COMMIT)
+        self.assertEqual(manifest["source_count"], 1381)
+
+        sources = manifest["sources"]
+        self.assertIsInstance(sources, list)
+        manifest_paths = [source["path"] for source in sources]
+        self.assertEqual(len(manifest_paths), manifest["source_count"])
+        self.assertEqual(len(set(manifest_paths)), manifest["source_count"])
+        self.assertEqual(
+            manifest_paths,
+            sorted(manifest_paths, key=lambda path: path.encode()),
+        )
+
+        upstream = CHECKED_IN_CORPUS / "upstream"
+        vendored_paths = sorted(
+            (
+                path.relative_to(upstream).as_posix()
+                for path in upstream.rglob("*")
+                if path.is_file()
+            ),
+            key=lambda path: path.encode(),
+        )
+        self.assertEqual(vendored_paths, manifest_paths)
+        for source in sources:
+            with self.subTest(path=source["path"]):
+                digest = hashlib.sha256(
+                    (upstream / source["path"]).read_bytes()
+                ).hexdigest()
+                self.assertEqual(digest, source["sha256"])
 
     def test_parse_number_accepts_px_and_rejects_other_units(self) -> None:
         path = Path("fixture.xml")

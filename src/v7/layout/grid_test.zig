@@ -4690,6 +4690,40 @@ test "grid cyclic implicit list representation gap preserves source order on bot
     }
 }
 
+test "grid lays out a child beyond the 10000-track cap" {
+    const track_count: usize = 10_001;
+    var columns = try std.testing.allocator.alloc(style.GridTrack, track_count);
+    defer std.testing.allocator.free(columns);
+    for (columns) |*track| track.* = .{ .fixed = 1 };
+    const rows = [_]style.GridTrack{.{ .fixed = 1 }};
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const container_id: Id = @enumFromInt(2);
+    var child = leafStyle();
+    child.grid_column = .{
+        .start = .{ .line = 10_001 },
+        .end = .{ .line = 10_002 },
+    };
+    child.grid_row = .{
+        .start = .{ .line = 1 },
+        .end = .{ .line = 2 },
+    };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{} });
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(10_001, 1, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 10_001, .height = 1 }, null);
+
+    try expectRelative(&tree, child_id, .{ .x = 10_000, .y = 0, .w = 1, .h = 1 });
+}
+
 test "grid overlarge line and span saturate at ten-thousand-track repeat boundary" {
     {
         var columns = try std.testing.allocator.alloc(style.GridTrack, 10_000);

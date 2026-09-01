@@ -8,7 +8,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 import tempfile
@@ -21,6 +21,7 @@ GENERATOR = "tools/import_taffy_v013_fixtures.py"
 GENERATOR_VERSION = 2
 FIXTURE_ROOT_NAME = "test_fixtures"
 XML_ROOT_NAME = "tests/xml"
+UPSTREAM_ROOT_NAME = "upstream"
 VARIANTS = (
     "border_box_ltr",
     "content_box_ltr",
@@ -267,6 +268,107 @@ def parse_xml_case(
     }
 
 
+def _manifest_source_paths(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise fail(f"cannot read existing manifest {path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise fail(f"existing manifest is not an object: {path}")
+    records = manifest.get("sources", [])
+    if not isinstance(records, list):
+        raise fail(f"existing manifest sources are not a list: {path}")
+
+    paths: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            raise fail(f"existing manifest has an invalid source record: {path}")
+        relative = record["path"]
+        parsed = PurePosixPath(relative)
+        if (
+            not relative
+            or parsed.is_absolute()
+            or parsed.as_posix() != relative
+            or any(part in ("", ".", "..") for part in parsed.parts)
+        ):
+            raise fail(f"existing manifest has an unsafe source path: {relative!r}")
+        if relative in paths:
+            raise fail(f"existing manifest has duplicate source path: {relative}")
+        paths.add(relative)
+    return paths
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(data)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def vendor_sources(
+    output: Path,
+    fixtures: list[tuple[str, Path]],
+    previous_paths: set[str],
+) -> None:
+    upstream = output / UPSTREAM_ROOT_NAME
+    if upstream.is_symlink() or (upstream.exists() and not upstream.is_dir()):
+        raise fail(f"upstream output is not a directory: {upstream}")
+    upstream.mkdir(parents=True, exist_ok=True)
+
+    current_paths = {relative for relative, _ in fixtures}
+    stale_paths = set(previous_paths)
+    stale_paths.update(
+        path.relative_to(upstream).as_posix()
+        for path in upstream.rglob("*.html")
+        if path.is_file()
+    )
+    for relative in sorted(stale_paths - current_paths, key=lambda value: value.encode()):
+        destination = upstream / relative
+        if destination.is_symlink():
+            destination.unlink()
+        elif destination.is_file():
+            destination.unlink()
+        elif destination.exists():
+            raise fail(f"cannot remove stale upstream source: {destination}")
+
+    for relative, source_path in fixtures:
+        destination = upstream / relative
+        if destination.is_symlink() or destination.exists() and not destination.is_file():
+            raise fail(f"upstream source destination is not a file: {destination}")
+        data = source_path.read_bytes()
+        _write_bytes(destination, data)
+        if source_sha256(destination) != hashlib.sha256(data).hexdigest():
+            raise fail(f"vendored upstream source changed while writing: {relative}")
+
+    for directory in sorted(
+        (
+            path
+            for path in upstream.rglob("*")
+            if path.is_dir() and not path.is_symlink()
+        ),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        if not any(directory.iterdir()):
+            directory.rmdir()
+
+
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
@@ -300,6 +402,7 @@ def import_fixtures(
 ) -> None:
     source = source.resolve()
     output = output.resolve()
+    previous_paths = _manifest_source_paths(output / "MANIFEST.json")
     verify_revision(source)
     fixtures = discover_fixtures(source)
 
@@ -353,6 +456,7 @@ def import_fixtures(
     }
     if selection is not None:
         manifest["selection"] = selection
+    vendor_sources(output, selected_fixtures, previous_paths)
     write_json(output / "normalized" / "cases.json", normalized)
     write_json(output / "MANIFEST.json", manifest)
 

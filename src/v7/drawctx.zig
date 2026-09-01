@@ -814,6 +814,41 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
     try std.testing.expectEqual(outer_label, tree.nodes.items[4].id);
 }
 
+test "DrawCtx: more than 64 nested containers preserve cursor and tree order" {
+    // Exercise the public nesting cursor past its fixed stack limit, then
+    // prove that closing every container restores both tree order and scope.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const container_count: usize = 65;
+    var container_ids: [container_count]Id = undefined;
+    for (&container_ids) |*container_id| {
+        container_id.* = try ctx.column(.{});
+    }
+    const deepest_label = try ctx.label(.{ .text = "deepest" });
+    for (0..container_count) |_| ctx.pop();
+    const root_label = try ctx.label(.{ .text = "root" });
+
+    for (container_ids, 0..) |container_id, index| {
+        const container_node =
+            tree.node(container_id) orelse return error.TestUnexpectedResult;
+        const expected_parent = if (index == 0) Id.root else container_ids[index - 1];
+        try std.testing.expectEqual(expected_parent, container_node.parent);
+    }
+    const deepest_node =
+        tree.node(deepest_label) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(container_ids[container_count - 1], deepest_node.parent);
+    const root_node = tree.node(root_label) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Id.root, root_node.parent);
+
+    try std.testing.expectEqual(deepest_label, tree.nodes.items[0].id);
+    try std.testing.expectEqual(container_ids[0], tree.nodes.items[container_count].id);
+    try std.testing.expectEqual(root_label, tree.nodes.items[container_count + 1].id);
+}
+
 test "DrawCtx: column wires 33 children in creation order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

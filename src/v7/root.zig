@@ -112,6 +112,7 @@ pub const runtime = @import("runtime.zig");
 
 test {
     _ = @import("drawcmd.zig");
+    _ = @import("drawctx.zig");
     _ = @import("input.zig");
     _ = @import("headless.zig");
     _ = @import("layout/fixture.zig");
