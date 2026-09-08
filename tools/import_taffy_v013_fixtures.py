@@ -325,6 +325,7 @@ def vendor_sources(
     output: Path,
     fixtures: list[tuple[str, Path]],
     previous_paths: set[str],
+    expected_hashes: dict[str, str],
 ) -> None:
     upstream = output / UPSTREAM_ROOT_NAME
     if upstream.is_symlink() or (upstream.exists() and not upstream.is_dir()):
@@ -349,13 +350,24 @@ def vendor_sources(
 
     for relative, source_path in fixtures:
         destination = upstream / relative
-        if destination.is_symlink() or destination.exists() and not destination.is_file():
+        if (
+            destination.is_symlink()
+            or (
+                destination.exists()
+                and not destination.is_file()
+            )
+        ):
             raise fail(f"upstream source destination is not a file: {destination}")
-        data = source_path.read_bytes()
+        try:
+            data = source_path.read_bytes()
+        except OSError as exc:
+            raise fail(f"cannot read fixture {source_path}: {exc}") from exc
+        digest = hashlib.sha256(data).hexdigest()
+        if expected_hashes.get(relative) != digest:
+            raise fail(f"source hash changed while importing: {relative}")
         _write_bytes(destination, data)
-        if source_sha256(destination) != hashlib.sha256(data).hexdigest():
+        if source_sha256(destination) != digest:
             raise fail(f"vendored upstream source changed while writing: {relative}")
-
     for directory in sorted(
         (
             path
@@ -456,7 +468,12 @@ def import_fixtures(
     }
     if selection is not None:
         manifest["selection"] = selection
-    vendor_sources(output, selected_fixtures, previous_paths)
+    vendor_sources(
+        output,
+        selected_fixtures,
+        previous_paths,
+        {source["path"]: source["sha256"] for source in sources},
+    )
     write_json(output / "normalized" / "cases.json", normalized)
     write_json(output / "MANIFEST.json", manifest)
 

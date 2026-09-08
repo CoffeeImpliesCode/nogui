@@ -265,7 +265,27 @@ fn paintStyleFromOpts(opts: anytype, defaults: ?PaintStyle) PaintStyle {
 /// missing node is therefore an internal tree invariant violation, not an
 /// optional API case; report it explicitly instead of using a bare unwrap.
 fn nodeAfterCreate(self: *DrawCtx, id: Id) *widget.WidgetNode {
+    const items = self.tree.nodes.items;
+    if (items.len > 0 and items[items.len - 1].id == id) {
+        return &items[items.len - 1];
+    }
     return self.tree.node(id) orelse @panic("DrawCtx: created node is missing");
+}
+
+fn seedSharedColumnStyleDirect(parent: *const widget.WidgetNode, child: *widget.WidgetNode) void {
+    const columns = parent.shared_columns orelse return;
+    if (parent.children.items.len == 0) return;
+    const child_index = parent.children.items.len - 1;
+    if (child_index >= columns.tracks.len) return;
+    const track = columns.tracks[child_index];
+    if (child.style.grow == 0) child.style.grow = track.grow;
+    if (child.style.shrink == 1) child.style.shrink = track.shrink;
+    if (std.meta.activeTag(child.style.flex_basis) == .auto) {
+        child.style.flex_basis = track.flex_basis;
+    }
+    if (std.meta.activeTag(child.style.min_size.width) == .auto) {
+        child.style.min_size.width = track.min_width;
+    }
 }
 
 /// Set the generated button label's canonical flex bounds.
@@ -318,8 +338,9 @@ fn setScrollOptions(self: *DrawCtx, id: Id, opts: anytype) void {
 }
 
 fn setTextOptions(self: *DrawCtx, id: Id, opts: anytype) void {
-    const node = nodeAfterCreate(self, id);
     const T = @TypeOf(opts);
+    if (!@hasField(T, "text_overflow") and !@hasField(T, "max_width")) return;
+    const node = nodeAfterCreate(self, id);
     if (@hasField(T, "text_overflow")) {
         node.text_overflow = @as(TextOverflow, opts.text_overflow);
     }
@@ -348,6 +369,10 @@ fn asPaintSides(x: anytype) Sides {
 fn asColor(x: anytype) [4]f32 {
     return .{ x[0], x[1], x[2], x[3] };
 }
+pub const ParentEntry = struct {
+    id: Id,
+    index: u32,
+};
 
 pub const DrawCtx = struct {
     tree: *WidgetTree,
@@ -369,8 +394,8 @@ pub const DrawCtx = struct {
     state_prev: ?*const StateDir = null,
     /// This frame's state directory (arena-allocated by App).
     state_cur: ?*StateDir = null,
-    parent_stack: [64]Id = .{.root} ** 64,
-    depth: u32 = 0,
+    /// Active parent cursors. Storage is owned by the current frame arena.
+    parent_stack: std.ArrayListUnmanaged(ParentEntry) = .empty,
     /// Defaults contributed by the component currently being drawn. A child
     /// scope replaces this value for its entire draw and is restored on return.
     component_defaults: ComponentDefaults = .{},
@@ -425,20 +450,34 @@ pub const DrawCtx = struct {
         const id: Id = @enumFromInt(self.tree.next_id);
         self.tree.next_id += 1;
 
-        const parent = self.parent_stack[self.depth];
+        const parent_entry: ?ParentEntry = if (self.parent_stack.items.len == 0)
+            null
+        else
+            self.parent_stack.items[self.parent_stack.items.len - 1];
+        const parent_id = if (parent_entry) |p| p.id else Id.root;
         const node: widget.WidgetNode = .{
             .id = id,
             .kind = kind,
-            .parent = parent,
+            .parent = parent_id,
             .style = resolved_style,
             .paint = resolved_paint,
             .font_size = font_size,
             .font_id = font_id,
         };
         try self.tree.appendNode(node);
-        if (parent != .root) {
-            try self.tree.appendChild(parent, id);
-            seedSharedColumnStyle(self, id);
+        if (parent_entry) |parent| {
+            if (parent.index < self.tree.nodes.items.len and
+                self.tree.nodes.items[parent.index].id == parent.id)
+            {
+                const parent_node = &self.tree.nodes.items[parent.index];
+                try parent_node.children.append(self.tree.allocator, id);
+                if (parent_node.kind == .row and parent_node.shared_columns != null) {
+                    seedSharedColumnStyleDirect(parent_node, &self.tree.nodes.items[self.tree.nodes.items.len - 1]);
+                }
+            } else {
+                try self.tree.appendChild(parent.id, id);
+                seedSharedColumnStyle(self, id);
+            }
         }
         return id;
     }
@@ -449,6 +488,7 @@ pub const DrawCtx = struct {
     /// places children.
     pub fn column(self: *DrawCtx, opts: anytype) !Id {
         const resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
+        try self.ensureParentCursorCapacity();
         const id = try self.create(
             .{ .column = .{} },
             resolved_style,
@@ -463,6 +503,7 @@ pub const DrawCtx = struct {
     /// Container: create + descend (row variant). See `column`.
     pub fn row(self: *DrawCtx, opts: anytype) !Id {
         const resolved_style = styleFromOpts(opts, self.component_defaults.style, .row);
+        try self.ensureParentCursorCapacity();
         const id = try self.create(
             .{ .row = .{} },
             resolved_style,
@@ -495,6 +536,7 @@ pub const DrawCtx = struct {
             resolved_style.grid_justify_items = resolved_style.@"align";
         if (!@hasField(T, "grid_align_items") and @hasField(T, "align"))
             resolved_style.grid_align_items = resolved_style.@"align";
+        try self.ensureParentCursorCapacity();
         const id = try self.create(
             .{ .column = .{} },
             resolved_style,
@@ -511,13 +553,15 @@ pub const DrawCtx = struct {
     /// parent. Also restores the post-order invariant: the container was
     /// appended before its children, so move it past them, to the end.
     pub fn pop(self: *DrawCtx) void {
-        std.debug.assert(self.depth > 0);
-        const id = self.parent_stack[self.depth];
-        self.depth -= 1;
+        std.debug.assert(self.parent_stack.items.len > 0);
+        const entry = self.parent_stack.pop().?;
 
-        const index = self.tree.nodeIndex(id);
-        std.debug.assert(index != null);
-        self.tree.moveNodeToEnd(index.?);
+        const index: usize = if (entry.index < self.tree.nodes.items.len and
+            self.tree.nodes.items[entry.index].id == entry.id)
+            entry.index
+        else
+            self.tree.nodeIndex(entry.id) orelse @panic("DrawCtx: container node missing on pop");
+        self.tree.moveNodeToEnd(index);
     }
 
     /// A static text leaf. The text is DUPLICATED into the frame arena:
@@ -577,7 +621,8 @@ pub const DrawCtx = struct {
         } };
         if (@hasField(T, "icon")) kind.button.icon = opts.icon;
         if (@hasField(T, "color")) kind.button.color = asColor(opts.color);
-
+        const visible_label = widget.buttonVisualLabel(kind);
+        if (visible_label.len != 0) try self.ensureParentCursorCapacity();
         const font_size = optsFontSize(opts);
         const font_id = optsFontId(opts);
         const id = try self.create(
@@ -599,7 +644,6 @@ pub const DrawCtx = struct {
         if (@hasField(T, "justify")) node.style.justify = @as(Justify, opts.justify);
         if (@hasField(T, "align")) node.style.@"align" = @as(Align, opts.@"align");
 
-        const visible_label = widget.buttonVisualLabel(kind);
         if (visible_label.len != 0) {
             self.descend(id);
             const label_id = try self.label(.{
@@ -760,11 +804,17 @@ pub const DrawCtx = struct {
         return value;
     }
 
+    /// Reserve cursor storage before the caller mutates the tree.
+    fn ensureParentCursorCapacity(self: *DrawCtx) !void {
+        try self.parent_stack.ensureUnusedCapacity(self.arena, 1);
+    }
+
     /// Cursor descends into a container: it becomes the parent for nodes
     /// created until the matching `pop()`.
     fn descend(self: *DrawCtx, id: Id) void {
-        self.depth += 1;
-        self.parent_stack[self.depth] = id;
+        const index: u32 = @intCast(self.tree.nodes.items.len - 1);
+        std.debug.assert(self.tree.nodes.items[index].id == id);
+        self.parent_stack.appendAssumeCapacity(.{ .id = id, .index = index });
     }
 };
 
@@ -815,8 +865,8 @@ test "DrawCtx: two-level cursor nesting wires parents and children" {
 }
 
 test "DrawCtx: more than 64 nested containers preserve cursor and tree order" {
-    // Exercise the public nesting cursor past its fixed stack limit, then
-    // prove that closing every container restores both tree order and scope.
+    // Exercise the public nesting cursor beyond the old fixed stack limit,
+    // then prove that closing every container restores both tree order and scope.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tree = WidgetTree.init(arena.allocator());
@@ -1850,4 +1900,53 @@ test "DrawCtx container gaps remain typed for percentage options" {
         @as(style.LengthPercentage, .{ .percent = 0.1 }),
         tree.node(percentage).?.style.gap,
     ));
+}
+
+test "DrawCtx: fast path deduplication preserves tree hierarchy and post-order ordering" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const shared: SharedColumns = .{ .tracks = &[_]ColumnTrack{
+        .{ .grow = 2, .shrink = 0.5, .flex_basis = .{ .length = 50 }, .min_width = .{ .length = 20 } },
+        .{ .grow = 1, .shrink = 1.0, .flex_basis = .{ .length = 100 }, .min_width = .{ .length = 30 } },
+    } };
+
+    const outer_col = try ctx.column(.{});
+    const row_container = try ctx.row(.{ .columns = &shared });
+    const child1 = try ctx.label(.{ .text = "item 1" });
+    const button_id = try ctx.button(.{ .label = "action" });
+    ctx.pop(); // pop row
+    const trailing_label = try ctx.label(.{ .text = "done" });
+    ctx.pop(); // pop outer_col
+
+    // Verify parent links
+    try std.testing.expectEqual(Id.root, tree.node(outer_col).?.parent);
+    try std.testing.expectEqual(outer_col, tree.node(row_container).?.parent);
+    try std.testing.expectEqual(outer_col, tree.node(trailing_label).?.parent);
+    try std.testing.expectEqual(row_container, tree.node(child1).?.parent);
+    try std.testing.expectEqual(row_container, tree.node(button_id).?.parent);
+
+    // Verify shared column track seeding
+    const c1_node = tree.node(child1).?;
+    try std.testing.expectEqual(@as(f32, 2), c1_node.style.grow);
+    try std.testing.expectEqual(@as(f32, 0.5), c1_node.style.shrink);
+    try std.testing.expectEqual(style.Dimension{ .length = 50 }, c1_node.style.flex_basis);
+    try std.testing.expectEqual(style.Dimension{ .length = 20 }, c1_node.style.min_size.width);
+
+    // Verify button label child was generated and correctly nested under button
+    const btn_node = tree.node(button_id).?;
+    try std.testing.expectEqual(@as(usize, 1), btn_node.children.items.len);
+    const btn_label_id = btn_node.children.items[0];
+    try std.testing.expectEqual(button_id, tree.node(btn_label_id).?.parent);
+
+    // Post-order invariant: children appear before containers in tree.nodes
+    try std.testing.expectEqual(child1, tree.nodes.items[0].id);
+    try std.testing.expectEqual(btn_label_id, tree.nodes.items[1].id);
+    try std.testing.expectEqual(button_id, tree.nodes.items[2].id);
+    try std.testing.expectEqual(row_container, tree.nodes.items[3].id);
+    try std.testing.expectEqual(trailing_label, tree.nodes.items[4].id);
+    try std.testing.expectEqual(outer_col, tree.nodes.items[5].id);
 }
