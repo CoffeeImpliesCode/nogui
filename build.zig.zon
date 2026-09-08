@@ -33,7 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .noapi = .{
-            .path = "../noapi",
+            .path = "vendor/noapi",
         },
         .sdl3 = .{
             .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=master#40c2e4b579aa556db37a502c936426aa1c8b5c95",
@@ -59,7 +59,7 @@
             .hash = "libxml2-2.12.6-0-_uu2QSRdAAA_t8w7V8hSK4N9tTNknkoMN5GucTaUG2ec",
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "shaders", "src/InterVariable.ttf" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "shaders", "src/InterVariable.ttf", "testdata", "vendor" },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
     // is computed for this package. Only files listed here will remain on disk

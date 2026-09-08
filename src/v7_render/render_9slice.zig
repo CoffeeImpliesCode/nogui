@@ -99,12 +99,12 @@ pub const Batch9Slice = struct {
     /// frame N's GPU is still reading: the GPU driver crash); the shared
     /// quad, the indirect/count buffers and the clip buffer are
     /// frame-agnostic.
-    bag_buf: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // host: N × SceneRect (112 B)
-    perm_a: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // gpu: N × u32 (even passes)
-    perm_b: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // gpu: N × u32 (odd passes)
-    hist_buf: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // gpu: groups × 256 u32 scratch
-    params_buf: [3]noapi.GpuPtr = .{noapi.GpuPtr{ .cpu = undefined, .gpu = 0 }} ** 3, // host: sort dispatch params
-    idx_buf: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 },
+    bag_buf: [3]noapi.GpuPtr, // host: N × SceneRect (112 B)
+    perm_a: [3]noapi.GpuPtr, // gpu: N × u32 (even passes)
+    perm_b: [3]noapi.GpuPtr, // gpu: N × u32 (odd passes)
+    hist_buf: [3]noapi.GpuPtr, // gpu: groups × 256 u32 scratch
+    params_buf: [3]noapi.GpuPtr, // host: sort dispatch params
+    idx_buf: noapi.GpuPtr,
     capacity: u32 = 0,
 
     /// Indirect-command buffer (one DrawIndexedIndirectCommand per
@@ -112,14 +112,14 @@ pub const Batch9Slice = struct {
     /// (the draw's command count, always 1). Host-visible, grown with
     /// the rest. The one indirect draw replaces cmd.drawIndexed: same
     /// indices, same pixels — the plumbing the P1 pipeline builds on.
-    indirect_buf: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 },
-    count_buf: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 },
+    indirect_buf: noapi.GpuPtr,
+    count_buf: noapi.GpuPtr,
 
     /// GPU clip-rect buffer (fixed cap max_clip_rects, host-visible):
     /// the fragment shader's clip test reads it via push.indirect (the
     /// PushData field the noapi surface reserves at offset 16). The batch
     /// rewrites it from the frame's clip list before every draw.
-    clip_buf: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 },
+    clip_buf: noapi.GpuPtr,
 
     /// Shaders for quad rendering + the CS1 sort.
     vert_shader: noapi.Shader,
@@ -167,8 +167,19 @@ pub const Batch9Slice = struct {
         const frag = try gpu.shaderCreate(frag_spv, .fragment, "main", "quad_frag");
         errdefer gpu.shaderDestroy(frag);
         const sort_sh = try gpu.shaderCreate(sort_spv, .compute, "main", "sort_comp");
+        // SAFETY: CPU pointers stay unread until ensureCapacity allocates the buffers.
+        const unallocated: noapi.GpuPtr = .{ .cpu = undefined, .gpu = 0 };
         return .{
             .gpu = gpu,
+            .bag_buf = .{unallocated} ** 3,
+            .perm_a = .{unallocated} ** 3,
+            .perm_b = .{unallocated} ** 3,
+            .hist_buf = .{unallocated} ** 3,
+            .params_buf = .{unallocated} ** 3,
+            .idx_buf = unallocated,
+            .indirect_buf = unallocated,
+            .count_buf = unallocated,
+            .clip_buf = unallocated,
             .vert_shader = vert,
             .frag_shader = frag,
             .sort_shader = sort_sh,
@@ -373,6 +384,7 @@ pub const Batch9Slice = struct {
         cmd.drawIndexedIndirectMulti(
             push,
             self.idx_buf,
+            .u32,
             self.indirect_buf,
             @sizeOf(noapi.DrawIndexedIndirectCommand),
             self.count_buf,

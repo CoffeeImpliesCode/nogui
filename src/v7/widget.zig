@@ -2,6 +2,9 @@
 //! per-frame widget tree.
 //! Per the prototype spec (notes/v7-prototype-spec.md §2).
 const std = @import("std");
+const perf_counters = @import("perf_counters.zig");
+const v7_options = @import("v7_options");
+const CounterSink = perf_counters.CounterSink;
 
 const Id = @import("id.zig").Id;
 const callback = @import("callback.zig");
@@ -304,12 +307,17 @@ pub const WidgetNode = struct {
 /// Storage is owned by the caller (the frame arena, see drawctx.zig); the
 /// tree must be re-created per frame, never reused across a reset.
 pub const WidgetTree = struct {
+    const dense_absent: u32 = std.math.maxInt(u32);
+
     nodes: std.ArrayListUnmanaged(WidgetNode) = .empty,
     allocator: std.mem.Allocator,
     next_id: u32 = 1,
     /// Frame-local index maintained by `appendNode` for production trees.
     /// Directly assembled trees can leave it incomplete; lookup then scans.
     id_index: std.AutoHashMapUnmanaged(Id, u32) = .empty,
+    /// Optional bounded ID-to-node-index view prepared at the tree-complete
+    /// boundary. `dense_absent` marks an ID that is not present.
+    dense_id_index: ?[]u32 = null,
     /// Per-frame clip-rect list (cap 64 = the GPU clip buffer's size). Clip
     /// ids are indices into this list; 0xFFFFFFFF = no clip. The core
     /// appends here (DrawCtx.pushClip + drawcmd's clip-stack walk); the
@@ -318,12 +326,93 @@ pub const WidgetTree = struct {
     // SAFETY: written only via pushClipRect before any read; clip_count tracks the filled count
     clip_rects: [64]ClipRect = undefined,
     clip_count: u32 = 0,
+    counter_sink: CounterSink = CounterSink.init(null),
 
     pub fn init(allocator: std.mem.Allocator) WidgetTree {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .counter_sink = CounterSink.init(null),
+        };
+    }
+
+    pub fn setCounterSink(self: *WidgetTree, counters: ?*perf_counters.Counters) void {
+        self.counter_sink = CounterSink.init(counters);
+    }
+
+    pub fn addCounter(self: *const WidgetTree, counter: perf_counters.Counter, amount: u64) void {
+        self.counter_sink.add(counter, amount);
+    }
+
+    fn invalidateDenseIdLookup(self: *WidgetTree) void {
+        if (self.dense_id_index) |dense_id_index| {
+            self.allocator.free(dense_id_index);
+            self.dense_id_index = null;
+        }
+    }
+
+    pub fn prepareIdLookup(self: *WidgetTree) error{OutOfMemory}!void {
+        if (self.nodes.items.len == 0) {
+            self.invalidateDenseIdLookup();
+            return;
+        }
+        if (self.id_index.count() != self.nodes.items.len) {
+            self.invalidateDenseIdLookup();
+            return;
+        }
+
+        var maximum_id: u32 = 0;
+        for (self.nodes.items, 0..) |*node_value, node_index| {
+            const stored_index = self.id_index.get(node_value.id) orelse {
+                self.invalidateDenseIdLookup();
+                return;
+            };
+            const index_u32 = std.math.cast(u32, node_index) orelse {
+                self.invalidateDenseIdLookup();
+                return;
+            };
+            if (index_u32 == dense_absent or stored_index != index_u32) {
+                self.invalidateDenseIdLookup();
+                return;
+            }
+            maximum_id = @max(maximum_id, @intFromEnum(node_value.id));
+        }
+
+        if (maximum_id == std.math.maxInt(u32)) {
+            self.invalidateDenseIdLookup();
+            return;
+        }
+        const dense_len_u64: u64 = @as(u64, maximum_id) + 1;
+        // Compare against ceil(dense_len / 2) so neither side can overflow.
+        const minimum_node_count: u64 = (dense_len_u64 + 1) / 2;
+        const node_count_u64 = std.math.cast(u64, self.nodes.items.len) orelse {
+            self.invalidateDenseIdLookup();
+            return;
+        };
+        if (node_count_u64 < minimum_node_count) {
+            self.invalidateDenseIdLookup();
+            return;
+        }
+        const dense_len = std.math.cast(usize, dense_len_u64) orelse {
+            self.invalidateDenseIdLookup();
+            return;
+        };
+
+        const candidate = try self.allocator.alloc(u32, dense_len);
+        errdefer self.allocator.free(candidate);
+        @memset(candidate, dense_absent);
+        for (self.nodes.items, 0..) |*node_value, node_index| {
+            const index_u32 = std.math.cast(u32, node_index) orelse unreachable;
+            candidate[@intFromEnum(node_value.id)] = index_u32;
+        }
+
+        // Keep the previous view published until the candidate is complete.
+        const previous = self.dense_id_index;
+        self.dense_id_index = candidate;
+        if (previous) |dense_id_index| self.allocator.free(dense_id_index);
     }
 
     pub fn deinit(self: *WidgetTree) void {
+        self.invalidateDenseIdLookup();
         for (self.nodes.items) |*node_value| {
             node_value.children.deinit(self.allocator);
         }
@@ -334,6 +423,7 @@ pub const WidgetTree = struct {
 
     /// Append a node and atomically add its frame-local lookup entry.
     pub fn appendNode(self: *WidgetTree, node_value: WidgetNode) !void {
+        self.invalidateDenseIdLookup();
         try self.nodes.append(self.allocator, node_value);
         errdefer _ = self.nodes.pop();
         try self.id_index.put(
@@ -354,16 +444,31 @@ pub const WidgetTree = struct {
     /// Return a node's array index. Production trees use the complete map;
     /// directly assembled trees fall back to their original linear lookup.
     pub fn nodeIndex(self: *const WidgetTree, id: Id) ?usize {
+        if (self.dense_id_index) |dense_id_index| {
+            const id_value = @intFromEnum(id);
+            if (id_value < dense_id_index.len) {
+                const stored_index = dense_id_index[id_value];
+                if (stored_index != dense_absent) {
+                    const index: usize = @intCast(stored_index);
+                    if (index < self.nodes.items.len) {
+                        self.counter_sink.add(.node_comparisons, 1);
+                        if (self.nodes.items[index].id == id) return index;
+                    }
+                }
+            }
+        }
         if (self.id_index.get(id)) |stored_index| {
             const index: usize = @intCast(stored_index);
-            if (index < self.nodes.items.len and self.nodes.items[index].id == id) {
-                return index;
+            if (index < self.nodes.items.len) {
+                self.counter_sink.add(.node_comparisons, 1);
+                if (self.nodes.items[index].id == id) return index;
             }
         } else if (self.id_index.count() == self.nodes.items.len) {
             return null;
         }
 
         for (self.nodes.items, 0..) |node_value, index| {
+            self.counter_sink.add(.node_comparisons, 1);
             if (node_value.id == id) return index;
         }
         return null;
@@ -372,6 +477,7 @@ pub const WidgetTree = struct {
     /// Move one node to the end while updating every shifted map entry.
     pub fn moveNodeToEnd(self: *WidgetTree, index: usize) void {
         std.debug.assert(index < self.nodes.items.len);
+        self.invalidateDenseIdLookup();
         const moved = self.nodes.orderedRemove(index);
         self.nodes.appendAssumeCapacity(moved);
         for (self.nodes.items[index..], index..) |node_value, new_index| {
@@ -448,7 +554,8 @@ pub fn geometryBoxEdges(node: *const WidgetNode, border_box_width: f32) Resolved
     };
 }
 
-fn contentBoxRect(border_rect: Rect, node: *const WidgetNode) Rect {
+/// Inset a border box by the node's resolved border and padding edges.
+pub fn contentBoxRect(border_rect: Rect, node: *const WidgetNode) Rect {
     const edges = geometryBoxEdges(node, border_rect.w);
     return .{
         .x = border_rect.x + edges.border.left + edges.padding.left,
@@ -472,67 +579,89 @@ fn contentBoxRect(border_rect: Rect, node: *const WidgetNode) Rect {
     };
 }
 
+const BorderOrigin = struct {
+    origin: [2]f32,
+    node: ?*const WidgetNode,
+};
+
+fn resolveBorderOrigin(
+    comptime visual: bool,
+    tree: *const WidgetTree,
+    id: Id,
+) BorderOrigin {
+    var ox: f32 = 0;
+    var oy: f32 = 0;
+    if (id == .root) {
+        return .{ .origin = .{ ox, oy }, .node = tree.nodeConst(.root) };
+    }
+
+    tree.counter_sink.add(.ancestor_reads, 1);
+    var current = tree.nodeConst(id) orelse {
+        return .{ .origin = .{ ox, oy }, .node = null };
+    };
+    const target = current;
+    while (true) {
+        ox += current.rect.x;
+        oy += current.rect.y;
+
+        const parent_id = current.parent;
+        const parent = tree.nodeConst(parent_id) orelse break;
+        const edges = geometryBoxEdges(parent, parent.rect.w);
+        ox += edges.border.left + edges.padding.left;
+        oy += edges.border.top + edges.padding.top;
+        if (visual) {
+            if (parent.scroll) |scroll| {
+                ox -= scroll.state.offset[0];
+                oy -= scroll.state.offset[1];
+            }
+        }
+        if (parent_id == .root) break;
+        current = parent;
+        tree.counter_sink.add(.ancestor_reads, 1);
+    }
+    return .{ .origin = .{ ox, oy }, .node = target };
+}
+
 /// Resolve a node's absolute border-box origin by walking parents: each
 /// ancestor contributes its own (relative) offset plus the step into its
 /// CONTENT box (border + padding). The surface origin is (0,0).
 pub fn absoluteBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
-    var ox: f32 = 0;
-    var oy: f32 = 0;
-    var cur = id;
-    while (cur != .root) {
-        const n = tree.nodeConst(cur) orelse break;
-        ox += n.rect.x;
-        oy += n.rect.y;
-        const parent = tree.nodeConst(n.parent) orelse break;
-        const edges = geometryBoxEdges(parent, parent.rect.w);
-        ox += edges.border.left + edges.padding.left;
-        oy += edges.border.top + edges.padding.top;
-        cur = n.parent;
-    }
-    return .{ ox, oy };
+    return resolveBorderOrigin(false, tree, id).origin;
 }
 
 /// Absolute border box of a node (origin + its own w/h).
 pub fn absoluteRect(tree: *const WidgetTree, id: Id) Rect {
-    const origin = absoluteBorderOrigin(tree, id);
-    const n = tree.nodeConst(id) orelse return .{ .x = origin[0], .y = origin[1] };
-    return .{ .x = origin[0], .y = origin[1], .w = n.rect.w, .h = n.rect.h };
+    const resolved = resolveBorderOrigin(false, tree, id);
+    const origin = resolved.origin;
+    const node = resolved.node orelse return .{ .x = origin[0], .y = origin[1] };
+    return .{ .x = origin[0], .y = origin[1], .w = node.rect.w, .h = node.rect.h };
 }
 
 /// Resolve a node's visual border-box origin, accounting for ancestor scroll.
 /// The target node's own scroll offset does not move its border box.
 pub fn visualBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
-    var ox: f32 = 0;
-    var oy: f32 = 0;
-    var cur = id;
-    while (cur != .root) {
-        const n = tree.nodeConst(cur) orelse break;
-        ox += n.rect.x;
-        oy += n.rect.y;
-        const parent = tree.nodeConst(n.parent) orelse break;
-        const edges = geometryBoxEdges(parent, parent.rect.w);
-        ox += edges.border.left + edges.padding.left;
-        oy += edges.border.top + edges.padding.top;
-        if (parent.scroll) |scroll| {
-            ox -= scroll.state.offset[0];
-            oy -= scroll.state.offset[1];
-        }
-        cur = n.parent;
-    }
-    return .{ ox, oy };
+    return resolveBorderOrigin(true, tree, id).origin;
 }
 
 /// Visual border box of a node, after ancestor scroll offsets are applied.
 pub fn visualBorderRect(tree: *const WidgetTree, id: Id) Rect {
-    const origin = visualBorderOrigin(tree, id);
-    const n = tree.nodeConst(id) orelse return .{ .x = origin[0], .y = origin[1] };
-    return .{ .x = origin[0], .y = origin[1], .w = n.rect.w, .h = n.rect.h };
+    const resolved = resolveBorderOrigin(true, tree, id);
+    const origin = resolved.origin;
+    const node = resolved.node orelse return .{ .x = origin[0], .y = origin[1] };
+    return .{ .x = origin[0], .y = origin[1], .w = node.rect.w, .h = node.rect.h };
 }
 
 /// Visual content box of a node, after ancestor scroll offsets are applied.
 pub fn visualContentRect(tree: *const WidgetTree, id: Id) Rect {
-    const border_rect = visualBorderRect(tree, id);
-    const node = tree.nodeConst(id) orelse return border_rect;
+    const resolved = resolveBorderOrigin(true, tree, id);
+    const origin = resolved.origin;
+    const node = resolved.node orelse return .{ .x = origin[0], .y = origin[1] };
+    const border_rect: Rect = .{
+        .x = origin[0],
+        .y = origin[1],
+        .w = node.rect.w,
+        .h = node.rect.h,
+    };
     return contentBoxRect(border_rect, node);
 }
 
@@ -547,6 +676,7 @@ pub fn pointInClipAxes(rect: Rect, axes: ClipAxes, pos: [2]f32) bool {
 pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
     var cur = id;
     while (cur != .root) {
+        tree.counter_sink.add(.ancestor_reads, 1);
         const node = tree.nodeConst(cur) orelse break;
         if (!pointInClipAxes(
             visualBorderRect(tree, cur),
@@ -592,6 +722,154 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     try std.testing.expectEqual(id2, tree.node(id1).?.children.items[0]);
 }
 
+// A prepared lookup must use stored post-order indices instead of deriving
+// positions from sequential IDs, and stale stored indices must still scan.
+test "WidgetTree: prepared lookup follows current post-order nodes" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const parent_id: Id = @enumFromInt(1);
+    const child_id: Id = @enumFromInt(3);
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = parent_id,
+    });
+    try tree.appendNode(.{
+        .id = parent_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+    });
+    try tree.prepareIdLookup();
+
+    try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(child_id));
+    try std.testing.expectEqual(@as(?usize, 1), tree.nodeIndex(parent_id));
+    try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@enumFromInt(2)));
+
+    std.mem.swap(WidgetNode, &tree.nodes.items[0], &tree.nodes.items[1]);
+    try std.testing.expectEqual(@as(?usize, 1), tree.nodeIndex(child_id));
+    try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(parent_id));
+
+    try tree.prepareIdLookup();
+    try std.testing.expectEqual(@as(?usize, 1), tree.nodeIndex(child_id));
+    try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(parent_id));
+}
+
+// A full-cardinality map can still be malformed. Preparation must not replace
+// its established missing-key behavior with a dense node scan.
+test "WidgetTree: malformed complete map remains lookup authority" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const id1: Id = @enumFromInt(1);
+    const id2: Id = @enumFromInt(2);
+    const unrelated_id: Id = @enumFromInt(3);
+    for ([_]Id{ id1, id2 }) |id| {
+        try tree.appendNode(.{
+            .id = id,
+            .kind = .{ .spacer = .{} },
+            .parent = .root,
+        });
+    }
+    try tree.prepareIdLookup();
+
+    try std.testing.expect(tree.id_index.remove(id2));
+    try tree.id_index.put(tree.allocator, unrelated_id, 1);
+    try tree.prepareIdLookup();
+
+    try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(id1));
+    try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(id2));
+}
+
+// The maximum representable ID must avoid max-plus-one overflow and retain the
+// existing sparse-map lookup path.
+test "WidgetTree: maximum ID remains on sparse fallback" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const maximum_id: Id = @enumFromInt(std.math.maxInt(u32));
+    try tree.appendNode(.{
+        .id = maximum_id,
+        .kind = .{ .spacer = .{} },
+        .parent = .root,
+    });
+    try tree.prepareIdLookup();
+
+    try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(maximum_id));
+    try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(.root));
+}
+
+// A failed replacement must leave the old validated lookup safe, and the tree
+// must accept a later preparation attempt.
+test "WidgetTree: prepare allocation failure keeps lookup retryable" {
+    var failing_allocator = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = failing_allocator.allocator();
+    var tree = WidgetTree.init(allocator);
+    defer tree.deinit();
+
+    const id1: Id = @enumFromInt(1);
+    const id2: Id = @enumFromInt(2);
+    const id3: Id = @enumFromInt(3);
+    for ([_]Id{ id1, id2 }) |id| {
+        try tree.appendNode(.{
+            .id = id,
+            .kind = .{ .spacer = .{} },
+            .parent = .root,
+        });
+    }
+    try tree.prepareIdLookup();
+
+    tree.nodes.items[1].id = id3;
+    try std.testing.expect(tree.id_index.remove(id2));
+    try tree.id_index.put(allocator, id3, 1);
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+
+    try std.testing.expectError(error.OutOfMemory, tree.prepareIdLookup());
+    try std.testing.expect(failing_allocator.has_induced_failure);
+    try std.testing.expectEqual(@as(?usize, 1), tree.nodeIndex(id3));
+    try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(id2));
+
+    failing_allocator.fail_index = std.math.maxInt(usize);
+    try tree.prepareIdLookup();
+    try tree.prepareIdLookup();
+    try std.testing.expectEqual(@as(?usize, 1), tree.nodeIndex(id3));
+}
+
+test "WidgetTree counters record node lookup and ancestor reads" {
+    var counters: perf_counters.Counters = .{};
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    tree.setCounterSink(&counters);
+    const root_id: Id = @enumFromInt(1);
+    const child_id: Id = @enumFromInt(2);
+    try tree.appendNode(.{
+        .id = root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 1, .y = 2, .w = 10, .h = 10 },
+    });
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "x" } },
+        .parent = root_id,
+        .rect = .{ .x = 3, .y = 4, .w = 5, .h = 6 },
+    });
+    try tree.appendChild(root_id, child_id);
+
+    _ = absoluteBorderOrigin(&tree, child_id);
+    const snapshot = try counters.snapshot();
+    if (comptime v7_options.perf_counters) {
+        try std.testing.expect(snapshot.value(.node_comparisons) > 0);
+        try std.testing.expect(snapshot.value(.ancestor_reads) > 0);
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.node_comparisons));
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.ancestor_reads));
+    }
+}
+
 test "WidgetTree: malformed IDs return InvalidStyle instead of panicking" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -618,6 +896,7 @@ test "WidgetTree: moving a node to the end reindexes shifted nodes" {
             .parent = .root,
         });
     }
+    try tree.prepareIdLookup();
 
     tree.moveNodeToEnd(0);
 
@@ -879,6 +1158,195 @@ test "geometry: stored resolved percentage edges retain containing basis" {
     const expected_origin = [2]f32{ 20, 0 };
     try std.testing.expectEqual(expected_origin, absoluteBorderOrigin(&tree, child_id));
     try std.testing.expectEqual(expected_origin, visualBorderOrigin(&tree, child_id));
+}
+
+test "geometry preserves nested fractional child-to-root accumulation" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const middle_id: Id = @enumFromInt(2);
+    const outer_id: Id = @enumFromInt(3);
+    var middle_scroll: ScrollState = .{ .offset = .{ 5.89, 0.4 } };
+    var outer_scroll: ScrollState = .{ .offset = .{ 7.28, 0.6 } };
+
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = middle_id,
+        .rect = .{ .x = 74.9, .y = 9.7, .w = 13.25, .h = 4.5 },
+    });
+    try tree.appendNode(.{
+        .id = middle_id,
+        .kind = .{ .row = .{} },
+        .parent = outer_id,
+        .rect = .{ .x = 6.8, .y = 4.6, .w = 100, .h = 80 },
+        .style = .{
+            .border_inset = .{
+                .top = .{ .length = 1.2 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 12.3 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 2.3 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 22.5 },
+            },
+        },
+        .scroll = .{ .state = &middle_scroll, .axis = .both },
+    });
+    try tree.appendNode(.{
+        .id = outer_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 78.7, .y = 7.9, .w = 200, .h = 160 },
+        .style = .{
+            .border_inset = .{
+                .top = .{ .length = 5.7 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 31.4 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 6.8 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 46.5 },
+            },
+        },
+        .scroll = .{ .state = &outer_scroll, .axis = .both },
+    });
+    try tree.appendChild(middle_id, child_id);
+    try tree.appendChild(outer_id, middle_id);
+
+    const absolute_origin = absoluteBorderOrigin(&tree, child_id);
+    const visual_origin = visualBorderOrigin(&tree, child_id);
+    try std.testing.expectEqual(
+        @as(u32, 0x4388_8CCC),
+        @as(u32, @bitCast(absolute_origin[0])),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0x4218_CCCD),
+        @as(u32, @bitCast(absolute_origin[1])),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0x4381_F70A),
+        @as(u32, @bitCast(visual_origin[0])),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0x4214_CCCD),
+        @as(u32, @bitCast(visual_origin[1])),
+    );
+
+    const absolute_rect = absoluteRect(&tree, child_id);
+    const visual_rect = visualBorderRect(&tree, child_id);
+    try std.testing.expectEqual(absolute_origin[0], absolute_rect.x);
+    try std.testing.expectEqual(absolute_origin[1], absolute_rect.y);
+    try std.testing.expectEqual(visual_origin[0], visual_rect.x);
+    try std.testing.expectEqual(visual_origin[1], visual_rect.y);
+    try std.testing.expectEqual(@as(f32, 13.25), absolute_rect.w);
+    try std.testing.expectEqual(@as(f32, 4.5), absolute_rect.h);
+    try std.testing.expectEqual(@as(f32, 13.25), visual_rect.w);
+    try std.testing.expectEqual(@as(f32, 4.5), visual_rect.h);
+}
+
+test "geometry returns the accumulated prefix when a parent is missing" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    const parent_id: Id = @enumFromInt(2);
+    const missing_id: Id = @enumFromInt(99);
+    var scroll_state: ScrollState = .{ .offset = .{ 2, 3 } };
+
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = parent_id,
+        .rect = .{ .x = 1, .y = 2, .w = 7, .h = 8 },
+    });
+    try tree.appendNode(.{
+        .id = parent_id,
+        .kind = .{ .column = .{} },
+        .parent = missing_id,
+        .rect = .{ .x = 10, .y = 20, .w = 50, .h = 40 },
+        .style = .{
+            .border_inset = .{
+                .top = .{ .length = 5 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 3 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 6 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 4 },
+            },
+        },
+        .scroll = .{ .state = &scroll_state, .axis = .both },
+    });
+    try tree.appendChild(parent_id, child_id);
+
+    try std.testing.expectEqual(
+        Rect{ .x = 18, .y = 33, .w = 7, .h = 8 },
+        absoluteRect(&tree, child_id),
+    );
+    try std.testing.expectEqual(
+        Rect{ .x = 16, .y = 30, .w = 7, .h = 8 },
+        visualBorderRect(&tree, child_id),
+    );
+}
+
+test "geometry preserves explicit root sentinel lookup semantics" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: Id = @enumFromInt(1);
+    var root_scroll: ScrollState = .{ .offset = .{ 3, 4 } };
+    try tree.appendNode(.{
+        .id = child_id,
+        .kind = .{ .label = .{ .text = "child" } },
+        .parent = .root,
+        .rect = .{ .x = 2, .y = 3, .w = 7, .h = 8 },
+    });
+    try tree.appendNode(.{
+        .id = .root,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 100, .y = 200, .w = 30, .h = 40 },
+        .style = .{
+            .border_inset = .{
+                .top = .{ .length = 11 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 5 },
+            },
+            .padding_inset = .{
+                .top = .{ .length = 13 },
+                .right = .{ .length = 0 },
+                .bottom = .{ .length = 0 },
+                .left = .{ .length = 7 },
+            },
+        },
+        .scroll = .{ .state = &root_scroll, .axis = .both },
+    });
+    try tree.appendChild(.root, child_id);
+
+    try std.testing.expectEqual(
+        Rect{ .x = 0, .y = 0, .w = 30, .h = 40 },
+        absoluteRect(&tree, .root),
+    );
+    try std.testing.expectEqual(
+        Rect{ .x = 14, .y = 27, .w = 7, .h = 8 },
+        absoluteRect(&tree, child_id),
+    );
+    try std.testing.expectEqual(
+        Rect{ .x = 11, .y = 23, .w = 7, .h = 8 },
+        visualBorderRect(&tree, child_id),
+    );
 }
 
 test "absoluteRect: root-level node is relative to the surface (0,0)" {

@@ -33,11 +33,14 @@ const event = @import("event.zig");
 const input = @import("input.zig");
 const headless = @import("headless.zig");
 const StateDir = @import("state.zig").StateDir;
+const perf_counters = @import("perf_counters.zig");
+const CounterSink = perf_counters.CounterSink;
 
 const FrameOutput = headless.FrameOutput;
 
 pub const App = struct {
     gpa: std.mem.Allocator,
+    layout_storage: layout.LayoutStorage,
     /// Serialize the frame tree to JSON (FrameOutput.json). OFF by
     /// default — the windowed + frames modes never read the JSON, and the
     /// serialization is a measurable per-frame cost. The headless drivers
@@ -103,16 +106,25 @@ pub const App = struct {
     /// The optional renderer endpoint. The endpoint remains owned by the
     /// window driver; App only borrows it while dispatching hooks.
     gpu_endpoint: ?*GpuEndpoint = null,
+    /// Optional runner-owned performance counter sink. The disabled build
+    /// stores no state and compiles every add to a no-op.
+    counter_sink: CounterSink = CounterSink.init(null),
 
     pub fn init(gpa: std.mem.Allocator) App {
         return .{
             .gpa = gpa,
+            .layout_storage = layout.LayoutStorage.init(gpa),
             .identity_registry = ComponentRegistry.init(gpa),
             .arenas = .{
                 std.heap.ArenaAllocator.init(gpa),
                 std.heap.ArenaAllocator.init(gpa),
             },
+            .counter_sink = CounterSink.init(null),
         };
+    }
+
+    pub fn setCounterSink(self: *App, counters: ?*perf_counters.Counters) void {
+        self.counter_sink = CounterSink.init(counters);
     }
 
     fn initGpuEntry(self: *App, entry: *ComponentEntry) !void {
@@ -167,6 +179,7 @@ pub const App = struct {
         self.detachGpu();
         self.components.deinit(self.gpa);
         self.identity_registry.deinit();
+        self.layout_storage.deinit();
         self.arenas[0].deinit();
         self.arenas[1].deinit();
         self.* = undefined;
@@ -486,6 +499,7 @@ pub const App = struct {
 
     fn findNode(tree: *const WidgetTree, id: Id) ?*const WidgetNode {
         for (tree.nodes.items) |*n| {
+            tree.addCounter(.node_comparisons, 1);
             if (n.id == id) return n;
         }
         return null;
@@ -552,6 +566,7 @@ pub const App = struct {
         const arena_alloc = self.arenas[build_idx].allocator();
         const tree = try arena_alloc.create(WidgetTree);
         tree.* = WidgetTree.init(arena_alloc);
+        tree.setCounterSink(self.counter_sink.pointer());
         // The registered ROOT component occupies id 1; the tree's node and
         // nested-component ids must never collide with it, so the counter
         // starts at 2.
@@ -586,18 +601,31 @@ pub const App = struct {
 
         // Draw the registered root through its vtable. `root` is the same
         // pointer register() stored, so click dispatch targets it too.
-        try root_component.vtable.draw(root, &ctx);
+        {
+            const zone = tracy.Zone.begin(.{ .name = "appDraw", .src = @src() });
+            defer zone.end();
+            try root_component.vtable.draw(root, &ctx);
+        }
 
-        try layout.layoutTree(tree, .{
-            .allocator = arena_alloc,
-            .available = surface,
-            .measure = self.measure,
-        });
+        {
+            const zone = tracy.Zone.begin(.{ .name = "layoutTree", .src = @src() });
+            defer zone.end();
+            try layout.layoutTree(tree, .{
+                .allocator = arena_alloc,
+                .available = surface,
+                .measure = self.measure,
+                .storage = &self.layout_storage,
+            });
+        }
         defer self.unmountStaleGpuComponents();
         if (gpu_frame) |active_gpu_frame| {
+            const zone = tracy.Zone.begin(.{ .name = "gpuComponentDispatch", .src = @src() });
+            defer zone.end();
             try self.dispatchGpuFrame(active_gpu_frame);
         }
 
+        const state_zone = tracy.Zone.begin(.{ .name = "stateInputValidation", .src = @src() });
+        defer state_zone.end();
         // Revalidate ids carried over from the previous frame's tree.
         // Draw order can change between frames (a conditional node inserted
         // above renumbers everything after it), so an id may now name a

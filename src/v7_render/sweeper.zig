@@ -500,7 +500,7 @@ pub fn buildFillBands(a: std.mem.Allocator, curves: []const Curve) !FillBands {
         const lo = @min(c.p0y, c.p2y);
         const hi = @max(c.p0y, c.p2y);
         const r0 = @as(i32, @intFromFloat(@floor(lo - 2.5))) + 1;
-        const r1 = @as(i32, @intFromFloat(@floor(hi + 0.5)));
+        const r1: i32 = @intFromFloat(@floor(hi + 0.5));
         const r0i: usize = @intCast(r0 - row_min);
         const r1i: usize = @intCast(r1 - row_min);
         for (r0i..r1i + 1) |ri| counts[ri] += 1;
@@ -526,7 +526,7 @@ pub fn buildFillBands(a: std.mem.Allocator, curves: []const Curve) !FillBands {
         const lo = @min(c.p0y, c.p2y);
         const hi = @max(c.p0y, c.p2y);
         const r0 = @as(i32, @intFromFloat(@floor(lo - 2.5))) + 1;
-        const r1 = @as(i32, @intFromFloat(@floor(hi + 0.5)));
+        const r1: i32 = @intFromFloat(@floor(hi + 0.5));
         const r0i: usize = @intCast(r0 - row_min);
         const r1i: usize = @intCast(r1 - row_min);
         for (r0i..r1i + 1) |ri| {
@@ -602,7 +602,7 @@ pub fn buildStrokeBands(a: std.mem.Allocator, edges: []const StrokeEdge, window:
     for (edges) |e| {
         const ymin = @min(e.y0, e.y1);
         const ymax = @max(e.y0, e.y1);
-        const r0 = @as(i32, @intFromFloat(@floor(ymin - window)));
+        const r0: i32 = @intFromFloat(@floor(ymin - window));
         const r1 = @as(i32, @intFromFloat(@ceil(ymax))) - 1;
         if (r0 > r1) continue; // degenerate: no row's window can overlap
         row_min = @min(row_min, r0);
@@ -629,7 +629,7 @@ pub fn buildStrokeBands(a: std.mem.Allocator, edges: []const StrokeEdge, window:
     for (edges) |e| {
         const ymin = @min(e.y0, e.y1);
         const ymax = @max(e.y0, e.y1);
-        const r0 = @as(i32, @intFromFloat(@floor(ymin - window)));
+        const r0: i32 = @intFromFloat(@floor(ymin - window));
         const r1 = @as(i32, @intFromFloat(@ceil(ymax))) - 1;
         if (r0 > r1) continue;
         const r0i: usize = @intCast(r0 - row_min);
@@ -656,7 +656,7 @@ pub fn buildStrokeBands(a: std.mem.Allocator, edges: []const StrokeEdge, window:
     for (edges, 0..) |e, ei| {
         const ymin = @min(e.y0, e.y1);
         const ymax = @max(e.y0, e.y1);
-        const r0 = @as(i32, @intFromFloat(@floor(ymin - window)));
+        const r0: i32 = @intFromFloat(@floor(ymin - window));
         const r1 = @as(i32, @intFromFloat(@ceil(ymax))) - 1;
         if (r0 > r1) continue;
         const r0i: usize = @intCast(r0 - row_min);

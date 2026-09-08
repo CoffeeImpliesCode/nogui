@@ -55,12 +55,14 @@
 //! Demo-side only: like text.zig, this file MAY import the v7 core.
 
 const std = @import("std");
+const tracy = @import("tracy");
 const noapi = @import("noapi");
 const svg = @import("svg.zig");
 const svg_xml = @import("svg_xml.zig");
 const renderer = @import("v7_render");
 const SceneRect = renderer.SceneRect;
 const nogui = @import("nogui");
+const CounterSink = nogui.CounterSink;
 pub const Rect = nogui.widget.Rect;
 const srgbToOklab = @import("text.zig").srgbToOklab;
 
@@ -524,6 +526,7 @@ pub const SvgView = struct {
     /// The per-stroke widths (user units, unscaled) + the count.
     stroke_widths: []const f32,
     stroke_count: usize,
+    counter_sink: CounterSink = CounterSink.init(null),
     /// The stroke's offset-outline edge buffers (mode 2 — the exact Cairo
     /// reference): one GPU buffer per stroked path holding the band's
     /// boundary edges, plus their BDAs and the curve BDAs (to restore the
@@ -897,6 +900,10 @@ pub const SvgView = struct {
         };
     }
 
+    pub fn setCounterSink(self: *SvgView, counters: ?*nogui.Counters) void {
+        self.counter_sink = CounterSink.init(counters);
+    }
+
     /// Bake the fit scale into the GPU curve buffers. The shader's
     /// TYPE_GLYPH branch sweeps the 1x1 px window against the curves in
     /// PIXEL space (the glyph outlines are extracted at the pixel size),
@@ -908,10 +915,12 @@ pub const SvgView = struct {
     /// marching quads) and `oversize` (the AA band / marching-quad
     /// half-extent in px), written into the stroke materials' win_w/win_h
     /// fields (unused by the shader otherwise). Per-frame tunable for the
-    /// stroke test scene.
     pub fn setStrokeStyle(self: *SvgView, algo: u32, oversize: f32) void {
+        const zone = tracy.Zone.begin(.{ .name = "svgStrokeUpdate", .src = @src() });
+        defer zone.end();
         const dst: [*]u8 = @ptrCast(@alignCast(self.materials.cpu));
         for (0..self.stroke_widths.len) |j| {
+            self.counter_sink.add(.svg_stroke_write_attempts, 1);
             const slot = self.base_slot + @as(u32, @intCast(self.paths_len)) + @as(u32, @intCast(j));
             const offset = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "win_w");
             @as(*f32, @ptrCast(@alignCast(dst + offset))).* = @floatFromInt(algo);
@@ -922,6 +931,7 @@ pub const SvgView = struct {
             const bda_off = slot * renderer.material_size + @offsetOf(renderer.GlyphMaterial, "curve_bda");
             const bda = if (algo == 2) self.stroke_edge_bdas[j] else self.stroke_curve_bdas[j];
             @as(*u64, @ptrCast(@alignCast(dst + bda_off))).* = bda;
+            self.counter_sink.add(.svg_stroke_writes, 3);
         }
     }
 
@@ -1043,6 +1053,7 @@ pub const SvgView = struct {
                 error.ShaderCompileFailed => null,
                 error.InvalidHandle => null,
                 error.BackendError => null,
+                error.OutOfDateKHR => null,
             };
             if (maybe_buf) |new_buf| {
                 if (self.band_bufs[i]) |old| self.gpu.gpuFree(old);
@@ -1117,6 +1128,7 @@ pub const SvgView = struct {
                 error.ShaderCompileFailed => null,
                 error.InvalidHandle => null,
                 error.BackendError => null,
+                error.OutOfDateKHR => null,
             };
             if (maybe_buf) |new_buf| {
                 if (self.stroke_band_bufs[j]) |old| self.gpu.gpuFree(old);

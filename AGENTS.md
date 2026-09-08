@@ -1,60 +1,37 @@
 # nogui
 
-**Stack**: Zig 0.16.0 · SDL3 · noapi (Vulkan) · FreeType · HarfBuzz · Tracy · `jj` (colocated git)  
-**Status**: Prototype / Research — High-performance immediate-mode GUI toolkit
+Zig 0.16.0 · SDL3 · noapi (Vulkan) · FreeType · HarfBuzz · Tracy · `jj`.
+This Linux-focused immediate-mode GUI is a research prototype rendered as batched quads.
+`src/v7/` is the canonical library, `src/v7_render/` is the renderer, and `src/v7_demo/` contains demos and performance tools.
 
----
+## Invariants
 
-## 1. Overview & Directory Structure
+- Render intermediate colors in Oklab; convert to sRGB in the final blit.
+- Use `noapi` (`Gpu.*`, `CommandBuffer.*`) for GPU work. Do not access raw Vulkan handles.
+- `App.arenas[2]` keeps the previous frame alive for layout diffing and hit-testing while the next frame builds. Avoid per-frame mallocs in hot rendering paths.
+- Nodes use CSS-style margin, border, and padding. `node.rect` is the border box relative to the parent content box. Use `widget.absoluteRect` for screen coordinates.
 
-`nogui` is an immediate-mode GUI toolkit rendering via 9-slice batched quads with an Oklab color pipeline on top of `noapi`.
+## Commands
 
-```
-├── src/
-│   ├── main.zig          # Minimal GPU initialization & grid test
-│   ├── proto.zig         # Prototype module exports
-│   ├── proto_main.zig    # FreeType atlas generation & GUI demo
-│   ├── v7/               # Next-generation layout & widget system
-│   └── v7_demo/          # Layout demo & stress benchmarks
-├── shaders/              # GLSL shader sources and compiled SPIR-V
-├── build.zig             # Build targets (nogui, proto, v7, spotify demo)
-└── build.zig.zon         # Dependencies (noapi, sdl3, freetype, tracy)
-```
-
----
-
-## 2. Invariants & Conventions
-
-1. **Rendering & Color Pipeline**:
-   - All intermediate rendering is performed in **Oklab** color space; final blit converts to sRGB.
-   - All GPU interaction goes through `noapi` abstractions (`Gpu.*`, `CommandBuffer.*`). Never access raw Vulkan handles directly.
-2. **Memory & Double-Buffered Arenas**:
-   - Double-buffered per-frame arenas (`App.arenas[2]`): frame $N$ builds in one arena while frame $N-1$ stays alive for layout diffing and hit-testing.
-   - Zero per-frame mallocs in hot rendering paths.
-3. **Box Model & Relative Coordinates**:
-   - Nodes carry CSS-style Box dimensions (margin, border, padding).
-   - `node.rect` is the border box **relative** to parent content box. Absolute screen coordinates are obtained only via explicit conversions (`widget.absoluteRect`).
-
----
-
-## 3. Commands & Quality Gates
-
-```bash
-zig build run                  # Run minimal grid test
-zig build v7                   # Run v7 layout demo
-zig build spotify              # Run Spotify UI stress benchmark
-zig build test                 # Run all unit tests
-zig build lint                 # Run project linters (ziglint + zlint)
-zig fmt --check .              # Verify formatting
-gate                           # Run house gate script
-jj st                          # VCS status (NEVER raw git)
+```sh
+zig build run
+zig build v7
+zig build spotify
+zig build test
+zig build fixture
+zig build layout-check
+zig build lint
+zig fmt --check src build.zig build.zig.zon
+python3 -m unittest discover -s tools -p 'test_*.py'
+gate
+jj st
 ```
 
-## NixOS, Development Environment & Shared Notes
+`run` starts the GPU grid test. `v7` starts the layout demo. `spotify` runs the UI stress scene. `fixture` checks the pinned Taffy corpus. `layout-check` compares the headless output with the golden layout. `gate` runs the house checks. Use `jj`, not raw Git.
 
-- This host runs NixOS. Never install system or development libraries imperatively.
-- Declare dependencies, headers, runtime libraries, and tools in `devenv.nix`.
-- Use the repository's direnv/devenv environment. Run `direnv allow` after environment changes.
-- Use `devenv shell` for a one-off shell.
-- Put durable architecture, design, protocol, and experiment notes under `docs/`.
-- Put cross-project or private agent handoff notes in `~/.agents/agent-notes/`. Never commit these notes.
+## Environment and notes
+
+- Declare dependencies, headers, libraries, and tools in `devenv.nix`; do not install them imperatively on NixOS.
+- Use direnv/devenv. Run `direnv allow` after environment changes or `devenv shell` for a one-off shell.
+- Keep durable architecture and experiment notes under `docs/`.
+- Keep private or cross-project agent handoff notes under `~/.agents/agent-notes/`, not in the repository.

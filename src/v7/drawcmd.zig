@@ -95,6 +95,8 @@ const no_clip: u32 = 0xFFFFFFFF;
 fn clipContains(tree: *const WidgetTree, container: Id, node_id: Id) bool {
     var cur = node_id;
     while (cur != .root) {
+        tree.addCounter(.ancestor_reads, 1);
+        tree.addCounter(.node_comparisons, 1);
         if (cur == container) return true;
         const n = tree.nodeConst(cur) orelse return false;
         cur = n.parent;
@@ -140,25 +142,35 @@ fn intersectInherited(tree: *const WidgetTree, rect: ClipRect, inherited_id: u32
     return intersectClip(rect, tree.clip_rects[inherited_id]);
 }
 
-/// Convert a laid-out tree into paint-ordered DrawCmds (parents BEFORE
-/// children — iterate the post-order array REVERSED). Each node's RELATIVE
-/// rect is resolved to its VISUAL border box first. Bordered nodes emit
-/// their ring before their fill. Returns a slice allocated from
-/// `allocator`; caller frees.
-///
-/// The clip pass: nodes whose paint or style requires content clipping push
-/// their visual border box onto the tree's per-frame clip-rect list. A node's
-/// own decorations inherit only ancestor clips; its descendants inherit its
-/// content clip. Nested clips intersect per axis. The tree must be mutable:
-/// the walk appends clip rects and stamps each node's `clip_id` so the text
-/// renderer applies the node's own content and text-overflow clips.
-pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_id: ?Id, press_alpha: f32) ![]DrawCmd {
-    const zone = tracy.Zone.begin(.{ .name = "collectDrawCmds", .src = @src() });
-    defer zone.end();
+/// Convert a laid-out tree into paint-ordered DrawCmds. The returned slice is
+/// allocated from `allocator`; caller frees.
+pub fn collectDrawCmds(
+    allocator: std.mem.Allocator,
+    tree: *WidgetTree,
+    pressed_id: ?Id,
+    press_alpha: f32,
+) ![]DrawCmd {
     var list: std.ArrayList(DrawCmd) = .empty;
+    errdefer list.deinit(allocator);
     const capacity = std.math.mul(usize, tree.nodes.items.len, 3) catch return error.OutOfMemory;
     try list.ensureTotalCapacity(allocator, capacity);
-    defer list.deinit(allocator);
+    try collectDrawCmdsInto(tree, pressed_id, press_alpha, &list);
+    return list.toOwnedSlice(allocator);
+}
+
+/// Convert a laid-out tree into paint-ordered DrawCmds in caller-owned storage.
+/// The caller must reserve enough capacity before entering a measured loop.
+pub fn collectDrawCmdsInto(
+    tree: *WidgetTree,
+    pressed_id: ?Id,
+    press_alpha: f32,
+    list: *std.ArrayList(DrawCmd),
+) !void {
+    const zone = tracy.Zone.begin(.{ .name = "collectDrawCmds", .src = @src() });
+    defer zone.end();
+    const required_capacity = std.math.mul(usize, tree.nodes.items.len, 3) catch return error.OutOfMemory;
+    if (list.capacity < required_capacity) return error.OutOfMemory;
+    list.clearRetainingCapacity();
     // Clip stack: mirrors enclosing content clips. Text-overflow clips are
     // appended separately and never enter this stack because they constrain
     // only the current node's glyphs, not its commands or descendants.
@@ -236,7 +248,7 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
         // feathered by PaintStyle.shadow. Only painted nodes cast shadows;
         // `shadow > 0` marks a shadow cmd for the renderer.
         if (painted and paint.shadow > 0) {
-            try list.append(allocator, .{
+            list.appendAssumeCapacity(.{
                 .rect = Rect{
                     .x = visual_border.x + 2,
                     .y = visual_border.y + 3,
@@ -258,7 +270,7 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
 
         // Ring next (paints behind the fill and the children).
         if (bordered and node.kind != .spacer) {
-            try list.append(allocator, .{
+            list.appendAssumeCapacity(.{
                 .rect = visual_border,
                 .color = paint.border_color,
                 .kind = .solid,
@@ -298,7 +310,7 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
             .h = @max(0, visual_border.h - border.top - border.bottom),
         };
         if (fill_rect.w <= 0 or fill_rect.h <= 0) continue;
-        try list.append(allocator, .{
+        list.appendAssumeCapacity(.{
             .rect = fill_rect,
             .color = color,
             .kind = .solid,
@@ -310,7 +322,32 @@ pub fn collectDrawCmds(allocator: std.mem.Allocator, tree: *WidgetTree, pressed_
             .tex_idx = tex_idx,
         });
     }
-    return list.toOwnedSlice(allocator);
+    return;
+}
+
+test "draw command collection counters record node comparisons" {
+    var counters: @import("perf_counters.zig").Counters = .{};
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    tree.setCounterSink(&counters);
+    const node_id: Id = @enumFromInt(1);
+    try tree.appendNode(.{
+        .id = node_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .w = 20, .h = 20 },
+    });
+    var list: std.ArrayList(DrawCmd) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try list.ensureTotalCapacity(std.testing.allocator, 3);
+    try collectDrawCmdsInto(&tree, null, 0, &list);
+    try std.testing.expect(tree.nodeConst(node_id) != null);
+    const snapshot = try counters.snapshot();
+    if (comptime @import("v7_options").perf_counters) {
+        try std.testing.expect(snapshot.value(.node_comparisons) > 0);
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.node_comparisons));
+    }
 }
 
 /// Linear interpolation between two RGBA colors: a + (b - a) * t.
@@ -1180,4 +1217,35 @@ test "collectDrawCmds: content overflow does not clip own decorations" {
     try std.testing.expectEqual(no_clip, cmds[1].clip_id);
     try std.testing.expectEqual(@as(u32, 0), cmds[2].clip_id);
     try std.testing.expectEqual(@as(u32, 0), tree.node(parent_id).?.clip_id);
+}
+
+test "collectDrawCmdsInto reuses caller-owned storage" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
+    });
+
+    var commands: std.ArrayList(DrawCmd) = .empty;
+    defer commands.deinit(std.testing.allocator);
+    try commands.ensureTotalCapacity(std.testing.allocator, 3);
+    const storage = commands.allocatedSlice().ptr;
+    const capacity = commands.capacity;
+
+    try collectDrawCmdsInto(&tree, null, 0, &commands);
+    try std.testing.expectEqual(@as(usize, 1), commands.items.len);
+    try collectDrawCmdsInto(&tree, null, 0, &commands);
+    try std.testing.expectEqual(@as(usize, 1), commands.items.len);
+    try std.testing.expectEqual(storage, commands.allocatedSlice().ptr);
+    try std.testing.expectEqual(capacity, commands.capacity);
+
+    var too_small: std.ArrayList(DrawCmd) = .empty;
+    defer too_small.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        collectDrawCmdsInto(&tree, null, 0, &too_small),
+    );
 }
