@@ -211,3 +211,57 @@ test "nested block scratch uses one tree-sized allocation" {
         layout_context.block_scratch_words.?.len,
     );
 }
+
+test "TextMeasurementCache caches unconstrained size for single-line text and reuses across wider available bounds" {
+    TextMeasureProbe.reset();
+    var layout_context: context.LayoutContext = .{
+        .allocator = std.testing.allocator,
+        .measure = TextMeasureProbe.measure,
+        .measure_node = testMeasureNode,
+        .layout_node = testLayoutNode,
+    };
+    defer layout_context.deinit();
+
+    const input_narrow: context.MeasureInput = .{
+        .known_dimensions = .{ .width = null, .height = null },
+        .available_space = .{
+            .width = .{ .definite = 100 },
+            .height = .{ .definite = 40 },
+        },
+        .font_size = 20,
+        .font_id = 3,
+    };
+    const first = try layout_context.measureTextCached(
+        5,
+        "abcd",
+        input_narrow,
+        .visible,
+        null,
+    );
+    try std.testing.expectEqual(@as(f32, 40), first.width);
+    try std.testing.expectEqual(@as(usize, 1), TextMeasureProbe.calls);
+
+    var input_wide = input_narrow;
+    input_wide.available_space.width = .{ .definite = 200 };
+    const second = try layout_context.measureTextCached(
+        5,
+        "abcd",
+        input_wide,
+        .visible,
+        null,
+    );
+    try std.testing.expectEqual(@as(f32, 40), second.width);
+    try std.testing.expectEqual(@as(usize, 1), TextMeasureProbe.calls);
+
+    var input_max = input_narrow;
+    input_max.available_space.width = .max_content;
+    const third = try layout_context.measureTextCached(
+        5,
+        "abcd",
+        input_max,
+        .visible,
+        null,
+    );
+    try std.testing.expectEqual(@as(f32, 40), third.width);
+    try std.testing.expectEqual(@as(usize, 1), TextMeasureProbe.calls);
+}
