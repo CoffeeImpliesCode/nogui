@@ -18,10 +18,10 @@
 // is the identity (the paint-ordered bag).
 //
 // Push constant ABI: PushData { vert_data @0; frag_data @8; indirect @16
-// (clip-rect buffer BDA); screen @24 (framebuffer size in px); scene_bda
-// @32 (the drawable bag); perm_bda @40 (the sorted permutation) } — the
-// fragment shader reads the first three fields (unchanged); scene_bda +
-// perm_bda are new (V1b).
+// (clip-rect buffer BDA); screen @24 (logical window size); scene_bda @32
+// (the drawable bag); perm_bda @40 (the sorted permutation); pixel_scale
+// @48 (device pixels per logical unit) }. The fragment shader uses the
+// same full declaration and converts SV_Position to logical coordinates.
 
 struct SceneRect {
     float4 dst;           // 0
@@ -39,13 +39,31 @@ struct SceneRect {
     // implicit pad to 112 (the 16-aligned bag stride)
 };
 
+struct GlyphMaterial {
+    int type;
+    float bearing_y;
+    float curve_w;
+    float curve_h;
+    float win_w;
+    float win_h;
+    uint64_t curve_bda;
+    uint64_t band_bda;
+    float4 gradient_to;
+};
+
+struct PaintTransform {
+    float4 transform_x;
+    float4 transform_y;
+};
+
 struct PushData {
     uint64_t vert_data;
     uint64_t frag_data;
     uint64_t indirect;
-    float2 screen; // framebuffer size (px) for the clip-space conversion
+    float2 screen; // logical window size for the clip-space conversion
     uint64_t scene_bda; // the drawable bag (CS1's input, read here sorted)
     uint64_t perm_bda; // the sorted permutation (u32 bag indices)
+    float2 pixel_scale; // physical framebuffer pixels per logical unit
 };
 
 [[vk::push_constant]] PushData pc;
@@ -60,6 +78,7 @@ void main(
     out [[vk::location(3)]] float2 vOrigin,
     out [[vk::location(4)]] nointerpolation uint vTexIdx, // flat (P3)
     out [[vk::location(5)]] nointerpolation uint vClipId,
+    out [[vk::location(6)]] float2 vLocal,
     out float4 gl_Position : SV_Position)
 {
     // The instance → drawable split: 9 sub-quads per rect, row-major
@@ -101,10 +120,20 @@ void main(
     const float px = xs[col + qx];
     const float py = ys[row + qy];
 
-    // Clip-space conversion — (px / sw) * 2 - 1, the exact op order from
-    // emitSceneRect (Vulkan NDC: Y down; layout Y down — no flip).
-    const float clip_x = (px / pc.screen.x) * 2.0 - 1.0;
-    const float clip_y = (py / pc.screen.y) * 2.0 - 1.0;
+    // Clip-space conversion uses the logical window extents. Rasterization
+    // maps this projection to the physical viewport exactly once (Vulkan
+    // NDC: Y down; layout Y down — no flip).
+    float2 painted = float2(px, py);
+    if (r.curve.x > 1e30) {
+        GlyphMaterial material = vk::BufferPointer<GlyphMaterial>(
+            pc.vert_data + 56u * uint64_t(r.material_index)).Get();
+        PaintTransform transform = vk::BufferPointer<PaintTransform>(material.curve_bda).Get();
+        painted = float2(
+            transform.transform_x.x * px + transform.transform_x.y * py + transform.transform_x.z,
+            transform.transform_y.x * px + transform.transform_y.y * py + transform.transform_y.z);
+    }
+    const float clip_x = (painted.x / pc.screen.x) * 2.0 - 1.0;
+    const float clip_y = (painted.y / pc.screen.y) * 2.0 - 1.0;
 
     // src-grid UVs (the CPU computes these unconditionally; the curve
     // branch below ignores them — same values either way).
@@ -144,4 +173,5 @@ void main(
     vOrigin = float2(asfloat(r.origin_x), asfloat(r.origin_y));
     vTexIdx = r.tex_idx;
     vClipId = r.clip_id;
+    vLocal = float2(px, py);
 }

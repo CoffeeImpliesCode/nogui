@@ -1,0 +1,159 @@
+{
+  "status": "bounded_diagnostic_not_qualification",
+  "scene": "todo",
+  "mode": "offscreen",
+  "optimize": "Debug",
+  "warmup_frames": 4,
+  "sample_frames": 20,
+  "clean_cpu_median_ms": {
+    "before": 199.3853015,
+    "after": 34.6042455
+  },
+  "mechanism_cpu_median_ms": {
+    "before": 229.1969755,
+    "after": 30.537846
+  },
+  "harfbuzz_shapes_per_sample": {
+    "before": 928,
+    "after": 3
+  },
+  "remaining_shapes": "Changing frame header and two visible toggle counters.",
+  "cache": {
+    "entries": 256,
+    "retained_payload_bytes": 4194304,
+    "font_settings": "Immutable font identity and pixel size; fixed LTR/Latin; width-independent."
+  },
+  "artifacts": {
+    "before": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/nogui-text-cache-before.jsonl",
+      "sha256": "ec068ed794c13a1f13c530c6bb9eaf75d78e5717d87dbecaec252cd99950730c"
+    },
+    "after": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/nogui-text-cache-after.jsonl",
+      "sha256": "94a644ab8377b82a22083122b584e172bddffcc373ae03741e4b73dd4bdd8354"
+    },
+    "clean-before": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/nogui-text-cache-clean-before.jsonl",
+      "sha256": "49dd8d8c48fe39a57042d0b5a9cb229137bc5998190e2803833dfecb9c72cb99"
+    },
+    "clean-after": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/nogui-text-cache-clean-after.jsonl",
+      "sha256": "03060c7537298662edd47b8ae3e34873bdfd944ec66980e7b27609188df73183"
+    },
+    "after-clean-binary": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/v7-demo-clean",
+      "sha256": "cfe2acd31672d8b332950e47a55114fb0b1a9cfc0ebbd5c6d348124a2c3d2ecb"
+    },
+    "before-clean-binary": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/baseline/snapshots/Debug/clean/v7-demo",
+      "sha256": "ae71333fe10dbe9b3ac9a32c1545d61abbabb1078aed45f0db68bb7bf4e5865a"
+    },
+    "after-mechanism-binary": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/v7-demo-mechanism",
+      "sha256": "bf105b1d96069002ff8c5e6f668f63a04b5fb9320485cdf50222d34f776b14dd"
+    },
+    "before-mechanism-binary": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/baseline/snapshots/Debug/mechanism/v7-demo",
+      "sha256": "bbc32d73d8fbf20b5a92043ba6c0efb8af134dd5a36a1d06099090b42b3ece36"
+    }
+  },
+  "render_reference_matches": [
+    {
+      "file": "todo.ppm",
+      "sha256": "6153b1568a15bc0ac80286413b2c228910ffe5df1d7b4a2b19edb3ce364e960d",
+      "matches": true
+    },
+    {
+      "file": "todo-sort.ppm",
+      "sha256": "6153b1568a15bc0ac80286413b2c228910ffe5df1d7b4a2b19edb3ce364e960d",
+      "matches": true
+    },
+    {
+      "file": "calculator.ppm",
+      "sha256": "08a232281eec626a545422e6db6c8d040fcc04f3fceab0b89f6a64786e800d89",
+      "matches": true
+    },
+    {
+      "file": "calculator-sort.ppm",
+      "sha256": "08a232281eec626a545422e6db6c8d040fcc04f3fceab0b89f6a64786e800d89",
+      "matches": true
+    },
+    {
+      "file": "spotify.ppm",
+      "sha256": "ef0e17503fa795f311974dce961c4a975ed8ce98569248a89269ec6ee90a747e",
+      "matches": true
+    },
+    {
+      "file": "spotify-sort.ppm",
+      "sha256": "ef0e17503fa795f311974dce961c4a975ed8ce98569248a89269ec6ee90a747e",
+      "matches": true
+    },
+    {
+      "file": "tiger.ppm",
+      "sha256": "1092e5cecfb7f8d5052d956e4f93dcaa70b04aa45f0fb06a7b882f58962dbf44",
+      "matches": true
+    },
+    {
+      "file": "tiger-sort.ppm",
+      "sha256": "1092e5cecfb7f8d5052d956e4f93dcaa70b04aa45f0fb06a7b882f58962dbf44",
+      "matches": true
+    },
+    {
+      "file": "strokes.ppm",
+      "sha256": "265b0bd3df8736f493fc870a30e21e71f038918cfb1f84fef80f8f983d8c6a3b",
+      "matches": true
+    },
+    {
+      "file": "strokes-sort.ppm",
+      "sha256": "265b0bd3df8736f493fc870a30e21e71f038918cfb1f84fef80f8f983d8c6a3b",
+      "matches": true
+    }
+  ],
+  "limits": [
+    "One short process per profile and version, not a randomized repeated-process baseline.",
+    "No sustained-stability or 120 FPS claim.",
+    "Full matrix remains deferred by user choice."
+  ],
+  "render_artifact_dir": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/shots",
+  "runtime": {
+    "extent": {
+      "width": 954,
+      "height": 1044
+    },
+    "gpu": "NVIDIA GeForce GTX 1660 Ti",
+    "driver": "595.99.02"
+  },
+  "shader_artifacts": {
+    "quad_vert.spv": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/shaders/quad_vert.spv",
+      "sha256": "fe35c897e1967416895ea776e1138a24d566a363d74365cf1f3465be2e5119aa"
+    },
+    "quad_frag.spv": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/shaders/quad_frag.spv",
+      "sha256": "791520a28ac03b6415d64d020b03e9120ae00d010a849bbc031a67d8903a70bc"
+    },
+    "sort_comp.spv": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/shaders/sort_comp.spv",
+      "sha256": "f14546b0285500f566c85576a93f193545fe88013d728acc0d67146714aca720"
+    },
+    "blit_oklab.spv": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/shaders/blit_oklab.spv",
+      "sha256": "4dccc8258d866e0177af25142ac6c050c193dd62740b8e4df2f99751a5a1e992"
+    },
+    "fullscreen_vert.spv": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/shaders/fullscreen_vert.spv",
+      "sha256": "4a4addb2793cc04666a3a1bca5209dfa7d97c7c6293bb841f4b87a96b8207df5"
+    },
+    "mandelbrot_comp.spv": {
+      "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/shaders/mandelbrot_comp.spv",
+      "sha256": "320de0eedfeafecdea004ed642e41e39172c807df94ee4454e2bce99c2b4d2e5"
+    }
+  },
+  "eviction_churn": {
+    "warmup_frames": 4,
+    "sample_frames": 100,
+    "shapes_per_sample": 3,
+    "path": "~/.cache/nogui/perf/stocktake-2026-09-09/text-cache/eviction-churn.jsonl",
+    "sha256": "3d43bcaff40a44019b8bc0bb2e434190aae0eed1b35315cbe87e864ae769a1ad"
+  }
+}

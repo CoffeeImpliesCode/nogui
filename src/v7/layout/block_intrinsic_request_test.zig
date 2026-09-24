@@ -1,7 +1,7 @@
 //! Verifies that block natural measurement preserves an intrinsically indefinite child axis.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const layout_context = @import("context.zig");
 const widget = @import("../widget.zig");
 const block_float = @import("block_float.zig");
@@ -43,7 +43,11 @@ const MeasureProbe = struct {
         available_height = null;
     }
 
-    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        input: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         calls += 1;
         known_width = input.known_dimensions.width;
         known_height = input.known_dimensions.height;
@@ -57,15 +61,17 @@ const MeasureProbe = struct {
         };
         return .{ .width = 10, .height = 20 };
     }
+
+    const source: layout_context.MeasureSource = .{ .callback = measure };
 };
 
 test "auto intrinsic block height leaves flex percentage height indefinite" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const flex_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const flex_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try tree.appendNode(.{
         .id = leaf_id,
@@ -137,9 +143,9 @@ test "definite Block availability does not define an auto percentage axis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const flex_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const flex_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try tree.appendNode(.{
         .id = leaf_id,
@@ -213,7 +219,7 @@ test "content-sized block root does not reconstruct an unknown axis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -235,7 +241,7 @@ test "content-sized block root does not reconstruct an unknown axis" {
 
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = MeasureProbe.measure,
+        .measure = MeasureProbe.source,
         .measure_node = measureFlexNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -267,7 +273,7 @@ test "inherent block root known border overrides style" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -289,7 +295,7 @@ test "inherent block root known border overrides style" {
 
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = MeasureProbe.measure,
+        .measure = MeasureProbe.source,
         .measure_node = measureFlexNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -316,7 +322,7 @@ test "content-sized block root floors known border by edges and gutter" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -347,7 +353,7 @@ test "content-sized block root floors known border by edges and gutter" {
 
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = MeasureProbe.measure,
+        .measure = MeasureProbe.source,
         .measure_node = measureFlexNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -375,8 +381,8 @@ test "block root sizing override does not leak to descendants" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -407,7 +413,7 @@ test "block root sizing override does not leak to descendants" {
 
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = MeasureProbe.measure,
+        .measure = MeasureProbe.source,
         .measure_node = measureFlexNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -435,7 +441,7 @@ test "block natural measurement returns OutOfMemory when scratch allocation fail
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },

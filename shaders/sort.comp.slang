@@ -30,7 +30,7 @@
 //   Dispatch boundaries provide the cross-group sync (Vulkan queue
 //   ordering); only workgroup-scope barriers are used inside.
 //
-// Buffers (per-frame ring ×2, indexed by the frame):
+// Buffers (per-frame ring ×3, indexed by the frame):
 //   bag_bda    host-visible SceneRect array (112 B records, 1 per drawable)
 //   perm_a/b   device-local u32 permutation ping-pong; pass 7 ends in A
 //   hist_bda   device-local scratch: groups × 256 u32

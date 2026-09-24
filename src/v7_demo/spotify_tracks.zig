@@ -1,4 +1,9 @@
 //! Track table view for the Spotify demo.
+//!
+//! Every control inside a table row is `.transparent`, and every row is either
+//! `.transparent` or carries the table background itself. A control that
+//! resolves the framework default instead repaints its row in the framework
+//! container grey and patchworks the table.
 
 const std = @import("std");
 const nogui = @import("nogui");
@@ -7,7 +12,22 @@ const callback = nogui.callback;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
 const widget = nogui.widget;
-const Id = nogui.Id;
+const FrameNodeId = nogui.FrameNodeId;
+const ComponentKey = nogui.ComponentKey;
+
+// Track IDs occupy 61 bits; the low three bits distinguish controls within a row.
+const TrackControl = enum(u3) {
+    number,
+    title,
+    album,
+    date_added,
+    like,
+    duration,
+};
+
+fn trackControlKey(track_key_base: u64, role: TrackControl) ComponentKey {
+    return .{ .u64 = track_key_base | @intFromEnum(role) };
+}
 
 const track_row_height = theme.track_row_height;
 const track_text_gap = theme.track_text_gap;
@@ -60,7 +80,11 @@ fn columnsFor(spec: layout.Spec) *const widget.SharedColumns {
     };
 }
 
-fn constrainIdentityText(tree: *widget.WidgetTree, id: Id, max_width: ?f32) error{InvalidStyle}!void {
+fn constrainIdentityText(
+    tree: *widget.WidgetTree,
+    id: FrameNodeId,
+    max_width: ?f32,
+) error{InvalidStyle}!void {
     const node = tree.node(id) orelse return error.InvalidStyle;
     node.style.shrink = 1;
     node.style.min_size.width = .{ .length = 0 };
@@ -75,7 +99,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         .gap = 0,
         .clip = true,
         .fill = theme.c_bg,
-        .gradient = theme.srgbToOklab(theme.c_bg),
     });
     defer ctx.pop();
 
@@ -92,7 +115,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
             .border = .{ .bottom = 1 },
             .border_color = theme.c_table_divider,
             .fill = theme.c_bg,
-            .gradient = theme.srgbToOklab(theme.c_bg),
         });
         defer ctx.pop();
 
@@ -134,6 +156,8 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         return;
     }
     for (active_tracks, 0..) |track, i| {
+        std.debug.assert(track.id >> 61 == 0);
+        const track_key_base = track.id << 3;
         const is_active = if (current_track_idx) |index| i == index else false;
         const select_track = callback.bind(App.selectTrack, i);
         const index_label = if (is_active)
@@ -152,7 +176,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .padding = .{ .left = theme.table_gutter, .right = theme.table_gutter },
                 .radius = .{ .top = 2, .right = 2, .bottom = 2, .left = 2 },
                 .fill = theme.c_track_active_bg,
-                .gradient = theme.srgbToOklab(theme.c_track_active_bg),
             });
         } else {
             _ = try ctx.row(.{
@@ -170,13 +193,14 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         defer ctx.pop();
 
         _ = try ctx.button(.{
+            .key = trackControlKey(track_key_base, .number),
             .label = index_label,
             .on_click_with_data = select_track,
             .color = if (is_active) theme.c_accent else theme.c_text_muted,
             .font_size = 12,
             .justify = .start,
             .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-            .transparent = !is_active,
+            .transparent = true,
         });
 
         {
@@ -184,7 +208,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .gap = theme.track_artwork_gap,
                 .clip = true,
                 .@"align" = .center,
-                .transparent = !is_active,
+                .transparent = true,
             });
             defer ctx.pop();
 
@@ -203,7 +227,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                     .gap = track_text_gap,
                     .clip = true,
                     .justify = .start,
-                    .transparent = !is_active,
+                    .transparent = true,
                 });
                 defer ctx.pop();
 
@@ -212,6 +236,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 else
                     null;
                 const title_button = try ctx.button(.{
+                    .key = trackControlKey(track_key_base, .title),
                     .label = track.title,
                     .on_click_with_data = select_track,
                     .color = if (is_active) theme.c_accent else theme.c_text,
@@ -220,7 +245,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                     .shrink = 1,
                     .min_height = 0,
                     .justify = .start,
-                    .transparent = !is_active,
+                    .transparent = true,
                     .text_overflow = .ellipsis,
                 });
                 const title_button_node = ctx.tree.node(title_button) orelse return error.InvalidStyle;
@@ -245,6 +270,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
 
         if (spec.show_album_column) {
             const album_button = try ctx.button(.{
+                .key = trackControlKey(track_key_base, .album),
                 .label = track.album,
                 .on_click_with_data = select_track,
                 .color = theme.c_text_sec,
@@ -254,7 +280,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .max_width = track_album_text_width_max,
                 .justify = .start,
                 .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-                .transparent = !is_active,
+                .transparent = true,
                 .text_overflow = .ellipsis,
             });
             const album_button_node = ctx.tree.node(album_button) orelse return error.InvalidStyle;
@@ -268,6 +294,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
 
         if (spec.show_date_column) {
             _ = try ctx.button(.{
+                .key = trackControlKey(track_key_base, .date_added),
                 .label = track.date_added,
                 .on_click_with_data = select_track,
                 .color = theme.c_text_muted,
@@ -277,28 +304,30 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
                 .max_width = theme.track_date_text_width_max,
                 .justify = .start,
                 .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-                .transparent = !is_active,
+                .transparent = true,
                 .text_overflow = .ellipsis,
             });
         }
 
         _ = try ctx.button(.{
+            .key = trackControlKey(track_key_base, .like),
             .label = if (track.is_liked) "♥" else "♡",
             .on_click_with_data = callback.bind(App.toggleTrackLike, i),
             .color = if (track.is_liked) theme.c_like_active else theme.c_text_muted,
             .font_size = 13,
             .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-            .transparent = !is_active,
+            .transparent = true,
         });
 
         _ = try ctx.button(.{
+            .key = trackControlKey(track_key_base, .duration),
             .label = track.duration_str,
             .on_click_with_data = select_track,
             .color = theme.c_text_sec,
             .font_size = 12,
             .justify = .end,
             .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-            .transparent = !is_active,
+            .transparent = true,
             .text_overflow = .ellipsis,
         });
     }

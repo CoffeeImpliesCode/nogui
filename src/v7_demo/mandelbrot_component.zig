@@ -4,21 +4,21 @@ const nogui = @import("nogui");
 const tracy = @import("tracy");
 
 const DrawCtx = nogui.DrawCtx;
-const Event = nogui.Event;
+const DispatchContext = nogui.event.DispatchContext;
 const GpuEndpoint = nogui.GpuEndpoint;
 const GpuFrame = nogui.GpuFrame;
-const Id = nogui.Id;
+const FrameNodeId = nogui.FrameNodeId;
 const Rect = nogui.Rect;
 const WidgetTree = nogui.WidgetTree;
-const absoluteRect = nogui.widget.absoluteRect;
-const srgbToOklab = @import("text.zig").srgbToOklab;
+const visualBorderRect = nogui.widget.visualBorderRect;
+const pointInClipChain = nogui.widget.pointInClipChain;
 
 pub const texture_width: u32 = 512;
 pub const texture_height: u32 = 384;
 pub const max_iterations: u32 = 256;
 
-const shader_bytes = @embedFile("mandelbrot_comp.spv");
-const shader_spv: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, shader_bytes));
+const shader_bytes align(@alignOf(u32)) = @embedFile("mandelbrot_comp.spv").*;
+const shader_spv: []const u32 = std.mem.bytesAsSlice(u32, &shader_bytes);
 
 const MandelParams = extern struct {
     size: [2]u32,
@@ -59,7 +59,14 @@ pub const MandelbrotComponent = struct {
 
     drag: ?MandelDrag = null,
     rect: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    widget_id: ?Id = null,
+    /// The keyed viewport box and the one node inside it. Both are dense
+    /// frame ids of the tree this component last drew, and together they
+    /// name every node a pointer event can land on inside the viewport.
+    /// Everything else this component draws — the caption, the reset button
+    /// and its label — is not a pointer surface.
+    viewport: FrameNodeId = .root,
+    viewport_content: FrameNodeId = .root,
+    /// The tree that published those ids, restated by every draw.
     tree: ?*const WidgetTree = null,
 
     pub fn setDescriptorHeap(self: *MandelbrotComponent, heap: noapi.DescriptorHeap) void {
@@ -170,24 +177,33 @@ pub const MandelbrotComponent = struct {
         self.last_unregistered_index = index;
     }
 
-    pub fn onEvent(self: *MandelbrotComponent, event: *const Event) void {
-        self.refreshRect();
-        switch (event.*) {
+    /// The routed path is this component's only input seam. App delivers the
+    /// phase and the node being visited, so the viewport answers for itself
+    /// and nothing else it draws can pan or zoom it. A press, move, release,
+    /// cancel or capture revocation all arrive at the viewport because the
+    /// focus manager captured its stable identity, which is why a move or a
+    /// release outside the box still belongs here.
+    pub fn onRoutedEvent(self: *MandelbrotComponent, context: *DispatchContext) void {
+        if (context.phase != .target) return;
+        if (context.current_target != context.target) return;
+        if (!self.isViewportNode(context.current_target)) return;
+        switch (context.event.*) {
             .mouse_move => |move| {
-                if (self.drag) |drag| {
-                    self.applyPan(.{ move.x, move.y }, drag);
-                }
+                if (self.drag) |drag| self.applyPan(.{ move.x, move.y }, drag);
             },
             .mouse_down => |down| {
-                if (down.button == .left and self.pointInRect(.{ down.x, down.y })) {
+                if (down.button == .left and self.pointInViewport(.{ down.x, down.y })) {
                     self.drag = .{ .mouse = .{ down.x, down.y }, .center = self.center };
                 }
             },
-            .mouse_up => {
-                if (self.drag != null) self.drag = null;
+            // A lost capture, a cancelled press and a window that stopped
+            // taking input all end the pan; none of them delivers a release
+            // the component could otherwise wait for forever.
+            .mouse_up, .mouse_cancel, .capture_lost, .window_focus_lost => {
+                self.drag = null;
             },
             .mouse_wheel => |wheel| {
-                if (wheel.delta_y != 0) {
+                if (wheel.delta_y != 0 and self.pointInViewport(.{ wheel.x, wheel.y })) {
                     self.scale = @max(
                         self.scale * @exp(@as(f64, wheel.delta_y) * 0.05),
                         10,
@@ -196,6 +212,10 @@ pub const MandelbrotComponent = struct {
             },
             else => {},
         }
+    }
+
+    fn isViewportNode(self: *const MandelbrotComponent, node: FrameNodeId) bool {
+        return node == self.viewport or node == self.viewport_content;
     }
 
     pub fn draw(self: *MandelbrotComponent, ctx: *DrawCtx) !void {
@@ -208,6 +228,7 @@ pub const MandelbrotComponent = struct {
             .padding = .{ .left = 6, .right = 6 },
         });
         _ = try ctx.button(.{
+            .key = .{ .static = "mandelbrot-reset" },
             .label = "reset",
             .on_click = MandelbrotComponent.reset,
             .color = c_text,
@@ -216,12 +237,12 @@ pub const MandelbrotComponent = struct {
             .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
             .border_color = c_border_strong,
             .fill = c_card_deep,
-            .gradient = srgbToOklab(c_card_deep),
         });
 
         _ = try ctx.row(.{});
         defer ctx.pop();
-        self.widget_id = try ctx.column(.{
+        self.viewport = try ctx.column(.{
+            .key = .{ .static = "viewport" },
             .texture = self.bindless_index,
             .flex_basis = 480,
             .box_sizing = .border_box,
@@ -231,7 +252,7 @@ pub const MandelbrotComponent = struct {
         });
         self.tree = ctx.tree;
         defer ctx.pop();
-        _ = try ctx.spacer(.{ .size = 190 });
+        self.viewport_content = try ctx.spacer(.{ .size = 190 });
     }
 
     fn precisionLabel(arena: std.mem.Allocator, precision: u32) ![]const u8 {
@@ -243,15 +264,30 @@ pub const MandelbrotComponent = struct {
         return std.fmt.allocPrint(arena, "Mandelbrot  [{s}]", .{mode});
     }
 
+    /// The showcase hid this component, so the next committed tree has no
+    /// viewport to capture, name or pan.
+    pub fn clearInputTarget(self: *MandelbrotComponent) void {
+        self.drag = null;
+        self.viewport = .root;
+        self.viewport_content = .root;
+        self.tree = null;
+        self.rect = .{};
+    }
+
     fn refreshRect(self: *MandelbrotComponent) void {
         const tree = self.tree orelse return;
-        const widget_id = self.widget_id orelse return;
-        self.rect = absoluteRect(tree, widget_id);
+        self.rect = visualBorderRect(tree, self.viewport);
     }
 
     fn pointInRect(self: *const MandelbrotComponent, point: [2]f32) bool {
         return point[0] >= self.rect.x and point[0] < self.rect.x + self.rect.w and
             point[1] >= self.rect.y and point[1] < self.rect.y + self.rect.h;
+    }
+
+    fn pointInViewport(self: *MandelbrotComponent, point: [2]f32) bool {
+        const tree = self.tree orelse return false;
+        self.rect = visualBorderRect(tree, self.viewport);
+        return self.pointInRect(point) and pointInClipChain(tree, self.viewport, point);
     }
 
     fn applyPan(self: *MandelbrotComponent, point: [2]f32, drag: MandelDrag) void {

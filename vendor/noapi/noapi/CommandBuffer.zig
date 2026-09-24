@@ -17,8 +17,7 @@ pub const PushData = extern struct {
     vert_data: u64 = 0,
     frag_data: u64 = 0,
     indirect: u64 = 0,
-    /// Framebuffer size (px) — the vertex shader's clip-space conversion
-    /// (P2b: the 9-slice grid moves into the VS, which needs sw/sh).
+    /// Logical window size used by scene geometry and vertex projection.
     screen: [2]f32 = .{ 0, 0 },
     /// The drawable bag (the SceneRect array) — the VS reads rects
     /// through it after the CS1 permutation (V1b).
@@ -26,6 +25,8 @@ pub const PushData = extern struct {
     /// The sorted permutation (u32 bag indices, CS1's output) — the VS
     /// fetches bag[perm[instance / 9]] (V1b).
     perm_bda: u64 = 0,
+    /// Physical framebuffer pixels per logical window unit on each axis.
+    pixel_scale: [2]f32 = .{ 1, 1 },
 };
 
 pub const IndexFormat = enum(u32) {

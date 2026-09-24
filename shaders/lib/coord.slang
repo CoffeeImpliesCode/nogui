@@ -1,11 +1,7 @@
 // coord.slang — pure coordinate/SDF helpers for quad_frag.
 //
-// Bit-exact ports of the SDF math that quad_frag.glsl evaluates inline in
-// main(). Each helper preserves the EXACT float operation order of the GLSL
-// branch it came from — do not "simplify" or reorder (the acceptance gate is
-// a pixel-compare against the GLSL build). The coverage clamps
-// (clamp(0.5 - d, ...), the feather division) and the cell/window math stay
-// in the fragment shader.
+// Shared SDF helpers for quad_frag.slang. Keep the shown operation order:
+// changing the float expressions can change rounded-rect edge pixels.
 
 // Canonical Inigo Quilez sdRoundBox — the formula both TYPE_ROUNDED_RECT
 // and TYPE_SHADOW evaluate (q = abs(p) - b; the inside term

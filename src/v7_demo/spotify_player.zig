@@ -3,6 +3,7 @@
 const std = @import("std");
 const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
+const ComponentKey = nogui.ComponentKey;
 const widget = nogui.widget;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
@@ -30,7 +31,6 @@ const UtilityButton = struct {
     };
     pub const default_paint: nogui.PaintStyle = .{
         .fill = theme.c_player_control_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
     };
 };
 
@@ -47,7 +47,6 @@ const TransportButton = struct {
     };
     pub const default_paint: nogui.PaintStyle = .{
         .fill = theme.c_player_control_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_control_bg),
     };
 };
 
@@ -65,7 +64,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         .clip = true,
         .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 8 },
         .fill = theme.c_player_bg,
-        .gradient = theme.srgbToOklab(theme.c_player_bg),
         .border = .{ .top = 1 },
         .border_color = theme.c_border,
     });
@@ -82,6 +80,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
 
 fn drawUtilityButton(
     ctx: *DrawCtx,
+    key: ComponentKey,
     label: []const u8,
     icon: widget.IconId,
     flex_basis: f32,
@@ -94,6 +93,7 @@ fn drawUtilityButton(
     const has_on_click = @hasField(@TypeOf(options), "on_click");
     if (has_on_click) {
         _ = try ctx.button(.{
+            .key = key,
             .direction = style.direction,
             .label = label,
             .accessible_label = label,
@@ -106,11 +106,11 @@ fn drawUtilityButton(
             .color = color,
             .padding = style.padding_inset,
             .fill = paint.fill,
-            .gradient = paint.gradient,
         });
         return;
     }
     _ = try ctx.button(.{
+        .key = key,
         .direction = style.direction,
         .label = label,
         .accessible_label = label,
@@ -122,7 +122,6 @@ fn drawUtilityButton(
         .color = color,
         .padding = style.padding_inset,
         .fill = paint.fill,
-        .gradient = paint.gradient,
     });
 }
 
@@ -178,6 +177,7 @@ fn drawNowPlaying(comptime App: type, track: anytype, ctx: *DrawCtx) !void {
 
     try drawUtilityButton(
         ctx,
+        .{ .static = "player-like-toggle" },
         "Like track",
         @as(widget.IconId, if (track.is_liked) .heart_filled else .heart),
         22,
@@ -194,9 +194,26 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
     {
         _ = try ctx.row(.{ .gap = 6, .clip = true, .justify = .center });
         defer ctx.pop();
-        try drawTransportButton(ctx, .shuffle, "Toggle shuffle", App.toggleShuffle, app.shuffle, 24);
-        try drawTransportButton(ctx, .previous, "Previous track", App.prevTrack, false, 24);
+        try drawTransportButton(
+            ctx,
+            .{ .static = "player-shuffle" },
+            .shuffle,
+            "Toggle shuffle",
+            App.toggleShuffle,
+            app.shuffle,
+            24,
+        );
+        try drawTransportButton(
+            ctx,
+            .{ .static = "player-previous" },
+            .previous,
+            "Previous track",
+            App.prevTrack,
+            false,
+            24,
+        );
         _ = try ctx.button(.{
+            .key = @as(ComponentKey, .{ .static = "player-play-toggle" }),
             .label = if (app.is_playing) "Pause" else "Play",
             .accessible_label = if (app.is_playing) "Pause" else "Play",
             .visual_label = "",
@@ -209,10 +226,25 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
             .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 },
             .radius = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 },
             .fill = theme.c_text,
-            .gradient = theme.srgbToOklab(theme.c_text),
         });
-        try drawTransportButton(ctx, .next, "Next track", App.nextTrack, false, 24);
-        try drawTransportButton(ctx, .repeat, "Toggle repeat", App.toggleRepeat, app.repeat, 24);
+        try drawTransportButton(
+            ctx,
+            .{ .static = "player-next" },
+            .next,
+            "Next track",
+            App.nextTrack,
+            false,
+            24,
+        );
+        try drawTransportButton(
+            ctx,
+            .{ .static = "player-repeat" },
+            .repeat,
+            "Toggle repeat",
+            App.toggleRepeat,
+            app.repeat,
+            24,
+        );
     }
 
     {
@@ -233,6 +265,7 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
             _ = try ctx.label(.{ .text = elapsed_text, .color = theme.c_player_utility, .font_size = 9 });
         }
         _ = try ctx.slider(.{
+            .key = @as(ComponentKey, .{ .static = "player-seek" }),
             .label = "seek",
             .visual_label = "",
             .value = &app.progress_sec,
@@ -257,6 +290,7 @@ fn drawTransport(comptime App: type, app: anytype, track: anytype, ctx: *DrawCtx
 
 fn drawTransportButton(
     ctx: *DrawCtx,
+    key: ComponentKey,
     icon: widget.IconId,
     label: []const u8,
     handler: anytype,
@@ -266,6 +300,7 @@ fn drawTransportButton(
     const style = TransportButton.default_style;
     const paint = TransportButton.default_paint;
     _ = try ctx.button(.{
+        .key = key,
         .direction = style.direction,
         .label = label,
         .accessible_label = label,
@@ -278,7 +313,6 @@ fn drawTransportButton(
         .color = if (active) theme.c_player_progress else theme.c_player_utility,
         .padding = style.padding_inset,
         .fill = paint.fill,
-        .gradient = paint.gradient,
     });
 }
 
@@ -286,9 +320,19 @@ fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
     _ = try ctx.row(.{ .gap = 6, .shrink = 1, .min_width = 0, .clip = true, .@"align" = .center });
     defer ctx.pop();
 
-    try drawUtilityButton(ctx, "Queue", .queue, 22, 18, theme.c_player_utility, .{});
     try drawUtilityButton(
         ctx,
+        .{ .static = "player-queue" },
+        "Queue",
+        .queue,
+        22,
+        18,
+        theme.c_player_utility,
+        .{},
+    );
+    try drawUtilityButton(
+        ctx,
+        .{ .static = "player-connect-device" },
         "Connect to a device",
         .devices,
         22,
@@ -297,6 +341,7 @@ fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
         .{},
     );
     _ = try ctx.button(.{
+        .key = @as(ComponentKey, .{ .static = "player-volume-toggle" }),
         .label = "Volume",
         .accessible_label = "Volume",
         .visual_label = "",
@@ -307,6 +352,7 @@ fn drawVolume(app: anytype, ctx: *DrawCtx) !void {
         .color = theme.c_player_utility,
     });
     _ = try ctx.slider(.{
+        .key = @as(ComponentKey, .{ .static = "player-volume" }),
         .label = "volume",
         .visual_label = "",
         .value = &app.volume,

@@ -1,10 +1,26 @@
 const std = @import("std");
 const style = @import("../style.zig");
 
-pub const Error = error{
-    InvalidStyle,
-    IndefinitePercentage,
-    OutOfMemory,
+const text = @import("../text.zig");
+// The element measure hook reports paint and path failures as well, so the
+// shared layout error set carries them. A real text provider reports its own
+// refusals through the same set, so an invalid font request fails the frame
+// instead of silently measuring something else. Every text name is reachable
+// from the validated `text.LayoutRequest` API.
+pub const Error = layout_errors.Error || text.TextError;
+
+const layout_errors = struct {
+    pub const Error = error{
+        InvalidStyle,
+        IndefinitePercentage,
+        OutOfMemory,
+        PhaseReentry,
+        PaintCapacityExceeded,
+        InvalidPaint,
+        InvalidPath,
+        PathCapacity,
+        SemanticCapacityExceeded,
+    };
 };
 pub const SizingError = Error;
 

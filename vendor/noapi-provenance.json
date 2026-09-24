@@ -1,0 +1,1017 @@
+{
+ "schema": "nogui.noapi-provenance.v1",
+ "package": "noapi",
+ "vendor_path": "vendor/noapi",
+ "source": {
+  "vcs": "jujutsu",
+  "repository": {
+   "name": "noapi",
+   "remote": null
+  },
+  "commit_id": "5a6aec7c2b1b1dafea0e1bd686e4ccc041db75f4",
+  "change_id": "plxkynpvunpqwlkqnnlkxlvvnpqvlssy"
+ },
+ "digest_definition": {
+  "algorithm": "sha256",
+  "canonicalization": "For each regular file entry sorted by the UTF-8 byte sequence of its relative POSIX path, concatenate the lowercase file SHA-256, two ASCII space bytes, the UTF-8 path, and one LF byte. SHA-256 the concatenated byte stream. Paths are relative to vendor/noapi; vendor/noapi-provenance.json is outside that tree and excluded. Symlinks are not permitted."
+ },
+ "upstream_content_digest": "612ae7dfc9f8b1db81a38b1f736e6e01ff54d86ebf5854286ab299f37a08bb56",
+ "upstream_files": [
+  {
+   "path": "build.zig",
+   "size": 13141,
+   "sha256": "2fc80a05cbdc4821bdd86308ca06a1e5abe1e1c09792c9bc7d017e6fb04bba75"
+  },
+  {
+   "path": "build.zig.zon",
+   "size": 734,
+   "sha256": "3d47c675b7f189ffbd315727738090b9cd465772ab52dcbe96cfeb5ea039f73e"
+  },
+  {
+   "path": "examples/1_triangle/main.zig",
+   "size": 4036,
+   "sha256": "d680dfb0378c9c4efd4b73fd58db2b8c5ba04d0b84be52b06ce6703151f05d05"
+  },
+  {
+   "path": "examples/2_textures/main.zig",
+   "size": 8697,
+   "sha256": "234cf88f28e566bfa516a3aa2244854d7ce6ea8425497eed2e68116331a7669a"
+  },
+  {
+   "path": "examples/3_3D/main.zig",
+   "size": 14806,
+   "sha256": "2d0e6a0ac8ad5f2ce8ede48cccad2de608641e4a8cb2789a5014b9ee753c9b3c"
+  },
+  {
+   "path": "examples/4_textures_advanced/main.zig",
+   "size": 10043,
+   "sha256": "b7f82440faa0b8ea6d98bf3beaba44071e7ab80b302ecce46ec88a0208ffc089"
+  },
+  {
+   "path": "examples/5_indirect_triangles/main.zig",
+   "size": 9265,
+   "sha256": "c5b13d32b6d3446733166c0633d89023d8809db19c1893fd58a9cf570648420d"
+  },
+  {
+   "path": "examples/6_compute_shaders/main.zig",
+   "size": 8279,
+   "sha256": "2d43adde6f77c7558061bbab1df939fbad3d21b6ccb7a12ba3fb89d26d101ee7"
+  },
+  {
+   "path": "examples/7_deferred_async_load/main.zig",
+   "size": 26259,
+   "sha256": "4d5cbc7f652957d000dd94b4e2c898fadd55cc26fa7ba3d8b89eedf03bd4b3b5"
+  },
+  {
+   "path": "examples/common.zig",
+   "size": 14725,
+   "sha256": "2008f3c02e37a28c27c8527fc007ae48c7f7cc835e7415f225a074a9e4c1f7b2"
+  },
+  {
+   "path": "noapi/Barrier.zig",
+   "size": 1134,
+   "sha256": "0c5d3aca2eb6b365edd0a1057f45185d504099dd2e04fbcded2dcfdeb9ef8062"
+  },
+  {
+   "path": "noapi/BlendState.zig",
+   "size": 959,
+   "sha256": "79d77352a6a7658b926813ba496e8ddd53cd5fee737b4159bf645548623c3b2f"
+  },
+  {
+   "path": "noapi/Buffer.zig",
+   "size": 413,
+   "sha256": "c28d16eba61aaaed9ae42c55f6a66fdfd92551efe768111bea724e5033fd1cb3"
+  },
+  {
+   "path": "noapi/CommandBuffer.zig",
+   "size": 13300,
+   "sha256": "587297c23be3db03ba9d5ade6e7091ef2fa1ec877e62662581bec6129e009a06"
+  },
+  {
+   "path": "noapi/DepthState.zig",
+   "size": 520,
+   "sha256": "136eadf0cda14d13b8b7ecfb297a24c6b3a6ac08d872b336fbfbfa67e987887d"
+  },
+  {
+   "path": "noapi/DescriptorHeap.zig",
+   "size": 445,
+   "sha256": "07b286548c622fd1e99cb99eaf915339402418c5858d622e40c3ddd9cfc5531b"
+  },
+  {
+   "path": "noapi/DescriptorPool.zig",
+   "size": 4758,
+   "sha256": "0e3e7bb2a19668eb69ac5198cbe83d1bda797890782dd73b09a32a3c307fca15"
+  },
+  {
+   "path": "noapi/DeviceLimits.zig",
+   "size": 973,
+   "sha256": "f84a11165cf41d901df9d2fedb831374588a0cdd90644c73d8a373553e7639e8"
+  },
+  {
+   "path": "noapi/Extent2D.zig",
+   "size": 246,
+   "sha256": "c6146e7ab375b4abb46c520d0fad4b9d67e1024a7131d53c5cc58df6bed59e53"
+  },
+  {
+   "path": "noapi/Gpu.zig",
+   "size": 12419,
+   "sha256": "75a1615e1b1e4425f3570b8a8e6b519ba90d51736df2ae0b440d3080488105ca"
+  },
+  {
+   "path": "noapi/GpuArena.zig",
+   "size": 3738,
+   "sha256": "0ba655cea116c680fdf6181a49b61712dceeebcab32248215581aeae418fd98f"
+  },
+  {
+   "path": "noapi/GpuError.zig",
+   "size": 411,
+   "sha256": "aca835dd7f4cd1b1f2dc5680c691b80abb6f3fc940f70cc4cf97d7172f24ac58"
+  },
+  {
+   "path": "noapi/GpuPtr.zig",
+   "size": 954,
+   "sha256": "82ac9bf8d1a03a0b3b9179301ed0c9b220f4ca73c3031bed171b7055c850c191"
+  },
+  {
+   "path": "noapi/Queue.zig",
+   "size": 2747,
+   "sha256": "1f9f6916f680b64af3bdba125c5358384760d301d608494ca498bbe73309685d"
+  },
+  {
+   "path": "noapi/RasterState.zig",
+   "size": 860,
+   "sha256": "6eeb892001ec347f87bf320090158cded1e09b370c0c334a1d861d8757c91cc1"
+  },
+  {
+   "path": "noapi/Rect.zig",
+   "size": 248,
+   "sha256": "09404bbe8d0c49a2efc84ec7a2ab22f62cc5f6dc41795cac9cacfacc4218635e"
+  },
+  {
+   "path": "noapi/Rendering.zig",
+   "size": 1044,
+   "sha256": "1924a997d8bb58258f62a727abd9eb34ef44d7d61bfa0544593f2db2b5e4ba49"
+  },
+  {
+   "path": "noapi/Semaphore.zig",
+   "size": 314,
+   "sha256": "e693efb600dcfb29e515301e52ec40754bfeb2e68b27b749ec95a3c9b24cc192"
+  },
+  {
+   "path": "noapi/Shader.zig",
+   "size": 1290,
+   "sha256": "c84af8e5a88ce43040ce296ec6e6c0dacc518688166c51b69022f4c434e93dbb"
+  },
+  {
+   "path": "noapi/ShaderHandle.zig",
+   "size": 322,
+   "sha256": "e629f5f81408ecc7ce7a6445c0c853044f63dae2cf8a2b05f420aab9f3034aca"
+  },
+  {
+   "path": "noapi/Surface.zig",
+   "size": 3632,
+   "sha256": "6b0b0497da4b41d9a40c787a27e197ad5168feae7fb864f2ad7881531a3f13b8"
+  },
+  {
+   "path": "noapi/Texture.zig",
+   "size": 4164,
+   "sha256": "ee947f93698db16f3dfbdf555b163b00748f3a481023b36a4b0b441ce62bda94"
+  },
+  {
+   "path": "noapi/TextureHandle.zig",
+   "size": 636,
+   "sha256": "b06995ed7bfa92de1051b87db30c5cbca15baeeee551ef7f099a41502e0085b1"
+  },
+  {
+   "path": "noapi/TimestampQuerySet.zig",
+   "size": 2492,
+   "sha256": "c2cda81a217c58360e0fd3534fb5967b2617788ec58c3c878817a3245bdae8ff"
+  },
+  {
+   "path": "noapi/Vertex.zig",
+   "size": 336,
+   "sha256": "f4183c03d3848b3d3deec8358869f6a4b4f3bcf6212f07ca8505846863652202"
+  },
+  {
+   "path": "noapi/VertexInput.zig",
+   "size": 324,
+   "sha256": "3554362af7eacd4db1b250a14db8cb9c749fecb5aed6d4191135cf8bfef9cd17"
+  },
+  {
+   "path": "noapi/Viewport.zig",
+   "size": 421,
+   "sha256": "7c7bbf4619a1e412a70e4c21877690d073e35dee59c01f1dc49faccdb95a88b6"
+  },
+  {
+   "path": "noapi/VkBackend.zig",
+   "size": 223593,
+   "sha256": "9e069e1b82e04a87d4d24ac3ad5aac1d390a0b294da47333c68fd8e8eb339d5f"
+  },
+  {
+   "path": "noapi/root.zig",
+   "size": 5325,
+   "sha256": "5505ab62c5917cbd4ab2cb3d8606420aaf7064a46d9931a3aa3a90802823e051"
+  },
+  {
+   "path": "noapi/vk.zig",
+   "size": 2403673,
+   "sha256": "ba8d3189013562be364a156e9d8e805b42f5bd17db6bc2f45c67ca7f6fa6d9c8"
+  },
+  {
+   "path": "shaders/base.slang",
+   "size": 600,
+   "sha256": "ace677faec6552684a07e372810c9a8c06df8d828789d536d2b1e2f296185d98"
+  },
+  {
+   "path": "shaders/buf_tri.frag",
+   "size": 144,
+   "sha256": "5b0d03542aaa12744900487510d3ef895b7d44151c515f660ba2f57d4209d7cc"
+  },
+  {
+   "path": "shaders/buf_tri.vert",
+   "size": 311,
+   "sha256": "b43d50cc450aa44c087d669d873218bdb7f8a0cc7b8fe3cec00eda902954f223"
+  },
+  {
+   "path": "shaders/buf_tri_frag.spv",
+   "size": 496,
+   "sha256": "26dfa9e090dcfc735f4ee322e23d35db4ccd4d8c098f2d934122576dde528ab4"
+  },
+  {
+   "path": "shaders/buf_tri_vert.spv",
+   "size": 1004,
+   "sha256": "eddbdf34c2c29a1b18841e90511654c565e3b69bf5dc4b59fe68fb6450c5dfe6"
+  },
+  {
+   "path": "shaders/cloud.frag",
+   "size": 2066,
+   "sha256": "944245b33d98398aa88030ccedbfeb008d2e4afd4d616d69356d89cc000c4bb5"
+  },
+  {
+   "path": "shaders/cloud.vert",
+   "size": 2831,
+   "sha256": "f69e65eed3e710d733bdaf214b064ca97a1f50cbea4a8e4671f95d3ef069e511"
+  },
+  {
+   "path": "shaders/cloud_frag.spv",
+   "size": 2824,
+   "sha256": "1c71272b3737659a73231dd03adea8e1e39a8c79f5ec752d9d4ea4353c3b5be6"
+  },
+  {
+   "path": "shaders/cloud_vert.spv",
+   "size": 5320,
+   "sha256": "8234e4cc7196cf8dfc894e789b5590a820c8aefa4b172cbe071a0a2a82c6c145"
+  },
+  {
+   "path": "shaders/color.slang",
+   "size": 4037,
+   "sha256": "865ec5c498dec85976396e3603ddc3154fac3d292dac53e2aa239e4969cbbc9b"
+  },
+  {
+   "path": "shaders/complex.slang",
+   "size": 2279,
+   "sha256": "adae60c5d068fcf71d93536d465d8713421c50a4d72f91e14c47af93a56e5b3c"
+  },
+  {
+   "path": "shaders/compute.comp",
+   "size": 642,
+   "sha256": "139d7ba7d98afa8a50c0b7cd97672e3fab08115314f6e2b55295b140705044a2"
+  },
+  {
+   "path": "shaders/compute_comp.spv",
+   "size": 2496,
+   "sha256": "787c6427c7a0b64faa698a1de5dab42a161790ef89e28011835d6dd8bdccead2"
+  },
+  {
+   "path": "shaders/cube.frag",
+   "size": 144,
+   "sha256": "5b0d03542aaa12744900487510d3ef895b7d44151c515f660ba2f57d4209d7cc"
+  },
+  {
+   "path": "shaders/cube.vert",
+   "size": 887,
+   "sha256": "81b96de4f4d2f5e9d3f8b18d02371c89fb9c3647b9fd795c11755c9ff5935e3e"
+  },
+  {
+   "path": "shaders/cube_frag.spv",
+   "size": 496,
+   "sha256": "26dfa9e090dcfc735f4ee322e23d35db4ccd4d8c098f2d934122576dde528ab4"
+  },
+  {
+   "path": "shaders/cube_vert.spv",
+   "size": 1596,
+   "sha256": "b50db56edb40df54f6386e9f894d89b5275111efc259651e891bc8dd5495847f"
+  },
+  {
+   "path": "shaders/env.ppm",
+   "size": 393278,
+   "sha256": "4ca7ab74f0f637214e4af273321994213d6edff6137e08edb1fdc1d4e936c576"
+  },
+  {
+   "path": "shaders/final_pass.frag",
+   "size": 3718,
+   "sha256": "20a8d05dae03bb2892e6b1ca1aa4dbd4318daad5e0d0d5ea156e76aec611522f"
+  },
+  {
+   "path": "shaders/final_pass.vert",
+   "size": 1107,
+   "sha256": "632cc3f120ef1b3b5339037686850685cf2633339d6a7eb7fcf702aede7dbb42"
+  },
+  {
+   "path": "shaders/final_pass_frag.spv",
+   "size": 8424,
+   "sha256": "0e73d244a488aefcf976d250474483035997eda8725497270f65093cdc680531"
+  },
+  {
+   "path": "shaders/final_pass_vert.spv",
+   "size": 1784,
+   "sha256": "9e48a97f3dcb6c272ac915fe5a3f0b0ae08137fcea938b401270d27f69ca1ff0"
+  },
+  {
+   "path": "shaders/fullscreen_quad.vert",
+   "size": 604,
+   "sha256": "071e313fe6a742966c1b4f8be219515579c884acea45cab4a5631418ab438288"
+  },
+  {
+   "path": "shaders/fullscreen_quad_vert.spv",
+   "size": 1744,
+   "sha256": "f6ff53314cead96cca759c5a38a16880574f9e3089b74600322c095723eb1399"
+  },
+  {
+   "path": "shaders/gbuffer.frag",
+   "size": 1754,
+   "sha256": "3a7d71ccdd2b23774285d9a3d8f6a46654a343bed2ba687aca38dda6132ef632"
+  },
+  {
+   "path": "shaders/gbuffer.vert",
+   "size": 1499,
+   "sha256": "bc80be9d2c1ce47c15bc1257e424b66ded8c6d8c88dab5d8979510dbf735ed48"
+  },
+  {
+   "path": "shaders/gbuffer_frag.spv",
+   "size": 3600,
+   "sha256": "598201519ca2589b9a6383fe72f9c33c9ac54cbfbb81ce71317c2ad41f180251"
+  },
+  {
+   "path": "shaders/gbuffer_vert.spv",
+   "size": 3964,
+   "sha256": "81d85306512aeaf9f746fe5a6e91680472c4a5488a2f32103eedf72a19c49d05"
+  },
+  {
+   "path": "shaders/grid.frag",
+   "size": 344,
+   "sha256": "78d826b660748b6bacb4152242d5f1e4b591291627b8e0a36869c257d2aae248"
+  },
+  {
+   "path": "shaders/grid.vert",
+   "size": 1536,
+   "sha256": "874e023fc025ba2f1ca87b82939ef241138d734fa4147ffe2e290da33c796db3"
+  },
+  {
+   "path": "shaders/grid_frag.spv",
+   "size": 1048,
+   "sha256": "9c4c8b703113a686097211fa0f5eb20333944a5ffabf74a2cb9b736e33d6267a"
+  },
+  {
+   "path": "shaders/grid_vert.spv",
+   "size": 4992,
+   "sha256": "ca9af11921b2070ab00ab19cc3146b522ec2018d3c6268734dede88c223a55aa"
+  },
+  {
+   "path": "shaders/indirect_tri_frag.slang",
+   "size": 276,
+   "sha256": "b17df415e3ea26505d52381cdad0ba3ef7c0c151c898826e013763c0d59c5977"
+  },
+  {
+   "path": "shaders/indirect_tri_frag.spv",
+   "size": 384,
+   "sha256": "4d0211d62bf60205606560cb9c9ddded18f32e9cdfb9da8f4d6416add7cf8462"
+  },
+  {
+   "path": "shaders/indirect_tri_vert.slang",
+   "size": 1310,
+   "sha256": "5028dd9d93504a613bc13e1f505c177812848c2f839d95d2b33dc101d2eb3b44"
+  },
+  {
+   "path": "shaders/indirect_tri_vert.spv",
+   "size": 2500,
+   "sha256": "cba3bfcafad4108e2625fc84bc90c23bfd6a024bff7c41ca83d63109c3e99e4e"
+  },
+  {
+   "path": "shaders/pga2d.slang",
+   "size": 7449,
+   "sha256": "0319dd262a260d47f21d4dcf33ee999d84939b7d1d8ae614b878099b100b9c3e"
+  },
+  {
+   "path": "shaders/sdf.slang",
+   "size": 10460,
+   "sha256": "0a48613ecc900b5c0d10ebd7341b9b978e8db9425bb49d3be8789047446c9cd7"
+  },
+  {
+   "path": "shaders/shader.slang",
+   "size": 14330,
+   "sha256": "aea0145aa43bdd14270322b04afc9c2136242597ce784161fda3510a699ef95f"
+  },
+  {
+   "path": "shaders/shader.spv",
+   "size": 4852,
+   "sha256": "202823fc1b73f83ccc435a48f56f7de99bd821896fb2ee056777229d9183fa60"
+  },
+  {
+   "path": "shaders/slang.spv",
+   "size": 90116,
+   "sha256": "1f00431fa1e13726ef57fcc9cb3855c51d3febacf045a5251d0aea186ccaa109"
+  },
+  {
+   "path": "shaders/tex_frag.frag",
+   "size": 1241,
+   "sha256": "bc0704d12b7e411bfb461dbfe647d45a9f730c7eb04bdc2365e35ae72cbe6737"
+  },
+  {
+   "path": "shaders/tex_frag.spv",
+   "size": 2124,
+   "sha256": "3efaab9330b5808b17827418526e4ea01f2fbf481d90289233176198e74d8cf0"
+  },
+  {
+   "path": "shaders/tex_sample.frag",
+   "size": 469,
+   "sha256": "f959df812145497378633262da84feb067ea287392ac50badd8375fc1b654304"
+  },
+  {
+   "path": "shaders/tex_sample_frag.spv",
+   "size": 692,
+   "sha256": "8ea4746b39e404e60d4d64d1f5a500ed1e42cc518bc6e90cfff5177056ca0d99"
+  },
+  {
+   "path": "shaders/tex_vert.spv",
+   "size": 964,
+   "sha256": "85c61fe8da203d6e59532adc636483d5df7eece9fc8451b06c8d64a8d3b3dc8e"
+  },
+  {
+   "path": "shaders/tex_vert.vert",
+   "size": 286,
+   "sha256": "42a190c74cdd94af988bdf6f98459ea8ed6af60bdd968c6047162378580e5df4"
+  },
+  {
+   "path": "shaders/triangle.frag",
+   "size": 270,
+   "sha256": "3af90066241a9b91fdc22de144a36a4e63e7b0fdd8bcfd99956a5bbff7f29e72"
+  },
+  {
+   "path": "shaders/triangle.vert",
+   "size": 566,
+   "sha256": "eb6023a887ceab3508abcdbe5c5a220c05b4f1499822b29c9cab40fe27ad1665"
+  },
+  {
+   "path": "shaders/triangle_frag.spv",
+   "size": 568,
+   "sha256": "7a593abff4efef75ace2de452e44e75029be4bdbe75ed24930c0ad2e6aa7d229"
+  },
+  {
+   "path": "shaders/triangle_vert.spv",
+   "size": 1512,
+   "sha256": "fd84cb46328e818189cbaa135f96e710f1eb196d65587a1ad6055e01497dfae4"
+  },
+  {
+   "path": "test/main.zig",
+   "size": 38362,
+   "sha256": "a0ff738a3cb20d26f9e48bb9a9d6418f12bcb37d609c8060c725a206792eadad"
+  }
+ ],
+ "patches": [
+  {
+   "path": "build.zig",
+   "original_sha256": "2fc80a05cbdc4821bdd86308ca06a1e5abe1e1c09792c9bc7d017e6fb04bba75",
+   "current_sha256": "85598456329ff8b87f29160bfb3247223a4a286a91219e3acb73e36dc077e0a4",
+   "reason": "Build the vendored tree as an SDL-free library: drop the sdl3 module import, declare sdl3 as a lazy dependency, add a -Dlibrary-only option that stops before the examples, register the test step first, stop installing generated documentation, and support focused unit-test filters."
+  },
+  {
+   "path": "build.zig.zon",
+   "original_sha256": "3d47c675b7f189ffbd315727738090b9cd465772ab52dcbe96cfeb5ea039f73e",
+   "current_sha256": "62c6ccf3bc091d21e2ee7c5f20fe770799ba3308ccd6108ca8477819b30cdea9",
+   "reason": "Mark the sdl3 dependency lazy so the library-only build stops before it is fetched or built; include the MIT grant authorized by the owner on 2026-10-02."
+  },
+  {
+   "path": "examples/3_3D/main.zig",
+   "original_sha256": "2d0e6a0ac8ad5f2ce8ede48cccad2de608641e4a8cb2789a5014b9ee753c9b3c",
+   "current_sha256": "7d606db75d36d343a304a0e703bbab144cc24c8be7a627e65282fe4e4c383520",
+   "reason": "Use the drawIndexed interface that reads index format from the buffer."
+  },
+  {
+   "path": "examples/5_indirect_triangles/main.zig",
+   "original_sha256": "c5b13d32b6d3446733166c0633d89023d8809db19c1893fd58a9cf570648420d",
+   "current_sha256": "9f67adf54763b17f79e86c3a7c1235aca2b8859e5216599bacb92e0ee7db9276",
+   "reason": "Use the drawIndexedIndirectMulti interface that reads index format from the buffer."
+  },
+  {
+   "path": "examples/common.zig",
+   "original_sha256": "2008f3c02e37a28c27c8527fc007ae48c7f7cc835e7415f225a074a9e4c1f7b2",
+   "current_sha256": "424d42f0e49439aa6d7352874007be5623b73d5075873dd9b34eb9b41569450e",
+   "reason": "Create native surfaces through Surface.initSdl, with one owner and no raw Vulkan handles in example callers."
+  },
+  {
+   "path": "noapi/CommandBuffer.zig",
+   "original_sha256": "587297c23be3db03ba9d5ade6e7091ef2fa1ec877e62662581bec6129e009a06",
+   "current_sha256": "f3d21f7dedb5e9b5da9c0aad077154e3324f415c35d1552db9fd8c37d9868cbf",
+   "reason": "Add the pixel_scale push constant that carries physical framebuffer pixels per logical window unit, and document screen as the logical window size."
+  },
+  {
+   "path": "noapi/Gpu.zig",
+   "original_sha256": "75a1615e1b1e4425f3570b8a8e6b519ba90d51736df2ae0b440d3080488105ca",
+   "current_sha256": "f9425477d4d1c2937460e0e2922c8dc7df42ad3d41cd8eda680e0e27bd43a7c8",
+   "reason": "Add commandsCancel to discard an unsent offscreen command buffer, and reject a cancelled buffer handle in copyCommandBufferHandles."
+  },
+  {
+   "path": "noapi/Queue.zig",
+   "original_sha256": "1f9f6916f680b64af3bdba125c5358384760d301d608494ca498bbe73309685d",
+   "current_sha256": "121e193a5de8d49e8df11b480de7db5db7eed9e501e67d6c5b9c659dfd1bc0d6",
+   "reason": "Reject a cancelled command buffer in copyCommandBufferHandles so an aborted offscreen frame cannot enter timeline submission."
+  },
+  {
+   "path": "noapi/Surface.zig",
+   "original_sha256": "6b0b0497da4b41d9a40c787a27e197ad5168feae7fb864f2ad7881531a3f13b8",
+   "current_sha256": "8eebc227dbef1f2dca72b6e82861d2eee7e00305af47a1e7e0c3957c2367df2a",
+   "reason": "Add abortFrame to discard active recording. Make initSdl the sole public surface factory, using an SDL-compatible callback without exposing Vulkan handles. Release the platform surface exactly once if adoption fails."
+  },
+  {
+   "path": "noapi/VkBackend.zig",
+   "original_sha256": "9e069e1b82e04a87d4d24ac3ad5aac1d390a0b294da47333c68fd8e8eb339d5f",
+   "current_sha256": "8780507d60a1f1722fafcf0d9005b54e70b460a498bdfd16dd13ec0788062018",
+   "reason": "Track per-window frame recording state and add abortFrame and commandsCancel, so an unfinished frame or an unsent offscreen command buffer is discarded instead of resubmitted and a duplicate frame call fails with FrameAlreadyActive or SurfaceFrameUnrecoverable; mirror pixel_scale in the graphics push constants with comptime layout asserts, keep command buffer ownership with the caller when submission fails, report software rasterizers through GpuInfo.software_emulation, and release partial window resources on failed surface adoption while leaving platform-surface ownership with the caller; include draw_indirect_bit alongside indirect_command_read_bit for draw_arguments hazards; report swapchain_recreated only after an actual rebuild, re-arm suboptimal acquisition, and keep every changed pixel extent pending without a two-frame resize throttle; log the bounded device-name slice rather than its zero-padded Vulkan property buffer. Additionally: cached image views are now deferred into the same pending_free drain that protects their image, instead of being destroyed eagerly while the descriptor still names them."
+  },
+  {
+   "path": "test/main.zig",
+   "original_sha256": "a0ff738a3cb20d26f9e48bb9a9d6418f12bcb37d609c8060c725a206792eadad",
+   "current_sha256": "2ff9b1a03cf08bebabd681f30f79ae7ae778512d37d8b0424643c55da8dbab12",
+   "reason": "Use drawIndexed with buffer-owned index format and migrate every native surface creation to Surface.initSdl."
+  }
+ ],
+ "content_digest": "735d30a5d8ccd4ce5709e0cb3e06e82630d69f406815513ffc38e799a6159f1d",
+ "files": [
+  {
+   "path": "LICENSE",
+   "size": 1071,
+   "sha256": "9061ae3e48ccfbd1841de23b3350d6f0618e72225740aad79786fc74d88035b8"
+  },
+  {
+   "path": "build.zig",
+   "size": 12907,
+   "sha256": "85598456329ff8b87f29160bfb3247223a4a286a91219e3acb73e36dc077e0a4"
+  },
+  {
+   "path": "build.zig.zon",
+   "size": 779,
+   "sha256": "62c6ccf3bc091d21e2ee7c5f20fe770799ba3308ccd6108ca8477819b30cdea9"
+  },
+  {
+   "path": "examples/1_triangle/main.zig",
+   "size": 4036,
+   "sha256": "d680dfb0378c9c4efd4b73fd58db2b8c5ba04d0b84be52b06ce6703151f05d05"
+  },
+  {
+   "path": "examples/2_textures/main.zig",
+   "size": 8697,
+   "sha256": "234cf88f28e566bfa516a3aa2244854d7ce6ea8425497eed2e68116331a7669a"
+  },
+  {
+   "path": "examples/3_3D/main.zig",
+   "size": 14800,
+   "sha256": "7d606db75d36d343a304a0e703bbab144cc24c8be7a627e65282fe4e4c383520"
+  },
+  {
+   "path": "examples/4_textures_advanced/main.zig",
+   "size": 10043,
+   "sha256": "b7f82440faa0b8ea6d98bf3beaba44071e7ab80b302ecce46ec88a0208ffc089"
+  },
+  {
+   "path": "examples/5_indirect_triangles/main.zig",
+   "size": 9247,
+   "sha256": "9f67adf54763b17f79e86c3a7c1235aca2b8859e5216599bacb92e0ee7db9276"
+  },
+  {
+   "path": "examples/6_compute_shaders/main.zig",
+   "size": 8279,
+   "sha256": "2d43adde6f77c7558061bbab1df939fbad3d21b6ccb7a12ba3fb89d26d101ee7"
+  },
+  {
+   "path": "examples/7_deferred_async_load/main.zig",
+   "size": 26259,
+   "sha256": "4d5cbc7f652957d000dd94b4e2c898fadd55cc26fa7ba3d8b89eedf03bd4b3b5"
+  },
+  {
+   "path": "examples/common.zig",
+   "size": 14700,
+   "sha256": "424d42f0e49439aa6d7352874007be5623b73d5075873dd9b34eb9b41569450e"
+  },
+  {
+   "path": "noapi/Barrier.zig",
+   "size": 1134,
+   "sha256": "0c5d3aca2eb6b365edd0a1057f45185d504099dd2e04fbcded2dcfdeb9ef8062"
+  },
+  {
+   "path": "noapi/BlendState.zig",
+   "size": 959,
+   "sha256": "79d77352a6a7658b926813ba496e8ddd53cd5fee737b4159bf645548623c3b2f"
+  },
+  {
+   "path": "noapi/Buffer.zig",
+   "size": 413,
+   "sha256": "c28d16eba61aaaed9ae42c55f6a66fdfd92551efe768111bea724e5033fd1cb3"
+  },
+  {
+   "path": "noapi/CommandBuffer.zig",
+   "size": 13339,
+   "sha256": "f3d21f7dedb5e9b5da9c0aad077154e3324f415c35d1552db9fd8c37d9868cbf"
+  },
+  {
+   "path": "noapi/DepthState.zig",
+   "size": 520,
+   "sha256": "136eadf0cda14d13b8b7ecfb297a24c6b3a6ac08d872b336fbfbfa67e987887d"
+  },
+  {
+   "path": "noapi/DescriptorHeap.zig",
+   "size": 445,
+   "sha256": "07b286548c622fd1e99cb99eaf915339402418c5858d622e40c3ddd9cfc5531b"
+  },
+  {
+   "path": "noapi/DescriptorPool.zig",
+   "size": 4758,
+   "sha256": "0e3e7bb2a19668eb69ac5198cbe83d1bda797890782dd73b09a32a3c307fca15"
+  },
+  {
+   "path": "noapi/DeviceLimits.zig",
+   "size": 973,
+   "sha256": "f84a11165cf41d901df9d2fedb831374588a0cdd90644c73d8a373553e7639e8"
+  },
+  {
+   "path": "noapi/Extent2D.zig",
+   "size": 246,
+   "sha256": "c6146e7ab375b4abb46c520d0fad4b9d67e1024a7131d53c5cc58df6bed59e53"
+  },
+  {
+   "path": "noapi/Gpu.zig",
+   "size": 13228,
+   "sha256": "f9425477d4d1c2937460e0e2922c8dc7df42ad3d41cd8eda680e0e27bd43a7c8"
+  },
+  {
+   "path": "noapi/GpuArena.zig",
+   "size": 3738,
+   "sha256": "0ba655cea116c680fdf6181a49b61712dceeebcab32248215581aeae418fd98f"
+  },
+  {
+   "path": "noapi/GpuError.zig",
+   "size": 411,
+   "sha256": "aca835dd7f4cd1b1f2dc5680c691b80abb6f3fc940f70cc4cf97d7172f24ac58"
+  },
+  {
+   "path": "noapi/GpuPtr.zig",
+   "size": 954,
+   "sha256": "82ac9bf8d1a03a0b3b9179301ed0c9b220f4ca73c3031bed171b7055c850c191"
+  },
+  {
+   "path": "noapi/Queue.zig",
+   "size": 3185,
+   "sha256": "121e193a5de8d49e8df11b480de7db5db7eed9e501e67d6c5b9c659dfd1bc0d6"
+  },
+  {
+   "path": "noapi/RasterState.zig",
+   "size": 860,
+   "sha256": "6eeb892001ec347f87bf320090158cded1e09b370c0c334a1d861d8757c91cc1"
+  },
+  {
+   "path": "noapi/Rect.zig",
+   "size": 248,
+   "sha256": "09404bbe8d0c49a2efc84ec7a2ab22f62cc5f6dc41795cac9cacfacc4218635e"
+  },
+  {
+   "path": "noapi/Rendering.zig",
+   "size": 1044,
+   "sha256": "1924a997d8bb58258f62a727abd9eb34ef44d7d61bfa0544593f2db2b5e4ba49"
+  },
+  {
+   "path": "noapi/Semaphore.zig",
+   "size": 314,
+   "sha256": "e693efb600dcfb29e515301e52ec40754bfeb2e68b27b749ec95a3c9b24cc192"
+  },
+  {
+   "path": "noapi/Shader.zig",
+   "size": 1290,
+   "sha256": "c84af8e5a88ce43040ce296ec6e6c0dacc518688166c51b69022f4c434e93dbb"
+  },
+  {
+   "path": "noapi/ShaderHandle.zig",
+   "size": 322,
+   "sha256": "e629f5f81408ecc7ce7a6445c0c853044f63dae2cf8a2b05f420aab9f3034aca"
+  },
+  {
+   "path": "noapi/Surface.zig",
+   "size": 5994,
+   "sha256": "8eebc227dbef1f2dca72b6e82861d2eee7e00305af47a1e7e0c3957c2367df2a"
+  },
+  {
+   "path": "noapi/Texture.zig",
+   "size": 4164,
+   "sha256": "ee947f93698db16f3dfbdf555b163b00748f3a481023b36a4b0b441ce62bda94"
+  },
+  {
+   "path": "noapi/TextureHandle.zig",
+   "size": 636,
+   "sha256": "b06995ed7bfa92de1051b87db30c5cbca15baeeee551ef7f099a41502e0085b1"
+  },
+  {
+   "path": "noapi/TimestampQuerySet.zig",
+   "size": 2492,
+   "sha256": "c2cda81a217c58360e0fd3534fb5967b2617788ec58c3c878817a3245bdae8ff"
+  },
+  {
+   "path": "noapi/Vertex.zig",
+   "size": 336,
+   "sha256": "f4183c03d3848b3d3deec8358869f6a4b4f3bcf6212f07ca8505846863652202"
+  },
+  {
+   "path": "noapi/VertexInput.zig",
+   "size": 324,
+   "sha256": "3554362af7eacd4db1b250a14db8cb9c749fecb5aed6d4191135cf8bfef9cd17"
+  },
+  {
+   "path": "noapi/Viewport.zig",
+   "size": 421,
+   "sha256": "7c7bbf4619a1e412a70e4c21877690d073e35dee59c01f1dc49faccdb95a88b6"
+  },
+  {
+   "path": "noapi/VkBackend.zig",
+   "size": 245838,
+   "sha256": "8780507d60a1f1722fafcf0d9005b54e70b460a498bdfd16dd13ec0788062018"
+  },
+  {
+   "path": "noapi/root.zig",
+   "size": 5325,
+   "sha256": "5505ab62c5917cbd4ab2cb3d8606420aaf7064a46d9931a3aa3a90802823e051"
+  },
+  {
+   "path": "noapi/vk.zig",
+   "size": 2403673,
+   "sha256": "ba8d3189013562be364a156e9d8e805b42f5bd17db6bc2f45c67ca7f6fa6d9c8"
+  },
+  {
+   "path": "shaders/base.slang",
+   "size": 600,
+   "sha256": "ace677faec6552684a07e372810c9a8c06df8d828789d536d2b1e2f296185d98"
+  },
+  {
+   "path": "shaders/buf_tri.frag",
+   "size": 144,
+   "sha256": "5b0d03542aaa12744900487510d3ef895b7d44151c515f660ba2f57d4209d7cc"
+  },
+  {
+   "path": "shaders/buf_tri.vert",
+   "size": 311,
+   "sha256": "b43d50cc450aa44c087d669d873218bdb7f8a0cc7b8fe3cec00eda902954f223"
+  },
+  {
+   "path": "shaders/buf_tri_frag.spv",
+   "size": 496,
+   "sha256": "26dfa9e090dcfc735f4ee322e23d35db4ccd4d8c098f2d934122576dde528ab4"
+  },
+  {
+   "path": "shaders/buf_tri_vert.spv",
+   "size": 1004,
+   "sha256": "eddbdf34c2c29a1b18841e90511654c565e3b69bf5dc4b59fe68fb6450c5dfe6"
+  },
+  {
+   "path": "shaders/cloud.frag",
+   "size": 2066,
+   "sha256": "944245b33d98398aa88030ccedbfeb008d2e4afd4d616d69356d89cc000c4bb5"
+  },
+  {
+   "path": "shaders/cloud.vert",
+   "size": 2831,
+   "sha256": "f69e65eed3e710d733bdaf214b064ca97a1f50cbea4a8e4671f95d3ef069e511"
+  },
+  {
+   "path": "shaders/cloud_frag.spv",
+   "size": 2824,
+   "sha256": "1c71272b3737659a73231dd03adea8e1e39a8c79f5ec752d9d4ea4353c3b5be6"
+  },
+  {
+   "path": "shaders/cloud_vert.spv",
+   "size": 5320,
+   "sha256": "8234e4cc7196cf8dfc894e789b5590a820c8aefa4b172cbe071a0a2a82c6c145"
+  },
+  {
+   "path": "shaders/color.slang",
+   "size": 4037,
+   "sha256": "865ec5c498dec85976396e3603ddc3154fac3d292dac53e2aa239e4969cbbc9b"
+  },
+  {
+   "path": "shaders/complex.slang",
+   "size": 2279,
+   "sha256": "adae60c5d068fcf71d93536d465d8713421c50a4d72f91e14c47af93a56e5b3c"
+  },
+  {
+   "path": "shaders/compute.comp",
+   "size": 642,
+   "sha256": "139d7ba7d98afa8a50c0b7cd97672e3fab08115314f6e2b55295b140705044a2"
+  },
+  {
+   "path": "shaders/compute_comp.spv",
+   "size": 2496,
+   "sha256": "787c6427c7a0b64faa698a1de5dab42a161790ef89e28011835d6dd8bdccead2"
+  },
+  {
+   "path": "shaders/cube.frag",
+   "size": 144,
+   "sha256": "5b0d03542aaa12744900487510d3ef895b7d44151c515f660ba2f57d4209d7cc"
+  },
+  {
+   "path": "shaders/cube.vert",
+   "size": 887,
+   "sha256": "81b96de4f4d2f5e9d3f8b18d02371c89fb9c3647b9fd795c11755c9ff5935e3e"
+  },
+  {
+   "path": "shaders/cube_frag.spv",
+   "size": 496,
+   "sha256": "26dfa9e090dcfc735f4ee322e23d35db4ccd4d8c098f2d934122576dde528ab4"
+  },
+  {
+   "path": "shaders/cube_vert.spv",
+   "size": 1596,
+   "sha256": "b50db56edb40df54f6386e9f894d89b5275111efc259651e891bc8dd5495847f"
+  },
+  {
+   "path": "shaders/env.ppm",
+   "size": 393278,
+   "sha256": "4ca7ab74f0f637214e4af273321994213d6edff6137e08edb1fdc1d4e936c576"
+  },
+  {
+   "path": "shaders/final_pass.frag",
+   "size": 3718,
+   "sha256": "20a8d05dae03bb2892e6b1ca1aa4dbd4318daad5e0d0d5ea156e76aec611522f"
+  },
+  {
+   "path": "shaders/final_pass.vert",
+   "size": 1107,
+   "sha256": "632cc3f120ef1b3b5339037686850685cf2633339d6a7eb7fcf702aede7dbb42"
+  },
+  {
+   "path": "shaders/final_pass_frag.spv",
+   "size": 8424,
+   "sha256": "0e73d244a488aefcf976d250474483035997eda8725497270f65093cdc680531"
+  },
+  {
+   "path": "shaders/final_pass_vert.spv",
+   "size": 1784,
+   "sha256": "9e48a97f3dcb6c272ac915fe5a3f0b0ae08137fcea938b401270d27f69ca1ff0"
+  },
+  {
+   "path": "shaders/fullscreen_quad.vert",
+   "size": 604,
+   "sha256": "071e313fe6a742966c1b4f8be219515579c884acea45cab4a5631418ab438288"
+  },
+  {
+   "path": "shaders/fullscreen_quad_vert.spv",
+   "size": 1744,
+   "sha256": "f6ff53314cead96cca759c5a38a16880574f9e3089b74600322c095723eb1399"
+  },
+  {
+   "path": "shaders/gbuffer.frag",
+   "size": 1754,
+   "sha256": "3a7d71ccdd2b23774285d9a3d8f6a46654a343bed2ba687aca38dda6132ef632"
+  },
+  {
+   "path": "shaders/gbuffer.vert",
+   "size": 1499,
+   "sha256": "bc80be9d2c1ce47c15bc1257e424b66ded8c6d8c88dab5d8979510dbf735ed48"
+  },
+  {
+   "path": "shaders/gbuffer_frag.spv",
+   "size": 3600,
+   "sha256": "598201519ca2589b9a6383fe72f9c33c9ac54cbfbb81ce71317c2ad41f180251"
+  },
+  {
+   "path": "shaders/gbuffer_vert.spv",
+   "size": 3964,
+   "sha256": "81d85306512aeaf9f746fe5a6e91680472c4a5488a2f32103eedf72a19c49d05"
+  },
+  {
+   "path": "shaders/grid.frag",
+   "size": 344,
+   "sha256": "78d826b660748b6bacb4152242d5f1e4b591291627b8e0a36869c257d2aae248"
+  },
+  {
+   "path": "shaders/grid.vert",
+   "size": 1536,
+   "sha256": "874e023fc025ba2f1ca87b82939ef241138d734fa4147ffe2e290da33c796db3"
+  },
+  {
+   "path": "shaders/grid_frag.spv",
+   "size": 1048,
+   "sha256": "9c4c8b703113a686097211fa0f5eb20333944a5ffabf74a2cb9b736e33d6267a"
+  },
+  {
+   "path": "shaders/grid_vert.spv",
+   "size": 4992,
+   "sha256": "ca9af11921b2070ab00ab19cc3146b522ec2018d3c6268734dede88c223a55aa"
+  },
+  {
+   "path": "shaders/indirect_tri_frag.slang",
+   "size": 276,
+   "sha256": "b17df415e3ea26505d52381cdad0ba3ef7c0c151c898826e013763c0d59c5977"
+  },
+  {
+   "path": "shaders/indirect_tri_frag.spv",
+   "size": 384,
+   "sha256": "4d0211d62bf60205606560cb9c9ddded18f32e9cdfb9da8f4d6416add7cf8462"
+  },
+  {
+   "path": "shaders/indirect_tri_vert.slang",
+   "size": 1310,
+   "sha256": "5028dd9d93504a613bc13e1f505c177812848c2f839d95d2b33dc101d2eb3b44"
+  },
+  {
+   "path": "shaders/indirect_tri_vert.spv",
+   "size": 2500,
+   "sha256": "cba3bfcafad4108e2625fc84bc90c23bfd6a024bff7c41ca83d63109c3e99e4e"
+  },
+  {
+   "path": "shaders/pga2d.slang",
+   "size": 7449,
+   "sha256": "0319dd262a260d47f21d4dcf33ee999d84939b7d1d8ae614b878099b100b9c3e"
+  },
+  {
+   "path": "shaders/sdf.slang",
+   "size": 10460,
+   "sha256": "0a48613ecc900b5c0d10ebd7341b9b978e8db9425bb49d3be8789047446c9cd7"
+  },
+  {
+   "path": "shaders/shader.slang",
+   "size": 14330,
+   "sha256": "aea0145aa43bdd14270322b04afc9c2136242597ce784161fda3510a699ef95f"
+  },
+  {
+   "path": "shaders/shader.spv",
+   "size": 4852,
+   "sha256": "202823fc1b73f83ccc435a48f56f7de99bd821896fb2ee056777229d9183fa60"
+  },
+  {
+   "path": "shaders/slang.spv",
+   "size": 90116,
+   "sha256": "1f00431fa1e13726ef57fcc9cb3855c51d3febacf045a5251d0aea186ccaa109"
+  },
+  {
+   "path": "shaders/tex_frag.frag",
+   "size": 1241,
+   "sha256": "bc0704d12b7e411bfb461dbfe647d45a9f730c7eb04bdc2365e35ae72cbe6737"
+  },
+  {
+   "path": "shaders/tex_frag.spv",
+   "size": 2124,
+   "sha256": "3efaab9330b5808b17827418526e4ea01f2fbf481d90289233176198e74d8cf0"
+  },
+  {
+   "path": "shaders/tex_sample.frag",
+   "size": 469,
+   "sha256": "f959df812145497378633262da84feb067ea287392ac50badd8375fc1b654304"
+  },
+  {
+   "path": "shaders/tex_sample_frag.spv",
+   "size": 692,
+   "sha256": "8ea4746b39e404e60d4d64d1f5a500ed1e42cc518bc6e90cfff5177056ca0d99"
+  },
+  {
+   "path": "shaders/tex_vert.spv",
+   "size": 964,
+   "sha256": "85c61fe8da203d6e59532adc636483d5df7eece9fc8451b06c8d64a8d3b3dc8e"
+  },
+  {
+   "path": "shaders/tex_vert.vert",
+   "size": 286,
+   "sha256": "42a190c74cdd94af988bdf6f98459ea8ed6af60bdd968c6047162378580e5df4"
+  },
+  {
+   "path": "shaders/triangle.frag",
+   "size": 270,
+   "sha256": "3af90066241a9b91fdc22de144a36a4e63e7b0fdd8bcfd99956a5bbff7f29e72"
+  },
+  {
+   "path": "shaders/triangle.vert",
+   "size": 566,
+   "sha256": "eb6023a887ceab3508abcdbe5c5a220c05b4f1499822b29c9cab40fe27ad1665"
+  },
+  {
+   "path": "shaders/triangle_frag.spv",
+   "size": 568,
+   "sha256": "7a593abff4efef75ace2de452e44e75029be4bdbe75ed24930c0ad2e6aa7d229"
+  },
+  {
+   "path": "shaders/triangle_vert.spv",
+   "size": 1512,
+   "sha256": "fd84cb46328e818189cbaa135f96e710f1eb196d65587a1ad6055e01497dfae4"
+  },
+  {
+   "path": "test/main.zig",
+   "size": 38164,
+   "sha256": "2ff9b1a03cf08bebabd681f30f79ae7ae778512d37d8b0424643c55da8dbab12"
+  }
+ ]
+}

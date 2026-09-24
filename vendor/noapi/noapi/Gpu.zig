@@ -110,6 +110,14 @@ pub fn commandsBegin(self: *Gpu) !CommandBuffer {
     return .{ .gpu = self, .handle = handle };
 }
 
+/// Discard one unsent command buffer created by commandsBegin. The handle is
+/// invalidated so a repeated cancel or later queueSubmit cannot reuse it.
+pub fn commandsCancel(self: *Gpu, command: *CommandBuffer) !void {
+    if (command.gpu != self) return error.CommandBufferGpuMismatch;
+    try self.backend.commandsCancel(command.handle);
+    command.handle = .null_handle;
+}
+
 pub fn numSurfaces(self: *const Gpu) u32 {
     return self.backend.numWindows();
 }
@@ -145,7 +153,10 @@ fn copyCommandBufferHandles(
     handles: *[64]CommandBufferHandle,
 ) ![]CommandBufferHandle {
     if (cmd_bufs.len > handles.len) return error.TooManyCommandBuffers;
-    for (cmd_bufs, 0..) |cb, i| handles[i] = cb.handle;
+    for (cmd_bufs, 0..) |cb, i| {
+        if (cb.handle == .null_handle) return error.InvalidCommandBuffer;
+        handles[i] = cb.handle;
+    }
     return handles[0..cmd_bufs.len];
 }
 
@@ -332,6 +343,15 @@ test "task4 submission wrapper accepts 64 and rejects 65 command buffers" {
     try std.testing.expectError(
         error.TooManyCommandBuffers,
         copyCommandBufferHandles(command_buffers[0..65], &handles),
+    );
+}
+
+test "cancelled command buffer cannot enter queue submission" {
+    const cancelled = [_]CommandBuffer{.{ .gpu = undefined, .handle = .null_handle }};
+    var handles: [64]CommandBufferHandle = undefined;
+    try std.testing.expectError(
+        error.InvalidCommandBuffer,
+        copyCommandBufferHandles(&cancelled, &handles),
     );
 }
 

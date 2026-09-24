@@ -79,10 +79,13 @@ pub const SeekError = error{
     ResamplerResetFailed,
 };
 
+/// A probe fails only when the file cannot be read. A file with no usable
+/// audio stream still yields fallback metadata, so one unplayable entry can
+/// not fail a whole library scan; playback reports the missing stream when
+/// the decoder opens the file.
 pub const ProbeError = std.mem.Allocator.Error || error{
     OpenInputFailed,
     StreamInfoFailed,
-    AudioStreamNotFound,
 };
 
 /// Hard limits keep untrusted attached-picture metadata from consuming
@@ -1129,6 +1132,10 @@ pub fn decodeArtwork(
 }
 
 /// Probe and copy tags without retaining any FFmpeg resources.
+///
+/// Embedded tags win over the filename and parent directory fallbacks. A file
+/// with no usable audio stream is not an error: it simply carries no
+/// stream-level tags, so the fallbacks fill every field.
 pub fn probeMetadata(
     gpa: std.mem.Allocator,
     path: []const u8,
@@ -1160,8 +1167,11 @@ pub fn probeMetadata(
         null,
         0,
     );
-    if (stream_index < 0) return error.AudioStreamNotFound;
-    const stream = format_context.streams[@intCast(stream_index)];
+    // A file with no usable audio stream has no stream-level tags to read. The
+    // probe reports the metadata it can see and lets the filename fallbacks
+    // cover the gaps instead of failing the caller.
+    const stream_metadata: ?*const c.AVDictionary =
+        if (stream_index < 0) null else format_context.streams[@intCast(stream_index)].*.metadata;
 
     var artwork = try extractAttachedArtwork(gpa, format_context);
     errdefer if (artwork) |*value| value.deinit(gpa);
@@ -1169,7 +1179,7 @@ pub fn probeMetadata(
         artwork = try extractMetadataArtwork(
             gpa,
             format_context.metadata,
-            stream.*.metadata,
+            stream_metadata,
         );
     }
 
@@ -1189,7 +1199,7 @@ pub fn probeMetadata(
     const title = try dupeTag(
         gpa,
         format_context.metadata,
-        stream.*.metadata,
+        stream_metadata,
         "title",
         fallback_title,
     );
@@ -1197,14 +1207,14 @@ pub fn probeMetadata(
     const artist = try dupeArtist(
         gpa,
         format_context.metadata,
-        stream.*.metadata,
+        stream_metadata,
         fallback_artist,
     );
     errdefer gpa.free(artist);
     const album = try dupeTag(
         gpa,
         format_context.metadata,
-        stream.*.metadata,
+        stream_metadata,
         "album",
         fallback_album,
     );

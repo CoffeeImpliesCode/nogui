@@ -1,7 +1,7 @@
 //! Verifies that intrinsic flex measurement is scoped to each container's auto main axis.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const layout_context = @import("context.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
@@ -11,7 +11,7 @@ const Style = style.Style;
 const WidgetKind = widget.WidgetKind;
 const WidgetTree = widget.WidgetTree;
 
-fn appendNode(tree: *WidgetTree, id: Id, parent: Id, node_style: Style) !void {
+fn appendNode(tree: *WidgetTree, id: FrameNodeId, parent: FrameNodeId, node_style: Style) !void {
     const kind: WidgetKind = switch (node_style.display) {
         .flex => .{ .row = .{} },
         .block, .flow_root, .grid => .{ .column = .{} },
@@ -87,7 +87,11 @@ const BreakableMeasureProbe = struct {
         definite_width = null;
     }
 
-    fn measure(text: []const u8, input: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        text: []const u8,
+        input: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         calls += 1;
 
         var min_line_length: usize = 0;
@@ -142,6 +146,8 @@ const BreakableMeasureProbe = struct {
             .height = exactF32FromUsize(line_count) * line_height,
         };
     }
+
+    const source: layout_context.MeasureSource = .{ .callback = measure };
 };
 
 const CrossMaxContributionProbe = struct {
@@ -170,7 +176,11 @@ const CrossMaxContributionProbe = struct {
         automatic_max_content_calls = 0;
     }
 
-    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        input: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         calls += 1;
         return switch (input.available_space.height) {
             .definite => |height| blk: {
@@ -186,10 +196,12 @@ const CrossMaxContributionProbe = struct {
         };
     }
 
+    const source: layout_context.MeasureSource = .{ .callback = measure };
     fn measureAutomaticMinimum(
+        _: ?*anyopaque,
         _: []const u8,
         input: layout_context.MeasureInput,
-    ) widget.Size {
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         const main_max_content = switch (input.available_space.width) {
             .definite => false,
             .min_content => false,
@@ -221,16 +233,20 @@ const CrossMaxContributionProbe = struct {
         }
         return .{ .width = 5, .height = 20 };
     }
+
+    const automatic_source: layout_context.MeasureSource = .{
+        .callback = measureAutomaticMinimum,
+    };
 };
 
 test "measureNatural scopes intrinsic height to auto-sized flex container" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const nested_id: Id = @enumFromInt(3);
-    const outer_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const nested_id: FrameNodeId = @enumFromInt(3);
+    const outer_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, first_id, nested_id, fixedItem(10, 60));
     try appendNode(&tree, second_id, nested_id, fixedItem(10, 60));
@@ -283,8 +299,8 @@ test "measureNatural defers percentage margins below intrinsic auto width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const outer_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const outer_id: FrameNodeId = @enumFromInt(2);
 
     var child_style = fixedItem(10, 10);
     child_style.margin_inset.left = .{ .percent = 0.5 };
@@ -326,8 +342,8 @@ test "max-content forwards definite child cross maximum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -358,7 +374,7 @@ test "max-content forwards definite child cross maximum" {
 
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = BreakableMeasureProbe.measure,
+        .measure = BreakableMeasureProbe.source,
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -396,8 +412,8 @@ test "max-content ignores transferred cross max for contribution" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -431,7 +447,7 @@ test "max-content ignores transferred cross max for contribution" {
 
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = CrossMaxContributionProbe.measure,
+        .measure = CrossMaxContributionProbe.source,
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -472,8 +488,8 @@ test "max-content uses aspect-derived preferred main with zero basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, container_id, .{
         .display = .block,
@@ -529,8 +545,8 @@ test "max-content measures automatic minimum under min-content main mode" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -560,7 +576,7 @@ test "max-content measures automatic minimum under min-content main mode" {
 
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = CrossMaxContributionProbe.measureAutomaticMinimum,
+        .measure = CrossMaxContributionProbe.automatic_source,
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };

@@ -398,6 +398,8 @@ pub const DeviceIdentity = struct {
     vendor_id: u32,
     device_id: u32,
     driver: []const u8,
+    /// Reported by the selected Vulkan device, not inferred from its name.
+    software_emulation: bool,
 };
 
 pub const max_textures = 65536;
@@ -406,6 +408,10 @@ pub const max_samplers = 256;
 fn propertyString(bytes: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
     return bytes[0..end];
+}
+
+fn isSoftwareDevice(device_type: vk.PhysicalDeviceType, driver_id: vk.DriverId) bool {
+    return device_type == .cpu or driver_id == .google_swiftshader or driver_id == .mesa_llvmpipe;
 }
 
 allocator: Allocator = undefined,
@@ -457,6 +463,7 @@ selected_driver_name: [vk.MAX_DRIVER_NAME_SIZE]u8 = undefined,
 selected_driver_name_len: u32 = 0,
 selected_vendor_id: u32 = 0,
 selected_device_id: u32 = 0,
+selected_software_emulation: bool = false,
 // Memory properties cached at init from vkGetPhysicalDeviceMemoryProperties
 mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
 
@@ -503,6 +510,34 @@ pub const DescHeapInfo = struct {
     sets: [3]vk.DescriptorSet, // textures, textures_rw, samplers
 };
 
+const FrameRecording = enum {
+    idle,
+    recording,
+    abort_failed,
+};
+
+fn requireIdleFrame(win: *const Window) !void {
+    switch (win.frame_recording) {
+        .idle => {},
+        .recording => return error.FrameAlreadyActive,
+        .abort_failed => return error.SurfaceFrameUnrecoverable,
+    }
+}
+
+fn requireRecordingFrame(win: *const Window) !void {
+    switch (win.frame_recording) {
+        .recording => {},
+        .idle => return error.FrameNotActive,
+        .abort_failed => return error.SurfaceFrameUnrecoverable,
+    }
+}
+
+fn markFrameAborting(win: *Window) !u32 {
+    try requireRecordingFrame(win);
+    win.frame_recording = .abort_failed;
+    return win.frame_index;
+}
+
 pub const Window = struct {
     valid: bool = true,
     surface: vk.SurfaceKHR = .null_handle,
@@ -526,11 +561,11 @@ pub const Window = struct {
     tracy_img_srclocs: std.ArrayListUnmanaged(u64) = .empty,
     present_done_fences: std.ArrayListUnmanaged(vk.Fence) = if (use_swapchain_maintenance1) .empty else undefined,
     frame_index: u32 = 0,
+    frame_recording: FrameRecording = .idle,
     image_index: u32 = 0,
     // CPU nanoseconds spent blocked on the GPU this frame (acquire/present/fence waits).
     slop_ns: u64 = 0,
     needs_resize: bool = false,
-    resize_throttle: u32 = 0,
     retired_swapchain: vk.SwapchainKHR = .null_handle,
     // Per-frame pending wait/signal semaphores (submitted with cmd buf in endFrame).
     wait_sems: std.ArrayListUnmanaged(std.ArrayListUnmanaged(vk.Semaphore)) = .empty,
@@ -561,8 +596,23 @@ fn notePresentQueueFailure(win: *Window, err: anyerror) FrameResult {
 }
 
 fn advanceFrame(win: *Window, frame: u32) void {
-    if (win.resize_throttle > 0) win.resize_throttle -= 1;
     win.frame_index = (frame + 1) % win.frames_in_flight;
+}
+
+fn finishFrame(win: *Window, frame: u32) void {
+    std.debug.assert(win.frame_recording == .recording or win.frame_recording == .abort_failed);
+    win.frame_recording = .idle;
+    advanceFrame(win, frame);
+}
+
+/// Destroy the swapchain a prior `recreateSwapchain` retired, once the
+/// presentation that replaced it has been handed to the engine. Every present
+/// path runs this, so a live surface holds one swapchain instead of one per
+/// resize; `destroyWindow` runs it for a window that never presented again.
+fn releaseRetiredSwapchain(self: *VkBackend, win: *Window) void {
+    if (win.retired_swapchain == .null_handle) return;
+    self.device.destroySwapchainKHR(win.retired_swapchain, null);
+    win.retired_swapchain = .null_handle;
 }
 
 const SubmittedWork = struct {
@@ -772,11 +822,20 @@ const AllocInfo = extern struct {
 
 /// Resources pending deferred destruction. Pushed by gpuFree/textureDestroy/descHeapDestroy,
 /// drained by flushPendingFrees which calls deviceWaitIdle once then destroys all.
+/// Entries are destroyed in push order, so a CHILD must be pushed before the
+/// parent that outlives it (an image view before its image).
 const PendingFree = union(enum) {
     texture: struct {
         image: vk.Image,
         view: vk.ImageView,
         memory: vk.DeviceMemory,
+    },
+    /// A cached image view whose image is already queued or destroyed. A
+    /// descriptor an in-flight frame still samples names this handle, so it
+    /// rides the SAME wait as the image instead of dying under that frame.
+    /// Push it BEFORE the `.texture` entry: it is the image's child.
+    image_view: struct {
+        view: vk.ImageView,
     },
     buffer: struct {
         buf: vk.Buffer,
@@ -814,10 +873,19 @@ const GraphicsPushConstants = extern struct {
     vert_data: u64,
     frag_data: u64,
     indirect_data: u64,
-    screen: [2]f32, // framebuffer size (px); @sizeOf must match PushData
+    screen: [2]f32, // logical window size for the vertex projection
     scene_bda: u64, // the drawable bag (V1b); @sizeOf must match PushData
     perm_bda: u64, // the sorted permutation (V1b); @sizeOf must match PushData
+    pixel_scale: [2]f32, // physical framebuffer pixels per logical unit
 };
+comptime {
+    std.debug.assert(@sizeOf(GraphicsPushConstants) == @sizeOf(PushData));
+    std.debug.assert(@sizeOf(PushData) == 56);
+    std.debug.assert(@sizeOf(PushData) <= 128);
+    std.debug.assert(@offsetOf(PushData, "pixel_scale") == 48);
+    std.debug.assert(@offsetOf(GraphicsPushConstants, "pixel_scale") ==
+        @offsetOf(PushData, "pixel_scale"));
+}
 const ComputePushConstants = extern struct {
     compute_data: u64,
 };
@@ -945,7 +1013,8 @@ pub fn init(options: Options) !*VkBackend {
     self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.physical_device);
 
     const gpu_props = self.instance.getPhysicalDeviceProperties(self.physical_device);
-    log.info("GPU: {s}", .{@as([]const u8, &gpu_props.device_name)});
+    const selected_name = propertyString(&gpu_props.device_name);
+    log.info("GPU: {s}", .{selected_name});
 
     var driver_props: vk.PhysicalDeviceDriverProperties = .{
         .driver_id = @enumFromInt(0),
@@ -958,7 +1027,6 @@ pub fn init(options: Options) !*VkBackend {
         .properties = gpu_props,
     };
     self.instance.getPhysicalDeviceProperties2(self.physical_device, &selected_properties);
-    const selected_name = propertyString(&gpu_props.device_name);
     const driver_name = propertyString(&driver_props.driver_name);
     const driver_info = propertyString(&driver_props.driver_info);
     const selected_driver = if (driver_info.len != 0) driver_info else driver_name;
@@ -970,6 +1038,7 @@ pub fn init(options: Options) !*VkBackend {
     self.selected_driver_name_len = @intCast(selected_driver.len);
     self.selected_vendor_id = gpu_props.vendor_id;
     self.selected_device_id = gpu_props.device_id;
+    self.selected_software_emulation = isSoftwareDevice(gpu_props.device_type, driver_props.driver_id);
 
     // Query device limits from Vulkan.
     {
@@ -1278,6 +1347,9 @@ pub fn flushPendingFrees(self: *VkBackend) !void {
                 self.device.destroyImage(t.image, null);
                 if (t.memory != .null_handle) self.device.freeMemory(t.memory, null);
             },
+            .image_view => |v| {
+                self.device.destroyImageView(v.view, null);
+            },
             .desc_heap => |d| {
                 self.device.freeDescriptorSets(d.pool, d.sets[0..]) catch |err|
                     log.warn("flushPendingFrees: freeDescriptorSets failed: {}", .{err});
@@ -1363,7 +1435,11 @@ pub fn deinit(self: *VkBackend) void {
 }
 
 pub fn numWindows(self: *const VkBackend) u32 {
-    return @intCast(self.windows.items.len);
+    var count: u32 = 0;
+    for (self.windows.items) |*window| {
+        if (window.valid) count += 1;
+    }
+    return count;
 }
 
 pub fn addWindow(
@@ -1391,6 +1467,12 @@ pub fn addWindow(
                 .present_stage_queries = timing_support.stage orelse .{},
                 .present_stage_support = timing_support.supported_stages,
             };
+            errdefer {
+                // Adoption happens only after every resource is ready.
+                w.surface = .null_handle;
+                destroyWindow(self, w);
+                w.* = .{ .valid = false };
+            }
             try initPerFrameSemaphoreLists(self, w);
             try createSwapchainResources(self, w);
             try createPresentSemaphores(self, w);
@@ -1432,6 +1514,10 @@ pub fn addWindow(
         .present_stage_queries = timing_support.stage orelse .{},
         .present_stage_support = timing_support.supported_stages,
     };
+    errdefer {
+        win.surface = .null_handle;
+        destroyWindow(self, &win);
+    }
     try initPerFrameSemaphoreLists(self, &win);
     log.info("addWindow: createSwapchainResources", .{});
     try createSwapchainResources(self, &win);
@@ -1476,9 +1562,14 @@ pub fn removeWindow(self: *VkBackend, index: u32) void {
 pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     const win = &self.windows.items[window_index];
     const frame = win.frame_index;
+    try requireIdleFrame(win);
     win.slop_ns = 0;
 
-    // Handle resize
+    // Handle resize. `recreated` reports what this call ACTUALLY did to the
+    // swapchain, because that is what a caller counting rebuilds needs: a
+    // `needs_resize` that was serviced here rebuilt the chain, and a
+    // `suboptimal` acquire below did not. The two are separate facts.
+    var recreated = false;
     if (win.needs_resize) {
         const zone = tracy.Zone.begin(.{ .src = @src() });
         defer zone.end();
@@ -1504,14 +1595,16 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
             win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_dwi.nanoseconds);
         }
         try recreateSwapchain(self, win);
-        win.needs_resize = false;
-        win.resize_throttle = 2;
+        // The rebuild retired the request: `recreateSwapchain` clears the
+        // latch only once the new chain exists, so a rebuild that fails stays
+        // pending for the next frame.
+        recreated = true;
     }
 
     const acq_fence = try self.device.createFence(&.{}, null);
     defer self.device.destroyFence(acq_fence, null);
 
-    const recreated = blk: {
+    {
         const zone_acq = tracy.Zone.begin(.{ .name = "acquireImage", .src = @src(), .color = .tomato });
         defer zone_acq.end();
         const t_acq = std.Io.Timestamp.now(self.io, .awake);
@@ -1528,10 +1621,14 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
             return e;
         };
         win.image_index = acq.image_index;
+        // SUBOPTIMAL means the chain no longer matches the surface but its
+        // images are still usable. The frame is drawn into the image just
+        // acquired; the rebuild is deferred to the next `beginFrame` so no
+        // submission names a swapchain being destroyed.
+        if (acq.result == .suboptimal_khr) win.needs_resize = true;
         _ = try self.device.waitForFences(([_]vk.Fence{acq_fence})[0..], .true, std.math.maxInt(u64));
         win.slop_ns += @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - t_acq.nanoseconds);
-        break :blk acq.result == .suboptimal_khr;
-    };
+    }
 
     // Wait for previous frame to finish before reusing pool/fence
     {
@@ -1552,8 +1649,10 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
     try self.flushPendingFrees();
 
     // Begin command buffer and transition UNDEFINED -> GENERAL
-    win.cmd_buffers.items[frame].beginCommandBuffer(&.{ .flags = .{ .one_time_submit_bit = true } }) catch |err|
-        log.err("beginFrame: beginCommandBuffer failed: {}", .{err});
+    win.cmd_buffers.items[frame].beginCommandBuffer(&.{ .flags = .{ .one_time_submit_bit = true } }) catch |err| {
+        win.frame_recording = .abort_failed;
+        return err;
+    };
     {
         var name_buf: [64]u8 = undefined;
         const label = std.fmt.bufPrintSentinel(&name_buf, "Frame {}", .{self.queue_counter}, 0) catch "Frame";
@@ -1586,8 +1685,116 @@ pub fn beginFrame(self: *VkBackend, window_index: u32) !FrameSchedule {
             .p_image_memory_barriers = @ptrCast(&barrier),
         });
     }
+    win.frame_recording = .recording;
 
     return .{ .next_vblank_us = 16667, .swapchain_recreated = recreated };
+}
+
+/// Claim the borrowed recording for a discard, or report that there is nothing
+/// left to discard. An idle surface frame is a no-op, not a failure: hosts
+/// cancel from an `errdefer`, so a cancel arriving after the frame already
+/// ended must succeed. That is also why `error.FrameNotActive` cannot escape
+/// here — once `.idle` is consumed the only states left are a `.recording`
+/// frame to claim and an `.abort_failed` frame that is already unrecoverable.
+fn claimFrameAbort(win: *Window) !?u32 {
+    if (win.frame_recording == .idle) return null;
+    return try markFrameAborting(win);
+}
+
+/// Discard the borrowed recording before its resources are released. The only
+/// work submitted is a layout transition for the acquired swapchain image;
+/// presenting that image returns it to the presentation engine. A failed
+/// discard poisons this surface frame instead of risking a stale submission.
+pub fn abortFrame(self: *VkBackend, window_index: u32) !void {
+    const win = &self.windows.items[window_index];
+    const frame = (try claimFrameAbort(win)) orelse return;
+    if (use_swapchain_maintenance1) return error.FrameCancellationUnsupported;
+
+    try self.device.resetCommandPool(win.cmd_pools.items[frame], .{});
+    // This pool never reached the queue, so nothing it recorded ever
+    // happened: the depth attachment still holds the layout it had before
+    // `cmdBeginRendering` and no reverse barrier is owed. Keeping the handle
+    // would make a later `cmdEndRendering` emit that barrier against an image
+    // that was never in `depth_stencil_attachment_optimal`.
+    self.last_depth_image = .null_handle;
+    const cmd = win.cmd_buffers.items[frame];
+    try cmd.beginCommandBuffer(&.{ .flags = .{ .one_time_submit_bit = true } });
+    const barrier: vk.ImageMemoryBarrier2 = .{
+        .image = win.images.items[win.image_index],
+        .subresource_range = .{
+            .aspect_mask = .{ .color_bit = true },
+            .base_mip_level = 0,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        },
+        .old_layout = .undefined,
+        .new_layout = .present_src_khr,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .src_stage_mask = .{ .all_commands_bit = true },
+        .src_access_mask = .{},
+        .dst_stage_mask = .{ .bottom_of_pipe_bit = true },
+        .dst_access_mask = .{},
+    };
+    cmd.pipelineBarrier2(&.{
+        .image_memory_barrier_count = 1,
+        .p_image_memory_barriers = @ptrCast(&barrier),
+    });
+    try cmd.endCommandBuffer();
+
+    self.queue_mutex.lockUncancelable(self.io);
+    defer self.queue_mutex.unlock(self.io);
+    const wait_value = self.queue_counter;
+    const signal_value = wait_value + 1;
+    const wait_semaphore = self.queue_sem;
+    const present_semaphore = win.present_sems.items[win.image_index];
+    const signal_semaphores = [_]vk.Semaphore{ self.queue_sem, present_semaphore };
+    const signal_values = [_]u64{ signal_value, 0 };
+    const wait_stage: vk.PipelineStageFlags = .{ .all_commands_bit = true };
+    const timeline: vk.TimelineSemaphoreSubmitInfo = .{
+        .wait_semaphore_value_count = 1,
+        .p_wait_semaphore_values = @ptrCast(&wait_value),
+        .signal_semaphore_value_count = 2,
+        .p_signal_semaphore_values = &signal_values,
+    };
+    const cmd_handle = cmd.handle;
+    try self.queue.submit(&.{vk.SubmitInfo{
+        .p_next = @constCast(&timeline),
+        .command_buffer_count = 1,
+        .p_command_buffers = @ptrCast(&cmd_handle),
+        .wait_semaphore_count = 1,
+        .p_wait_semaphores = @ptrCast(&wait_semaphore),
+        .p_wait_dst_stage_mask = @ptrCast(&wait_stage),
+        .signal_semaphore_count = 2,
+        .p_signal_semaphores = &signal_semaphores,
+    }}, win.cmd_pool_ready.items[frame]);
+    self.queue_counter = signal_value;
+    win.wait_sems.items[frame].clearRetainingCapacity();
+    win.wait_values.items[frame].clearRetainingCapacity();
+    win.signal_sems.items[frame].clearRetainingCapacity();
+    win.signal_values.items[frame].clearRetainingCapacity();
+
+    const present_info: vk.PresentInfoKHR = .{
+        .wait_semaphore_count = 1,
+        .p_wait_semaphores = @ptrCast(&present_semaphore),
+        .swapchain_count = 1,
+        .p_swapchains = @ptrCast(&win.swapchain),
+        .p_image_indices = @ptrCast(&win.image_index),
+    };
+    const present_result = self.queue.presentKHR(&present_info) catch |err| {
+        if (err != error.OutOfDateKHR) return err;
+        win.needs_resize = true;
+        finishFrame(win, frame);
+        return;
+    };
+    switch (presentQueueResult(present_result)) {
+        .success, .suboptimal => {
+            self.releaseRetiredSwapchain(win);
+            finishFrame(win, frame);
+        },
+        else => return error.SurfaceFrameUnrecoverable,
+    }
 }
 
 pub fn currentSwapchainImage(self: *const VkBackend, window_index: u32) TextureHandle {
@@ -1600,6 +1807,7 @@ pub fn currentSwapchainImage(self: *const VkBackend, window_index: u32) TextureH
 
 pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !FrameResult {
     const win = &self.windows.items[window_index];
+    try requireRecordingFrame(win);
     const frame = win.frame_index;
     const img_idx = win.image_index;
     var frame_result = frameResultForPresentQueue(.success);
@@ -1711,6 +1919,9 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
         .p_signal_semaphore_values = &signal_vals_buf,
     };
     const cb_handle = win.cmd_buffers.items[frame].handle;
+    // Submission failure leaves the reset frame fence unsignaled. Do not
+    // allow a later endFrame to submit the same command buffer again.
+    win.frame_recording = .abort_failed;
     {
         const zone_qs = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
         defer zone_qs.end();
@@ -1725,6 +1936,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
             .p_signal_semaphores = &signal_sems_buf,
         }}, win.cmd_pool_ready.items[frame]);
     }
+    win.frame_recording = .recording;
     // Clear per-frame semaphore arrays for next use
     win.wait_sems.items[frame].clearRetainingCapacity();
     win.wait_values.items[frame].clearRetainingCapacity();
@@ -1834,10 +2046,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
                     }
                     win.present_timing_diagnostics.outstanding_timed_presents = win.outstanding_timed_presents;
                 }
-                if (win.retired_swapchain != .null_handle) {
-                    self.device.destroySwapchainKHR(win.retired_swapchain, null);
-                    win.retired_swapchain = .null_handle;
-                }
+                self.releaseRetiredSwapchain(win);
                 // Annotate the presentation on the CPU timeline; the GPU frame zone
                 // named "img {M}" identifies this frame on the GPU timeline.
                 if (self.tracy_gpu_zones) {
@@ -1856,6 +2065,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
                 }
                 frame_result = notePresentQueueFailure(win, e);
                 if (present_failure == .timing_queue_full) {
+                    finishFrame(win, frame);
                     return e;
                 }
                 if (!frame_result.present_out_of_date) {
@@ -1866,7 +2076,7 @@ pub fn endFrame(self: *VkBackend, window_index: u32, present: ?PresentInfo) !Fra
         }
     }
 
-    advanceFrame(win, frame);
+    finishFrame(win, frame);
     return frame_result;
 }
 pub fn getCurrentCmdBuf(self: *VkBackend, window_index: u32) CommandBufferHandle {
@@ -1926,13 +2136,9 @@ fn queueSubmitTracked(
 
     try self.submitted_work.ensureUnusedCapacity(self.allocator, 1);
     const fence = try self.device.createFence(&.{}, null);
-    var submitted = false;
-    errdefer {
-        if (!submitted) {
-            self.device.freeCommandBuffers(self.offscreen_cmd_pool, handles);
-            self.device.destroyFence(fence, null);
-        }
-    }
+    // Pre-submit errors leave command-buffer ownership with the caller,
+    // which may cancel the unsubmitted recording.
+    errdefer self.device.destroyFence(fence, null);
 
     // The preflight above leaves all fallible ownership operations complete before
     // command buffers are ended or submitted.
@@ -1979,10 +2185,13 @@ fn queueSubmitTracked(
     {
         const zone_qs = tracy.Zone.begin(.{ .name = "queueSubmit", .src = @src(), .color = .tomato });
         defer zone_qs.end();
-        try self.queue.submit(&.{submit_info}, fence);
+        self.queue.submit(&.{submit_info}, fence) catch |err| {
+            // A driver error can leave submission ownership indeterminate.
+            // Freeing the command buffer or its resources here is unsafe.
+            std.debug.panic("offscreen queue submission state unknown: {s}", .{@errorName(err)});
+        };
     }
 
-    submitted = true;
     self.submitted_work.appendAssumeCapacity(.{ .cmds = cmds_copy, .fence = fence });
     tracking_owned = false;
 }
@@ -2097,7 +2306,8 @@ pub fn queryLastCheckpoint(self: *VkBackend) u32 {
     self.device.getQueueCheckpointDataNV(self.queue.handle, &data_count, null);
     log.warn("═══ NVIDIA GPU CHECKPOINTS ═══", .{});
     if (data_count > 0) {
-        const count = @min(data_count, 64);
+        const count: usize = @min(data_count, 64);
+        if (count == 0) return 0;
         var data: [64]vk.CheckpointDataNV = undefined;
         for (&data) |*d| {
             d.* = .{
@@ -2107,7 +2317,7 @@ pub fn queryLastCheckpoint(self: *VkBackend) u32 {
                 .p_checkpoint_marker = @ptrCast(&d.stage),
             };
         }
-        var query_count: u32 = count;
+        var query_count: u32 = @intCast(count);
         self.device.getQueueCheckpointDataNV(self.queue.handle, &query_count, &data);
         log.warn("  stage        pipeline                         marker", .{});
         log.warn("  ------------  ------------------------------  --------", .{});
@@ -2182,8 +2392,18 @@ pub fn commandsBegin(self: *VkBackend) !CommandBufferHandle {
         .level = .primary,
         .command_buffer_count = 1,
     }, @ptrCast(&cb));
+    errdefer self.device.freeCommandBuffers(self.offscreen_cmd_pool, &.{cb});
     try self.device.beginCommandBuffer(cb, &.{ .flags = .{ .one_time_submit_bit = true } });
     return cb;
+}
+
+/// An unsent offscreen command buffer may still name component resources.
+/// Freeing it discards the recording without queue submission.
+pub fn commandsCancel(self: *VkBackend, cmd: CommandBufferHandle) !void {
+    if (cmd == .null_handle or findCmdOwner(self, cmd) != null) return error.NotOffscreenCommand;
+    self.queue_mutex.lockUncancelable(self.io);
+    defer self.queue_mutex.unlock(self.io);
+    self.device.freeCommandBuffers(self.offscreen_cmd_pool, &.{cmd});
 }
 
 pub fn queueWaitIdle(self: *VkBackend) !void {
@@ -2826,7 +3046,7 @@ fn toVkStageFlags(stage: Stage) vk.PipelineStageFlags2 {
 
 pub fn cmdBarrier(self: *VkBackend, cmd: CommandBufferHandle, before: Stage, after: Stage, hazards: Hazard) void {
     const src_stage = toVkStageFlags(before);
-    const dst_stage = toVkStageFlags(after);
+    var dst_stage = toVkStageFlags(after);
     var src_access: vk.AccessFlags2 = .{};
     var dst_access: vk.AccessFlags2 = .{};
     if (!hazards.descriptors and !hazards.draw_arguments and !hazards.depth_stencil) {
@@ -2848,6 +3068,8 @@ pub fn cmdBarrier(self: *VkBackend, cmd: CommandBufferHandle, before: Stage, aft
                 src_access.shader_write_bit = true;
             }
             dst_access.indirect_command_read_bit = true;
+            // Indirect arguments are read before vertex shading.
+            dst_stage.draw_indirect_bit = true;
         }
         if (hazards.depth_stencil) {
             src_access.depth_stencil_attachment_write_bit = true;
@@ -3363,6 +3585,7 @@ pub fn deviceIdentity(self: *const VkBackend) DeviceIdentity {
         .vendor_id = self.selected_vendor_id,
         .device_id = self.selected_device_id,
         .driver = self.selected_driver_name[0..self.selected_driver_name_len],
+        .software_emulation = self.selected_software_emulation,
     };
 }
 pub fn surfaceSize(self: *const VkBackend, window_index: u32) Extent2D {
@@ -3372,18 +3595,24 @@ pub fn surfaceSize(self: *const VkBackend, window_index: u32) Extent2D {
 pub fn notifyResize(self: *VkBackend, window_index: u32, size: Extent2D) void {
     if (window_index < self.windows.items.len) {
         const win = &self.windows.items[window_index];
-        if (win.requested_extent.width != size.width or win.requested_extent.height != size.height) {
-            win.requested_extent = size;
-            if (win.resize_throttle == 0) {
-                log.info("notifyResize: setting needs_resize (size={}x{})", .{ size.width, size.height });
-                win.needs_resize = true;
-            } else {
-                log.info(
-                    "notifyResize: deferring (size={}x{}, throttle={})",
-                    .{ size.width, size.height, win.resize_throttle },
-                );
-            }
+        // A repeat of the request already on record is a no-op. It can neither
+        // retire that request nor clear its arming: the request stays pending
+        // until a frame rebuilds for it.
+        if (win.requested_extent.width == size.width and win.requested_extent.height == size.height) return;
+        win.requested_extent = size;
+        // The arming comes from the extent the chain is actually built at, not
+        // from the request that preceded it. Arming from the request would
+        // drop the newest size: a second notification of that same pending
+        // size finds nothing changed, so nothing ever asks for the rebuild the
+        // first one deferred. A request the chain already serves asks for
+        // nothing, and the latch is never cleared here, so a driver-reported
+        // out-of-date stays armed across a notification.
+        if (win.extent.width == size.width and win.extent.height == size.height) {
+            log.info("notifyResize: size already built (size={}x{})", .{ size.width, size.height });
+            return;
         }
+        log.info("notifyResize: setting needs_resize (size={}x{})", .{ size.width, size.height });
+        win.needs_resize = true;
     }
 }
 
@@ -3772,10 +4001,7 @@ fn destroyWindow(self: *VkBackend, win: *Window) void {
         self.device.destroySwapchainKHR(win.swapchain, null);
         win.swapchain = .null_handle;
     }
-    if (win.retired_swapchain != .null_handle) {
-        self.device.destroySwapchainKHR(win.retired_swapchain, null);
-        win.retired_swapchain = .null_handle;
-    }
+    self.releaseRetiredSwapchain(win);
     for (win.cmd_pools.items) |p| self.device.destroyCommandPool(p, null);
     win.cmd_pools.deinit(alloc);
     win.cmd_buffers.deinit(alloc);
@@ -4129,14 +4355,26 @@ pub fn textureDestroy(self: *VkBackend, tex: TextureHandle) void {
     if (tex.isSwapchain()) return;
     const t = tex.texture;
     if (t.id == 0 or t.id > self.textures.items.len) return;
-    // Destroy all cached views for this texture
+    // Retire every cached view for this texture. These are the exact handles
+    // `textureViewDescriptor` handed to `descHeapSetTextures`, so a descriptor
+    // a frame still in flight names one of them: destroying here would leave
+    // that descriptor sampling a dead view for the rest of the frame's
+    // lifetime. Each goes into `pending_free` instead and is destroyed only
+    // after the `deviceWaitIdle` that drains the list, alongside the image.
+    // The cache entries themselves drop now — that is host bookkeeping, and a
+    // later view request must not hand back a handle that is on its way out.
     {
         var keys_to_remove = std.ArrayList(u64).empty;
         defer keys_to_remove.deinit(self.allocator);
         var it = self.texture_view_cache.iterator();
         while (it.next()) |entry| {
             if (entry.key_ptr.* >> 32 == t.id) {
-                self.device.destroyImageView(entry.value_ptr.*, null);
+                // Pushed BEFORE the `.texture` entry below: the drain destroys
+                // in push order, and an image view must not outlive its image.
+                self.pending_free.append(self.allocator, .{
+                    .image_view = .{ .view = entry.value_ptr.* },
+                }) catch |err|
+                    log.warn("textureDestroy: cached view append failed: {}", .{err});
                 keys_to_remove.append(self.allocator, entry.key_ptr.*) catch |err|
                     log.warn("textureCleanup: append failed: {}", .{err});
             }
@@ -5371,4 +5609,223 @@ test "task4 OutOfDate preserves timing state and advances frame recovery" {
     try std.testing.expect(!recovered.present_out_of_date);
     advanceFrame(&win, 1);
     try std.testing.expectEqual(@as(u32, 0), win.frame_index);
+}
+
+test "aborted surface frame rejects stale submission and advances to reusable slot" {
+    // Model the state changes around a successful swapchain-only submission.
+    // No Vulkan device is needed to exercise duplicate and poisoned calls.
+    var win: Window = .{ .frames_in_flight = 2 };
+    try requireIdleFrame(&win);
+    win.frame_recording = .recording;
+    try std.testing.expectError(error.FrameAlreadyActive, requireIdleFrame(&win));
+    const frame = try markFrameAborting(&win);
+    try std.testing.expectError(error.SurfaceFrameUnrecoverable, requireRecordingFrame(&win));
+    try std.testing.expectError(error.SurfaceFrameUnrecoverable, markFrameAborting(&win));
+    try std.testing.expectError(error.SurfaceFrameUnrecoverable, requireIdleFrame(&win));
+
+    finishFrame(&win, frame);
+    try std.testing.expectError(error.FrameNotActive, requireRecordingFrame(&win));
+    try requireIdleFrame(&win);
+    try std.testing.expectEqual(@as(u32, 1), win.frame_index);
+    win.frame_recording = .recording;
+    try requireRecordingFrame(&win);
+    finishFrame(&win, win.frame_index);
+    try std.testing.expectEqual(@as(u32, 0), win.frame_index);
+}
+
+test "cancelling a surface frame with nothing recorded succeeds, not FrameNotActive" {
+    // Hosts cancel from an `errdefer`, so a cancel that arrives with no live
+    // recording must report success. The state it must never report is
+    // `FrameNotActive`: after the idle check only a `.recording` frame is
+    // claimable, and a poisoned `.abort_failed` frame is refused.
+    var win: Window = .{ .frames_in_flight = 2 };
+    try std.testing.expectEqual(@as(?u32, null), try claimFrameAbort(&win));
+
+    win.frame_recording = .recording;
+    const frame = (try claimFrameAbort(&win)).?;
+    try std.testing.expectEqual(@as(u32, 0), frame);
+    try std.testing.expectError(error.SurfaceFrameUnrecoverable, claimFrameAbort(&win));
+
+    finishFrame(&win, frame);
+    // The discard finished that frame, so a second cancel finds nothing to do
+    // and the next frame opens on the advanced slot.
+    try std.testing.expectEqual(@as(?u32, null), try claimFrameAbort(&win));
+    try requireIdleFrame(&win);
+    try std.testing.expectEqual(@as(u32, 1), win.frame_index);
+    win.frame_recording = .recording;
+    try std.testing.expectEqual(@as(u32, 1), (try claimFrameAbort(&win)).?);
+}
+
+test "software GPU classification uses Vulkan device and driver identity" {
+    try std.testing.expect(isSoftwareDevice(.cpu, .mesa_radv));
+    try std.testing.expect(isSoftwareDevice(.virtual_gpu, .google_swiftshader));
+    try std.testing.expect(isSoftwareDevice(.integrated_gpu, .mesa_llvmpipe));
+    try std.testing.expect(!isSoftwareDevice(.discrete_gpu, .nvidia_proprietary));
+    try std.testing.expect(!isSoftwareDevice(.integrated_gpu, .intel_open_source_mesa));
+}
+
+test "surface count excludes retired slots and includes slot reuse" {
+    // Retired slots remain allocated so another live Surface keeps its index.
+    var windows = [_]Window{ .{}, .{ .valid = false }, .{} };
+    var backend: VkBackend = .{
+        .io = std.testing.io,
+        .windows = .{ .items = &windows, .capacity = windows.len },
+    };
+    try std.testing.expectEqual(@as(u32, 2), backend.numWindows());
+    windows[0].valid = false;
+    try std.testing.expectEqual(@as(u32, 1), backend.numWindows());
+    windows[1].valid = true;
+    try std.testing.expectEqual(@as(u32, 2), backend.numWindows());
+    windows[1].valid = false;
+    windows[2].valid = false;
+    try std.testing.expectEqual(@as(u32, 0), backend.numWindows());
+}
+
+test "a resize request stays pending until the frame that rebuilds for it" {
+    // The transition under test is a real one: a host notification reaches the
+    // backend and a later frame serves it. Neither step needs a device, so the
+    // state a dropped request leaves behind is visible here: a request that is
+    // not pending is a frame presented into a chain built for the old size.
+    var windows = [_]Window{.{
+        .extent = .{ .width = 800, .height = 600 },
+        .requested_extent = .{ .width = 800, .height = 600 },
+    }};
+    var backend: VkBackend = .{
+        .io = std.testing.io,
+        .windows = .{ .items = &windows, .capacity = windows.len },
+    };
+    const win = &windows[0];
+    try std.testing.expect(!win.needs_resize);
+
+    // A live drag makes the window send one new size, then the same size
+    // again. The first notification is the request, and a repeat of it must
+    // not take that request back.
+    backend.notifyResize(0, .{ .width = 900, .height = 700 });
+    backend.notifyResize(0, .{ .width = 900, .height = 700 });
+    try std.testing.expect(win.needs_resize);
+    try std.testing.expectEqual(@as(u32, 900), win.requested_extent.width);
+    try std.testing.expectEqual(@as(u32, 700), win.requested_extent.height);
+
+    // What a rebuilding frame leaves behind: the chain is built for the
+    // requested size, so that request is served and the frame ends.
+    win.extent = .{ .width = 900, .height = 700 };
+    win.needs_resize = false;
+    win.frame_recording = .recording;
+    finishFrame(win, 0);
+
+    // The next size of the same drag must be pending as well. A rebuild is
+    // not permission to present the following frame into the chain it just
+    // replaced, and the request may not wait for a later, equal notification
+    // to ask for it again.
+    backend.notifyResize(0, .{ .width = 1000, .height = 800 });
+    backend.notifyResize(0, .{ .width = 1000, .height = 800 });
+    try std.testing.expect(win.needs_resize);
+    try std.testing.expectEqual(@as(u32, 1000), win.requested_extent.width);
+    try std.testing.expectEqual(@as(u32, 800), win.requested_extent.height);
+
+    // The request outlives the frames that pass while it waits, and the chain
+    // is still the size it replaced.
+    win.frame_recording = .recording;
+    finishFrame(win, win.frame_index);
+    backend.notifyResize(0, .{ .width = 1000, .height = 800 });
+    try std.testing.expect(win.needs_resize);
+    try std.testing.expectEqual(@as(u32, 900), backend.surfaceSize(0).width);
+}
+
+test "a repeat of the size already built asks for no rebuild" {
+    var windows = [_]Window{.{
+        .extent = .{ .width = 1280, .height = 720 },
+        .requested_extent = .{ .width = 1280, .height = 720 },
+    }};
+    var backend: VkBackend = .{
+        .io = std.testing.io,
+        .windows = .{ .items = &windows, .capacity = windows.len },
+    };
+    const win = &windows[0];
+
+    // A window repeats its size for reasons that need no new chain: a
+    // restore, a scale hint, a duplicated configure. Rebuilding for one costs
+    // a device wait and a chain the driver has to make again.
+    backend.notifyResize(0, .{ .width = 1280, .height = 720 });
+    try std.testing.expect(!win.needs_resize);
+    try std.testing.expectEqual(@as(u32, 1280), win.requested_extent.width);
+    try std.testing.expectEqual(@as(u32, 720), win.requested_extent.height);
+
+    // A different size is pending, and repeating that pending size must not
+    // serve it.
+    backend.notifyResize(0, .{ .width = 640, .height = 480 });
+    try std.testing.expect(win.needs_resize);
+    backend.notifyResize(0, .{ .width = 640, .height = 480 });
+    try std.testing.expect(win.needs_resize);
+}
+
+test "textureDestroy defers a cached view into the same wait as its image" {
+    // The state under test is what `textureDestroy` does to a view a frame in
+    // flight still samples through its descriptor: it must NOT destroy the
+    // handle here. This backend carries no device (`device` is undefined), so
+    // an eager destroyImageView would fault; the real proof is that both
+    // cached views land in `pending_free`, ordered BEFORE the image entry so
+    // the drain (deviceWaitIdle, then destroy in push order) never outlives a
+    // view by its image.
+    var textures = [_]TextureInfo{.{
+        .image = @enumFromInt(1),
+        .default_view = @enumFromInt(100),
+        .format = @enumFromInt(0),
+    }};
+    var backend: VkBackend = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .textures = .{ .items = &textures, .capacity = textures.len },
+        .texture_view_cache = std.AutoHashMap(u64, vk.ImageView).init(std.testing.allocator),
+    };
+    defer backend.texture_view_cache.deinit();
+    defer backend.pending_free.deinit(std.testing.allocator);
+
+    // Two cached views of texture 1 (its sampled and RW descriptors hash to
+    // different keys) and one belonging to a texture that is NOT destroyed.
+    try backend.texture_view_cache.put((@as(u64, 1) << 32) | 0xaa, @enumFromInt(200));
+    try backend.texture_view_cache.put((@as(u64, 1) << 32) | 0xbb, @enumFromInt(201));
+    try backend.texture_view_cache.put((@as(u64, 2) << 32) | 0xaa, @enumFromInt(300));
+
+    backend.textureDestroy(.{ .tag = .texture, .texture = .{ .id = 1, .birth_frame = 0 } });
+
+    // The retired views are queued, not destroyed, and the cache has already
+    // stopped handing them out.
+    try std.testing.expectEqual(@as(usize, 3), backend.pending_free.items.len);
+    try std.testing.expectEqual(@as(usize, 1), backend.texture_view_cache.count());
+    try std.testing.expectEqual(
+        @as(vk.ImageView, @enumFromInt(300)),
+        backend.texture_view_cache.get((@as(u64, 2) << 32) | 0xaa).?,
+    );
+
+    // Both cached views of the dead texture are queued, and both precede the
+    // image that owns them.
+    var deferred: usize = 0;
+    for (backend.pending_free.items) |entry| {
+        switch (entry) {
+            .image_view => |v| {
+                deferred += 1;
+                try std.testing.expect(v.view == @as(vk.ImageView, @enumFromInt(200)) or
+                    v.view == @as(vk.ImageView, @enumFromInt(201)));
+            },
+            .texture => |t| {
+                try std.testing.expectEqual(@as(usize, 2), deferred);
+                try std.testing.expectEqual(@as(vk.Image, @enumFromInt(1)), t.image);
+                try std.testing.expectEqual(@as(vk.ImageView, @enumFromInt(100)), t.view);
+            },
+            // A buffer or descriptor pool here would mean the test's own
+            // setup is wrong: this path queues views and one image, nothing else.
+            .buffer, .desc_heap => return error.UnexpectedPendingFreeKind,
+        }
+    }
+
+    // The slot is closed, and the cache no longer holds its views, so a
+    // repeated destroy queues no view a second time.
+    try std.testing.expect(!textures[0].valid);
+    backend.textureDestroy(.{ .tag = .texture, .texture = .{ .id = 1, .birth_frame = 0 } });
+    var views_queued: usize = 0;
+    for (backend.pending_free.items) |entry| {
+        if (entry == .image_view) views_queued += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), views_queued);
 }

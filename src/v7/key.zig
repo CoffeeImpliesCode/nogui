@@ -5,6 +5,20 @@ pub const ComponentKey = union(enum) {
     static: []const u8,
     u64: u64,
 
+    /// The hash is only an index; equality always checks the full key.
+    pub fn eql(a: ComponentKey, b: ComponentKey) bool {
+        return switch (a) {
+            .static => |text| switch (b) {
+                .static => |other| std.mem.eql(u8, text, other),
+                .u64 => false,
+            },
+            .u64 => |value| switch (b) {
+                .static => false,
+                .u64 => |other| value == other,
+            },
+        };
+    }
+
     pub fn hash(self: ComponentKey) u64 {
         var h: u64 = 0xcbf29ce484222325;
         switch (self) {
@@ -69,4 +83,20 @@ test "component identity distinguishes parent and key" {
     const other_key = ComponentId.child(.root, .{ .u64 = 8 });
     try std.testing.expect(!std.meta.eql(root_child, nested));
     try std.testing.expect(!std.meta.eql(root_child, other_key));
+}
+
+test "api-w02 ComponentKey equality compares bytes and tags" {
+    var buffer = [_]u8{ 'a', 'b' };
+    try std.testing.expect(ComponentKey.eql(
+        .{ .static = "ab" },
+        .{ .static = &buffer },
+    ));
+    buffer[1] = 'c';
+    try std.testing.expect(!ComponentKey.eql(
+        .{ .static = "ab" },
+        .{ .static = &buffer },
+    ));
+    try std.testing.expect(ComponentKey.eql(.{ .u64 = 7 }, .{ .u64 = 7 }));
+    try std.testing.expect(!ComponentKey.eql(.{ .u64 = 7 }, .{ .u64 = 8 }));
+    try std.testing.expect(!ComponentKey.eql(.{ .u64 = 7 }, .{ .static = "7" }));
 }

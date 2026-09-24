@@ -5,10 +5,10 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const release_safe = std.builtin.OptimizeMode.ReleaseSafe;
-    const sdl3 = b.dependency("sdl3", .{ .target = target, .optimize = release_safe });
+
+    const library_only = b.option(bool, "library-only", "Expose the noapi library without SDL examples") orelse false;
     const tracy = b.dependency("tracy", .{ .target = target, .optimize = release_safe });
     const enable_tracy = b.option(bool, "enable-tracy", "Enable Tracy profiler") orelse true;
-    const tracy_impl = if (enable_tracy) tracy.module("tracy_impl_enabled") else tracy.module("tracy_impl_disabled");
 
     // zig-cov coverage (see zig-cov README): zig-gate --cov passes these
     const coverage = b.option(bool, "coverage", "Enable zig-cov") orelse false;
@@ -20,7 +20,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "sdl3", .module = sdl3.module("sdl3") },
             .{ .name = "tracy", .module = tracy.module("tracy") },
         },
     });
@@ -30,6 +29,24 @@ pub fn build(b: *std.Build) void {
         .name = "noapi",
         .root_module = mod,
     });
+    // ── Tests ─────────────────────────────────
+    const mod_tests = b.addTest(.{ .root_module = mod });
+    if (coverage) {
+        mod_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
+        mod_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
+        mod_tests.root_module.link_libc = true; // atexit handler writes the .zcov
+        if (cov_rt) |p| mod_tests.root_module.addObjectFile(.{ .cwd_relative = p });
+    }
+    const run_mod_tests = b.addRunArtifact(mod_tests);
+    if (test_filter) |filter| {
+        mod_tests.filters = b.allocator.dupe([]const u8, &.{filter}) catch @panic("out of memory");
+    }
+    const test_step = b.step("test", "Run noapi tests");
+    test_step.dependOn(&run_mod_tests.step);
+    if (library_only) return;
+
+    const sdl3 = b.lazyDependency("sdl3", .{ .target = target, .optimize = release_safe }) orelse return;
+    const tracy_impl = tracy.module(if (enable_tracy) "tracy_impl_enabled" else "tracy_impl_disabled");
 
     // ── common module (shared example helpers) ───────────
     const common_mod = b.createModule(.{
@@ -280,17 +297,4 @@ pub fn build(b: *std.Build) void {
     run_7_step.dependOn(&run_7_cmd.step);
     run_7_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_7_cmd.addArgs(args);
-
-    // ── Tests ─────────────────────────────────
-    const mod_tests = b.addTest(.{ .root_module = mod });
-    if (coverage) {
-        mod_tests.use_llvm = true; // required: only the LLVM backend emits sancov counters
-        mod_tests.root_module.fuzz = true; // emits __sancov_cntrs + __sancov_pcs1
-        mod_tests.root_module.link_libc = true; // atexit handler writes the .zcov
-        if (cov_rt) |p| mod_tests.root_module.addObjectFile(.{ .cwd_relative = p });
-    }
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-    if (test_filter) |filter| mod_tests.filters = &.{filter};
-    const test_step = b.step("test", "Run noapi tests");
-    test_step.dependOn(&run_mod_tests.step);
 }

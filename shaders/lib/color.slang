@@ -1,14 +1,6 @@
-// Color conversions ported bit-exact from the GLSL pipeline.
-// Sources:
-//   - quad_frag.glsl  : linearToOklab, oklabToSRGB (used by the subpixel branch)
-//   - blit_oklab.frag : oklabToSRGB (the blit's Oklab -> linear sRGB conversion)
-//
-// Both files define IDENTICAL oklabToSRGB bodies, so one export covers both;
-// there is no "Fast" variant to keep separate. No srgbToOklab exists in either
-// source. The matrix products and gamma curves are inlined as scalar
-// expressions in the GLSL (no m1/m2/m3 helpers), so there are no helper
-// functions to port. Operation order, literals, and pow calls are preserved
-// verbatim for pixel-identical output.
+// Color conversions shared by the glyph fragment pass and the final blit.
+// Keep the matrix products and gamma operations in this order for pixel
+// parity. The final blit converts the Oklab target to linear sRGB.
 module color;
 
 // Oklab -> LINEAR sRGB (Björn Ottosson's inverse, direct cubic form).

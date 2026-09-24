@@ -1,11 +1,56 @@
 //! Comptime method → type-erased callback adapter.
-//! Per the prototype spec (notes/v7-prototype-spec.md §3).
 //!
 //! User code never writes type-erased handlers: a plain method
 //! `fn (*T) void` is wrapped here, and the `*anyopaque` argument is
 //! supplied by the event system at dispatch time from the widget's
 //! `owner` component id.
 const std = @import("std");
+const subscription = @import("subscription.zig");
+const model = @import("model.zig");
+const Session = @import("session.zig").Session;
+
+/// A persistent listener may store only a weak model identity, not a borrowed
+/// owner pointer. Session resolves the owner for each synchronous invocation.
+pub fn eventHandler(comptime Event: type, comptime Owner: type, comptime handler: anytype) subscription.Handler {
+    return struct {
+        fn call(owner: *const anyopaque, event: *const anyopaque, session: *anyopaque) void {
+            @call(.auto, handler, .{
+                @as(*const Owner, @ptrCast(@alignCast(owner))),
+                @as(*const Event, @ptrCast(@alignCast(event))),
+                @as(*Session, @ptrCast(@alignCast(session))),
+            });
+        }
+    }.call;
+}
+
+pub fn modelHandler(comptime Subject: type, comptime Owner: type, comptime handler: anytype) subscription.Handler {
+    return struct {
+        fn call(owner: *const anyopaque, value: *const anyopaque, session: *anyopaque) void {
+            const key: *const model.ModelKey = @ptrCast(@alignCast(value));
+            @call(.auto, handler, .{
+                @as(*const Owner, @ptrCast(@alignCast(owner))),
+                model.WeakModel(Subject){ .key = key.* },
+                @as(*Session, @ptrCast(@alignCast(session))),
+            });
+        }
+    }.call;
+}
+
+pub fn globalHandler(comptime Global: type, comptime Owner: type, comptime handler: anytype) subscription.Handler {
+    return eventHandler(Global, Owner, handler);
+}
+
+pub fn deferredHandler(comptime Payload: type, comptime Owner: type, comptime handler: anytype) subscription.Handler {
+    return struct {
+        fn call(owner: *const anyopaque, payload: *const anyopaque, session: *anyopaque) void {
+            @call(.auto, handler, .{
+                @as(*const Owner, @ptrCast(@alignCast(owner))),
+                @as(*Payload, @ptrCast(@alignCast(@constCast(payload)))),
+                @as(*Session, @ptrCast(@alignCast(session))),
+            });
+        }
+    }.call;
+}
 
 /// A type-erased callback with a caller-owned integer payload.
 pub const UserCallback = struct {

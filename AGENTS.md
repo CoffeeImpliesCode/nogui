@@ -27,7 +27,7 @@ gate
 jj st
 ```
 
-`run` starts the GPU grid test. `v7` starts the layout demo. `spotify` runs the UI stress scene. `fixture` checks the pinned Taffy corpus. `layout-check` compares the headless output with the golden layout. `gate` runs the house checks. Use `jj`, not raw Git.
+`run` starts the GPU grid test. It animates until the window closes; `--frames N` renders N frames and exits, and `--shot PATH` renders one frame, writes it as a binary PPM and exits. `v7` starts the layout demo. `spotify` runs the UI stress scene. `fixture` checks the pinned Taffy corpus. `layout-check` compares the headless output with the golden layout. `gate` runs the house checks. Use `jj`, not raw Git.
 
 ## Environment and notes
 

@@ -68,16 +68,25 @@ pub fn main(init: std.process.Init) !void {
     defer gpu.deinit();
 
     // ── Windows + surfaces
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surf1 = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 800, .height = 600 } });
+    // Each window's platform surface is created and adopted in one call, and
+    // the noapi Surface owns it: no raw handle crosses this boundary and no
+    // second owner exists.
+    var surf1 = try noapi.Surface.initSdl(
+        &gpu,
+        @ptrCast(sdl_win.value),
+        @ptrCast(&sdl3.c.SDL_Vulkan_CreateSurface),
+        .{ .extent = .{ .width = 800, .height = 600 } },
+    );
     try presentTimingCapabilitySmoke(&surf1);
 
     const sdl_win2 = try sdl3.video.Window.init("noapi-2", 400, 300, .{ .resizable = true });
     try sdl_win2.show();
-    const sdl_surface2 = try sdl3.vulkan.Surface.init(sdl_win2, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface2: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface2.surface));
-    var surf2 = try noapi.Surface.init(&gpu, surface2, .{ .extent = .{ .width = 400, .height = 300 } });
+    var surf2 = try noapi.Surface.initSdl(
+        &gpu,
+        @ptrCast(sdl_win2.value),
+        @ptrCast(&sdl3.c.SDL_Vulkan_CreateSurface),
+        .{ .extent = .{ .width = 400, .height = 300 } },
+    );
 
     const win1_id = try sdl_win.getId();
     const win2_id = try sdl_win2.getId();
@@ -645,15 +654,10 @@ fn presentationFeedbackTest(init: std.process.Init, requested_mode: []const u8) 
     });
     defer gpu.deinit();
 
-    const sdl_surface = try sdl3.vulkan.Surface.init(
-        sdl_window,
-        @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
-        null,
-    );
-    const vk_surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var surface = try noapi.Surface.init(
+    var surface = try noapi.Surface.initSdl(
         &gpu,
-        vk_surface,
+        @ptrCast(sdl_window.value),
+        @ptrCast(&sdl3.c.SDL_Vulkan_CreateSurface),
         .{
             .extent = .{ .width = 954, .height = 1044 },
             .present_mode = .fifo,

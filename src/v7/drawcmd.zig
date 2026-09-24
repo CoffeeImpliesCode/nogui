@@ -1,45 +1,20 @@
-//! v7 draw command list — bridge from the laid-out tree to a flat,
-//! paint-ordered list of DrawCmds (the FrameData boundary; v6 lineage).
-//!
-//! Node rects are RELATIVE (border boxes, positioned relative to the
-//! parent's CONTENT box); every node is resolved to its VISUAL border
-//! box via widget.visualBorderRect before emitting.
-//!
-//! Paint order: parents BEFORE children. `WidgetTree` stores nodes in
-//! post-order (descendants first, containers last), so iterating the node
-//! array in REVERSE yields parents-before-children order directly. Within
-//! one node the border ring paints BEFORE its fill (ring behind fill).
-//!
-//! Color palette (sRGB, alpha = 1):
-//!   column / row (container)  {0.13, 0.14, 0.16}   dim background
-//!   button                    {0.25, 0.35, 0.55}   accent blue
-//!   slider (track)            {0.20, 0.20, 0.22}   dark track
-//!   label                     — not painted (glyph strokes carry it)
-//!   spacer                    — not painted (skipped entirely)
-//! Bordered nodes (any resolved physical border side > 0) emit a ring cmd
-//! first (the full visual border box, PaintStyle.border_color, ring = true),
-//! then the fill cmd (border box inset by the border, palette color,
-//! ring = false). A bordered label emits only the ring; a spacer emits
-//! nothing.
-//!
-//! Painted nodes with PaintStyle.shadow > 0 emit a shadow cmd FIRST — the
-//! visual border box dropped (+2, +3) px in soft black (alpha 0.28),
-//! feathered by PaintStyle.shadow — so the shadow paints behind the ring and
-//! fill. Every cmd a node emits carries its typed style and paint values.
-//!
-//! Nodes whose rect has w == 0 or h == 0 are skipped: nothing to paint.
-//!
-//! A node with the `.texture` PaintStyle option emits its FILL with its
-//! bindless heap index: the fragment shader's TYPE_TEXTURE branch samples
-//! the texture before the material dispatch, so the fill ignores the flat
-//! color (painted white = identity tint) and the gradient. The ring and
-//! shadow cmds stay untextured.
-//!
+//! Convert visual border boxes into renderer-neutral paint in tree paint order.
+//! Layout and hit boxes remain untransformed. A node paints before its children.
+//! Its own content clip applies to descendants and custom content, not its border.
+//! Every emitted layer is `widget.effectiveLayer`: the authored local layer,
+//! plus a custom record's own bump, raised by the band overlay placement
+//! assigned the node. The addition is checked, never clamped, and the
+//! authored `paint.layer` itself is left alone so it stays inspectable.
+//! Each rectangle retains its authored colors until PaintList resolves the palette.
 
 const std = @import("std");
 const tracy = @import("tracy");
+const perf_counters = @import("perf_counters.zig");
+const v7_options = @import("v7_options");
+const frame_paint = @import("paint.zig");
 
-const Id = @import("id.zig").Id;
+const FrameNodeId = @import("id.zig").FrameNodeId;
+const WidgetId = @import("id.zig").WidgetId;
 const Rect = @import("widget.zig").Rect;
 const Sides = @import("widget.zig").Sides;
 const ClipRect = @import("widget.zig").ClipRect;
@@ -48,30 +23,23 @@ const PaintStyle = @import("widget.zig").PaintStyle;
 const WidgetTree = @import("widget.zig").WidgetTree;
 const ScrollState = @import("widget.zig").ScrollState;
 const visualBorderRect = @import("widget.zig").visualBorderRect;
-const visualContentRect = @import("widget.zig").visualContentRect;
+const contentBoxRect = @import("widget.zig").contentBoxRect;
 const geometryBoxEdges = @import("widget.zig").geometryBoxEdges;
 const Overflow = @import("style.zig").Overflow;
 
-/// One paint command: a solid fill (`ring = false`) or a border ring
-/// (`ring = true`). Typed `style` and `paint` values carry the geometry and
-/// visual data required by the renderer. `border` is the physical border
-/// resolved for this node's containing block; it is kept at the render
-/// boundary so consumers do not resolve CSS values a second time.
+const widget = @import("widget.zig");
+/// One node background or custom element rectangle. `rect_paint` is the
+/// renderer-neutral source of truth; PaintList copies borrowed shadow slices
+/// into the frame arena and resolves colors before GPU submission.
 pub const DrawCmd = struct {
     rect: Rect,
-    color: [4]f32, // sRGB, alpha 1
-    kind: enum { solid },
-    style: Style = .{},
-    paint: PaintStyle = .{},
-    border: Sides = .{},
-    ring: bool = false,
-    /// Clip id: index into the frame's clip-rect list (WidgetTree.
-    /// clip_rects); 0xFFFFFFFF = no clip. Stamped by collectDrawCmds from
-    /// the enclosing content-clip containers.
-    clip_id: u32 = 0xFFFFFFFF,
-    /// Bindless texture heap index. 0xFFFFFFFF = flat fill. Only the FILL
-    /// cmd carries it.
-    tex_idx: u32 = 0xFFFFFFFF,
+    rect_paint: frame_paint.RectPaint,
+    path_paint: ?frame_paint.PathPaint = null,
+    image_paint: ?frame_paint.ImagePaint = null,
+    /// The clip this command paints under: the node's inherited content clip,
+    /// or `no_clip` outside every enclosing clip. The paint records repeat it
+    /// as their own `clip_id`, so the GPU clip ABI is unchanged.
+    clip_id: u32 = no_clip,
 };
 
 const palette = struct {
@@ -83,7 +51,7 @@ const palette = struct {
 
 /// One content-clip stack entry: a node that is currently open
 /// (its subtree is being walked) and the clip id stamped on its cmds.
-const ClipStackEntry = struct { container: Id, clip_id: u32 };
+const ClipStackEntry = struct { container: FrameNodeId, clip_id: u32 };
 
 /// The no-clip sentinel (matches the shader's `vClipId != 0xFFFFFFFFu`).
 const no_clip: u32 = 0xFFFFFFFF;
@@ -92,7 +60,7 @@ const no_clip: u32 = 0xFFFFFFFF;
 /// the parent chain — the clip stack pops a container once the walk
 /// leaves its subtree (reversed post-order visits a container before its
 /// descendants, so the pop is detected on the first node outside it).
-fn clipContains(tree: *const WidgetTree, container: Id, node_id: Id) bool {
+fn clipContains(tree: *const WidgetTree, container: FrameNodeId, node_id: FrameNodeId) bool {
     var cur = node_id;
     while (cur != .root) {
         tree.addCounter(.ancestor_reads, 1);
@@ -141,18 +109,59 @@ fn intersectInherited(tree: *const WidgetTree, rect: ClipRect, inherited_id: u32
     std.debug.assert(inherited_id < tree.clip_count);
     return intersectClip(rect, tree.clip_rects[inherited_id]);
 }
+fn textLeadingInset(kind: widget.WidgetKind) f32 {
+    return widget.textInsets(kind).leading;
+}
+
+/// Preflight one record per painted node and one per custom painted rectangle.
+/// This conservative bound avoids allocation in the hot collector, and it
+/// counts exactly the nodes the collector emits: hidden ones and the DORMANT
+/// overlay subtrees a record registered but nothing placed.
+pub fn requiredCapacity(tree: *const WidgetTree) error{OutOfMemory}!usize {
+    var visible_nodes: usize = 0;
+    var records: usize = 0;
+    for (tree.nodes.items) |node| {
+        if (node.paint_hidden or node.overlay_dormant) continue;
+        visible_nodes += 1;
+        if (node.kind == .element) {
+            records = std.math.add(usize, records, node.kind.element.paint_records.items.len) catch
+                return error.OutOfMemory;
+        }
+    }
+    const capacity = std.math.add(usize, visible_nodes, records) catch
+        return error.OutOfMemory;
+    if (capacity > std.math.maxInt(u32)) return error.OutOfMemory;
+    return capacity;
+}
+
+fn intersectRect(rect: Rect, bounds: Rect) Rect {
+    const x = @max(rect.x, bounds.x);
+    const y = @max(rect.y, bounds.y);
+    return .{
+        .x = x,
+        .y = y,
+        .w = @max(0, @min(rect.x + rect.w, bounds.x + bounds.w) - x),
+        .h = @max(0, @min(rect.y + rect.h, bounds.y + bounds.h) - y),
+    };
+}
 
 /// Convert a laid-out tree into paint-ordered DrawCmds. The returned slice is
 /// allocated from `allocator`; caller frees.
+///
+/// A DORMANT overlay subtree is authored visible and laid out, and emits
+/// nothing: it is a record the consumer registered that no anchor resolved,
+/// so painting it would show a dismissed popup. The exclusion is the node's
+/// own `overlay_dormant` flag, the same one `input.hitTest` and
+/// `widget.maximumPaintLayer` read, so paint and routing cannot disagree.
 pub fn collectDrawCmds(
     allocator: std.mem.Allocator,
     tree: *WidgetTree,
-    pressed_id: ?Id,
+    pressed_id: ?WidgetId,
     press_alpha: f32,
 ) ![]DrawCmd {
     var list: std.ArrayList(DrawCmd) = .empty;
     errdefer list.deinit(allocator);
-    const capacity = std.math.mul(usize, tree.nodes.items.len, 3) catch return error.OutOfMemory;
+    const capacity = try requiredCapacity(tree);
     try list.ensureTotalCapacity(allocator, capacity);
     try collectDrawCmdsInto(tree, pressed_id, press_alpha, &list);
     return list.toOwnedSlice(allocator);
@@ -162,13 +171,13 @@ pub fn collectDrawCmds(
 /// The caller must reserve enough capacity before entering a measured loop.
 pub fn collectDrawCmdsInto(
     tree: *WidgetTree,
-    pressed_id: ?Id,
+    pressed_id: ?WidgetId,
     press_alpha: f32,
     list: *std.ArrayList(DrawCmd),
 ) !void {
     const zone = tracy.Zone.begin(.{ .name = "collectDrawCmds", .src = @src() });
     defer zone.end();
-    const required_capacity = std.math.mul(usize, tree.nodes.items.len, 3) catch return error.OutOfMemory;
+    const required_capacity = try requiredCapacity(tree);
     if (list.capacity < required_capacity) return error.OutOfMemory;
     list.clearRetainingCapacity();
     // Clip stack: mirrors enclosing content clips. Text-overflow clips are
@@ -182,22 +191,41 @@ pub fn collectDrawCmdsInto(
     while (i > 0) {
         i -= 1;
         const node = &nodes[i];
-        const visual_border = visualBorderRect(tree, node.id);
 
         while (clip_len > 0 and
             !clipContains(tree, clip_stack[clip_len - 1].container, node.id))
         {
             clip_len -= 1;
         }
+        if (node.paint_hidden or node.overlay_dormant) continue;
+        const visual_border = visualBorderRect(tree, node.id);
+        // A clip imposed by overlay placement constrains this node's OWN fill
+        // and every descendant, and it never resizes the node. It intersects
+        // into the same inherited stack the tree's own overflow clips use, so
+        // `WidgetNode.paint_clip_id` and `clip_id` keep their meaning and the
+        // GPU clip ABI is unchanged.
         const inherited_clip_id = if (clip_len > 0) clip_stack[clip_len - 1].clip_id else no_clip;
-        node.paint_clip_id = inherited_clip_id;
-        var content_clip_id = inherited_clip_id;
+        const placed_clip_id: u32 = if (node.placement_clip) |imposed|
+            try tree.pushClipRect(intersectInherited(
+                tree,
+                imposed,
+                inherited_clip_id,
+            ))
+        else
+            inherited_clip_id;
+        if (placed_clip_id != inherited_clip_id) {
+            std.debug.assert(clip_len < clip_stack.len);
+            clip_stack[clip_len] = .{ .container = node.id, .clip_id = placed_clip_id };
+            clip_len += 1;
+        }
+        node.paint_clip_id = placed_clip_id;
+        var content_clip_id = placed_clip_id;
         const content_clip_axes = node.contentClipAxes();
         if (content_clip_axes.any()) {
             const content_clip = intersectInherited(
                 tree,
                 ClipRect.fromRect(visual_border, content_clip_axes),
-                inherited_clip_id,
+                content_clip_id,
             );
             content_clip_id = try tree.pushClipRect(content_clip);
             std.debug.assert(clip_len < clip_stack.len);
@@ -209,17 +237,18 @@ pub fn collectDrawCmdsInto(
             geometryBoxEdges(node, visual_border.w)).border;
         node.clip_id = content_clip_id;
         const text_bearing = switch (node.kind) {
-            .label, .slider => true,
+            .label, .slider, .checkbox, .switch_control, .radio, .progress => true,
             else => false,
         };
         if (text_bearing and node.text_overflow == .clip and
             visual_border.w > 0 and visual_border.h > 0)
         {
-            const visual_content = visualContentRect(tree, node.id);
+            const visual_content = contentBoxRect(visual_border, node);
+            const leading_inset = textLeadingInset(node.kind);
             var text_clip: ClipRect = .{
-                .x = visual_content.x,
+                .x = visual_content.x + leading_inset,
                 .y = visual_content.y,
-                .w = visual_content.w,
+                .w = @max(0, visual_content.w - leading_inset),
                 .h = visual_content.h,
             };
             if (node.text_max_width) |maximum| {
@@ -231,106 +260,232 @@ pub fn collectDrawCmdsInto(
         }
         if (visual_border.w <= 0 or visual_border.h <= 0) continue;
 
-        const style = node.style;
-        const paint = node.paint;
+        const authored = node.paint;
+        if (authored.texture != null and authored.paint_fill != null) return error.InvalidStyle;
+        const explicit_fill = authored.fill[3] > 0 or
+            authored.paint_fill != null or authored.texture != null;
         const base_color: ?[4]f32 = switch (node.kind) {
-            .column, .row => palette.container,
-            // Transparent buttons retain their hit target without a painted slab.
-            .button => if (paint.transparent) null else if (paint.fill[3] > 0) paint.fill else palette.button,
-            .slider => palette.slider,
-            .label => null, // no fill — the glyph strokes carry the label
-            .spacer => null, // spacer paints nothing
+            .column, .row => if (authored.transparent) null else if (explicit_fill)
+                authored.fill
+            else
+                palette.container,
+            .button => if (authored.transparent) null else if (explicit_fill)
+                authored.fill
+            else
+                palette.button,
+            .slider => if (explicit_fill) authored.fill else palette.slider,
+            .element,
+            .checkbox,
+            .switch_control,
+            .radio,
+            .progress,
+            .separator,
+            .label,
+            .spacer,
+            => if (explicit_fill) authored.fill else null,
         };
-        const painted = base_color != null;
+        const pressed_button = if (node.kind == .button) blk: {
+            const pressed = pressed_id orelse break :blk false;
+            const widget_id = node.widget_id orelse break :blk false;
+            break :blk pressed.eql(widget_id);
+        } else false;
+        const color: ?[4]f32 = if (base_color) |base|
+            if (pressed_button and authored.paint_fill == null and authored.texture == null)
+                lerp4(base, palette.button_pressed, press_alpha)
+            else
+                base
+        else
+            null;
+        const fill: ?frame_paint.Fill = if (authored.texture) |texture|
+            .{ .image_pattern = .{
+                .texture_index = texture,
+                .tile = .{ .x = visual_border.w, .y = visual_border.h },
+            } }
+        else if (authored.paint_fill) |rich|
+            rich
+        else if (color) |solid|
+            .{ .solid = srgb(solid) }
+        else
+            null;
 
-        // Shadow first — paints behind everything else for this node: the
-        // visual border box dropped (+2, +3) px, soft black at 28% alpha,
-        // feathered by PaintStyle.shadow. Only painted nodes cast shadows;
-        // `shadow > 0` marks a shadow cmd for the renderer.
-        if (painted and paint.shadow > 0) {
-            list.appendAssumeCapacity(.{
-                .rect = Rect{
-                    .x = visual_border.x + 2,
-                    .y = visual_border.y + 3,
+        const widths = [_]f32{ border.top, border.right, border.bottom, border.left };
+        // SAFETY: the loop assigns all four sides before any read.
+        var sides: frame_paint.Borders = undefined;
+        var bordered = false;
+        for (&sides, widths, authored.border_styles, 0..) |*side, width, border_style, index| {
+            const resolved_width = if (border_style == .none) 0 else width;
+            side.* = .{
+                .width = resolved_width,
+                .color = if (authored.border_colors) |colors|
+                    colors[index]
+                else
+                    srgb(authored.border_color),
+                .style = border_style,
+            };
+            bordered = bordered or resolved_width > 0;
+        }
+        if (fill != null or bordered or authored.shadows.len > 0) {
+            const rect_paint: frame_paint.RectPaint = .{
+                .bounds = .{
+                    .x = visual_border.x,
+                    .y = visual_border.y,
                     .w = visual_border.w,
                     .h = visual_border.h,
                 },
-                .color = .{ 0, 0, 0, 0.28 },
-                .kind = .solid,
-                .style = style,
-                .paint = paint,
-                .border = border,
-                .ring = false,
+                .fill = fill,
+                .borders = sides,
+                .radii = authored.resolvedRadii(),
+                .shadows = authored.shadows,
+                .opacity = authored.opacity,
+                .transform = authored.transform,
                 .clip_id = inherited_clip_id,
-            });
-        }
-
-        const bordered = border.top > 0 or border.right > 0 or
-            border.bottom > 0 or border.left > 0;
-
-        // Ring next (paints behind the fill and the children).
-        if (bordered and node.kind != .spacer) {
+                .layer = try widget.effectiveLayer(node, 0),
+                .order = @intCast(list.items.len),
+            };
             list.appendAssumeCapacity(.{
                 .rect = visual_border,
-                .color = paint.border_color,
-                .kind = .solid,
-                .style = style,
-                .paint = paint,
-                .border = border,
-                .ring = true,
+                .rect_paint = rect_paint,
                 .clip_id = inherited_clip_id,
             });
         }
 
-        const c = base_color orelse continue;
-        // A textured fill shows the texture's own pixels: the fragment
-        // branch multiplies the sample by vColor (the tint). The
-        // MULTIPLICATIVE identity for the Oklab channels is (1,1,1) —
-        // Oklab "white" (1,0,0) would zero the sample's a/b chroma and
-        // render every texture desaturated. The texture rect carries the
-        // registered heap index.
-        const tex_idx: u32 = paint.texture orelse 0xFFFFFFFF;
-        // The held-down button eases from its normal fill to the darker
-        // pressed palette color by press_alpha (1 = fully pressed; the
-        // core drives the eased value, so the fill tracks the press-in
-        // animation instead of snapping).
-        const color: [4]f32 = if (tex_idx != 0xFFFFFFFF)
-            .{ 1, 1, 1, 1 } // the identity tint — the texture's own Oklab pixels
-        else if (pressed_id != null and pressed_id.? == node.id and node.kind == .button)
-            lerp4(c, palette.button_pressed, press_alpha)
-        else
-            c;
-
-        // Fill = border box inset by the border (ring area stays clear).
-        // Skip fills the border fully consumes (zero/negative size).
-        const fill_rect: Rect = .{
-            .x = visual_border.x + border.left,
-            .y = visual_border.y + border.top,
-            .w = @max(0, visual_border.w - border.left - border.right),
-            .h = @max(0, visual_border.h - border.top - border.bottom),
-        };
-        if (fill_rect.w <= 0 or fill_rect.h <= 0) continue;
-        list.appendAssumeCapacity(.{
-            .rect = fill_rect,
-            .color = color,
-            .kind = .solid,
-            .style = style,
-            .paint = paint,
-            .border = border,
-            .ring = false,
-            .clip_id = inherited_clip_id,
-            .tex_idx = tex_idx,
-        });
+        // Custom paint is above its node background and below its children.
+        if (node.kind == .element) {
+            const bounds = widget.visualContentRect(tree, node.id);
+            // Element records are authored against the content box, so they
+            // clip to it. The node's own content clip covers the border box
+            // and is already on the stack for descendants; push a distinct
+            // one only when padding or border actually insets the box.
+            const record_clip_id: u32 = if (content_clip_axes.any() and
+                (bounds.x != visual_border.x or bounds.y != visual_border.y or
+                    bounds.w != visual_border.w or bounds.h != visual_border.h))
+                try tree.pushClipRect(intersectInherited(
+                    tree,
+                    ClipRect.fromRect(bounds, content_clip_axes),
+                    inherited_clip_id,
+                ))
+            else
+                content_clip_id;
+            for (node.kind.element.paint_records.items) |record| {
+                switch (record) {
+                    .rect => |rect_spec| {
+                        const rect_bounds: Rect = .{
+                            .x = bounds.x + rect_spec.bounds.x,
+                            .y = bounds.y + rect_spec.bounds.y,
+                            .w = rect_spec.bounds.w,
+                            .h = rect_spec.bounds.h,
+                        };
+                        const layer: u32 = try widget.effectiveLayer(node, rect_spec.layer);
+                        const opacity = authored.opacity * rect_spec.opacity;
+                        const transform = multiplyAffine(authored.transform, rect_spec.transform);
+                        const order: u32 = rect_spec.order orelse @intCast(list.items.len);
+                        var rp = rect_spec;
+                        rp.bounds = .{
+                            .x = rect_bounds.x,
+                            .y = rect_bounds.y,
+                            .w = rect_bounds.w,
+                            .h = rect_bounds.h,
+                        };
+                        rp.layer = layer;
+                        rp.opacity = opacity;
+                        rp.transform = transform;
+                        rp.clip_id = record_clip_id;
+                        rp.order = order;
+                        list.appendAssumeCapacity(.{
+                            .rect = rect_bounds,
+                            .rect_paint = rp,
+                            .path_paint = null,
+                            .clip_id = record_clip_id,
+                        });
+                    },
+                    .path => |path_spec| {
+                        const path_bounds: Rect = .{
+                            .x = bounds.x + path_spec.bounds.x,
+                            .y = bounds.y + path_spec.bounds.y,
+                            .w = path_spec.bounds.w,
+                            .h = path_spec.bounds.h,
+                        };
+                        const layer: u32 = try widget.effectiveLayer(node, path_spec.layer);
+                        const opacity = authored.opacity * path_spec.opacity;
+                        const transform = multiplyAffine(authored.transform, path_spec.transform);
+                        const order: u32 = path_spec.order orelse @intCast(list.items.len);
+                        var pp = path_spec;
+                        pp.bounds = .{
+                            .x = path_bounds.x,
+                            .y = path_bounds.y,
+                            .w = path_bounds.w,
+                            .h = path_bounds.h,
+                        };
+                        pp.layer = layer;
+                        pp.opacity = opacity;
+                        pp.transform = transform;
+                        pp.clip_id = record_clip_id;
+                        pp.order = order;
+                        list.appendAssumeCapacity(.{
+                            .rect = path_bounds,
+                            .rect_paint = .{
+                                .bounds = .{
+                                    .x = path_bounds.x,
+                                    .y = path_bounds.y,
+                                    .w = path_bounds.w,
+                                    .h = path_bounds.h,
+                                },
+                                .opacity = opacity,
+                                .transform = transform,
+                                .clip_id = record_clip_id,
+                                .layer = layer,
+                                .order = order,
+                            },
+                            .path_paint = pp,
+                            .clip_id = record_clip_id,
+                        });
+                    },
+                    .image => |image_spec| {
+                        const image_bounds: Rect = .{
+                            .x = bounds.x + image_spec.bounds.x,
+                            .y = bounds.y + image_spec.bounds.y,
+                            .w = image_spec.bounds.w,
+                            .h = image_spec.bounds.h,
+                        };
+                        const layer: u32 = try widget.effectiveLayer(node, image_spec.layer);
+                        const order: u32 = image_spec.order orelse @intCast(list.items.len);
+                        var ip = image_spec;
+                        ip.bounds = .{
+                            .x = image_bounds.x,
+                            .y = image_bounds.y,
+                            .w = image_bounds.w,
+                            .h = image_bounds.h,
+                        };
+                        ip.layer = layer;
+                        ip.opacity = authored.opacity * image_spec.opacity;
+                        ip.clip_id = record_clip_id;
+                        ip.order = order;
+                        list.appendAssumeCapacity(.{
+                            .rect = image_bounds,
+                            .rect_paint = .{
+                                .bounds = ip.bounds,
+                                .opacity = ip.opacity,
+                                .clip_id = ip.clip_id,
+                                .layer = layer,
+                                .order = order,
+                            },
+                            .image_paint = ip,
+                            .clip_id = record_clip_id,
+                        });
+                    },
+                }
+            }
+        }
     }
     return;
 }
 
 test "draw command collection counters record node comparisons" {
-    var counters: @import("perf_counters.zig").Counters = .{};
+    var counters: perf_counters.Counters = .{};
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     tree.setCounterSink(&counters);
-    const node_id: Id = @enumFromInt(1);
+    const node_id: FrameNodeId = @enumFromInt(1);
     try tree.appendNode(.{
         .id = node_id,
         .kind = .{ .column = .{} },
@@ -343,11 +498,31 @@ test "draw command collection counters record node comparisons" {
     try collectDrawCmdsInto(&tree, null, 0, &list);
     try std.testing.expect(tree.nodeConst(node_id) != null);
     const snapshot = try counters.snapshot();
-    if (comptime @import("v7_options").perf_counters) {
+    if (comptime v7_options.perf_counters) {
         try std.testing.expect(snapshot.value(.node_comparisons) > 0);
     } else {
         try std.testing.expectEqual(@as(u64, 0), snapshot.value(.node_comparisons));
     }
+}
+
+fn srgb(channels: [4]f32) frame_paint.Color {
+    return .{ .srgb = .{
+        .r = channels[0],
+        .g = channels[1],
+        .b = channels[2],
+        .a = channels[3],
+    } };
+}
+
+fn multiplyAffine(p: frame_paint.Affine, l: frame_paint.Affine) frame_paint.Affine {
+    return .{
+        .a = p.a * l.a + p.c * l.b,
+        .b = p.b * l.a + p.d * l.b,
+        .c = p.a * l.c + p.c * l.d,
+        .d = p.b * l.c + p.d * l.d,
+        .tx = p.a * l.tx + p.c * l.ty + p.tx,
+        .ty = p.b * l.tx + p.d * l.ty + p.ty,
+    };
 }
 
 /// Linear interpolation between two RGBA colors: a + (b - a) * t.
@@ -367,19 +542,15 @@ fn indexOfRect(cmds: []const DrawCmd, r: Rect) ?usize {
     return null;
 }
 
-fn expectColor(actual: [4]f32, expected: [4]f32) !void {
-    try std.testing.expectEqualSlices(f32, &expected, &actual);
-}
-
 test "collectDrawCmds: paint order — container before children, spacer skipped" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: Id = @enumFromInt(1);
-    const l1: Id = @enumFromInt(2);
-    const l2: Id = @enumFromInt(3);
-    const btn: Id = @enumFromInt(4);
-    const sp: Id = @enumFromInt(5);
+    const col: FrameNodeId = @enumFromInt(1);
+    const l1: FrameNodeId = @enumFromInt(2);
+    const l2: FrameNodeId = @enumFromInt(3);
+    const btn: FrameNodeId = @enumFromInt(4);
+    const sp: FrameNodeId = @enumFromInt(5);
 
     // Post-order append: children first, container last.
     try tree.nodes.append(std.testing.allocator, .{
@@ -435,95 +606,14 @@ test "collectDrawCmds: paint order — container before children, spacer skipped
     try std.testing.expectEqual(@as(?usize, null), indexOfRect(cmds, l2_rect));
 }
 
-test "collectDrawCmds: colors — button accent, container dim" {
-    var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.deinit();
-
-    const col: Id = @enumFromInt(1);
-    const btn: Id = @enumFromInt(2);
-
-    try tree.nodes.append(std.testing.allocator, .{
-        .id = btn,
-        .kind = .{ .button = .{ .label = "go" } },
-        .parent = col,
-        .rect = .{ .x = 10, .y = 70, .w = 80, .h = 30 },
-    });
-    try tree.nodes.append(std.testing.allocator, .{
-        .id = col,
-        .kind = .{ .column = .{} },
-        .parent = .root,
-        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 },
-    });
-
-    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
-    defer std.testing.allocator.free(cmds);
-
-    const col_rect: Rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 };
-    const btn_rect: Rect = .{ .x = 10, .y = 70, .w = 80, .h = 30 };
-
-    const col_idx = indexOfRect(cmds, col_rect) orelse return error.MissingColumnCmd;
-    const btn_idx = indexOfRect(cmds, btn_rect) orelse return error.MissingButtonCmd;
-
-    try expectColor(cmds[col_idx].color, palette.container);
-    try expectColor(cmds[btn_idx].color, palette.button);
-}
-
-test "collectDrawCmds: pressed button fill eases to the pressed color at press_alpha 1" {
-    var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.deinit();
-
-    const btn: Id = @enumFromInt(1);
-    try tree.nodes.append(std.testing.allocator, .{
-        .id = btn,
-        .kind = .{ .button = .{ .label = "go" } },
-        .parent = .root,
-        .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
-    });
-
-    // press_alpha 1: the old instant-swap behavior, fully pressed color.
-    const cmds = try collectDrawCmds(std.testing.allocator, &tree, btn, 1);
-    defer std.testing.allocator.free(cmds);
-
-    try std.testing.expectEqual(@as(usize, 1), cmds.len);
-    try expectColor(cmds[0].color, palette.button_pressed);
-}
-
-test "collectDrawCmds: pressed button fill is the midpoint at press_alpha 0.5" {
-    var tree = WidgetTree.init(std.testing.allocator);
-    defer tree.deinit();
-
-    const btn: Id = @enumFromInt(1);
-    try tree.nodes.append(std.testing.allocator, .{
-        .id = btn,
-        .kind = .{ .button = .{ .label = "go" } },
-        .parent = .root,
-        .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
-    });
-
-    const cmds = try collectDrawCmds(std.testing.allocator, &tree, btn, 0.5);
-    defer std.testing.allocator.free(cmds);
-
-    try std.testing.expectEqual(@as(usize, 1), cmds.len);
-    // Each channel = (button[i] + button_pressed[i]) / 2.
-    const mid: [4]f32 = .{
-        (palette.button[0] + palette.button_pressed[0]) / 2,
-        (palette.button[1] + palette.button_pressed[1]) / 2,
-        (palette.button[2] + palette.button_pressed[2]) / 2,
-        (palette.button[3] + palette.button_pressed[3]) / 2,
-    };
-    for (cmds[0].color, mid) |got, want| {
-        try std.testing.expect(std.math.approxEqAbs(f32, want, got, 1e-5));
-    }
-}
-
 test "collectDrawCmds: zero-size nodes are skipped" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: Id = @enumFromInt(1);
-    const btn: Id = @enumFromInt(2);
-    const zero_w: Id = @enumFromInt(3);
-    const zero_h: Id = @enumFromInt(4);
+    const col: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @enumFromInt(2);
+    const zero_w: FrameNodeId = @enumFromInt(3);
+    const zero_h: FrameNodeId = @enumFromInt(4);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -563,9 +653,9 @@ test "collectDrawCmds: nonpositive nodes keep clip ids but emit no decorations o
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const zero_width: Id = @enumFromInt(1);
-    const negative_height: Id = @enumFromInt(2);
-    const clip: Id = @enumFromInt(3);
+    const zero_width: FrameNodeId = @enumFromInt(1);
+    const negative_height: FrameNodeId = @enumFromInt(2);
+    const clip: FrameNodeId = @enumFromInt(3);
     const decorated_style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -576,7 +666,7 @@ test "collectDrawCmds: nonpositive nodes keep clip ids but emit no decorations o
     };
     const decorated_paint: PaintStyle = .{
         .border_color = .{ 1, 0, 0, 1 },
-        .shadow = 3,
+        .shadows = &.{.{ .color = srgb(.{ 0, 0, 0, 0.28 }), .blur = 3 }},
     };
 
     try tree.nodes.append(std.testing.allocator, .{
@@ -617,15 +707,14 @@ test "collectDrawCmds: nonpositive nodes keep clip ids but emit no decorations o
     try std.testing.expectEqual(@as(u32, 0), tree.node(negative_height).?.clip_id);
     try std.testing.expectEqual(@as(usize, 1), cmds.len);
     try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 100, .h = 100 }, cmds[0].rect);
-    try std.testing.expect(!cmds[0].ring);
 }
 
 test "collectDrawCmds: clipped text intersects its content box with the parent clip" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const label_id: Id = @enumFromInt(1);
-    const clip_id: Id = @enumFromInt(2);
+    const label_id: FrameNodeId = @enumFromInt(1);
+    const clip_id: FrameNodeId = @enumFromInt(2);
     try tree.nodes.append(std.testing.allocator, .{
         .id = label_id,
         .kind = .{ .label = .{ .text = "clipped" } },
@@ -666,11 +755,11 @@ test "collectDrawCmds: empty tree yields zero cmds" {
     try std.testing.expectEqual(@as(usize, 0), cmds.len);
 }
 
-test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
+test "collectDrawCmds: bordered button keeps fill and physical sides in one paint rectangle" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const btn: Id = @enumFromInt(1);
+    const btn: FrameNodeId = @enumFromInt(1);
     const style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -692,27 +781,25 @@ test "collectDrawCmds: bordered button emits ring then fill with exact rects" {
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
-    // Ring cmd first: the full absolute border box, border color.
-    try std.testing.expectEqual(@as(usize, 2), cmds.len);
-    try std.testing.expect(cmds[0].ring);
-    try std.testing.expectEqual(Rect{ .x = 10, .y = 10, .w = 80, .h = 30 }, cmds[0].rect);
-    try expectColor(cmds[0].color, .{ 1, 0, 0, 1 });
-    try std.testing.expectEqual(style, cmds[0].style);
-    try std.testing.expectEqual(Sides{ .top = 1, .right = 2, .bottom = 3, .left = 4 }, cmds[0].border);
-
-    // Fill cmd second: the border box inset by the border, palette color.
-    try std.testing.expect(!cmds[1].ring);
-    try std.testing.expectEqual(Rect{ .x = 14, .y = 11, .w = 80 - 6, .h = 30 - 4 }, cmds[1].rect);
-    try expectColor(cmds[1].color, palette.button);
-    try std.testing.expectEqual(style, cmds[1].style);
-    try std.testing.expectEqual(Sides{ .top = 1, .right = 2, .bottom = 3, .left = 4 }, cmds[1].border);
+    try std.testing.expectEqual(@as(usize, 1), cmds.len);
+    const output = cmds[0].rect_paint;
+    try std.testing.expectEqual(
+        frame_paint.Rect{ .x = 10, .y = 10, .w = 80, .h = 30 },
+        output.bounds,
+    );
+    try std.testing.expectEqual(@as(f32, 1), output.borders[0].width);
+    try std.testing.expectEqual(@as(f32, 2), output.borders[1].width);
+    try std.testing.expectEqual(@as(f32, 3), output.borders[2].width);
+    try std.testing.expectEqual(@as(f32, 4), output.borders[3].width);
+    try std.testing.expectEqual(@as(f32, 1), output.borders[0].color.srgb.r);
+    try std.testing.expectEqual(@as(f32, palette.button[0]), output.fill.?.solid.srgb.r);
 }
 
-test "collectDrawCmds: resolved physical border edges drive fill geometry" {
+test "collectDrawCmds: resolved physical border edges reach paint without re-resolving CSS" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const btn: Id = @enumFromInt(1);
+    const btn: FrameNodeId = @enumFromInt(1);
     const style: Style = .{
         .border_inset = .{
             .top = .{ .percent = 0.5 },
@@ -743,22 +830,20 @@ test "collectDrawCmds: resolved physical border edges drive fill geometry" {
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
-    try std.testing.expectEqual(@as(usize, 2), cmds.len);
-    try std.testing.expectEqual(Rect{ .x = 10, .y = 10, .w = 80, .h = 30 }, cmds[0].rect);
-    try std.testing.expectEqual(
-        Rect{ .x = 14, .y = 11, .w = 74, .h = 26 },
-        cmds[1].rect,
-    );
-    try std.testing.expectEqual(resolved_border, cmds[0].border);
-    try std.testing.expectEqual(resolved_border, cmds[1].border);
+    try std.testing.expectEqual(@as(usize, 1), cmds.len);
+    const sides = cmds[0].rect_paint.borders;
+    try std.testing.expectEqual(@as(f32, 1), sides[0].width);
+    try std.testing.expectEqual(@as(f32, 2), sides[1].width);
+    try std.testing.expectEqual(@as(f32, 3), sides[2].width);
+    try std.testing.expectEqual(@as(f32, 4), sides[3].width);
 }
 
 test "collectDrawCmds: nested node under a column resolves to its absolute rect" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: Id = @enumFromInt(1);
-    const btn: Id = @enumFromInt(2);
+    const col: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @enumFromInt(2);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -783,50 +868,51 @@ test "collectDrawCmds: nested node under a column resolves to its absolute rect"
     try std.testing.expectEqual(Rect{ .x = 10, .y = 10, .w = 20, .h = 10 }, cmds[1].rect);
 }
 
-test "collectDrawCmds: shadowed node emits one shadow cmd first with offset rect and shadow color" {
+test "collectDrawCmds: authored shadow keeps its offset, color, blur, and inset" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const btn: Id = @enumFromInt(1);
-    const paint: PaintStyle = .{ .shadow = 3 };
+    const btn: FrameNodeId = @enumFromInt(1);
+    const paint_style: PaintStyle = .{ .shadows = &.{.{
+        .color = srgb(.{ 0.2, 0.3, 0.4, 0.5 }),
+        .offset = .{ .x = 2, .y = 3 },
+        .blur = 3,
+        .spread = 1,
+        .inset = true,
+    }} };
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
         .kind = .{ .button = .{ .label = "go" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
-        .paint = paint,
+        .paint = paint_style,
     });
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
-    // Shadow cmd first: the absolute border box translated (+2, +3), soft
-    // black at 28% alpha, feathered by PaintStyle.shadow; then the plain fill.
-    try std.testing.expectEqual(@as(usize, 2), cmds.len);
-    try std.testing.expect(!cmds[0].ring);
-    try std.testing.expectEqual(@as(f32, 3), cmds[0].paint.shadow);
-    try std.testing.expectEqual(Rect{ .x = 12, .y = 13, .w = 80, .h = 30 }, cmds[0].rect);
-    try expectColor(cmds[0].color, .{ 0, 0, 0, 0.28 });
-    try std.testing.expectEqual(paint, cmds[0].paint);
-
-    // Fill second: the un-offset border box, palette color, and typed paint
-    // fields carried over.
-    try std.testing.expect(!cmds[1].ring);
-    try std.testing.expectEqual(Rect{ .x = 10, .y = 10, .w = 80, .h = 30 }, cmds[1].rect);
-    try expectColor(cmds[1].color, palette.button);
-    try std.testing.expectEqual(@as(f32, 3), cmds[1].paint.shadow);
-    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, cmds[1].paint.gradient);
-    try std.testing.expectEqual(paint, cmds[1].paint);
+    try std.testing.expectEqual(@as(usize, 1), cmds.len);
+    const output = cmds[0].rect_paint;
+    try std.testing.expectEqual(
+        frame_paint.Rect{ .x = 10, .y = 10, .w = 80, .h = 30 },
+        output.bounds,
+    );
+    try std.testing.expectEqual(@as(usize, 1), output.shadows.len);
+    try std.testing.expectEqual(@as(f32, 2), output.shadows[0].offset.x);
+    try std.testing.expectEqual(@as(f32, 3), output.shadows[0].offset.y);
+    try std.testing.expectEqual(@as(f32, 3), output.shadows[0].blur);
+    try std.testing.expectEqual(@as(f32, 1), output.shadows[0].spread);
+    try std.testing.expect(output.shadows[0].inset);
+    try std.testing.expectEqual(@as(f32, 0.5), output.shadows[0].color.srgb.a);
+    try std.testing.expectEqual(@as(f32, palette.button[0]), output.fill.?.solid.srgb.r);
 }
 
-test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
+test "collectDrawCmds: layered shadow and border remain with their node's fill" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    // A layered, bordered, shadowed button emits three cmds (shadow, ring,
-    // fill) — every one must carry the node's layer key so the drawable
-    // bag sorts the whole node as one unit onto its z level.
-    const btn: Id = @enumFromInt(1);
+    // One paint record keeps every primitive of this node on one layer.
+    const btn: FrameNodeId = @enumFromInt(1);
     const style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -835,27 +921,30 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
             .left = .{ .length = 1 },
         },
     };
-    const paint: PaintStyle = .{ .layer = 2, .shadow = 3 };
+    const paint_style: PaintStyle = .{ .layer = 2, .shadows = &.{.{
+        .color = srgb(.{ 0, 0, 0, 0.5 }),
+        .blur = 3,
+    }} };
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
         .kind = .{ .button = .{ .label = "go" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 80, .h = 30 },
         .style = style,
-        .paint = paint,
+        .paint = paint_style,
     });
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
-    try std.testing.expectEqual(@as(usize, 3), cmds.len);
-    try std.testing.expectEqual(@as(f32, 3), cmds[0].paint.shadow); // shadow first
-    try std.testing.expect(cmds[1].ring);
-    try std.testing.expect(!cmds[2].ring);
-    for (cmds) |c| try std.testing.expectEqual(@as(u32, 2), c.paint.layer);
+    try std.testing.expectEqual(@as(usize, 1), cmds.len);
+    try std.testing.expectEqual(@as(usize, 1), cmds[0].rect_paint.shadows.len);
+    try std.testing.expectEqual(@as(f32, 1), cmds[0].rect_paint.borders[0].width);
+    try std.testing.expect(cmds[0].rect_paint.fill != null);
+    try std.testing.expectEqual(@as(u32, 2), cmds[0].rect_paint.layer);
 
     // A plain (unlayered) node's cmds default to layer 0.
-    const plain: Id = @enumFromInt(2);
+    const plain: FrameNodeId = @enumFromInt(2);
     try tree.nodes.append(std.testing.allocator, .{
         .id = plain,
         .kind = .{ .button = .{ .label = "plain" } },
@@ -865,16 +954,16 @@ test "collectDrawCmds: shadow, ring, and fill share the node's layer" {
     const cmds2 = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds2);
     // Reversed post-order: the plain button (appended last) emits first.
-    try std.testing.expectEqual(@as(usize, 4), cmds2.len);
-    try std.testing.expectEqual(@as(u32, 0), cmds2[0].paint.layer); // plain fill
-    for (cmds2[1..]) |c| try std.testing.expectEqual(@as(u32, 2), c.paint.layer);
+    try std.testing.expectEqual(@as(usize, 2), cmds2.len);
+    try std.testing.expectEqual(@as(u32, 0), cmds2[0].rect_paint.layer);
+    try std.testing.expectEqual(@as(u32, 2), cmds2[1].rect_paint.layer);
 }
 
-test "collectDrawCmds: bordered label emits exactly one ring cmd" {
+test "collectDrawCmds: a border-only label emits exactly one command" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const lbl: Id = @enumFromInt(1);
+    const lbl: FrameNodeId = @enumFromInt(1);
     const style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -896,13 +985,10 @@ test "collectDrawCmds: bordered label emits exactly one ring cmd" {
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
 
-    // One ring, no fill: the label's own background is unpainted.
+    // The label authors no fill, so its four border sides are the only reason
+    // it emits anything: exactly one command, on the full border box.
     try std.testing.expectEqual(@as(usize, 1), cmds.len);
-    try std.testing.expect(cmds[0].ring);
     try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 24 }, cmds[0].rect);
-    try expectColor(cmds[0].color, .{ 0.42, 0.42, 0.48, 1 });
-    try std.testing.expectEqual(style, cmds[0].style);
-    try std.testing.expectEqual(Sides{ .top = 1, .right = 1, .bottom = 1, .left = 1 }, cmds[0].border);
 }
 
 test "collectDrawCmds: a content clip stamps descendants, preserves own paint, then pops for siblings" {
@@ -911,9 +997,9 @@ test "collectDrawCmds: a content clip stamps descendants, preserves own paint, t
 
     // Post-order: children before containers. A clip-marked column holds
     // a button; a sibling button sits outside the clip.
-    const inner_btn: Id = @enumFromInt(1);
-    const card: Id = @enumFromInt(2);
-    const sibling_btn: Id = @enumFromInt(3);
+    const inner_btn: FrameNodeId = @enumFromInt(1);
+    const card: FrameNodeId = @enumFromInt(2);
+    const sibling_btn: FrameNodeId = @enumFromInt(3);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = inner_btn,
@@ -965,9 +1051,9 @@ test "collectDrawCmds: nested clip containers stamp the deepest enclosing clip" 
 
     // outer (clip) → inner (clip) → button. The button's cmds carry the
     // INNER clip id; both rects are appended (outer id 0, inner id 1).
-    const btn: Id = @enumFromInt(1);
-    const inner: Id = @enumFromInt(2);
-    const outer: Id = @enumFromInt(3);
+    const btn: FrameNodeId = @enumFromInt(1);
+    const inner: FrameNodeId = @enumFromInt(2);
+    const outer: FrameNodeId = @enumFromInt(3);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -1011,9 +1097,9 @@ test "collectDrawCmds: scrolled descendants use visual paint and text clip coord
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const label_id: Id = @enumFromInt(1);
-    const button_id: Id = @enumFromInt(2);
-    const scroll_id: Id = @enumFromInt(3);
+    const label_id: FrameNodeId = @enumFromInt(1);
+    const button_id: FrameNodeId = @enumFromInt(2);
+    const scroll_id: FrameNodeId = @enumFromInt(3);
     var scroll_state: ScrollState = .{ .offset = .{ 7, 9 } };
 
     try tree.nodes.append(std.testing.allocator, .{
@@ -1085,8 +1171,8 @@ test "collectDrawCmds: style overflow modes clip descendants without scroll stat
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const parent_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const parent_id: FrameNodeId = @enumFromInt(2);
         try tree.nodes.append(std.testing.allocator, .{
             .id = child_id,
             .kind = .{ .button = .{ .label = "overflowed" } },
@@ -1158,8 +1244,8 @@ test "collectDrawCmds: mixed overflow axes retain independent GPU clips" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const parent_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const parent_id: FrameNodeId = @enumFromInt(2);
         try tree.nodes.append(std.testing.allocator, .{
             .id = child_id,
             .kind = .{ .button = .{ .label = "overflowed" } },
@@ -1190,8 +1276,8 @@ test "collectDrawCmds: content overflow does not clip own decorations" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
     try tree.nodes.append(std.testing.allocator, .{
         .id = child_id,
         .kind = .{ .button = .{ .label = "child" } },
@@ -1206,16 +1292,18 @@ test "collectDrawCmds: content overflow does not clip own decorations" {
         .style = .{
             .overflow = .{ .width = .hidden, .height = .hidden },
         },
-        .paint = .{ .shadow = 4 },
+        .paint = .{ .shadows = &.{.{
+            .color = srgb(.{ 0, 0, 0, 0.5 }),
+            .blur = 4,
+        }} },
     });
     try tree.appendChild(parent_id, child_id);
 
     const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
     defer std.testing.allocator.free(cmds);
-    try std.testing.expectEqual(@as(usize, 3), cmds.len);
-    try std.testing.expectEqual(no_clip, cmds[0].clip_id);
-    try std.testing.expectEqual(no_clip, cmds[1].clip_id);
-    try std.testing.expectEqual(@as(u32, 0), cmds[2].clip_id);
+    try std.testing.expectEqual(@as(usize, 2), cmds.len);
+    try std.testing.expectEqual(no_clip, cmds[0].rect_paint.clip_id);
+    try std.testing.expectEqual(@as(u32, 0), cmds[1].rect_paint.clip_id);
     try std.testing.expectEqual(@as(u32, 0), tree.node(parent_id).?.clip_id);
 }
 
@@ -1247,5 +1335,52 @@ test "collectDrawCmdsInto reuses caller-owned storage" {
     try std.testing.expectError(
         error.OutOfMemory,
         collectDrawCmdsInto(&tree, null, 0, &too_small),
+    );
+}
+
+test "collectDrawCmds: control text clips leave room for each indicator" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    var checked = true;
+    var switched = false;
+    var selected: ?u32 = 9;
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .checkbox = .{ .label = "enabled", .value = &checked } },
+        .parent = .root,
+        .rect = .{ .x = 20, .y = 30, .w = 100, .h = 18 },
+        .text_overflow = .clip,
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(2),
+        .kind = .{ .switch_control = .{ .label = "active", .value = &switched } },
+        .parent = .root,
+        .rect = .{ .x = 200, .y = 30, .w = 100, .h = 18 },
+        .text_overflow = .clip,
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(3),
+        .kind = .{ .radio = .{ .label = "option", .selected = &selected, .option = 9 } },
+        .parent = .root,
+        .rect = .{ .x = 400, .y = 30, .w = 100, .h = 18 },
+        .text_overflow = .clip,
+    });
+
+    const cmds = try collectDrawCmds(std.testing.allocator, &tree, null, 0);
+    defer std.testing.allocator.free(cmds);
+    try std.testing.expectEqual(@as(usize, 0), cmds.len);
+    try std.testing.expectEqual(@as(u32, 3), tree.clip_count);
+    // Reverse post-order assigns clips in radio, switch, checkbox order.
+    try std.testing.expectEqual(
+        ClipRect{ .x = 424, .y = 30, .w = 76, .h = 18 },
+        tree.clip_rects[0],
+    );
+    try std.testing.expectEqual(
+        ClipRect{ .x = 236, .y = 30, .w = 64, .h = 18 },
+        tree.clip_rects[1],
+    );
+    try std.testing.expectEqual(
+        ClipRect{ .x = 44, .y = 30, .w = 76, .h = 18 },
+        tree.clip_rects[2],
     );
 }

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A synthetic mark this example rasterizes for real.
+
+  The document carries absolute width and height, so `queryIntrinsicSize`
+  answers 48x48 rather than null, and it is authored in four quadrants so a
+  readback can name WHICH quadrant a pixel came from rather than only that
+  something was drawn:
+
+    top-left      #e04040   red
+    top-right     #40c060   green
+    bottom-left   #4070e0   blue
+    bottom-right  transparent (nothing authored there at all)
+
+  The empty quadrant is the load-bearing one: a rasterizer that filled the
+  document background, or that ran off the end of a shape, shows up there.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="0" y="0" width="24" height="24" fill="#e04040"/>
+  <rect x="24" y="0" width="24" height="24" fill="#40c060"/>
+  <rect x="0" y="24" width="24" height="24" fill="#4070e0"/>
+</svg>

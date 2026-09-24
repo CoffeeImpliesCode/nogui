@@ -10,6 +10,18 @@ pub const Options = facade.Options;
 pub const ClipRect = facade.ClipRect;
 pub const max_clip_rects = facade.max_clip_rects;
 pub const SceneRect = facade.SceneRect;
+pub const PaintScene = facade.PaintScene;
+pub const PaintTarget = facade.PaintTarget;
+pub const PaintExtra = facade.PaintExtra;
+pub const PaintMaterial = facade.PaintMaterial;
+pub const MaterialRange = facade.MaterialRange;
+pub const Lowered = facade.Lowered;
+pub const PaintError = facade.PaintError;
+pub const lowerPaint = facade.lowerPaint;
+pub const type_path_fill = facade.type_path_fill;
+pub const type_path_stroke = facade.type_path_stroke;
+pub const type_paint_rect = facade.type_paint_rect;
+pub const type_paint_shadow = facade.type_paint_shadow;
 
 pub const Curve = sweeper.Curve;
 pub const StrokeEdge = sweeper.StrokeEdge;
@@ -27,3 +39,8 @@ pub const FillBands = sweeper.FillBands;
 pub const buildFillBands = sweeper.buildFillBands;
 pub const StrokeBands = sweeper.StrokeBands;
 pub const buildStrokeBands = sweeper.buildStrokeBands;
+
+test {
+    _ = @import("w13_render_test.zig");
+    _ = @import("w13_flat_test.zig");
+}

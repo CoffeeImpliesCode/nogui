@@ -1,7 +1,7 @@
 //! Specifies final-width remeasurement across the flex-to-block dispatcher bridge.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const dispatch = @import("dispatch.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
@@ -32,8 +32,8 @@ fn autoStyle(display: style.Display) Style {
 
 fn appendNode(
     tree: *WidgetTree,
-    id: Id,
-    parent: Id,
+    id: FrameNodeId,
+    parent: FrameNodeId,
     node_style: Style,
     kind: WidgetKind,
 ) !void {
@@ -61,7 +61,7 @@ fn expectRect(expected: Rect, actual: Rect) !void {
     try std.testing.expectApproxEqAbs(expected.h, actual.h, tolerance);
 }
 
-fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
+fn expectRelative(tree: *const WidgetTree, id: FrameNodeId, expected: Rect) !void {
     const actual = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
     try expectRect(expected, actual.rect);
 }
@@ -70,12 +70,12 @@ test "flex bridge remeasures mixed block after main-axis shrink" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const inner_flex_id: Id = @enumFromInt(3);
-    const mixed_block_id: Id = @enumFromInt(4);
-    const sibling_id: Id = @enumFromInt(5);
-    const root_id: Id = @enumFromInt(6);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const inner_flex_id: FrameNodeId = @enumFromInt(3);
+    const mixed_block_id: FrameNodeId = @enumFromInt(4);
+    const sibling_id: FrameNodeId = @enumFromInt(5);
+    const root_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(
         &tree,

@@ -4,7 +4,6 @@
 const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
-const vk = noapi.vk;
 const Io = std.Io;
 
 pub const tracy_impl = @import("tracy_impl");
@@ -118,12 +117,12 @@ pub const App = struct {
         try sdl3.init(.{ .video = true, .events = true });
         errdefer sdl3.quit(.{ .video = true, .events = true });
 
-        const win = try sdl3.video.Window.init(app_name, width, height, .{
+        var win: ?sdl3.video.Window = try sdl3.video.Window.init(app_name, width, height, .{
             .resizable = true,
             .high_pixel_density = true,
         });
-        errdefer win.deinit();
-        try win.show();
+        errdefer if (win) |w| w.deinit();
+        try win.?.show();
 
         // Vulkan loader via SDL3
         try sdl3.vulkan.loadLibrary(null);
@@ -154,21 +153,23 @@ pub const App = struct {
             allocator.destroy(gpu);
         }
 
-        // Surface — pass gpu directly (already a stable heap pointer)
-        const sdl_surface = try sdl3.vulkan.Surface.init(
-            win,
-            @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
-            null,
+        // Surface — pass gpu directly (already a stable heap pointer). The
+        // platform surface is created and adopted in this one call, and this
+        // Surface owns the handle, so nothing else may destroy it.
+        const surf = try noapi.Surface.initSdl(
+            gpu,
+            @ptrCast(win.?.value),
+            @ptrCast(&sdl3.c.SDL_Vulkan_CreateSurface),
+            .{ .extent = .{ .width = width, .height = height } },
         );
-        const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-        const surf = try noapi.Surface.init(gpu, surface, .{
-            .extent = .{ .width = width, .height = height },
-        });
 
+        // Success: App.deinit owns win from here; disarm the errdefer.
+        const owned_win = win.?;
+        win = null;
         return .{
             .gpu = gpu,
             .surf = surf,
-            .sdl_win = win,
+            .sdl_win = owned_win,
             .gpa = allocator,
             .io = io,
             .width = width,

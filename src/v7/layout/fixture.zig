@@ -1,11 +1,11 @@
 const std = @import("std");
 
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const layout = @import("root.zig");
 const layout_context = @import("context.zig");
-const grid_layout = @import("grid.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
+const text_api = @import("../text.zig");
 
 const cases_path = "testdata/taffy-v0.13.0/normalized/cases.json";
 const manifest_path = "testdata/taffy-v0.13.0/MANIFEST.json";
@@ -21,11 +21,13 @@ const source_prefix = "test_fixtures/";
 const ahem_glyph_width: f32 = 10.0;
 const ahem_line_height: f32 = 10.0;
 const comparison_tolerance: f64 = 0.1;
+const AhemWritingMode = text_api.WritingMode;
 
 pub const FixtureSummary = struct {
     passed: usize = 0,
     failed: usize = 0,
     unsupported: usize = 0,
+    unsupported_sha256: [32]u8,
 };
 
 pub const FixtureError = error{
@@ -166,11 +168,15 @@ fn runFiltered(
 
     try validateCorpus(allocator, parsed_corpus.value, parsed_manifest.value);
     try validateSelection(parsed_corpus.value.cases, parsed_manifest.value.selection);
+    var unsupported_hasher = std.crypto.hash.sha2.Sha256.init(.{});
     if (count) |maximum| {
-        if (maximum == 0) return .{};
+        if (maximum == 0) {
+            return .{ .unsupported_sha256 = emptyUnsupportedSha256() };
+        }
     }
 
-    var summary: FixtureSummary = .{};
+    // SAFETY: The hasher writes the complete digest before this summary returns.
+    var summary: FixtureSummary = .{ .unsupported_sha256 = undefined };
     var found = false;
     var matched: usize = 0;
     for (parsed_corpus.value.cases) |fixture_case| {
@@ -196,6 +202,10 @@ fn runFiltered(
                         "fixture\tunsupported\t{s}\t{s}\n",
                         .{ fixture_case.id, fixture_case.variant },
                     );
+                    unsupported_hasher.update(fixture_case.id);
+                    unsupported_hasher.update("\t");
+                    unsupported_hasher.update(fixture_case.variant);
+                    unsupported_hasher.update("\n");
                     summary.unsupported += 1;
                     continue;
                 },
@@ -224,8 +234,16 @@ fn runFiltered(
     }
 
     if (!found) return error.FixtureNotFound;
+    unsupported_hasher.final(&summary.unsupported_sha256);
     return summary;
 }
+fn emptyUnsupportedSha256() [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
 fn readCorpusFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) FixtureError![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(
         io,
@@ -384,11 +402,11 @@ const FixtureResources = struct {
 
 const FixtureTree = struct {
     tree: widget.WidgetTree,
-    source_ids: []Id,
+    source_ids: []FrameNodeId,
     resources: FixtureResources,
 
     fn init(allocator: std.mem.Allocator, node_count: usize) CaseError!FixtureTree {
-        const source_ids = try allocator.alloc(Id, node_count);
+        const source_ids = try allocator.alloc(FrameNodeId, node_count);
         errdefer allocator.free(source_ids);
         for (source_ids) |*id| id.* = .root;
         var resources = try FixtureResources.init(allocator, node_count);
@@ -414,21 +432,22 @@ const TreeBuilder = struct {
     result: *FixtureTree,
     source_index: usize = 0,
 
-    fn buildRoot(self: *TreeBuilder) CaseError!Id {
+    fn buildRoot(self: *TreeBuilder) CaseError!FrameNodeId {
         const root_id = try self.buildNode(.root);
         if (self.source_index != self.fixture_case.nodes.len) return error.InvalidFixture;
         return root_id;
     }
 
-    fn buildNode(self: *TreeBuilder, parent: Id) CaseError!Id {
+    fn buildNode(self: *TreeBuilder, parent: FrameNodeId) CaseError!FrameNodeId {
         if (self.source_index >= self.fixture_case.nodes.len) return error.InvalidFixture;
         const index = self.source_index;
         self.source_index += 1;
         if (index >= std.math.maxInt(u32)) return error.InvalidFixture;
         if (index >= self.fixture_case.expected.len) return error.InvalidFixture;
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         const fixture_node = self.fixture_case.nodes[index];
         const expected = self.fixture_case.expected[index];
+        const writing_mode = try fixtureWritingMode(fixture_node);
         const node_style = try fixtureStyle(
             &self.result.resources,
             fixture_node,
@@ -436,19 +455,23 @@ const TreeBuilder = struct {
         const kind = try fixtureKind(fixture_node, node_style);
         const scroll = try fixtureScrollSpec(&self.result.resources, index, expected);
 
-        var children: std.ArrayList(Id) = .empty;
+        var children: std.ArrayList(FrameNodeId) = .empty;
         defer children.deinit(self.allocator);
         for (0..fixture_node.child_count) |_| {
             try children.append(self.allocator, try self.buildNode(id));
         }
 
-        try self.result.tree.appendNode(.{
+        self.result.tree.appendNode(.{
             .id = id,
             .kind = kind,
             .parent = parent,
             .style = node_style,
+            .writing_mode = writing_mode,
             .scroll = scroll,
-        });
+        }) catch |append_error| switch (append_error) {
+            error.DuplicateWidgetKey => return error.InvalidFixture,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
         for (children.items) |child_id| {
             // A missing parent means the fixture's preorder structure is malformed.
             self.result.tree.appendChild(id, child_id) catch |append_error| switch (append_error) {
@@ -811,7 +834,7 @@ pub fn runCase(allocator: std.mem.Allocator, fixture_case: Case) CaseError!bool 
     layout.layoutTree(&fixture_tree.tree, .{
         .allocator = allocator,
         .available = available,
-        .measure = ahemMeasure,
+        .measure = ahemMeasureSource(),
         .width_mode = fixture_case.viewport_mode.width,
         .height_mode = fixture_case.viewport_mode.height,
     }) catch |layout_error| {
@@ -997,13 +1020,19 @@ fn fixtureKind(fixture_node: Node, node_style: style.Style) CaseError!widget.Wid
     return .{ .column = .{} };
 }
 
+fn fixtureWritingMode(fixture_node: Node) CaseError!AhemWritingMode {
+    const writing_mode = fixture_node.writing_mode orelse return .horizontal_tb;
+    if (std.mem.eql(u8, writing_mode, "horizontal-tb")) return .horizontal_tb;
+    if (!std.mem.eql(u8, writing_mode, "vertical-lr")) return error.Unsupported;
+    if (!std.mem.eql(u8, fixture_node.kind, "text")) return error.Unsupported;
+    return .vertical_lr;
+}
+
 fn fixtureStyle(
     resources: *FixtureResources,
     fixture_node: Node,
 ) CaseError!style.Style {
-    if (fixture_node.writing_mode) |writing_mode| {
-        if (!std.mem.eql(u8, writing_mode, "horizontal-tb")) return error.Unsupported;
-    }
+    const writing_mode = try fixtureWritingMode(fixture_node);
 
     var result: style.Style = .{ .box_sizing = .border_box };
 
@@ -1014,7 +1043,12 @@ fn fixtureStyle(
             else => return error.InvalidFixture,
         };
         has_flex_direction = object.contains("flex-direction");
-        try applyFixtureAttributes(resources, &result, object);
+        try applyFixtureAttributes(
+            resources,
+            &result,
+            object,
+            writing_mode,
+        );
     }
     if (std.mem.eql(u8, fixture_node.kind, "div") and
         result.display == .flex and
@@ -1025,20 +1059,33 @@ fn fixtureStyle(
     return result;
 }
 
+fn validateFixtureWritingModeAttribute(
+    writing_mode: AhemWritingMode,
+    value: []const u8,
+) CaseError!void {
+    const expected = switch (writing_mode) {
+        .horizontal_tb => "horizontal-tb",
+        .vertical_lr => "vertical-lr",
+    };
+    if (!std.mem.eql(u8, value, expected)) return error.Unsupported;
+}
+
 fn applyFixtureAttributes(
     resources: *FixtureResources,
     result: *style.Style,
     attributes: std.json.ObjectMap,
+    writing_mode: AhemWritingMode,
 ) CaseError!void {
     var iterator = attributes.iterator();
     while (iterator.next()) |entry| {
-        if (isGridTemplateAttribute(entry.key_ptr.*)) continue;
-        try applyAttributeWithResources(
-            resources,
-            result,
-            entry.key_ptr.*,
-            try jsonString(entry.value_ptr.*),
-        );
+        const name = entry.key_ptr.*;
+        if (isGridTemplateAttribute(name)) continue;
+        const value = try jsonString(entry.value_ptr.*);
+        if (std.mem.eql(u8, name, "writing-mode")) {
+            try validateFixtureWritingModeAttribute(writing_mode, value);
+            continue;
+        }
+        try applyAttributeWithResources(resources, result, name, value);
     }
 
     iterator = attributes.iterator();
@@ -1058,11 +1105,10 @@ fn isGridTemplateAttribute(name: []const u8) bool {
 }
 
 test "fixture Ahem breaks only at zero-width spaces" {
-    const measured = ahemMeasure("H H", .{
+    const measured = try ahemMeasure("H H", .{
         .known_dimensions = .{ .width = null, .height = null },
         .available_space = .{ .width = .{ .definite = 25 }, .height = .max_content },
-        .font_size = 10,
-        .font_id = 0,
+        .writing_mode = .horizontal_tb,
     });
 
     try std.testing.expectEqual(@as(f32, 30), measured.width);
@@ -1070,15 +1116,92 @@ test "fixture Ahem breaks only at zero-width spaces" {
 }
 
 test "fixture Ahem measures UTF-8 byte lengths" {
-    const measured = ahemMeasure("\xC3\xA9", .{
+    const measured = try ahemMeasure("\xC3\xA9", .{
         .known_dimensions = .{ .width = null, .height = null },
         .available_space = .{ .width = .max_content, .height = .max_content },
-        .font_size = 10,
-        .font_id = 0,
+        .writing_mode = .horizontal_tb,
     });
 
     try std.testing.expectEqual(@as(f32, 20), measured.width);
     try std.testing.expectEqual(ahem_line_height, measured.height);
+}
+
+// The box owns the reported width, while the ink owns the line count: an
+// unbreakable Ahem segment still occupies its min-content glyphs when the
+// known box is narrower, and a wider known box merges segments that fit.
+test "fixture Ahem wraps unbreakable ink under a known box width" {
+    const collapsed = try ahemMeasure("HH\xE2\x80\x8BHH", .{
+        .known_dimensions = .{ .width = 0, .height = null },
+        .available_space = .{ .width = .max_content, .height = .max_content },
+        .writing_mode = .horizontal_tb,
+    });
+
+    try std.testing.expectEqual(@as(f32, 0), collapsed.width);
+    try std.testing.expectEqual(@as(f32, 20), collapsed.height);
+
+    const roomy = try ahemMeasure("HH\xE2\x80\x8BHH", .{
+        .known_dimensions = .{ .width = 100, .height = null },
+        .available_space = .{ .width = .max_content, .height = .max_content },
+        .writing_mode = .horizontal_tb,
+    });
+
+    try std.testing.expectEqual(@as(f32, 100), roomy.width);
+    try std.testing.expectEqual(ahem_line_height, roomy.height);
+}
+
+test "fixture vertical Ahem max-content maps inline size to height" {
+    const measured = try ahemMeasure("HH\xE2\x80\x8BHH\xE2\x80\x8BHH", .{
+        .known_dimensions = .{ .width = null, .height = null },
+        .available_space = .{ .width = .max_content, .height = .max_content },
+        .writing_mode = .vertical_lr,
+    });
+
+    try std.testing.expectEqual(@as(f32, 10), measured.width);
+    try std.testing.expectEqual(@as(f32, 60), measured.height);
+}
+
+test "fixture vertical Ahem min-content wraps each unbreakable segment" {
+    const measured = try ahemMeasure("HH\xE2\x80\x8BHH\xE2\x80\x8BHH", .{
+        .known_dimensions = .{ .width = null, .height = null },
+        .available_space = .{ .width = .max_content, .height = .min_content },
+        .writing_mode = .vertical_lr,
+    });
+
+    try std.testing.expectEqual(@as(f32, 30), measured.width);
+    try std.testing.expectEqual(@as(f32, 20), measured.height);
+}
+
+test "fixture vertical Ahem definite height wraps into columns" {
+    const measured = try ahemMeasure("HH\xE2\x80\x8BHH\xE2\x80\x8BHH", .{
+        .known_dimensions = .{ .width = null, .height = null },
+        .available_space = .{ .width = .max_content, .height = .{ .definite = 40 } },
+        .writing_mode = .vertical_lr,
+    });
+
+    try std.testing.expectEqual(@as(f32, 20), measured.width);
+    try std.testing.expectEqual(@as(f32, 40), measured.height);
+}
+
+test "fixture vertical Ahem known height overrides available inline size" {
+    const measured = try ahemMeasure("HH\xE2\x80\x8BHH\xE2\x80\x8BHH", .{
+        .known_dimensions = .{ .width = null, .height = 30 },
+        .available_space = .{ .width = .max_content, .height = .max_content },
+        .writing_mode = .vertical_lr,
+    });
+
+    try std.testing.expectEqual(@as(f32, 30), measured.width);
+    try std.testing.expectEqual(@as(f32, 30), measured.height);
+}
+
+test "fixture vertical Ahem known width overrides measured block size" {
+    const measured = try ahemMeasure("HH\xE2\x80\x8BHH\xE2\x80\x8BHH", .{
+        .known_dimensions = .{ .width = 25, .height = null },
+        .available_space = .{ .width = .max_content, .height = .{ .definite = 40 } },
+        .writing_mode = .vertical_lr,
+    });
+
+    try std.testing.expectEqual(@as(f32, 25), measured.width);
+    try std.testing.expectEqual(@as(f32, 40), measured.height);
 }
 
 test "fixture horizontal Ahem zero-width breaks wrap under definite width" {
@@ -2227,6 +2350,9 @@ test "fixture grid placements parse lines and positive spans" {
         .{ .name = "grid-row-end", .value = "span" },
         .{ .name = "grid-row-end", .value = "1 2" },
         .{ .name = "grid-row-end", .value = "span " },
+        .{ .name = "grid-column-start", .value = "32768" },
+        .{ .name = "grid-row-start", .value = "-32769" },
+        .{ .name = "grid-column-end", .value = "span 65536" },
     };
     for (invalid) |case| {
         try std.testing.expectError(
@@ -2253,20 +2379,20 @@ test "fixture grid placements parse lines and positive spans" {
         &fixture_tree.resources,
         &result,
         "grid-column-start",
-        "32768",
+        "32767",
     );
     try std.testing.expectEqual(
-        @as(style.GridPlacement, .{ .line = 10_000 }),
+        @as(style.GridPlacement, .{ .line = 32767 }),
         result.grid_column.start,
     );
     try applyAttributeWithResources(
         &fixture_tree.resources,
         &result,
         "grid-row-start",
-        "-32769",
+        "-32768",
     );
     try std.testing.expectEqual(
-        @as(style.GridPlacement, .{ .line = -10_000 }),
+        @as(style.GridPlacement, .{ .line = -32768 }),
         result.grid_row.start,
     );
     try std.testing.expectError(
@@ -2289,16 +2415,24 @@ test "fixture grid placements parse lines and positive spans" {
     );
 }
 
-test "fixture overlarge grid values clamp to upstream track maximum" {
+test "fixture grid values preserve representable integer bounds" {
     try std.testing.expect(std.meta.eql(
-        @as(style.GridPlacement, .{ .span = 10_000 }),
-        try parseGridPlacement("span 15000"),
+        @as(style.GridPlacement, .{ .span = 65535 }),
+        try parseGridPlacement("span 65535"),
     ));
+    try std.testing.expectError(
+        error.InvalidFixture,
+        parseGridPlacement("span 65536"),
+    );
 
-    const repeat = try parseRepeatHeader("repeat(15000, 1px)");
+    const repeat = try parseRepeatHeader("repeat(65535, 1px)");
     try std.testing.expectEqual(
-        @as(style.GridRepeatKind, .{ .count = 10_000 }),
+        @as(style.GridRepeatKind, .{ .count = 65535 }),
         repeat.kind,
+    );
+    try std.testing.expectError(
+        error.InvalidFixture,
+        parseRepeatHeader("repeat(65536, 1px)"),
     );
     try std.testing.expectEqualStrings("1px", repeat.body);
 }
@@ -2848,31 +2982,27 @@ fn parseRepeatHeader(token: []const u8) CaseError!RepeatSpec {
     else if (std.mem.eql(u8, count_text, "auto-fit"))
         .auto_fit
     else
-        .{ .count = try parseSaturatedGridCount(count_text) };
+        .{ .count = try parseGridCount(count_text) };
     return .{ .kind = kind, .body = body };
 }
 
-fn parseSaturatedGridCount(value: []const u8) CaseError!u16 {
+fn parseGridCount(value: []const u8) CaseError!u16 {
     if (value.len == 0) return error.InvalidFixture;
     var start: usize = 0;
     if (value[0] == '+') start = 1;
     if (start == value.len) return error.InvalidFixture;
 
-    var count: usize = 0;
+    var count: u16 = 0;
     var has_digit = false;
     for (value[start..]) |character| {
         if (character < '0' or character > '9') return error.InvalidFixture;
         has_digit = true;
-        if (count >= grid_layout.grid_track_count_max) continue;
-        const digit: usize = character - '0';
-        if (count > (grid_layout.grid_track_count_max - digit) / 10) {
-            count = grid_layout.grid_track_count_max;
-        } else {
-            count = count * 10 + digit;
-        }
+        const digit: u16 = @intCast(character - '0');
+        count = std.math.mul(u16, count, 10) catch return error.InvalidFixture;
+        count = std.math.add(u16, count, digit) catch return error.InvalidFixture;
     }
     if (!has_digit or count == 0) return error.InvalidFixture;
-    return @intCast(@min(count, grid_layout.grid_track_count_max));
+    return count;
 }
 
 fn parseGridTemplate(
@@ -3138,7 +3268,7 @@ fn parseGridPlacement(value: []const u8) CaseError!style.GridPlacement {
         {
             return error.InvalidFixture;
         }
-        const parsed_span = parseSaturatedGridCount(span_text) catch {
+        const parsed_span = parseGridCount(span_text) catch {
             if (isNamedGridLine(span_text)) return error.Unsupported;
             return error.InvalidFixture;
         };
@@ -3147,37 +3277,38 @@ fn parseGridPlacement(value: []const u8) CaseError!style.GridPlacement {
     if (std.mem.indexOfAny(u8, trimmed, " \t\n\r") != null) {
         return error.InvalidFixture;
     }
-    const line = parseSaturatedGridLine(trimmed) catch {
+    const line = parseGridLine(trimmed) catch {
         if (isNamedGridLine(trimmed)) return error.Unsupported;
         return error.InvalidFixture;
     };
     return .{ .line = line };
 }
 
-fn parseSaturatedGridLine(value: []const u8) CaseError!i16 {
+fn parseGridLine(value: []const u8) CaseError!i16 {
     if (value.len == 0) return error.InvalidFixture;
     var index: usize = 0;
     var negative = false;
-    if (value[index] == '-' or value[index] == '+') {
-        negative = value[index] == '-';
-        index += 1;
+    if (value[0] == '-' or value[0] == '+') {
+        negative = value[0] == '-';
+        index = 1;
     }
     if (index == value.len) return error.InvalidFixture;
 
-    var magnitude: usize = 0;
+    var magnitude: u16 = 0;
     for (value[index..]) |character| {
         if (character < '0' or character > '9') return error.InvalidFixture;
-        if (magnitude >= grid_layout.grid_track_count_max) continue;
-        const digit: usize = character - '0';
-        if (magnitude > (grid_layout.grid_track_count_max - digit) / 10) {
-            magnitude = grid_layout.grid_track_count_max;
-        } else {
-            magnitude = magnitude * 10 + digit;
-        }
+        const digit: u16 = @intCast(character - '0');
+        magnitude = std.math.mul(u16, magnitude, 10) catch return error.InvalidFixture;
+        magnitude = std.math.add(u16, magnitude, digit) catch return error.InvalidFixture;
     }
     if (magnitude == 0) return error.InvalidFixture;
-    const bounded: i32 = @intCast(@min(magnitude, grid_layout.grid_track_count_max));
-    return @intCast(if (negative) -bounded else bounded);
+    if (negative) {
+        if (magnitude > 32768) return error.InvalidFixture;
+        if (magnitude == 32768) return std.math.minInt(i16);
+        return -@as(i16, @intCast(magnitude));
+    }
+    if (magnitude > 32767) return error.InvalidFixture;
+    return @intCast(magnitude);
 }
 
 fn isNamedGridLine(value: []const u8) bool {
@@ -3311,18 +3442,61 @@ const AhemMetrics = struct {
     max_line_length: usize = 0,
 };
 
-fn ahemMeasure(text: []const u8, input: layout_context.MeasureInput) widget.Size {
-    return layout_context.measureContent(ahemMeasureBase, text, input);
+fn ahemMeasure(
+    content: []const u8,
+    input: layout_context.MeasureInput,
+) layout_context.LayoutError!layout_context.TextMeasurement {
+    return layout_context.measureContent(ahemMeasureSource(), content, input);
 }
 
-fn ahemMeasureBase(text: []const u8, input: layout_context.MeasureInput) widget.Size {
-    const metrics = measureAhemMetrics(text);
+fn ahemMeasureSource() layout_context.MeasureSource {
+    return .{ .callback = ahemMeasureBase };
+}
+
+/// The synthetic Ahem provider. It maps the logical axes onto the physical
+/// constraints and reports no baseline, so core's historical 0.8-of-size
+/// fallback keeps the fixture goldens identical.
+fn ahemMeasureBase(
+    _: ?*anyopaque,
+    content: []const u8,
+    input: layout_context.MeasureInput,
+) layout_context.LayoutError!layout_context.TextMeasurement {
+    const horizontal = switch (input.writing_mode) {
+        .horizontal_tb => ahemMeasureHorizontal(content, input),
+        .vertical_lr => ahemMeasureVertical(content, input),
+    };
+    return horizontal;
+}
+
+fn ahemMeasureHorizontal(
+    content: []const u8,
+    input: layout_context.MeasureInput,
+) layout_context.TextMeasurement {
+    const metrics = measureAhemMetrics(content);
     const width = ahemInlineSize(metrics, input);
-    const line_count = ahemLineCount(text, width);
+    const line_count = ahemLineCount(content, width);
     const height: f32 = @floatCast(
         @as(f64, @floatFromInt(line_count)) * @as(f64, ahem_line_height),
     );
     return .{ .width = width, .height = height };
+}
+
+fn ahemMeasureVertical(
+    content: []const u8,
+    input: layout_context.MeasureInput,
+) layout_context.TextMeasurement {
+    var horizontal_input = input;
+    horizontal_input.known_dimensions = .{
+        .width = input.known_dimensions.height,
+        .height = input.known_dimensions.width,
+    };
+    horizontal_input.available_space = .{
+        .width = input.available_space.height,
+        .height = input.available_space.width,
+    };
+    horizontal_input.writing_mode = .horizontal_tb;
+    const horizontal = ahemMeasureHorizontal(content, horizontal_input);
+    return .{ .width = horizontal.height, .height = horizontal.width };
 }
 
 fn measureAhemMetrics(text: []const u8) AhemMetrics {

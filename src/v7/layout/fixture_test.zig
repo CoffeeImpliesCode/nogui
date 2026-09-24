@@ -12,9 +12,12 @@ test "runs the complete pinned fixture corpus" {
         return;
     }
 
-    try std.testing.expectEqual(@as(usize, 5504), result.passed);
+    try std.testing.expectEqual(@as(usize, 5524), result.passed);
     try std.testing.expectEqual(@as(usize, 0), result.failed);
-    try std.testing.expectEqual(@as(usize, 20), result.unsupported);
+    try std.testing.expectEqual(@as(usize, 0), result.unsupported);
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("", &expected, .{});
+    try std.testing.expectEqual(expected, result.unsupported_sha256);
 }
 
 test "runs one pinned fixture variant" {
@@ -46,4 +49,21 @@ test "runs a pinned fixture range" {
         error.FixtureNotFound,
         fixture.runRange(std.testing.allocator, 5524, 1),
     );
+}
+
+test "runs all pinned vertical-lr fixture variants" {
+    const source_ids = [_][]const u8{
+        "flex/intrinsic_sizing_main_size_column.html",
+        "flex/intrinsic_sizing_main_size_column_nested.html",
+        "flex/intrinsic_sizing_main_size_column_wrap.html",
+        "grid/grid_aspect_ratio_fill_child_max_height.html",
+        "grid/grid_relayout_vertical_text.html",
+    };
+
+    for (source_ids) |source_id| {
+        const result = try fixture.runAll(std.testing.allocator, source_id);
+        try std.testing.expectEqual(@as(usize, 4), result.passed);
+        try std.testing.expectEqual(@as(usize, 0), result.failed);
+        try std.testing.expectEqual(@as(usize, 0), result.unsupported);
+    }
 }

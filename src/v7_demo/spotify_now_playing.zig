@@ -37,7 +37,6 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
             .left = now_playing_rail_padding_x,
         },
         .fill = theme.c_sidebar_bg,
-        .gradient = theme.srgbToOklab(theme.c_sidebar_bg),
     });
     defer ctx.pop();
 
@@ -121,7 +120,6 @@ fn drawMetadata(
         .clip = true,
         .padding = .{ .top = 10, .right = 12, .bottom = 10, .left = 12 },
         .fill = theme.c_card_bg,
-        .gradient = theme.srgbToOklab(theme.c_card_bg),
         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
     });
     defer ctx.pop();

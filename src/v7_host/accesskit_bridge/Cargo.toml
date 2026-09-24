@@ -1,0 +1,95 @@
+[package]
+name = "nogui_accesskit_bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Narrow, panic-contained C ABI bridge from nogui to AccessKit"
+publish = false
+
+[lib]
+name = "nogui_accesskit_bridge"
+path = "src/lib.rs"
+# A static library plus an rlib so `cargo test` can exercise the marshalling
+# without producing a second C artifact.
+crate-type = ["staticlib", "rlib"]
+
+# The patched AT-SPI translation layer is a workspace member, so
+# `cargo test --workspace --all-features` builds and runs its unit tests next
+# to this bridge's. A `[patch.crates-io]` path entry on its own does not: cargo
+# does not compile a non-member dependency with `cfg(test)`, so the ordering,
+# signed-id, disabled, one-read dispatch and positioned-range proofs in
+# `vendor/accesskit_atspi_common/src` would never be compiled at all.
+# `--all-features` is what reaches `simplified.rs`, which `accesskit_unix`
+# does not enable, so no host build has compiled that module yet; it brings
+# that module's own upstream tests in as well. This package is still the
+# default member, so `cargo build` for the host archive selects exactly what
+# it selected before.
+#
+# `vendor/accesskit_unix` is deliberately NOT a member. It declares mutually
+# exclusive `async-io` (default) and `tokio` features and fails to compile on
+# both at once, and `--all-features` would enable both. It is named in
+# `exclude` anyway so that the day cargo's path-dependency auto-membership
+# widens, adding it here is not what silently breaks the workspace build.
+[workspace]
+members = ["vendor/accesskit_atspi_common"]
+exclude = ["vendor/accesskit_unix"]
+
+# ONE crate, ONE archive, three platform adapters.
+#
+# Plan W21 pins the AccessKit baseline, and the shared C ABI in
+# `include/nogui_accesskit_bridge.h` is what a host compiles against on every
+# target. A host therefore links exactly one archive, and the platform adapter
+# inside it is selected by `cfg`, not by a second crate. `accesskit` itself is
+# therefore the same exact pin on every target: a semver-compatible bump would
+# silently move the AT-SPI, UI Automation and AX wire behaviour this bridge is
+# written against, and it would do so on whichever target happened to resolve
+# first.
+[target.'cfg(any(unix, windows))'.dependencies]
+accesskit = "=0.25.0"
+
+# The AT-SPI adapter: every Unix target that is not macOS. `accesskit_unix`
+# 0.23.0 is not target-gated itself, so this is the one source for all of them.
+# It is the only one of the three that takes a deactivation handler, because
+# AT-SPI is the only one that reports a screen reader going away.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# The bridge names `EditableTextHandlerNoMut` and `EditableTextRequest`
+# itself, to hand `accesskit_unix::Adapter::new` a typed handler for the
+# standard AT-SPI `EditableText` range methods. This resolves to the same
+# patched path node the adapter uses, so there is one implementation and one
+# `Context` holding it, not two.
+accesskit_atspi_common = "=0.20.0"
+accesskit_unix = "=0.23.0"
+
+# The AX adapter, which is built around the content view of a real `NSWindow`
+# and is therefore attached after construction rather than inside it. The
+# direct `objc2-foundation` dependency is for `MainThreadMarker`, which the
+# attach and mutation paths use to refuse a call that is not on the main
+# thread. Its `NSThread` feature is named here rather than left to
+# `accesskit_macos` to enable, because the bridge calls into it itself.
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit_macos = "=0.27.0"
+objc2-foundation = { version = "0.2", features = ["NSThread"] }
+
+# The UI Automation adapter, which subclasses a window's procedure to receive
+# `WM_GETOBJECT` and is therefore also attached after construction.
+[target.'cfg(windows)'.dependencies]
+accesskit_windows = "=0.35.0"
+
+# W21 named custom actions. The published `accesskit_atspi_common` 0.20.0
+# publishes only a `click` action over AT-SPI and sends `Action::Click` for
+# index 0 whether or not the node is clickable, so a host that publishes
+# AccessKit's own named actions cannot reach them and a custom-only node has
+# its index 0 mis-dispatched as a click. The local copy under `vendor/` is
+# that same 0.20.0 source with the AT-SPI action list, the disabled-state and
+# named-action dispatch fixes applied; the version pin is unchanged, so the
+# resolved graph and every other AccessKit family pin above stay exactly as
+# they were.
+# The patched package is internal to this bridge and is never published.
+[patch.crates-io]
+# The Unix adapter is the second patched package: it is the published
+# `accesskit_unix` 0.23.0 source with the positioned-edit handler threaded
+# through its adapter state, and with `InsertText`/`DeleteText` delegating to
+# the `PlatformNode` methods above. Version pin and licence unchanged, so the
+# resolved graph and every other AccessKit family pin stay exactly as they
+# were. The patched package is internal to this bridge and never published.
+accesskit_atspi_common = { path = "vendor/accesskit_atspi_common" }
+accesskit_unix = { path = "vendor/accesskit_unix" }

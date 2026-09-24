@@ -1,14 +1,16 @@
 //! v7 widget types — geometry, per-child flex data, kind union, and the
 //! per-frame widget tree.
-//! Per the prototype spec (notes/v7-prototype-spec.md §2).
 const std = @import("std");
 const perf_counters = @import("perf_counters.zig");
 const v7_options = @import("v7_options");
 const CounterSink = perf_counters.CounterSink;
 
-const Id = @import("id.zig").Id;
+const FrameNodeId = @import("id.zig").FrameNodeId;
+const WidgetId = @import("id.zig").WidgetId;
 const callback = @import("callback.zig");
 const style = @import("style.zig");
+const element = @import("element.zig");
+const text = @import("text.zig");
 
 pub const PaintStyleOverride = style.PaintStyleOverride;
 pub const ComponentDefaults = style.ComponentDefaults;
@@ -16,6 +18,7 @@ pub const Style = style.Style;
 pub const PaintStyle = style.PaintStyle;
 pub const StyleOverride = style.StyleOverride;
 pub const Display = style.Display;
+pub const Visibility = style.Visibility;
 pub const Position = style.Position;
 pub const FlexDirection = style.FlexDirection;
 pub const FlexWrap = style.FlexWrap;
@@ -79,8 +82,9 @@ pub const ClipAxes = struct {
     }
 };
 
-/// A clip rectangle in layout (framebuffer px) space. The GPU clip buffer
-/// stores these verbatim (four f32, 16 bytes). An extent of
+/// A clip rectangle in logical window space. The GPU clip buffer stores
+/// these verbatim (four f32, 16 bytes); shader input converts device
+/// fragment coordinates to logical units before clipping.
 /// `disabled_extent` disables clipping on that axis without changing the GPU
 /// ABI; all real clip extents are nonnegative.
 /// 0xFFFFFFFF (no clip id) disables both axes by bypassing the clip lookup.
@@ -144,8 +148,10 @@ pub const ScrollSpec = struct {
     axis: ScrollAxis = .vertical,
 };
 
-/// Text overflow behavior.
-pub const TextOverflow = enum { visible, clip, ellipsis };
+/// Text overflow behavior: what a text box does with content wider than itself.
+/// The enum lives with the text request that carries the policy; it is
+/// re-exported here because a node is where the policy is read and set.
+pub const TextOverflow = text.TextOverflow;
 
 /// A window-rendered SVG icon. This stays value-only so the widget tree
 /// remains independent of the GPU cache that owns its path materials.
@@ -183,14 +189,92 @@ pub fn sliderThumbRect(rail: Rect, fraction: f32) Rect {
     };
 }
 
+/// Checkbox and radio indicator size in px.
+pub const control_indicator_size: f32 = 18;
+
+/// Switch track width in px.
+pub const switch_track_width: f32 = 30;
+
+/// Horizontal gap between a control indicator and its label in px.
+pub const control_gap: f32 = 6;
+
+/// The text column a control's caption starts in. Measure decoration and paint
+/// both read this ONE table, so a caption and its box cannot disagree about
+/// where the text begins.
+pub const TextInsets = struct {
+    /// Horizontal space before the caption, occupied by a control indicator.
+    leading: f32 = 0,
+    /// Horizontal space after the caption. Always zero today; the field keeps
+    /// the table symmetric so a trailing decoration is one edit rather than a
+    /// second convention.
+    trailing: f32 = 0,
+    top: f32 = 0,
+    bottom: f32 = 0,
+
+    /// Total horizontal inset the caption's column gives up.
+    pub fn horizontal(self: TextInsets) f32 {
+        return self.leading + self.trailing;
+    }
+
+    /// Total vertical inset the caption's line box gives up.
+    pub fn vertical(self: TextInsets) f32 {
+        return self.top + self.bottom;
+    }
+};
+
+/// The one text-inset table, by widget kind. A default unstyled node has no
+/// insets at all, so it needs no decoration work and no extra measurement.
+pub fn textInsets(kind: WidgetKind) TextInsets {
+    return switch (kind) {
+        .checkbox, .radio => .{ .leading = control_indicator_size + control_gap },
+        .switch_control => .{ .leading = switch_track_width + control_gap },
+        .progress => .{ .bottom = 14 },
+        .label, .button, .slider, .spacer, .column, .row, .separator, .element => .{},
+    };
+}
+
+/// Axis used by a separator leaf.
+pub const SeparatorAxis = enum { horizontal, vertical };
+
 /// What a widget node is. Payload differs per kind; fields with defaults
 /// may be omitted at construction.
+/// Caller-owned control state must remain valid while any frame tree that
+/// refers to it can still be inspected, including the previous double-buffered
+/// frame.
 pub const WidgetKind = union(enum) {
     column: struct {},
     row: struct {},
     /// `color` is the text color in sRGB (converted to Oklab by the
     /// renderer, like every widget color); default = white.
     label: struct { text: []const u8, color: [4]f32 = .{ 1, 1, 1, 1 } },
+    checkbox: struct {
+        label: []const u8,
+        value: *bool,
+        color: [4]f32 = .{ 1, 1, 1, 1 },
+    },
+    switch_control: struct {
+        label: []const u8,
+        value: *bool,
+        color: [4]f32 = .{ 1, 1, 1, 1 },
+    },
+    radio: struct {
+        label: []const u8,
+        selected: *?u32,
+        option: u32,
+        color: [4]f32 = .{ 1, 1, 1, 1 },
+    },
+    progress: struct {
+        label: []const u8,
+        value: f32,
+        min: f32,
+        max: f32,
+        color: [4]f32 = .{ 1, 1, 1, 1 },
+    },
+    separator: struct {
+        axis: SeparatorAxis = .horizontal,
+        thickness: f32 = 1,
+        color: [4]f32 = .{ 1, 1, 1, 1 },
+    },
     button: struct {
         /// Semantic name retained for input dispatch and accessibility.
         label: []const u8,
@@ -204,7 +288,7 @@ pub const WidgetKind = union(enum) {
         accessible_label: ?[]const u8 = null,
         color: [4]f32 = .{ 1, 1, 1, 1 },
         on_click: ?*const fn (*anyopaque) void = null, // set via callback.wrap()
-        owner: Id = .root, // component_id at creation time
+        owner: FrameNodeId = .root, // component_id at creation time
         user_callback: ?callback.UserCallback = null,
     },
     slider: struct {
@@ -219,6 +303,7 @@ pub const WidgetKind = union(enum) {
         max: f32,
     },
     spacer: struct { size: f32 = 0 },
+    element: *element.Frame,
 };
 
 /// Return a button's visible text while keeping its semantic label intact.
@@ -241,12 +326,46 @@ pub fn sliderVisualLabel(kind: WidgetKind) []const u8 {
     };
 }
 
+/// Per-frame input eligibility. Focus policy resolves defaults by widget kind.
+pub const Interaction = struct {
+    disabled: bool = false,
+    focusable: ?bool = null,
+    /// Negative values stay programmatically focusable but leave Tab traversal.
+    tab_index: ?i32 = null,
+    tab_group: ?u32 = null,
+};
+
+/// The band a placed subtree paints in.
+///
+/// Placement is frame-local, so this travels with the NODE and by VALUE: a
+/// published tree — and the previous tree a consumer still reads — carries
+/// its own bands without reaching into a bank the next frame recycles. It is
+/// a resolved physical band, never the authored node layer, so a placed node
+/// keeps its own authored order INSIDE the band.
+pub const PlacementPaint = struct {
+    /// Registration index of the record whose subtree this node is in. The
+    /// band it names is one indexed read, not a search.
+    record_index: u32,
+    /// Band BASE. Disjoint per placed record and above every application
+    /// layer, so a popup covers the whole application while its own nodes
+    /// keep the order they authored.
+    layer: u32,
+    /// The (priority, registration) key this band was assigned by: the same
+    /// comparator hit routing uses.
+    order: u64,
+};
+
 /// One node in the tree.
 pub const WidgetNode = struct {
-    id: Id,
+    id: FrameNodeId,
+    /// Stable identity for interactive nodes; display nodes remain unkeyed.
+    widget_id: ?WidgetId = null,
+    interaction: Interaction = .{},
+    /// Dense component receiver for routed input in this committed frame.
+    owner: FrameNodeId = .root,
     kind: WidgetKind,
-    parent: Id,
-    children: std.ArrayListUnmanaged(Id) = .empty,
+    parent: FrameNodeId,
+    children: std.ArrayListUnmanaged(FrameNodeId) = .empty,
     /// BORDER box, positioned relative to the parent's CONTENT box (see
     /// Rect's doc). Filled by the layout dispatcher.
     rect: Rect = .{},
@@ -262,6 +381,30 @@ pub const WidgetNode = struct {
     /// True when the current block layout pass hides this node through itself
     /// or an ancestor. Recomputed at every direct block layout entry.
     layout_hidden: bool = false,
+    /// Paint, input and semantic visibility, including hidden ancestors.
+    paint_hidden: bool = false,
+    /// A REGISTERED overlay record resolved to nothing this frame, so this
+    /// node is inside a DORMANT overlay subtree: laid out, filled and
+    /// authored visible, and placed by nothing. Painting or hitting it would
+    /// show and route a popup the consumer dismissed, so every ordinary paint
+    /// and hit walk skips it — the draw-command collector, the scene's own
+    /// chrome and rings, `input.hitTest`, `input.isEnabled` (and with it tab
+    /// order and focus assignment) and the inspector's own visibility.
+    ///
+    /// The flag is PER NODE and never inherited: `stage` decides it by the
+    /// DEEPEST record that names the node, so a node inside a dormant subtree
+    /// is dormant itself, a nested unplaced record is hidden inside a placed
+    /// ancestor at any priority, and a nested PLACED record inside a dormant
+    /// one stays painted, hittable, pressable and focusable together.
+    ///
+    /// BY VALUE, like `placement_clip` and `placement_paint`: `Frame.stage`
+    /// writes it into the tree it resolves and it is published with that tree,
+    /// so a tree keeps answering for its own frame and no walk has to consult
+    /// the frame's bank. It is a placement fact, never an authored one:
+    /// `isVisible` reads `paint_hidden` alone, and `stage` clears this flag for
+    /// every node before it resolves anything, so a marker left by an earlier
+    /// resolution can never be read back as authored hidden content.
+    overlay_dormant: bool = false,
     /// Canonical typed layout values.
     style: Style = .{},
     /// Resolved typed paint values. This is the canonical paint view.
@@ -270,12 +413,17 @@ pub const WidgetNode = struct {
     text_overflow: TextOverflow = .visible,
     text_max_width: ?f32 = null,
     shared_columns: ?*const SharedColumns = null,
-    /// Font size in px for text-bearing nodes; 0 = the host's default.
-    /// Set from opts.font_size; the measure hook and the text engine
-    /// dispatch on it.
-    font_size: f32 = 0,
-    /// Font selection: 0 = the host default font, 1 = the second font.
-    font_id: u8 = 0,
+    /// The AUTHORED text override for this node, copied into the frame arena.
+    /// Null on a node that carries no text options of its own; a container with
+    /// overrides keeps it so directly assembled trees inherit too.
+    text_input: ?*const text.TextInput = null,
+    /// The RESOLVED text request, frame-owned and immutable after layout.
+    /// Null until inheritance is resolved, and forever on a node whose whole
+    /// subtree asks for no text.
+    text_request: ?*const text.NodeText = null,
+    /// Carried through measure so a fixture can ask for vertical text. Layout
+    /// assigns no writing-mode semantics of its own.
+    writing_mode: text.WritingMode = .horizontal_tb,
     /// Ancestor clip applied to this node's own decorations. The node's
     /// content clip must not crop its border, shadow, slider chrome, or
     /// interaction rings.
@@ -283,6 +431,21 @@ pub const WidgetNode = struct {
     /// Clip applied to this node's content, including text and icons.
     /// 0xFFFFFFFF means no clip.
     clip_id: u32 = 0xFFFFFFFF,
+    /// A clip imposed on this node by something that does not resize it.
+    /// Overlay placement writes the anchor's inherited clip here instead of
+    /// shrinking the content box, so a clipped popup keeps its laid-out size
+    /// and origin. Frame-local: default null, cloned like any other node
+    /// field, and it constrains this node's OWN fill and every descendant —
+    /// paint, hit and inspection all read this one field. The GPU clip buffer
+    /// ABI is unchanged; consumers intersect it into a pushed clip rect.
+    placement_clip: ?ClipRect = null,
+
+    /// The paint band overlay placement assigned this node, or null when no
+    /// placement covers it. Frame-local like `placement_clip` and cloned like
+    /// any other node field: every painter reads it through
+    /// `effectiveLayer`, and the authored `paint.layer` is never mutated, so
+    /// the authored style stays exactly what inspection reports it as.
+    placement_paint: ?PlacementPaint = null,
 
     /// Return the independent axes on which this node clips content and
     /// descendants.
@@ -298,6 +461,90 @@ pub const WidgetNode = struct {
     }
 };
 
+/// A late query or list measures its viewport independently of materialized
+/// children. Layout still visits those children to establish scroll extent.
+pub fn isLateQuery(node: *const WidgetNode) bool {
+    return node.kind == .element and switch (node.kind.element.late_scope) {
+        .query, .list => true,
+        .none => false,
+    };
+}
+
+/// A node is visible only if neither it nor any ancestor is hidden or display-none.
+/// The parent walk also handles directly assembled trees without a layout pass.
+pub fn isVisible(tree: *const WidgetTree, id: FrameNodeId) bool {
+    if (tree.visibility_prepared) {
+        const node = tree.nodeConst(id) orelse return false;
+        return !node.paint_hidden;
+    }
+    var current = id;
+    var remaining = tree.nodes.items.len;
+    while (current != .root and remaining > 0) : (remaining -= 1) {
+        const node = tree.nodeConst(current) orelse return false;
+        if (node.style.display == .none or node.style.visibility == .hidden) return false;
+        current = node.parent;
+    }
+    return current == .root;
+}
+
+/// The authored local layer plus one custom record's own bump. Every layer
+/// addition is CHECKED and typed: a layer space that cannot hold the sum
+/// fails the frame instead of wrapping or clamping onto a layer that means
+/// something else.
+pub fn localLayer(node: *const WidgetNode, bump: u32) error{PaintLayerOverflow}!u32 {
+    return std.math.add(u32, node.paint.layer, bump) catch error.PaintLayerOverflow;
+}
+
+/// The physical layer this node paints in: its authored local layer, raised
+/// by the band its placement assigned. One definition every painter reads —
+/// node background, custom records and generated control chrome alike — so a
+/// placed subtree can never be painted over by the application it covers,
+/// while its own nodes keep the order they authored inside the band.
+pub fn effectiveLayer(node: *const WidgetNode, bump: u32) error{PaintLayerOverflow}!u32 {
+    const local = try localLayer(node, bump);
+    const band = node.placement_paint orelse return local;
+    return std.math.add(u32, local, band.layer) catch error.PaintLayerOverflow;
+}
+
+/// The highest raw local layer THIS node emits: its own authored layer, or
+/// the largest authored-plus-custom-bump sum among its custom records. A node
+/// with no custom records emits its authored layer and nothing else.
+pub fn emittedLocalLayer(node: *const WidgetNode) error{PaintLayerOverflow}!u32 {
+    var raw = node.paint.layer;
+    if (node.kind == .element) {
+        for (node.kind.element.paint_records.items) |record| {
+            const bump = switch (record) {
+                .rect => |value| value.layer,
+                .path => |value| value.layer,
+                .image => |value| value.layer,
+            };
+            raw = @max(raw, try localLayer(node, bump));
+        }
+    }
+    return raw;
+}
+
+/// The highest raw local layer the application actually emits. Overlay bands
+/// are assigned above it, so a placed popup always covers the whole tree.
+///
+/// ONE scalar pass and no scratch: the answer is a maximum, so a node never
+/// needs its descendants' maxima and nothing here inherits from an ancestor.
+/// The painter skips exactly the nodes this skips, so an unplaced custom
+/// record that stays high still counts — it is only ever missing a band. A
+/// DORMANT overlay subtree is the one exception, and it is the same
+/// exception on both sides: its nodes are excluded here and excluded by every
+/// painter, so a record nothing placed can neither paint nor lift a band.
+/// Its own raw layer is untouched: `emittedLocalLayer` still reports it, so
+/// the same record counts again the moment a placement places it.
+pub fn maximumPaintLayer(tree: *const WidgetTree) error{PaintLayerOverflow}!u32 {
+    var maximum: u32 = 0;
+    for (tree.nodes.items) |node| {
+        if (node.paint_hidden or node.overlay_dormant) continue;
+        maximum = @max(maximum, try emittedLocalLayer(&node));
+    }
+    return maximum;
+}
+
 /// The per-frame widget tree.
 ///
 /// Invariant: node order is **post-order** — a node's children are appended
@@ -311,10 +558,22 @@ pub const WidgetTree = struct {
 
     nodes: std.ArrayListUnmanaged(WidgetNode) = .empty,
     allocator: std.mem.Allocator,
+    /// Storage for the immutable text records `layoutTree` publishes. A record
+    /// outlives the publication that replaced it: a snapshot taken before the
+    /// change still reads the superseded record, so nothing here is ever freed
+    /// individually. One arena releases the whole set at `deinit`, which is why
+    /// a repeated layout over a GPA-backed tree leaks nothing. Backing chunks
+    /// come from `allocator`, so a tree built inside a frame arena carries its
+    /// records in that arena and needs no teardown of its own.
+    text_records: std.heap.ArenaAllocator,
     next_id: u32 = 1,
+    /// The canonical layout pass has propagated display and visibility flags.
+    visibility_prepared: bool = false,
     /// Frame-local index maintained by `appendNode` for production trees.
     /// Directly assembled trees can leave it incomplete; lookup then scans.
-    id_index: std.AutoHashMapUnmanaged(Id, u32) = .empty,
+    id_index: std.AutoHashMapUnmanaged(FrameNodeId, u32) = .empty,
+    /// Stable handle to this frame's dense node ID. Owned by this frame arena.
+    stable_index: std.AutoHashMapUnmanaged(WidgetId, FrameNodeId) = .empty,
     /// Optional bounded ID-to-node-index view prepared at the tree-complete
     /// boundary. `dense_absent` marks an ID that is not present.
     dense_id_index: ?[]u32 = null,
@@ -331,8 +590,17 @@ pub const WidgetTree = struct {
     pub fn init(allocator: std.mem.Allocator) WidgetTree {
         return .{
             .allocator = allocator,
+            .text_records = std.heap.ArenaAllocator.init(allocator),
             .counter_sink = CounterSink.init(null),
         };
+    }
+
+    /// The allocator `layoutTree` publishes text records through. Read it
+    /// through the tree's own address: `init` returns by value, so an allocator
+    /// captured while building the tree would name the temporary, not the
+    /// storage the records live in.
+    pub fn textRecordAllocator(self: *WidgetTree) std.mem.Allocator {
+        return self.text_records.allocator();
     }
 
     pub fn setCounterSink(self: *WidgetTree, counters: ?*perf_counters.Counters) void {
@@ -361,6 +629,7 @@ pub const WidgetTree = struct {
         }
 
         var maximum_id: u32 = 0;
+        var minimum_id: u32 = std.math.maxInt(u32);
         for (self.nodes.items, 0..) |*node_value, node_index| {
             const stored_index = self.id_index.get(node_value.id) orelse {
                 self.invalidateDenseIdLookup();
@@ -374,7 +643,9 @@ pub const WidgetTree = struct {
                 self.invalidateDenseIdLookup();
                 return;
             }
-            maximum_id = @max(maximum_id, @intFromEnum(node_value.id));
+            const node_id = @intFromEnum(node_value.id);
+            maximum_id = @max(maximum_id, node_id);
+            minimum_id = @min(minimum_id, node_id);
         }
 
         if (maximum_id == std.math.maxInt(u32)) {
@@ -388,6 +659,10 @@ pub const WidgetTree = struct {
             self.invalidateDenseIdLookup();
             return;
         };
+        const interval_len_u64 =
+            @as(u64, maximum_id) - @as(u64, minimum_id) + 1;
+        const contiguous_interval = interval_len_u64 == node_count_u64;
+
         if (node_count_u64 < minimum_node_count) {
             self.invalidateDenseIdLookup();
             return;
@@ -399,7 +674,14 @@ pub const WidgetTree = struct {
 
         const candidate = try self.allocator.alloc(u32, dense_len);
         errdefer self.allocator.free(candidate);
-        @memset(candidate, dense_absent);
+        if (contiguous_interval) {
+            // Validation and cardinality prove every ID from minimum through
+            // maximum is filled below, so only the absent prefix needs setup.
+            const prefix_len = std.math.cast(usize, minimum_id) orelse unreachable;
+            @memset(candidate[0..prefix_len], dense_absent);
+        } else {
+            @memset(candidate, dense_absent);
+        }
         for (self.nodes.items, 0..) |*node_value, node_index| {
             const index_u32 = std.math.cast(u32, node_index) orelse unreachable;
             candidate[@intFromEnum(node_value.id)] = index_u32;
@@ -418,12 +700,16 @@ pub const WidgetTree = struct {
         }
         self.nodes.deinit(self.allocator);
         self.id_index.deinit(self.allocator);
+        self.stable_index.deinit(self.allocator);
+        // Superseded records included: nothing read them after the tree died.
+        self.text_records.deinit();
         self.* = undefined;
     }
 
     /// Append a node and atomically add its frame-local lookup entry.
-    pub fn appendNode(self: *WidgetTree, node_value: WidgetNode) !void {
+    pub fn appendNode(self: *WidgetTree, node_value: WidgetNode) error{ OutOfMemory, DuplicateWidgetKey }!void {
         self.invalidateDenseIdLookup();
+        self.visibility_prepared = false;
         try self.nodes.append(self.allocator, node_value);
         errdefer _ = self.nodes.pop();
         try self.id_index.put(
@@ -431,19 +717,36 @@ pub const WidgetTree = struct {
             node_value.id,
             @intCast(self.nodes.items.len - 1),
         );
+        errdefer _ = self.id_index.remove(node_value.id);
+        if (node_value.widget_id) |widget_id| {
+            const entry = try self.stable_index.getOrPut(self.allocator, widget_id);
+            if (entry.found_existing) return error.DuplicateWidgetKey;
+            entry.value_ptr.* = node_value.id;
+        }
+    }
+
+    /// Attach an explicit key after a control's dense node was created.
+    /// The frame-local lookup is published only after the map insert succeeds.
+    pub fn bindWidget(self: *WidgetTree, id: FrameNodeId, widget_id: WidgetId) !void {
+        const node_value = self.node(id) orelse return error.InvalidStyle;
+        if (node_value.widget_id != null) return error.DuplicateWidgetKey;
+        const entry = try self.stable_index.getOrPut(self.allocator, widget_id);
+        if (entry.found_existing) return error.DuplicateWidgetKey;
+        node_value.widget_id = widget_id;
+        entry.value_ptr.* = id;
     }
 
     /// Append a child id through the tree-owned frame allocator.
     /// Missing parent IDs are malformed tree input and return
     /// `error.InvalidStyle`.
-    pub fn appendChild(self: *WidgetTree, parent: Id, child: Id) !void {
+    pub fn appendChild(self: *WidgetTree, parent: FrameNodeId, child: FrameNodeId) !void {
         const parent_node = self.node(parent) orelse return error.InvalidStyle;
         try parent_node.children.append(self.allocator, child);
     }
 
     /// Return a node's array index. Production trees use the complete map;
     /// directly assembled trees fall back to their original linear lookup.
-    pub fn nodeIndex(self: *const WidgetTree, id: Id) ?usize {
+    pub fn nodeIndex(self: *const WidgetTree, id: FrameNodeId) ?usize {
         if (self.dense_id_index) |dense_id_index| {
             const id_value = @intFromEnum(id);
             if (id_value < dense_id_index.len) {
@@ -478,12 +781,60 @@ pub const WidgetTree = struct {
     pub fn moveNodeToEnd(self: *WidgetTree, index: usize) void {
         std.debug.assert(index < self.nodes.items.len);
         self.invalidateDenseIdLookup();
+        self.visibility_prepared = false;
         const moved = self.nodes.orderedRemove(index);
         self.nodes.appendAssumeCapacity(moved);
         for (self.nodes.items[index..], index..) |node_value, new_index| {
             if (self.id_index.getPtr(node_value.id)) |stored_index| {
                 stored_index.* = @intCast(new_index);
             }
+        }
+    }
+
+    /// Rebuild postorder once after a bounded late subroot has added children
+    /// beneath an already closed ancestor. Validation precedes any mutation.
+    pub fn finalizePostorder(self: *WidgetTree, allocator: std.mem.Allocator) !void {
+        const count = self.nodes.items.len;
+        const ordered = try allocator.alloc(WidgetNode, count);
+        defer allocator.free(ordered);
+        const marks = try allocator.alloc(u8, count);
+        defer allocator.free(marks);
+        @memset(marks, 0);
+        const Cursor = struct { index: usize, child: usize = 0 };
+        const stack = try allocator.alloc(Cursor, count);
+        defer allocator.free(stack);
+        var written: usize = 0;
+        for (self.nodes.items, 0..) |node_value, root_index| {
+            if (node_value.parent != .root) continue;
+            var depth: usize = 1;
+            stack[0] = .{ .index = root_index };
+            marks[root_index] = 1;
+            while (depth > 0) {
+                const cursor = &stack[depth - 1];
+                const current = &self.nodes.items[cursor.index];
+                if (cursor.child < current.children.items.len) {
+                    const child_id = current.children.items[cursor.child];
+                    cursor.child += 1;
+                    const child_index = self.nodeIndex(child_id) orelse return error.InvalidStyle;
+                    if (self.nodes.items[child_index].parent != current.id or
+                        marks[child_index] != 0 or depth == count) return error.InvalidStyle;
+                    marks[child_index] = 1;
+                    stack[depth] = .{ .index = child_index };
+                    depth += 1;
+                    continue;
+                }
+                ordered[written] = current.*;
+                written += 1;
+                marks[cursor.index] = 2;
+                depth -= 1;
+            }
+        }
+        if (written != count) return error.InvalidStyle;
+        self.invalidateDenseIdLookup();
+        @memcpy(self.nodes.items, ordered);
+        for (self.nodes.items, 0..) |node_value, index| {
+            const stored = self.id_index.getPtr(node_value.id) orelse return error.InvalidStyle;
+            stored.* = @intCast(index);
         }
     }
 
@@ -498,15 +849,28 @@ pub const WidgetTree = struct {
 
     /// Lookup by id. Indexed frame trees resolve in O(1); directly assembled
     /// trees retain linear lookup semantics. Unknown IDs return null.
-    pub fn node(self: *WidgetTree, id: Id) ?*WidgetNode {
+    pub fn node(self: *WidgetTree, id: FrameNodeId) ?*WidgetNode {
         const index = self.nodeIndex(id) orelse return null;
         return &self.nodes.items[index];
     }
 
     /// Const-safe lookup with the same indexed and fallback behavior as `node`.
-    pub fn nodeConst(self: *const WidgetTree, id: Id) ?*const WidgetNode {
+    pub fn nodeConst(self: *const WidgetTree, id: FrameNodeId) ?*const WidgetNode {
         const index = self.nodeIndex(id) orelse return null;
         return &self.nodes.items[index];
+    }
+
+    /// Resolve a persistent handle inside this specific committed or staged
+    /// tree. A handle from another owner or retired generation cannot match.
+    pub fn frameNode(self: *const WidgetTree, widget_id: WidgetId) ?FrameNodeId {
+        if (self.stable_index.get(widget_id)) |id| return id;
+        if (self.id_index.count() == self.nodes.items.len) return null;
+        for (self.nodes.items) |node_value| {
+            if (node_value.widget_id) |candidate| {
+                if (candidate.eql(widget_id)) return node_value.id;
+            }
+        }
+        return null;
     }
 
     /// All nodes whose parent == .root (top-level).
@@ -587,7 +951,7 @@ const BorderOrigin = struct {
 fn resolveBorderOrigin(
     comptime visual: bool,
     tree: *const WidgetTree,
-    id: Id,
+    id: FrameNodeId,
 ) BorderOrigin {
     var ox: f32 = 0;
     var oy: f32 = 0;
@@ -625,12 +989,12 @@ fn resolveBorderOrigin(
 /// Resolve a node's absolute border-box origin by walking parents: each
 /// ancestor contributes its own (relative) offset plus the step into its
 /// CONTENT box (border + padding). The surface origin is (0,0).
-pub fn absoluteBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
+pub fn absoluteBorderOrigin(tree: *const WidgetTree, id: FrameNodeId) [2]f32 {
     return resolveBorderOrigin(false, tree, id).origin;
 }
 
 /// Absolute border box of a node (origin + its own w/h).
-pub fn absoluteRect(tree: *const WidgetTree, id: Id) Rect {
+pub fn absoluteRect(tree: *const WidgetTree, id: FrameNodeId) Rect {
     const resolved = resolveBorderOrigin(false, tree, id);
     const origin = resolved.origin;
     const node = resolved.node orelse return .{ .x = origin[0], .y = origin[1] };
@@ -639,20 +1003,58 @@ pub fn absoluteRect(tree: *const WidgetTree, id: Id) Rect {
 
 /// Resolve a node's visual border-box origin, accounting for ancestor scroll.
 /// The target node's own scroll offset does not move its border box.
-pub fn visualBorderOrigin(tree: *const WidgetTree, id: Id) [2]f32 {
+pub fn visualBorderOrigin(tree: *const WidgetTree, id: FrameNodeId) [2]f32 {
     return resolveBorderOrigin(true, tree, id).origin;
 }
 
 /// Visual border box of a node, after ancestor scroll offsets are applied.
-pub fn visualBorderRect(tree: *const WidgetTree, id: Id) Rect {
+pub fn visualBorderRect(tree: *const WidgetTree, id: FrameNodeId) Rect {
     const resolved = resolveBorderOrigin(true, tree, id);
     const origin = resolved.origin;
     const node = resolved.node orelse return .{ .x = origin[0], .y = origin[1] };
     return .{ .x = origin[0], .y = origin[1], .w = node.rect.w, .h = node.rect.h };
 }
 
+/// Move a node's RELATIVE border box so its VISUAL origin lands at `origin`.
+/// This is the one mutation a frame-local placement performs: every
+/// descendant inherits the move through the parent walk in
+/// `visualBorderRect`, and the node's own border box, content box and
+/// semantic bounds follow it, so paint, input, semantics and inspection read
+/// the same geometry without a per-node offset.
+///
+/// Relative rects stay the storage form: the offset is written into the
+/// subtree's root, never into a second copy of the tree.
+pub fn moveVisualOrigin(
+    tree: *WidgetTree,
+    id: FrameNodeId,
+    origin: [2]f32,
+) error{InvalidGeometry}!void {
+    if (!std.math.isFinite(origin[0]) or !std.math.isFinite(origin[1]))
+        return error.InvalidGeometry;
+    const node = tree.node(id) orelse return error.InvalidGeometry;
+    const parent_id = node.parent;
+    if (parent_id == .root) {
+        node.rect.x = origin[0];
+        node.rect.y = origin[1];
+        return;
+    }
+    const parent = tree.nodeConst(parent_id) orelse return error.InvalidGeometry;
+    const edges = geometryBoxEdges(parent, parent.rect.w);
+    var base = resolveBorderOrigin(true, tree, parent_id).origin;
+    base[0] += edges.border.left + edges.padding.left;
+    base[1] += edges.border.top + edges.padding.top;
+    if (parent.scroll) |scroll| {
+        base[0] -= scroll.state.offset[0];
+        base[1] -= scroll.state.offset[1];
+    }
+    node.rect.x = origin[0] - base[0];
+    node.rect.y = origin[1] - base[1];
+    if (!std.math.isFinite(node.rect.x) or !std.math.isFinite(node.rect.y))
+        return error.InvalidGeometry;
+}
+
 /// Visual content box of a node, after ancestor scroll offsets are applied.
-pub fn visualContentRect(tree: *const WidgetTree, id: Id) Rect {
+pub fn visualContentRect(tree: *const WidgetTree, id: FrameNodeId) Rect {
     const resolved = resolveBorderOrigin(true, tree, id);
     const origin = resolved.origin;
     const node = resolved.node orelse return .{ .x = origin[0], .y = origin[1] };
@@ -672,12 +1074,86 @@ pub fn pointInClipAxes(rect: Rect, axes: ClipAxes, pos: [2]f32) bool {
     return true;
 }
 
-/// Return whether a point is inside every clipped ancestor axis of a node.
-pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
+/// The effective clip on a node's own painted box: its border box intersected
+/// with the nearest `placement_clip` on itself or an ancestor. This is the ONE
+/// definition every consumer reads — paint, hit and inspection — so a popup
+/// clipped by placement clips identically in all three. Null means no
+/// placement clip constrains the node.
+pub fn placedContentRect(tree: *const WidgetTree, id: FrameNodeId) ?Rect {
+    var clip: ?ClipRect = null;
+    var current = id;
+    var remaining = tree.nodes.items.len + 1;
+    while (current != .root and remaining > 0) : (remaining -= 1) {
+        const node = tree.nodeConst(current) orelse break;
+        if (node.placement_clip) |imposed| {
+            clip = if (clip) |existing| intersectClips(existing, imposed) else imposed;
+        }
+        if (current == id) break;
+        current = node.parent;
+    }
+    const imposed = clip orelse return null;
+    return clipRectToRect(visualBorderRect(tree, id), imposed);
+}
+
+/// Intersect two clip rects, keeping an axis unconstrained when either side
+/// leaves it unconstrained. This is the same rule drawcmd applies when it
+/// folds a clip into a pushed rect, expressed once for the core.
+pub fn intersectClips(first: ClipRect, second: ClipRect) ClipRect {
+    const x = intersectClipAxis(first.x, first.w, second.x, second.w);
+    const y = intersectClipAxis(first.y, first.h, second.y, second.h);
+    return .{ .x = x.start, .y = y.start, .w = x.extent, .h = y.extent };
+}
+
+const ClipAxisSpan = struct { start: f32, extent: f32 };
+
+fn intersectClipAxis(
+    start: f32,
+    extent: f32,
+    other_start: f32,
+    other_extent: f32,
+) ClipAxisSpan {
+    if (extent == ClipRect.disabled_extent) return .{ .start = other_start, .extent = other_extent };
+    if (other_extent == ClipRect.disabled_extent) return .{ .start = start, .extent = extent };
+    const from = @max(start, other_start);
+    return .{
+        .start = from,
+        .extent = @max(0, @min(start + extent, other_start + other_extent) - from),
+    };
+}
+
+/// The part of `rect` a clip leaves visible, as a plain rectangle. An axis the
+/// clip does not constrain keeps the whole extent.
+pub fn clipRectToRect(rect: Rect, clip: ClipRect) Rect {
+    var out = rect;
+    if (clip.clipsX()) {
+        const start = @max(rect.x, clip.x);
+        out.x = start;
+        out.w = @max(0, @min(rect.x + rect.w, clip.x + clip.w) - start);
+    }
+    if (clip.clipsY()) {
+        const start = @max(rect.y, clip.y);
+        out.y = start;
+        out.h = @max(0, @min(rect.y + rect.h, clip.y + clip.h) - start);
+    }
+    return out;
+}
+
+/// Return whether a point is inside every clipped ancestor axis of a node,
+/// including any clip imposed by placement. This is the single clipping rule:
+/// hit routing, the painter and the inspector all reduce to this.
+pub fn pointInPlacedClipChain(tree: *const WidgetTree, id: FrameNodeId, pos: [2]f32) bool {
     var cur = id;
-    while (cur != .root) {
+    var remaining = tree.nodes.items.len + 1;
+    while (cur != .root and remaining > 0) : (remaining -= 1) {
         tree.counter_sink.add(.ancestor_reads, 1);
         const node = tree.nodeConst(cur) orelse break;
+        if (node.placement_clip) |imposed| {
+            if (!pointInClipAxes(
+                clipRectToRect(visualBorderRect(tree, cur), imposed),
+                .{ .x = imposed.clipsX(), .y = imposed.clipsY() },
+                pos,
+            )) return false;
+        }
         if (!pointInClipAxes(
             visualBorderRect(tree, cur),
             node.contentClipAxes(),
@@ -688,10 +1164,17 @@ pub fn pointInClipChain(tree: *const WidgetTree, id: Id, pos: [2]f32) bool {
     return true;
 }
 
+/// Return whether a point is inside every clipped ancestor axis of a node.
+/// A clip imposed by overlay placement is part of that chain, so hit routing,
+/// the painter and the inspector cannot disagree about a clipped popup.
+pub fn pointInClipChain(tree: *const WidgetTree, id: FrameNodeId, pos: [2]f32) bool {
+    return pointInPlacedClipChain(tree, id, pos);
+}
+
 /// Absolute CONTENT box of a node: the absolute border box inset by the
 /// node's own border + padding. Where children live and text draws.
 /// Missing IDs are malformed tree input and return `error.InvalidStyle`.
-pub fn contentRect(tree: *const WidgetTree, id: Id) error{InvalidStyle}!Rect {
+pub fn contentRect(tree: *const WidgetTree, id: FrameNodeId) error{InvalidStyle}!Rect {
     const node = tree.nodeConst(id) orelse return error.InvalidStyle;
     const border_rect = absoluteRect(tree, id);
     return contentBoxRect(border_rect, node);
@@ -701,8 +1184,8 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: Id = @enumFromInt(1);
-    const id2: Id = @enumFromInt(2);
+    const id1: FrameNodeId = @enumFromInt(1);
+    const id2: FrameNodeId = @enumFromInt(2);
     try tree.appendNode(.{
         .id = id1,
         .kind = .{ .label = .{ .text = "a" } },
@@ -722,14 +1205,79 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     try std.testing.expectEqual(id2, tree.node(id1).?.children.items[0]);
 }
 
+test "api-w02 a dense node cannot be rebound to a second stable identity" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    const first_node: FrameNodeId = @enumFromInt(1);
+    const second_node: FrameNodeId = @enumFromInt(2);
+    try tree.appendNode(.{
+        .id = first_node,
+        .kind = .{ .spacer = .{} },
+        .parent = .root,
+    });
+    try tree.appendNode(.{
+        .id = second_node,
+        .kind = .{ .spacer = .{} },
+        .parent = .root,
+    });
+    const first: WidgetId = .{ .owner = 1, .slot = 1, .generation = 1 };
+    const second: WidgetId = .{ .owner = 1, .slot = 2, .generation = 1 };
+    try tree.bindWidget(first_node, first);
+    try std.testing.expectError(error.DuplicateWidgetKey, tree.bindWidget(first_node, second));
+    try std.testing.expectEqual(first_node, tree.frameNode(first).?);
+    try std.testing.expectEqual(@as(?FrameNodeId, null), tree.frameNode(second));
+    try tree.bindWidget(second_node, second);
+    try std.testing.expectError(error.DuplicateWidgetKey, tree.bindWidget(second_node, first));
+    try std.testing.expectEqual(first, tree.nodeConst(first_node).?.widget_id.?);
+    try std.testing.expectEqual(second, tree.nodeConst(second_node).?.widget_id.?);
+}
+
+// A contiguous interval covers every ID from its minimum through its maximum,
+// even when post-order node indices do not follow ID order.
+test "WidgetTree: consecutive IDs start at zero, one, or two" {
+    for ([_]u32{ 0, 1, 2 }) |minimum_id| {
+        var tree = WidgetTree.init(std.testing.allocator);
+        defer tree.deinit();
+
+        const ids = [_]FrameNodeId{
+            @enumFromInt(minimum_id + 2),
+            @enumFromInt(minimum_id),
+            @enumFromInt(minimum_id + 1),
+        };
+        for (ids) |id| {
+            try tree.appendNode(.{
+                .id = id,
+                .kind = .{ .spacer = .{} },
+                .parent = .root,
+            });
+        }
+        try tree.prepareIdLookup();
+
+        const lookup = tree.dense_id_index.?;
+        for (ids, 0..) |id, node_index| {
+            try std.testing.expectEqual(@as(?usize, node_index), tree.nodeIndex(id));
+            try std.testing.expectEqual(id, tree.nodeConst(id).?.id);
+        }
+        var absent_id: u32 = 0;
+        while (absent_id < minimum_id) : (absent_id += 1) {
+            try std.testing.expectEqual(WidgetTree.dense_absent, lookup[absent_id]);
+            try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@enumFromInt(absent_id)));
+        }
+        try std.testing.expectEqual(
+            @as(?usize, null),
+            tree.nodeIndex(@enumFromInt(minimum_id + 3)),
+        );
+    }
+}
+
 // A prepared lookup must use stored post-order indices instead of deriving
 // positions from sequential IDs, and stale stored indices must still scan.
 test "WidgetTree: prepared lookup follows current post-order nodes" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const parent_id: Id = @enumFromInt(1);
-    const child_id: Id = @enumFromInt(3);
+    const parent_id: FrameNodeId = @enumFromInt(1);
+    const child_id: FrameNodeId = @enumFromInt(3);
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = "child" } },
@@ -755,16 +1303,42 @@ test "WidgetTree: prepared lookup follows current post-order nodes" {
     try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(parent_id));
 }
 
+// Gaps inside a dense-enough span must remain absent, not inherit data from
+// the allocator or a previously prepared view.
+test "WidgetTree: sparse IDs retain absent entries inside the dense span" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const ids = [_]FrameNodeId{ @enumFromInt(4), .root, @enumFromInt(2) };
+    for (ids) |id| {
+        try tree.appendNode(.{
+            .id = id,
+            .kind = .{ .spacer = .{} },
+            .parent = .root,
+        });
+    }
+    try tree.prepareIdLookup();
+
+    const lookup = tree.dense_id_index.?;
+    for ([_]u32{ 1, 3 }) |absent_id| {
+        try std.testing.expectEqual(WidgetTree.dense_absent, lookup[absent_id]);
+        try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@enumFromInt(absent_id)));
+    }
+    for (ids, 0..) |id, node_index| {
+        try std.testing.expectEqual(@as(?usize, node_index), tree.nodeIndex(id));
+    }
+}
+
 // A full-cardinality map can still be malformed. Preparation must not replace
 // its established missing-key behavior with a dense node scan.
 test "WidgetTree: malformed complete map remains lookup authority" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: Id = @enumFromInt(1);
-    const id2: Id = @enumFromInt(2);
-    const unrelated_id: Id = @enumFromInt(3);
-    for ([_]Id{ id1, id2 }) |id| {
+    const id1: FrameNodeId = @enumFromInt(1);
+    const id2: FrameNodeId = @enumFromInt(2);
+    const unrelated_id: FrameNodeId = @enumFromInt(3);
+    for ([_]FrameNodeId{ id1, id2 }) |id| {
         try tree.appendNode(.{
             .id = id,
             .kind = .{ .spacer = .{} },
@@ -781,13 +1355,62 @@ test "WidgetTree: malformed complete map remains lookup authority" {
     try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(id2));
 }
 
+// If the map omits a node, preparation must leave lookup on the linear
+// fallback so that the missing map entry does not hide that node.
+test "WidgetTree: incomplete map scans nodes after preparation" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const id1: FrameNodeId = @enumFromInt(1);
+    const id2: FrameNodeId = @enumFromInt(2);
+    for ([_]FrameNodeId{ id1, id2 }) |id| {
+        try tree.appendNode(.{
+            .id = id,
+            .kind = .{ .spacer = .{} },
+            .parent = .root,
+        });
+    }
+    try tree.prepareIdLookup();
+    try std.testing.expect(tree.id_index.remove(id1));
+    try tree.prepareIdLookup();
+
+    try std.testing.expect(tree.dense_id_index == null);
+    try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(id1));
+    try std.testing.expectEqual(id1, tree.nodeConst(id1).?.id);
+}
+
+// Equal map cardinality does not prove that stored post-order indices match.
+test "WidgetTree: mismatched map index rejects prepared lookup" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const id1: FrameNodeId = @enumFromInt(1);
+    try tree.appendNode(.{
+        .id = .root,
+        .kind = .{ .spacer = .{} },
+        .parent = .root,
+    });
+    try tree.appendNode(.{
+        .id = id1,
+        .kind = .{ .spacer = .{} },
+        .parent = .root,
+    });
+    try tree.prepareIdLookup();
+    tree.id_index.getPtr(.root).?.* = 1;
+    try tree.prepareIdLookup();
+
+    try std.testing.expect(tree.dense_id_index == null);
+    try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(.root));
+    try std.testing.expectEqual(id1, tree.nodeConst(id1).?.id);
+}
+
 // The maximum representable ID must avoid max-plus-one overflow and retain the
 // existing sparse-map lookup path.
 test "WidgetTree: maximum ID remains on sparse fallback" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const maximum_id: Id = @enumFromInt(std.math.maxInt(u32));
+    const maximum_id: FrameNodeId = @enumFromInt(std.math.maxInt(u32));
     try tree.appendNode(.{
         .id = maximum_id,
         .kind = .{ .spacer = .{} },
@@ -810,10 +1433,10 @@ test "WidgetTree: prepare allocation failure keeps lookup retryable" {
     var tree = WidgetTree.init(allocator);
     defer tree.deinit();
 
-    const id1: Id = @enumFromInt(1);
-    const id2: Id = @enumFromInt(2);
-    const id3: Id = @enumFromInt(3);
-    for ([_]Id{ id1, id2 }) |id| {
+    const id1: FrameNodeId = @enumFromInt(1);
+    const id2: FrameNodeId = @enumFromInt(2);
+    const id3: FrameNodeId = @enumFromInt(3);
+    for ([_]FrameNodeId{ id1, id2 }) |id| {
         try tree.appendNode(.{
             .id = id,
             .kind = .{ .spacer = .{} },
@@ -843,8 +1466,8 @@ test "WidgetTree counters record node lookup and ancestor reads" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     tree.setCounterSink(&counters);
-    const root_id: Id = @enumFromInt(1);
-    const child_id: Id = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(1);
+    const child_id: FrameNodeId = @enumFromInt(2);
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },
@@ -874,7 +1497,7 @@ test "WidgetTree: malformed IDs return InvalidStyle instead of panicking" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const missing_id: Id = @enumFromInt(99);
+    const missing_id: FrameNodeId = @enumFromInt(99);
     try std.testing.expectError(
         error.InvalidStyle,
         tree.appendChild(missing_id, @enumFromInt(1)),
@@ -886,10 +1509,10 @@ test "WidgetTree: moving a node to the end reindexes shifted nodes" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: Id = @enumFromInt(1);
-    const id2: Id = @enumFromInt(2);
-    const id3: Id = @enumFromInt(3);
-    for ([_]Id{ id1, id2, id3 }) |id| {
+    const id1: FrameNodeId = @enumFromInt(1);
+    const id2: FrameNodeId = @enumFromInt(2);
+    const id3: FrameNodeId = @enumFromInt(3);
+    for ([_]FrameNodeId{ id1, id2, id3 }) |id| {
         try tree.appendNode(.{
             .id = id,
             .kind = .{ .spacer = .{} },
@@ -912,11 +1535,11 @@ test "WidgetTree: roots() returns only top-level nodes in append order" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: Id = @enumFromInt(1);
-    const id2: Id = @enumFromInt(2);
-    const id3: Id = @enumFromInt(3);
-    const id4: Id = @enumFromInt(4);
-    const id5: Id = @enumFromInt(5);
+    const id1: FrameNodeId = @enumFromInt(1);
+    const id2: FrameNodeId = @enumFromInt(2);
+    const id3: FrameNodeId = @enumFromInt(3);
+    const id4: FrameNodeId = @enumFromInt(4);
+    const id5: FrameNodeId = @enumFromInt(5);
 
     // Post-order: children first, then their containers.
     try tree.nodes.append(std.testing.allocator, .{ .id = id4, .kind = .{ .label = .{ .text = "c" } }, .parent = id1 });
@@ -952,8 +1575,8 @@ test "WidgetTree: roots() with a too-small buf returns the full count, no overfl
     // Count reflects everything that would have been written.
     try std.testing.expectEqual(@as(usize, 5), count);
     // The first entries still land, in append order.
-    try std.testing.expectEqual(@as(Id, @enumFromInt(1)), small[0].id);
-    try std.testing.expectEqual(@as(Id, @enumFromInt(2)), small[1].id);
+    try std.testing.expectEqual(@as(FrameNodeId, @enumFromInt(1)), small[0].id);
+    try std.testing.expectEqual(@as(FrameNodeId, @enumFromInt(2)), small[1].id);
     // Writing past buf.len would trip the slice bounds check under `zig test`.
 }
 
@@ -963,9 +1586,9 @@ test "absoluteRect: walks parent content boxes through border+padding" {
 
     // Root-level column with padding, holding a row with a border, holding
     // a label offset relative to the row's content box.
-    const col: Id = @enumFromInt(1);
-    const row: Id = @enumFromInt(2);
-    const label: Id = @enumFromInt(3);
+    const col: FrameNodeId = @enumFromInt(1);
+    const row: FrameNodeId = @enumFromInt(2);
+    const label: FrameNodeId = @enumFromInt(3);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = label,
@@ -1029,8 +1652,8 @@ test "absoluteRect: typed zero edges preserve content origin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
     const parent_style: Style = .{
         .border_inset = .{
             .top = .{ .length = 2 },
@@ -1072,8 +1695,8 @@ test "geometry: typed percentage parent edges define child absolute and visual o
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
     const parent_style: Style = .{
         .display = .block,
         .size = .{
@@ -1120,8 +1743,8 @@ test "geometry: stored resolved percentage edges retain containing basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
     const containing_width: f32 = 200;
     const parent_width: f32 = 100;
     const padding_fraction: f32 = 0.10;
@@ -1164,9 +1787,9 @@ test "geometry preserves nested fractional child-to-root accumulation" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const middle_id: Id = @enumFromInt(2);
-    const outer_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const middle_id: FrameNodeId = @enumFromInt(2);
+    const outer_id: FrameNodeId = @enumFromInt(3);
     var middle_scroll: ScrollState = .{ .offset = .{ 5.89, 0.4 } };
     var outer_scroll: ScrollState = .{ .offset = .{ 7.28, 0.6 } };
 
@@ -1256,9 +1879,9 @@ test "geometry returns the accumulated prefix when a parent is missing" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
-    const missing_id: Id = @enumFromInt(99);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
+    const missing_id: FrameNodeId = @enumFromInt(99);
     var scroll_state: ScrollState = .{ .offset = .{ 2, 3 } };
 
     try tree.appendNode(.{
@@ -1304,7 +1927,7 @@ test "geometry preserves explicit root sentinel lookup semantics" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
+    const child_id: FrameNodeId = @enumFromInt(1);
     var root_scroll: ScrollState = .{ .offset = .{ 3, 4 } };
     try tree.appendNode(.{
         .id = child_id,
@@ -1353,7 +1976,7 @@ test "absoluteRect: root-level node is relative to the surface (0,0)" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: Id = @enumFromInt(1);
+    const col: FrameNodeId = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
         .id = col,
         .kind = .{ .column = .{} },
@@ -1409,8 +2032,8 @@ test "visualBorderRect: scroll offset applies only to descendants" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const scroll_id: Id = @enumFromInt(1);
-    const child_id: Id = @enumFromInt(2);
+    const scroll_id: FrameNodeId = @enumFromInt(1);
+    const child_id: FrameNodeId = @enumFromInt(2);
     var scroll_state: ScrollState = .{ .offset = .{ 4, 6 } };
 
     try tree.nodes.append(std.testing.allocator, .{
@@ -1456,8 +2079,8 @@ test "pointInClipChain: rejects points outside a scrolled ancestor clip" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const clip_id: Id = @enumFromInt(1);
-    const child_id: Id = @enumFromInt(2);
+    const clip_id: FrameNodeId = @enumFromInt(1);
+    const child_id: FrameNodeId = @enumFromInt(2);
     var scroll_state: ScrollState = .{ .offset = .{ 5, 0 } };
 
     try tree.nodes.append(std.testing.allocator, .{

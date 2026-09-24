@@ -113,7 +113,9 @@ pub fn main(init: std.process.Init) !void {
         _ = try app.surf.endFrame(.{ .blit_to_swapchain = true });
 
         timer.report();
-        if (schedule.next_vblank_us > 1000) try std.Io.sleep(io, .fromMicroseconds(schedule.next_vblank_us - 1000), .awake);
+        if (schedule.next_vblank_us > 1000) {
+            try std.Io.sleep(io, .fromMicroseconds(schedule.next_vblank_us - 1000), .awake);
+        }
     }
 
     try app.gpu.waitIdle();

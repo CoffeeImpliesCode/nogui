@@ -16,7 +16,7 @@ pub const Artwork = struct {
 /// Maximum number of local tracks retained by the scanner and playback queue.
 pub const local_queue_capacity: usize = 4096;
 pub const Track = struct {
-    id: u32,
+    id: u64,
     title: []const u8,
     artist: []const u8,
     album: []const u8,

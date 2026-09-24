@@ -5,7 +5,7 @@
 //! flow remains separate from the selected mixed layout engine.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const layout_api = @import("root.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
@@ -36,8 +36,8 @@ fn autoStyle(display: style.Display) Style {
 
 fn appendNode(
     tree: *WidgetTree,
-    id: Id,
-    parent: Id,
+    id: FrameNodeId,
+    parent: FrameNodeId,
     node_style: Style,
     kind: WidgetKind,
 ) !void {
@@ -57,7 +57,7 @@ fn layout(tree: *WidgetTree, available: widget.Size) !void {
     });
 }
 
-fn expectRect(tree: *const WidgetTree, id: Id, expected: Rect) !void {
+fn expectRect(tree: *const WidgetTree, id: FrameNodeId, expected: Rect) !void {
     const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
     const actual = node.rect;
     const tolerance: f32 = 0.001;
@@ -71,8 +71,8 @@ test "forest roots preserve source order and margin cursor overlap" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
 
     var first_style = fixedStyle(.flex, 30, 20);
     first_style.margin_inset = .{
@@ -97,9 +97,9 @@ test "intrinsic forest stacks flow roots and keeps absolute roots out of flow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(
         &tree,
@@ -144,10 +144,10 @@ test "forest auto root stretches width and keeps natural height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const block_id: Id = @enumFromInt(2);
-    const auto_root_id: Id = @enumFromInt(3);
-    const next_root_id: Id = @enumFromInt(4);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const block_id: FrameNodeId = @enumFromInt(2);
+    const auto_root_id: FrameNodeId = @enumFromInt(3);
+    const next_root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(
         &tree,
@@ -201,10 +201,10 @@ test "forest auto root remeasures wrapped flex at margin-resolved width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_leaf_id: Id = @enumFromInt(1);
-    const second_leaf_id: Id = @enumFromInt(2);
-    const flex_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const first_leaf_id: FrameNodeId = @enumFromInt(1);
+    const second_leaf_id: FrameNodeId = @enumFromInt(2);
+    const flex_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(
         &tree,
@@ -252,8 +252,8 @@ test "forest root flex basis and grow distribute positive free space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
 
     var first_style = fixedStyle(.flex, 10, 0);
     first_style.size.height = .auto;
@@ -277,8 +277,8 @@ test "forest root shrink freezes at minimum height floor" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
 
     var first_style = fixedStyle(.flex, 10, 0);
     first_style.size.height = .auto;
@@ -303,10 +303,10 @@ test "forest absolute and hidden roots do not consume flow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_left_id: Id = @enumFromInt(1);
-    const absolute_right_id: Id = @enumFromInt(2);
-    const hidden_id: Id = @enumFromInt(3);
-    const flow_id: Id = @enumFromInt(4);
+    const absolute_left_id: FrameNodeId = @enumFromInt(1);
+    const absolute_right_id: FrameNodeId = @enumFromInt(2);
+    const hidden_id: FrameNodeId = @enumFromInt(3);
+    const flow_id: FrameNodeId = @enumFromInt(4);
 
     var absolute_left_style = fixedStyle(.flex, 20, 10);
     absolute_left_style.position = .absolute;
@@ -387,8 +387,8 @@ test "forest absolute auto root keeps its natural width without paired insets" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(
         &tree,
         leaf_id,
@@ -418,12 +418,12 @@ test "forest absolute auto-width column flex shrinks to widest intrinsic child" 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const nested_leaf_id: Id = @enumFromInt(3);
-    const third_id: Id = @enumFromInt(4);
-    const absolute_id: Id = @enumFromInt(5);
-    const root_id: Id = @enumFromInt(6);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const nested_leaf_id: FrameNodeId = @enumFromInt(3);
+    const third_id: FrameNodeId = @enumFromInt(4);
+    const absolute_id: FrameNodeId = @enumFromInt(5);
+    const root_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(
         &tree,
@@ -508,8 +508,8 @@ test "forest absolute paired insets clamp auto and concrete widths" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const auto_id: Id = @enumFromInt(1);
-    const concrete_id: Id = @enumFromInt(2);
+    const auto_id: FrameNodeId = @enumFromInt(1);
+    const concrete_id: FrameNodeId = @enumFromInt(2);
 
     var auto_style = autoStyle(.flex);
     auto_style.position = .absolute;
@@ -544,7 +544,7 @@ test "forest absolute paired auto width drives aspect-ratio height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     var root_style = autoStyle(.flex);
     root_style.position = .absolute;
     root_style.aspect_ratio = 2;
@@ -565,8 +565,8 @@ test "forest absolute leaf derives width from paired vertical insets and aspect 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     var leaf_style = autoStyle(.block);
     leaf_style.position = .absolute;
@@ -600,7 +600,7 @@ test "forest absolute inset and margin overflow returns InvalidStyle" {
     const extreme: f32 = 3.0e38;
     try std.testing.expect(std.math.isFinite(extreme));
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     var root_style = fixedStyle(.flex, 10, 10);
     root_style.position = .absolute;
     root_style.margin_inset.left = .{ .length = extreme };
@@ -620,7 +620,7 @@ test "forest relative inset overflow returns InvalidStyle" {
     const extreme: f32 = 3.0e38;
     try std.testing.expect(std.math.isFinite(extreme));
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     var root_style = fixedStyle(.flex, 10, 10);
     root_style.margin_inset.left = .{ .length = extreme };
     root_style.margin_inset.right = .{ .length = -extreme };
@@ -637,7 +637,7 @@ test "forest max-clamped root remains shrinkable" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     var root_style = fixedStyle(.flex, 10, 0);
     root_style.size.height = .auto;
     root_style.flex_basis = .{ .length = 200 };
@@ -654,7 +654,7 @@ test "forest vertical percentage insets use surface height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     var root_style = fixedStyle(.flex, 20, 10);
     root_style.inset = .{
         .top = .{ .percent = 0.5 },
@@ -673,8 +673,8 @@ test "forest absolute root ignores flex basis outside flex formatting context" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(
         &tree,
         leaf_id,
@@ -705,8 +705,8 @@ test "forest relative inset moves root after flow without moving cursor" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const relative_id: Id = @enumFromInt(1);
-    const following_id: Id = @enumFromInt(2);
+    const relative_id: FrameNodeId = @enumFromInt(1);
+    const following_id: FrameNodeId = @enumFromInt(2);
 
     var relative_style = fixedStyle(.flex, 20, 10);
     relative_style.inset = .{
@@ -741,7 +741,7 @@ test "forest dispatch handles more than sixty-four roots" {
     const root_count: usize = 70;
     var root_index: usize = 0;
     while (root_index < root_count) : (root_index += 1) {
-        const root_id: Id = @enumFromInt(@as(u32, @intCast(root_index + 1)));
+        const root_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(root_index + 1)));
         try appendNode(
             &tree,
             root_id,
@@ -755,7 +755,7 @@ test "forest dispatch handles more than sixty-four roots" {
 
     root_index = 0;
     while (root_index < root_count) : (root_index += 1) {
-        const root_id: Id = @enumFromInt(@as(u32, @intCast(root_index + 1)));
+        const root_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(root_index + 1)));
         try expectRect(&tree, root_id, .{
             .x = 0,
             .y = @floatFromInt(root_index),
@@ -765,11 +765,82 @@ test "forest dispatch handles more than sixty-four roots" {
     }
 }
 
+test "forest direct postorder assembly lays out roots with an incomplete index" {
+    const leaf_id: FrameNodeId = @enumFromInt(10);
+    const inner_id: FrameNodeId = @enumFromInt(20);
+    const first_root_id: FrameNodeId = @enumFromInt(30);
+    const second_root_id: FrameNodeId = @enumFromInt(40);
+
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = leaf_id,
+        .kind = .{ .spacer = .{} },
+        .parent = inner_id,
+        .style = fixedStyle(.block, 10, 5),
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = inner_id,
+        .kind = .{ .column = .{} },
+        .parent = first_root_id,
+        .style = fixedStyle(.flow_root, 40, 20),
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = first_root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = fixedStyle(.flow_root, 40, 20),
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = second_root_id,
+        .kind = .{ .column = .{} },
+        .parent = .root,
+        .style = fixedStyle(.flow_root, 30, 10),
+    });
+    try tree.nodes.items[1].children.append(std.testing.allocator, leaf_id);
+    try tree.nodes.items[2].children.append(std.testing.allocator, inner_id);
+
+    try layout(&tree, .{ .width = 100, .height = 50 });
+
+    try expectRect(&tree, first_root_id, .{ .x = 0, .y = 0, .w = 100, .h = 20 });
+    try expectRect(&tree, inner_id, .{ .x = 0, .y = 0, .w = 40, .h = 20 });
+    try expectRect(&tree, leaf_id, .{ .x = 0, .y = 0, .w = 10, .h = 5 });
+    try expectRect(&tree, second_root_id, .{ .x = 0, .y = 20, .w = 100, .h = 10 });
+}
+
+test "forest dispatcher releases validation scratch on later allocation failure" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const root_id: FrameNodeId = @enumFromInt(1);
+    try appendNode(
+        &tree,
+        root_id,
+        .root,
+        fixedStyle(.flow_root, 20, 20),
+        .{ .column = .{} },
+    );
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 2,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        layout_api.layoutTree(&tree, .{
+            .allocator = failing_allocator.allocator(),
+            .available = .{ .width = 20, .height = 20 },
+            .measure = null,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), failing_allocator.alloc_index);
+}
+
 test "forest dispatcher propagates validation allocation failure" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     try appendNode(
         &tree,
         root_id,
@@ -796,9 +867,9 @@ test "forest dispatcher rejects an orphan parent" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
-    const missing_parent_id: Id = @enumFromInt(2);
-    const orphan_id: Id = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(1);
+    const missing_parent_id: FrameNodeId = @enumFromInt(2);
+    const orphan_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(
         &tree,

@@ -29,7 +29,7 @@ pub const StrokeEdge = extern struct { x0: f32, y0: f32, x1: f32, y1: f32 };
 /// curve_bda @24 (8B → 32), band_bda @32 (8B → 40), gradient_to @40 (16B
 /// → 56). The implicit padding is identical in the shader copy.
 pub const GlyphMaterial = extern struct {
-    type: u32, // 0=SOLID, 1=GLYPH, 2=ROUNDED_RECT, 3=SHADOW
+    type: u32, // 0=SOLID, 1=GLYPH, 2=ROUNDED_RECT, 3=SHADOW, 4=STROKE, 5=SWEEP
     bearing_y: f32, // FreeType bearing Y / corner radius / border / feather
     curve_w: f32, // glyph extent / x radius
     curve_h: f32, // glyph extent / y radius
@@ -117,21 +117,6 @@ pub const GlyphSweeper = struct {
     pub fn deinit(self: *GlyphSweeper) void {
         self.gpu.gpuFree(self.curve_buf);
         self.* = undefined;
-    }
-
-    /// Grow the curve buffer to hold `extra` additional bytes after the
-    /// curve array (used by the demo to append a coverage bitmap). The BDA
-    /// may change; callers must re-write materials after growing.
-    pub fn growCurveBuffer(self: *GlyphSweeper, extra: usize) !void {
-        const base = @sizeOf(u32) * 2 + @as(usize, self.num_curves) * @sizeOf(Curve);
-        const padded = (extra + 3) & ~@as(usize, 3);
-        const new_size = base + padded;
-        const new_buf = try self.gpu.gpuMalloc(new_size, 16, .default);
-        const src: [*]const u8 = @ptrCast(@alignCast(self.curve_buf.cpu));
-        @memcpy(@as([*]u8, @ptrCast(@alignCast(new_buf.cpu)))[0..base], src[0..base]);
-        self.gpu.gpuFree(self.curve_buf);
-        self.curve_buf = new_buf;
-        self.curve_buf_bda = new_buf.gpu;
     }
 
     /// Write a GlyphMaterial into the GPU material buffer at the given slot.
