@@ -1,0 +1,23 @@
+.{
+    .name = .noapi,
+    .version = "0.0.0",
+    .fingerprint = 0xd121d8799d91b108,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .sdl3 = .{
+            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=master#40c2e4b579aa556db37a502c936426aa1c8b5c95",
+            .hash = "sdl3-0.2.0-NmT1Q0mFJwBi9kZmArzh2rfJ_mFshydV0zPGULVlpACc",
+        },
+        .tracy = .{
+            .url = "git+https://codeberg.org/CoffeeImpliesCode/tracy_zig#b2ea5bf4b8fe80f7cd9226d0c4af88dc04e1e07b",
+            .hash = "tracy-1.0.0+0.13.1-R7l8BUBWAQAD_78ohq3IXQ6Wv9CDm2KLAGdjbMmd4p8r",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "noapi",
+        "test",
+        "shaders",
+    },
+}
