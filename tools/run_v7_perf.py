@@ -95,6 +95,7 @@ GPU_MACHINE_FIELDS = (
 MACHINE_FIELDS = HOST_MACHINE_FIELDS + GPU_MACHINE_FIELDS
 NOAPI_PROVENANCE_SCHEMA = "nogui.noapi-provenance.v1"
 NOAPI_GENERATED_TOP_LEVEL_DIRS = frozenset({
+    ".zig-global-cache",
     ".zig-cache",
     "zig-cache",
     "zig-out",

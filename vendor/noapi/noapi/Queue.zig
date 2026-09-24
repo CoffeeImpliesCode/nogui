@@ -13,7 +13,10 @@ fn copyCommandBufferHandles(
     handles: *[64]Gpu.CommandBufferHandle,
 ) ![]Gpu.CommandBufferHandle {
     if (cmd_bufs.len > handles.len) return error.TooManyCommandBuffers;
-    for (cmd_bufs, 0..) |cb, i| handles[i] = cb.handle;
+    for (cmd_bufs, 0..) |cb, i| {
+        if (cb.handle == .null_handle) return error.InvalidCommandBuffer;
+        handles[i] = cb.handle;
+    }
     return handles[0..cmd_bufs.len];
 }
 
@@ -76,6 +79,15 @@ test "task4 signaling submission wrapper accepts 64 and rejects 65 command buffe
     try std.testing.expectError(
         error.TooManyCommandBuffers,
         copyCommandBufferHandles(command_buffers[0..65], &handles),
+    );
+}
+
+test "cancelled offscreen frame cannot enter timeline submission" {
+    const cancelled = [_]CommandBuffer{.{ .gpu = undefined, .handle = .null_handle }};
+    var handles: [64]Gpu.CommandBufferHandle = undefined;
+    try std.testing.expectError(
+        error.InvalidCommandBuffer,
+        copyCommandBufferHandles(&cancelled, &handles),
     );
 }
 

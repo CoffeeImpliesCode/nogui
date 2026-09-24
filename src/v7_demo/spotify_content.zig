@@ -2,6 +2,7 @@
 
 const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
+const ComponentKey = nogui.ComponentKey;
 const widget = nogui.widget;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
@@ -39,6 +40,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
 
 fn drawCircleButton(
     ctx: *DrawCtx,
+    key: ComponentKey,
     label: []const u8,
     color: [4]f32,
     font_size: f32,
@@ -52,6 +54,7 @@ fn drawCircleButton(
     const border: f32 = if (bordered) 1 else 0;
     if (has_on_click) {
         _ = try ctx.button(.{
+            .key = key,
             .direction = style.direction,
             .label = label,
             .on_click = options.on_click,
@@ -69,6 +72,7 @@ fn drawCircleButton(
         return;
     }
     _ = try ctx.button(.{
+        .key = key,
         .direction = style.direction,
         .label = label,
         .flex_basis = options.flex_basis,
@@ -103,17 +107,25 @@ fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec
         _ = try ctx.row(.{ .gap = theme.header_control_gap, .@"align" = .center });
         defer ctx.pop();
 
-        try drawCircleButton(ctx, "<", theme.c_text, 14, .{
+        try drawCircleButton(ctx, .{ .static = "header-back" }, "<", theme.c_text, 14, .{
             .flex_basis = 26,
             .fill = theme.c_card_elevated,
         });
         if (spec.mode != .compact) {
-            try drawCircleButton(ctx, ">", theme.c_text, 14, .{
-                .flex_basis = 26,
-                .fill = theme.c_card_elevated,
-            });
+            try drawCircleButton(
+                ctx,
+                .{ .static = "header-forward" },
+                ">",
+                theme.c_text,
+                14,
+                .{
+                    .flex_basis = 26,
+                    .fill = theme.c_card_elevated,
+                },
+            );
         }
         _ = try ctx.button(.{
+            .key = @as(ComponentKey, .{ .static = "header-search" }),
             .label = "Search  What do you want to play?",
             .on_click = App.selectNavSearch,
             .grow = 1,
@@ -130,12 +142,25 @@ fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec
             .font_size = 12,
         });
         if (spec.mode != .compact) {
-            try drawFilterPill(ctx, "All", app.active_category == .all, App.selectCategoryAll);
+            try drawFilterPill(
+                ctx,
+                "All",
+                .{ .static = "filter-all" },
+                app.active_category == .all,
+                App.selectCategoryAll,
+            );
             if (spec.mode == .desktop) {
-                try drawFilterPill(ctx, "Music", app.active_category == .music, App.selectCategoryMusic);
+                try drawFilterPill(
+                    ctx,
+                    "Music",
+                    .{ .static = "filter-music" },
+                    app.active_category == .music,
+                    App.selectCategoryMusic,
+                );
                 try drawFilterPill(
                     ctx,
                     "Podcasts",
+                    .{ .static = "filter-podcasts" },
                     app.active_category == .podcasts,
                     App.selectCategoryPodcasts,
                 );
@@ -146,8 +171,15 @@ fn drawHeader(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spec
     if (spec.mode != .compact) _ = try drawProfilePill(ctx, "Janis");
 }
 
-fn drawFilterPill(ctx: *DrawCtx, text: []const u8, active: bool, on_click: anytype) !void {
+fn drawFilterPill(
+    ctx: *DrawCtx,
+    text: []const u8,
+    key: ComponentKey,
+    active: bool,
+    on_click: anytype,
+) !void {
     _ = try ctx.button(.{
+        .key = key,
         .label = text,
         .on_click = on_click,
         .color = if (active) theme.c_bg else theme.c_text,
@@ -168,7 +200,7 @@ fn drawProfilePill(ctx: *DrawCtx, name: []const u8) !void {
     });
     defer ctx.pop();
 
-    try drawCircleButton(ctx, "J", theme.c_bg, 12, .{
+    try drawCircleButton(ctx, .{ .static = "profile-avatar" }, "J", theme.c_bg, 12, .{
         .flex_basis = 20,
         .fill = theme.c_accent,
     });
@@ -268,6 +300,7 @@ fn drawActions(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spe
     defer ctx.pop();
 
     _ = try ctx.button(.{
+        .key = @as(ComponentKey, .{ .static = "playlist-play-toggle" }),
         .label = if (app.is_playing) "||" else ">",
         .on_click = App.togglePlay,
         .flex_basis = 48,
@@ -277,18 +310,43 @@ fn drawActions(comptime App: type, app: anytype, ctx: *DrawCtx, spec: layout.Spe
         .padding = .{ .left = 13, .right = 13, .top = 11, .bottom = 11 },
         .radius = .{ .top = 24, .right = 24, .bottom = 24, .left = 24 },
         .fill = theme.c_accent,
-        .gradient = theme.srgbToOklab(theme.c_accent_hover),
+        .paint_fill = nogui.paint.Fill{ .gradient = .{
+            .first = .{ .color = .{ .srgb = .{
+                .r = theme.c_accent[0],
+                .g = theme.c_accent[1],
+                .b = theme.c_accent[2],
+                .a = theme.c_accent[3],
+            } }, .position = 0 },
+            .second = .{ .color = .{ .srgb = .{
+                .r = theme.c_accent_hover[0],
+                .g = theme.c_accent_hover[1],
+                .b = theme.c_accent_hover[2],
+                .a = theme.c_accent_hover[3],
+            } }, .position = 1 },
+        } },
         .font_size = 18,
     });
     try drawCircleButton(
         ctx,
+        .{ .static = "playlist-save-toggle" },
         if (app.playlist_saved) "♥" else "+",
         if (app.playlist_saved) theme.c_accent else theme.c_text_sec,
         15,
-        .{ .flex_basis = 32, .fill = theme.c_bg, .on_click = App.togglePlaylistSaved },
+        .{
+            .flex_basis = 32,
+            .fill = theme.c_bg,
+            .on_click = App.togglePlaylistSaved,
+        },
     );
-    try drawCircleButton(ctx, "...", theme.c_text_sec, 14, .{
-        .flex_basis = 32,
-        .fill = theme.c_bg,
-    });
+    try drawCircleButton(
+        ctx,
+        .{ .static = "playlist-actions-menu" },
+        "...",
+        theme.c_text_sec,
+        14,
+        .{
+            .flex_basis = 32,
+            .fill = theme.c_bg,
+        },
+    );
 }

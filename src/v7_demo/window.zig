@@ -3,22 +3,17 @@
 //! glyph materials, rendered into an offscreen Oklab float target, then
 //! blitted to the swapchain with the Oklab→sRGB conversion shader.
 //!
-//! Demo-side code (imports std, sdl3, noapi AND the pure v7 module via the
-//! `v7` symlink in this directory — same convention as ui.zig, so this file
-//! stays standalone-compilable). The v7 module itself never sees sdl3/noapi.
+//! The reusable host owns SDL video, windows, and input translation. This
+//! demo owns GPU presentation, scene construction, audio, and perf policy.
 //!
 //! Flow per frame: the window begins the Surface frame and obtains its
 //! command buffer; app.frameWithGpuAtTime builds + lays out the tree and
 //! dispatches component GPU hooks; collectDrawCmds flattens the tree into
-//! paint-ordered DrawCmds; buildSliceRects turns each cmd into a SceneRect —
-//! solid cmds use material slot 0, radius-bearing fills and border rings use
-//! per-cmd rounded-rect materials (type 2) written into the engine's material
-//! buffer; label-bearing nodes additionally emit one glyph SceneRect per
-//! character via TextEngine (FreeType); Renderer prepares the stable GPU sort
-//! and records one indexed draw into the offscreen Oklab target; a barrier
-//! transitions the target to shader-read; the blit pass samples it and writes
-//! sRGB to the swapchain. Mouse clicks hit-test the same frame's tree and
-//! dispatch back into the app (mutations apply on the next frame).
+//! paint-ordered commands. PaintList resolves authored colors into Oklab and
+//! Renderer lowers effects and paths into the same sorted quad scene as
+//! controls, glyphs, and cached SVGs. Each in-flight frame owns disjoint
+//! material slots. The GUI pass draws once into the Oklab target; the blit
+//! pass converts it to sRGB. Input routes to the committed tree.
 //!
 //! `runShot` renders a single frame into the offscreen target, copies it back
 //! to a readback buffer and writes a P6 PPM — the text-renders proof.
@@ -26,71 +21,71 @@
 const std = @import("std");
 const sdl3 = @import("sdl3");
 const noapi = @import("noapi");
-const vk = noapi.vk;
 const Io = std.Io;
 
 const nogui = @import("nogui");
+const host = @import("nogui_host");
+const HostApplication = host.Application;
+const host_preferences = host.preferences;
 const v7_options = nogui.options;
-const CounterSink = nogui.CounterSink;
 const App = nogui.App;
 const Event = nogui.Event;
 const tracy = @import("tracy");
 const perf = @import("perf.zig");
 const calculator_ui = @import("calculator.zig");
 const FramePacer = @import("FramePacer.zig").FramePacer;
-const Id = nogui.Id;
-const DrawCmd = nogui.drawcmd.DrawCmd;
-const WidgetTree = nogui.WidgetTree;
+const FrameNodeId = nogui.FrameNodeId;
+const WindowSize = nogui.geometry.WindowSize;
 const Rect = nogui.Rect;
-const ClipRect = nogui.widget.ClipRect;
-const visualBorderRect = nogui.visualBorderRect;
-const sliderThumbRect = nogui.widget.sliderThumbRect;
-const sliderVisualLabel = nogui.widget.sliderVisualLabel;
-const contentRect = nogui.widget.contentRect;
-const visualContentRect = nogui.visualContentRect;
 const IconId = nogui.widget.IconId;
-const collectDrawCmdsInto = nogui.drawcmd.collectDrawCmdsInto;
-const MouseButton = nogui.event.MouseButton;
-const Key = nogui.event.Key;
 const hitTest = nogui.hitTest; // runShot's forced --hover
 const renderer = @import("v7_render");
 const Renderer = renderer.Renderer;
-const RenderScene = renderer.Scene;
 const RenderOptions = renderer.Options;
-
-/// The offscreen Oklab render target format (the GUI pass's workspace).
-/// RGBA16F halves the blend ROP traffic vs RGBA32F: the Oklab values
-/// (L in [0,1], a/b in [-0.4,0.4]) need only 2^-11 relative precision —
-/// 8-20x headroom over the 8-bit sRGB output step. The fragment shader
-/// objects MUST be created with this format (the shader-object output
-/// override) or the attachment mismatch renders black.
-// The offscreen Oklab render target format. RGBA16F would halve the blend
-// ROP traffic, but it is BLOCKED on this stack: the shader-object output
-// override is unsupported (Vulkan 341 headers reject the flag/pNext) and
-// the half4 SPIR-V output needs shaderFloat16/storageInputOutput16, which
-// this GTX 1660 Ti driver does not expose (FeatureNotPresent). 32F stays.
-const render_target_format: noapi.Texture.TextureFormat = .rgba32_float;
 const SceneRect = renderer.SceneRect;
-comptime {
-    std.debug.assert(@sizeOf(ClipRect) == @sizeOf(renderer.ClipRect));
-    std.debug.assert(@alignOf(ClipRect) == @alignOf(renderer.ClipRect));
-    std.debug.assert(@offsetOf(ClipRect, "x") == @offsetOf(renderer.ClipRect, "x"));
-    std.debug.assert(@offsetOf(ClipRect, "y") == @offsetOf(renderer.ClipRect, "y"));
-    std.debug.assert(@offsetOf(ClipRect, "w") == @offsetOf(renderer.ClipRect, "w"));
-    std.debug.assert(@offsetOf(ClipRect, "h") == @offsetOf(renderer.ClipRect, "h"));
-}
-const TextEngine = @import("text.zig").TextEngine;
-const text_mod = @import("text.zig");
-const svg_xml = @import("svg_xml.zig");
-const SvgView = @import("svg_view.zig").SvgView;
-const max_materials = @import("text.zig").max_materials;
-const font_size_px = @import("text.zig").font_size_px;
-const srgbToOklab = @import("text.zig").srgbToOklab;
+const paint = nogui.paint;
+
+// The reusable frame module: the graphics text engine, the frame scene
+// lowering, the GPU scene recording, and the bindless texture heap. The
+// Oklab constants, the material partition, and the two sentinels live
+// there; this file owns only the demo's assets, its raster caches, and its
+// perf policy. `v7_frame` re-exports `scene`, `heap`, and `text_gpu`.
+const v7_frame_mod = @import("v7_frame");
+const frame_scene = v7_frame_mod.scene;
+const frame_heap = v7_frame_mod.heap;
+const TextEngine = v7_frame_mod.TextEngine;
+const srgbToOklab = v7_frame_mod.srgbToOklab;
+const debug_state_mod = @import("debug_state.zig");
+const no_texture = frame_scene.no_texture;
+const render_target_format = frame_scene.render_target_format;
+const glyph_material_ceiling = frame_scene.glyph_material_ceiling;
+const BindlessHeap = frame_heap.BindlessHeap;
+const recordColorConversion = frame_scene.recordBlit;
+const devicePixels = frame_scene.devicePixels;
+const svg_mod = @import("svg.zig");
 const ui = @import("ui.zig"); // for the demo texture index (texture_idx)
 const AudioPlayer = @import("audio_player.zig").AudioPlayer;
 const ffmpeg_decoder = @import("ffmpeg_decoder.zig");
 const LocalTrack = @import("spotify_data.zig").LocalTrack;
 const spotify_ui = @import("spotify.zig");
+
+/// The demo's palette: the resolution table for authored `.palette = n`
+/// colors. Application theme data, passed to the public lowering by pointer
+/// and read only for the frame's duration.
+const demo_palette = [_]paint.Srgb{
+    .{ .r = 0.25, .g = 0.35, .b = 0.55 },
+    .{ .r = 0.13, .g = 0.14, .b = 0.16 },
+};
+
+fn cancelSurfaceRecording(context: *anyopaque, _: *noapi.CommandBuffer) !void {
+    const surface: *noapi.Surface = @ptrCast(@alignCast(context));
+    try surface.abortFrame();
+}
+
+fn cancelOffscreenRecording(context: *anyopaque, command: *noapi.CommandBuffer) !void {
+    const gpu: *noapi.Gpu = @ptrCast(@alignCast(context));
+    try gpu.commandsCancel(command);
+}
 
 /// SDL3 extension list copy. Gpu.init's loader callback can't be a closure,
 /// so the dupe lives here for the duration of run()/runShot().
@@ -132,101 +127,83 @@ fn getExts() []const [*:0]const u8 {
     return exts_copy_global;
 }
 
-/// Map an SDL keycode to the core Key set (navigation/activation only).
-fn mapSdlKey(kc: sdl3.keycode.Keycode) ?Key {
-    return switch (kc) {
-        .tab => .tab,
-        .return_key, .return_key2 => .enter,
-        .space => .space,
-        .escape => .escape,
-        .left => .left,
-        .right => .right,
-        .up => .up,
-        .down => .down,
-        .home => .home,
-        .end => .end,
-        else => null,
-    };
+fn logicalWindowSize(sdl_window: sdl3.video.Window) !WindowSize {
+    const size = try sdl_window.getSize();
+    return .{ .width = @floatFromInt(size[0]), .height = @floatFromInt(size[1]) };
 }
 
-fn dispatchRootEvent(comptime T: type, root: *T, event: Event) void {
-    if (comptime @hasDecl(T, "onEvent")) root.onEvent(&event);
+fn deviceSurfaceExtent(sdl_window: sdl3.video.Window) !noapi.Extent2D {
+    const pixels = try sdl_window.getSizeInPixels();
+    return .{ .width = @intCast(pixels[0]), .height = @intCast(pixels[1]) };
 }
 
-fn dispatchRootFrame(comptime T: type, root: *T, time_ms: u64) void {
-    if (comptime @hasDecl(T, "onFrame")) root.onFrame(time_ms);
+fn setScenePixelScale(
+    text_engine: *TextEngine,
+    svg_scene: *SvgScene,
+    icon_cache: *IconCache,
+    logical_size: WindowSize,
+    device_extent: noapi.Extent2D,
+) !void {
+    const scale = try nogui.geometry.PixelScale.init(logical_size, .{
+        .width = device_extent.width,
+        .height = device_extent.height,
+    });
+    text_engine.setPixelScale(scale);
+    svg_scene.setPixelScale(scale);
+    icon_cache.setPixelScale(scale);
 }
 
 fn configureGpuComponents(comptime T: type, root: *T, heap: noapi.DescriptorHeap) void {
     if (comptime @hasDecl(T, "setGpuDescriptorHeap")) root.setGpuDescriptorHeap(heap);
 }
 
-fn dispatchRootPrecisionKey(comptime T: type, root: *T) bool {
-    if (comptime @hasDecl(T, "onPrecisionKey")) {
-        root.onPrecisionKey();
-        return true;
-    }
-    return false;
-}
-
-/// The SVG showcase's reserved box (the node the ui stores in
-/// ui.svg_box_id): the tiger's scene rects are injected at its content
-/// rect. The CONTENT rect (not the border box) — the drawing area the
-/// box's padding/border define — plus the card's paint layer (the
-/// injected SVG rects must sort ON TOP of the card's fill, not at the
-/// default z=0 behind every box).
-const SvgCard = struct { rect: Rect, layer: u32 };
-
-fn svgCardRect(tree: *const WidgetTree) error{InvalidStyle}!SvgCard {
-    if (ui.svg_box_id) |id_raw| {
-        const id: Id = @enumFromInt(id_raw);
-        for (tree.nodes.items) |n| {
-            tree.addCounter(.svg_card_node_comparisons, 1);
-            if (n.id == id) {
-                return .{ .rect = try contentRect(tree, id), .layer = n.paint.layer };
-            }
-        }
-    }
-    return .{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .layer = 0 };
-}
-
-/// Parse the embedded tiger + convert it into the renderer's SvgView
-/// (per-path conics + glyph materials + scene rects). The materials are
-/// written into the shared text-engine buffer at the SVG region — Renderer
-/// draws everything with that one material BDA.
-fn initSvgView(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEngine) !SvgView {
-    const tiger_xml = @embedFile("tiger.svg");
-    var doc = try svg_xml.parseSvg(gpa, tiger_xml);
-    defer doc.deinit();
-    const v = try SvgView.init(gpa, gpu, &doc, text_engine.materials, text_engine.materialBda(), svg_material_base);
-    return v;
-}
+/// The showcase documents. Both are rendered by librsvg through the
+/// reusable host adapter (`svg_mod`): groups, transforms, curves, gradients
+/// and viewBox all come from the real renderer. The demo keeps no parser.
+const tiger_svg = @embedFile("tiger.svg");
 
 /// The stroke test scene: curved thin strokes at increasing widths. The
-/// stroke algo + oversize sliders drive the shader; the scale slider
-/// zooms the whole scene.
-fn initStrokeView(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEngine) !SvgView {
-    const strokes_xml =
-        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
-        \\  <path d="M 50 60 C 150 220, 350 -80, 450 60" stroke="#fff" stroke-width="0.1" fill="none"/>
-        \\  <path d="M 50 120 C 150 280, 350 -20, 450 120" stroke="#fff" stroke-width="0.25" fill="none"/>
-        \\  <path d="M 50 180 C 150 340, 350 40, 450 180" stroke="#fff" stroke-width="0.5" fill="none"/>
-        \\  <path d="M 50 240 C 150 400, 350 100, 450 240" stroke="#fff" stroke-width="1" fill="none"/>
-        \\  <path d="M 50 300 C 150 460, 350 160, 450 300" stroke="#fff" stroke-width="2" fill="none"/>
-        \\  <path d="M 50 360 C 150 520, 350 220, 450 360" stroke="#fff" stroke-width="4" fill="none"/>
-        \\</svg>
-    ;
-    var doc = try svg_xml.parseSvg(gpa, strokes_xml);
-    defer doc.deinit();
-    const v = try SvgView.init(gpa, gpu, &doc, text_engine.materials, text_engine.materialBda(), svg_material_base);
-    return v;
+/// viewBox covers the curves' FULL ink — the 0.1-wide curve's control
+/// points reach y = -80 and the 4-wide one y = 520 — so librsvg's
+/// preserveAspectRatio fit shows every stroke instead of cropping the
+/// overflow, which is what the old bounds-fit view had to special-case.
+const stroke_scene_svg =
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 -90 420 620">
+    \\  <path d="M 50 60 C 150 220, 350 -80, 450 60" stroke="#fff" stroke-width="0.1" fill="none"/>
+    \\  <path d="M 50 120 C 150 280, 350 -20, 450 120" stroke="#fff" stroke-width="0.25" fill="none"/>
+    \\  <path d="M 50 180 C 150 340, 350 40, 450 180" stroke="#fff" stroke-width="0.5" fill="none"/>
+    \\  <path d="M 50 240 C 150 400, 350 100, 450 240" stroke="#fff" stroke-width="1" fill="none"/>
+    \\  <path d="M 50 300 C 150 460, 350 160, 450 300" stroke="#fff" stroke-width="2" fill="none"/>
+    \\  <path d="M 50 360 C 150 520, 350 220, 450 360" stroke="#fff" stroke-width="4" fill="none"/>
+    \\</svg>
+;
+
+/// The stroke test scene (the TestStrokesApp root) loads the curved
+/// thin-stroke set; everything else loads the tiger.
+fn sceneDocument(comptime T: type) []const u8 {
+    return if (comptime T == ui.TestStrokesApp) stroke_scene_svg else tiger_svg;
+}
+
+/// The showcase box's declared edge in logical window units, declared once
+/// by the UI and echoed here so the scene can report its raster before the
+/// first measured one exists.
+fn sceneDocumentBox(comptime T: type) f32 {
+    return if (comptime T == ui.TestStrokesApp)
+        ui.stroke_scene_box_size
+    else
+        ui.tiger_scene_box_size;
 }
 
 const icon_count = @typeInfo(IconId).@"enum".fields.len;
-const icon_material_base: u32 = svg_material_base + 384;
 
-/// Compact 16px SVG paths, indexed in exact `IconId` declaration order.
-/// Every path stays within the view box so cached bounds center consistently.
+/// The icon box in logical window units. Every icon document uses a
+/// 16-unit viewBox, so one square quad at this size samples the whole
+/// raster and the set keeps a uniform optical weight.
+const icon_logical_size: f32 = 16;
+
+/// Compact 16-unit SVG documents, indexed in exact `IconId` declaration
+/// order. They upload as white coverage masks: the scene rect's Oklab tint
+/// supplies the color, so one raster per icon serves every button color.
 const icon_svg = [_][]const u8{
     \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
     \\  <path
@@ -302,73 +279,273 @@ const icon_svg = [_][]const u8{
     \\</svg>
     ,
 };
+
 comptime {
     std.debug.assert(icon_svg.len == icon_count);
 }
 
-const IconCache = struct {
-    views: [icon_count]SvgView,
+/// A rasterized SVG document bound to one device-pixel viewport and
+/// registered in the GUI texture heap. The raster is rebuilt ONLY when the
+/// destination's device size or the display scale changes: a steady frame
+/// reuses the registered heap index with no upload and no allocation.
+const SvgTexture = struct {
+    gpa: std.mem.Allocator,
+    gpu: *noapi.Gpu,
+    registry: *BindlessHeap,
+    document: []const u8,
+    /// Coverage-mask upload: the raster keeps only its alpha and the scene
+    /// rect's Oklab tint supplies the color.
+    mask: bool,
+    viewport: [2]u32 = .{ 0, 0 },
+    scale: f32 = 0,
+    texture: noapi.TextureHandle = .{},
+    index: u32 = no_texture,
 
-    fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu, text_engine: *TextEngine) !IconCache {
-        comptime std.debug.assert(icon_material_base + icon_count * 2 <= max_materials);
-        var views: [icon_count]SvgView = undefined;
-        var initialized: usize = 0;
-        errdefer for (views[0..initialized]) |*view| view.deinit(gpu);
-        for (icon_svg, 0..) |xml, i| {
-            var doc = try svg_xml.parseSvg(gpa, xml);
-            defer doc.deinit();
-            views[i] = try SvgView.init(
-                gpa,
-                gpu,
-                &doc,
-                text_engine.materials,
-                text_engine.materialBda(),
-                icon_material_base + @as(u32, @intCast(i * 2)),
-            );
-            views[i].setScale(1);
-            initialized += 1;
-        }
-        return .{ .views = views };
+    fn init(
+        gpa: std.mem.Allocator,
+        gpu: *noapi.Gpu,
+        registry: *BindlessHeap,
+        document: []const u8,
+        mask: bool,
+    ) SvgTexture {
+        return .{
+            .gpa = gpa,
+            .gpu = gpu,
+            .registry = registry,
+            .document = document,
+            .mask = mask,
+        };
     }
 
-    fn deinit(self: *IconCache, gpu: *noapi.Gpu) void {
-        for (&self.views) |*view| view.deinit(gpu);
+    fn deinit(self: *SvgTexture) void {
+        self.release();
         self.* = undefined;
     }
 
-    fn get(self: *const IconCache, icon: IconId) *const SvgView {
-        return &self.views[@intFromEnum(icon)];
+    /// Drop the raster and give its heap slot back to the registry's shared
+    /// free list. A viewport change re-rasterizes rather than keeping a
+    /// stale surface alive beside the new one.
+    fn release(self: *SvgTexture) void {
+        if (self.texture.texture.id == 0) return;
+        self.registry.release(self.gpa, self.texture);
+        self.gpu.textureDestroy(self.texture);
+        self.texture = .{};
+        self.index = no_texture;
+        self.viewport = .{ 0, 0 };
+        self.scale = 0;
+    }
+
+    /// Rasterize and upload for an exact device-pixel viewport. A no-op
+    /// when the live raster already covers it.
+    fn ensure(self: *SvgTexture, width: u32, height: u32, scale: f32) !void {
+        if (self.texture.texture.id != 0 and self.viewport[0] == width and
+            self.viewport[1] == height and self.scale == scale) return;
+        self.release();
+        var image = try svg_mod.rasterize(self.gpa, self.document, width, height, scale);
+        defer image.deinit();
+        const texture = try createSurfaceTexture(self.gpu, &image, self.mask);
+        errdefer self.gpu.textureDestroy(texture);
+        self.index = try self.registry.register(self.gpa, texture);
+        self.texture = texture;
+        self.viewport = .{ width, height };
+        self.scale = scale;
     }
 };
 
-/// Convert window-logical mouse coordinates (SDL event space) to surface
-/// pixels (the layout space): scale by the surface/window size ratio.
-/// Identity when the window is not scaled; correct on HiDPI displays.
-fn toSurfacePoint(sdl_win: sdl3.video.Window, gw: *noapi.Surface, p: [2]f32) ![2]f32 {
-    const win_size = try sdl_win.getSize();
-    const surface_size = gw.surfaceSize();
-    const sw: f32 = @floatFromInt(@min(surface_size.width, 1 << 24));
-    const sh: f32 = @floatFromInt(@min(surface_size.height, 1 << 24));
-    const ww: f32 = @floatFromInt(@min(win_size[0], 1 << 24));
-    const wh: f32 = @floatFromInt(@min(win_size[1], 1 << 24));
+/// The reserved showcase box's document (tiger or stroke scene), rasterized
+/// at the box's device-pixel size and sampled as one bindless quad.
+const SvgScene = struct {
+    texture: SvgTexture,
+    /// The box edge the UI declares, reported until the first measured
+    /// raster replaces it (the scene's panel reads the value during draw,
+    /// one frame before the measured box is known).
+    declared_box: f32,
+    scale: nogui.geometry.PixelScale = .{ .x = 1, .y = 1 },
+    /// librsvg is missing: reported once so the log names the cause instead
+    /// of leaving an empty card unexplained.
+    reported: bool = false,
+
+    fn init(
+        gpa: std.mem.Allocator,
+        gpu: *noapi.Gpu,
+        registry: *BindlessHeap,
+        document: []const u8,
+        declared_box: f32,
+    ) SvgScene {
+        return .{
+            .texture = SvgTexture.init(gpa, gpu, registry, document, false),
+            .declared_box = declared_box,
+        };
+    }
+
+    fn deinit(self: *SvgScene) void {
+        self.texture.deinit();
+        self.* = undefined;
+    }
+
+    fn setPixelScale(self: *SvgScene, scale: nogui.geometry.PixelScale) void {
+        self.scale = scale;
+        if (ui.svg_raster[0] == 0) {
+            ui.svg_raster = .{
+                devicePixels(self.declared_box, scale.x),
+                devicePixels(self.declared_box, scale.y),
+            };
+        }
+        ui.svg_raster_scale = scale.x;
+    }
+
+    /// Rasterize the document for `box`'s device-pixel size and return its
+    /// heap index. Null when the box is collapsed, the raster exceeds the
+    /// host's viewport bound, or librsvg is unavailable.
+    fn prepare(self: *SvgScene, box: Rect) !?u32 {
+        if (box.w <= 0 or box.h <= 0) return null;
+        if (!svg_mod.isAvailable()) {
+            if (!self.reported) {
+                self.reported = true;
+                std.log.warn("SVG showcase disabled: librsvg and Cairo did not load", .{});
+            }
+            return null;
+        }
+        const width = devicePixels(box.w, self.scale.x);
+        const height = devicePixels(box.h, self.scale.y);
+        if (width == 0 or height == 0 or
+            width > svg_mod.max_viewport_edge or height > svg_mod.max_viewport_edge) return null;
+        try self.texture.ensure(width, height, self.scale.x);
+        ui.svg_raster = .{ width, height };
+        ui.svg_raster_scale = self.scale.x;
+        return self.texture.index;
+    }
+};
+
+/// The transport icons, rasterized by librsvg at the display's device
+/// scale. Every icon shares one square device size, so the set
+/// re-rasterizes together when the scale changes and never mid-frame.
+const IconCache = struct {
+    textures: [icon_count]SvgTexture,
+    /// The device-pixel viewport the registered rasters were made for.
+    raster: [2]u32 = .{ 0, 0 },
+    scale: nogui.geometry.PixelScale = .{ .x = 1, .y = 1 },
+    reported: bool = false,
+
+    fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *BindlessHeap) IconCache {
+        var textures: [icon_count]SvgTexture = undefined;
+        for (icon_svg, 0..) |document, slot| {
+            textures[slot] = SvgTexture.init(gpa, gpu, registry, document, true);
+        }
+        return .{ .textures = textures };
+    }
+
+    fn deinit(self: *IconCache) void {
+        for (&self.textures) |*texture| texture.deinit();
+        self.* = undefined;
+    }
+
+    fn setPixelScale(self: *IconCache, scale: nogui.geometry.PixelScale) void {
+        self.scale = scale;
+    }
+
+    /// Rasterize the whole set for the current display scale. False when
+    /// librsvg is unavailable or a raster failed, in which case the scene
+    /// draws no icons rather than stale ones.
+    fn prepare(self: *IconCache) bool {
+        if (!svg_mod.isAvailable()) {
+            if (!self.reported) {
+                self.reported = true;
+                std.log.warn("transport icons disabled: librsvg and Cairo did not load", .{});
+            }
+            return false;
+        }
+        const width = devicePixels(icon_logical_size, self.scale.x);
+        const height = devicePixels(icon_logical_size, self.scale.y);
+        if (width == 0 or height == 0) return false;
+        if (self.raster[0] == width and self.raster[1] == height) return true;
+        for (&self.textures) |*texture| {
+            texture.ensure(width, height, self.scale.x) catch |err| {
+                std.log.warn(
+                    "transport icon raster failed at {d}x{d}: {s}",
+                    .{ width, height, @errorName(err) },
+                );
+                return false;
+            };
+        }
+        self.raster = .{ width, height };
+        return true;
+    }
+
+    /// The icon's bindless heap index, valid after a `prepare` that
+    /// returned true.
+    fn index(self: *const IconCache, icon: IconId) u32 {
+        return self.textures[@intFromEnum(icon)].index;
+    }
+};
+
+/// The public lowering's injection points, implemented over the demo's
+/// librsvg-backed raster caches. The public module knows nothing about SVG
+/// documents, viewports, or Cairo; it asks for a heap index for a box.
+fn overlayPrepare(ctx: *anyopaque, box: Rect) anyerror!?u32 {
+    const scene: *SvgScene = @ptrCast(@alignCast(ctx));
+    return scene.prepare(box);
+}
+
+fn iconsPrepare(ctx: *anyopaque) bool {
+    const cache: *IconCache = @ptrCast(@alignCast(ctx));
+    return cache.prepare();
+}
+
+fn iconIndex(ctx: *anyopaque, icon: IconId) u32 {
+    const cache: *const IconCache = @ptrCast(@alignCast(ctx));
+    return cache.index(icon);
+}
+
+/// The demo's scene inputs for one frame. The showcase box comes from the
+/// node the UI published during the frame's draw, which is why this is built
+/// per frame and not cached beside the raster caches.
+fn sceneOptions(
+    svg_scene: *SvgScene,
+    icon_cache: *IconCache,
+) frame_scene.SceneOptions {
     return .{
-        p[0] * sw / ww,
-        p[1] * sh / wh,
+        .palette = &demo_palette,
+        .overlay = .{ .ctx = svg_scene, .prepare = overlayPrepare },
+        .icons = .{
+            .ctx = icon_cache,
+            .prepare = iconsPrepare,
+            .index = iconIndex,
+        },
+        .icon_logical_size = icon_logical_size,
+        .showcase_box = if (ui.svg_box_id) |raw| @as(FrameNodeId, @enumFromInt(raw)) else null,
     };
 }
 
-/// The modern dark canvas: the Oklab L≈0.20 neutral with a whisper of blue
-/// (b < 0) — the deepest surface the cards sit on. Clears the offscreen
-/// target.
-const oklab_gray = [4]f32{ 0.20, 0.0, -0.008, 1.0 };
+/// The public recorder's inputs for one frame. `arena` is the frame tree's
+/// own arena, so the lowering's scratch dies with the frame that owns the
+/// tree — the demo never frees it separately.
+fn recordContext(
+    frame: *const nogui.FrameOutput,
+    gui_renderer: *Renderer,
+    text_engine: *const TextEngine,
+    verify_sort: bool,
+    logical_size: WindowSize,
+    device_extent: noapi.Extent2D,
+    texture_heap: noapi.DescriptorHeap,
+) frame_scene.RecordContext {
+    return .{
+        .arena = frame.tree.allocator,
+        .renderer = gui_renderer,
+        .text = text_engine,
+        .verify_sort = verify_sort,
+        .logical = logical_size,
+        .device = device_extent,
+        .texture_heap = texture_heap,
+        .clips = frame.tree.clip_rects[0..frame.tree.clip_count],
+    };
+}
 
-/// The SVG view's material slots own the TOP region of the shared
-/// material buffer: [svg_material_base, MAX_MATERIALS). The tiger has
-/// ≤240 fill paths + up to 78 stroked paths (a slot each); the per-frame
-/// decorations descend from svg_material_base. The glyphs (from slot 1
-/// upward) must stay below svg_material_base — the demo's ~620 glyphs
-/// fit with headroom.
-const svg_material_base: u32 = max_materials - 512;
+// The Oklab clear colour and the material partition (glyph ceiling, the
+// three per-frame decoration rings) live in the public scene module; this
+// file aliases what it still needs. `frame_material_slots` and
+// `frame_material_base` have no demo callers left: the lowering and the
+// recording are their only consumers, and both live in `v7_frame/scene.zig`.
 
 /// A shader file read from disk: owns the byte buffer, exposes the SPIR-V
 /// word slice (shaderCreate copies the module, so the bytes only need to
@@ -415,181 +592,6 @@ fn ensureRenderTarget(
     gpu.descHeapSetTextures(blit_heap, 0, &.{rt_desc});
 }
 
-/// The GUI texture heap + registry (spec §5 phase 1 — the bindless path):
-/// a persistent descriptor heap created once (set 0 = the app-registered
-/// textures, set 2 = one shared linear/clamp sampler at index 0) plus a
-/// map from the app's texture handle to its stable heap index. The frame
-/// binds the heap with ONE cmd.bindDescriptorSets before renderer.draw —
-/// bindings are not draws, so the one-draw invariant holds. The fragment
-/// shader samples textures[NonUniformResourceIndex(tex_idx)] (set 0
-/// binding 0) with samplers[0] (set 2 binding 0); descHeapSetTextures
-/// writes each registration's image-view descriptor at its index.
-/// descHeapCreate's requested counts are capacity hints — the backend
-/// forces the pool to max_textures/max_samplers either way.
-const ExternalTextureSlots = struct {
-    const Self = ExternalTextureSlots;
-
-    /// Indices freed by external component textures are reusable by any
-    /// subsequent registration, including ordinary map-owned textures.
-    next_idx: u32 = 0,
-    reusable_indices: std.ArrayListUnmanaged(u32) = .empty,
-    live_indices: std.AutoHashMapUnmanaged(u32, void) = .empty,
-
-    fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-        self.reusable_indices.deinit(gpa);
-        self.live_indices.deinit(gpa);
-        self.* = undefined;
-    }
-
-    fn take(self: *Self) u32 {
-        if (self.reusable_indices.pop()) |idx| return idx;
-        const idx = self.next_idx;
-        self.next_idx += 1;
-        return idx;
-    }
-
-    fn restore(self: *Self, gpa: std.mem.Allocator, idx: u32) void {
-        self.reusable_indices.append(gpa, idx) catch
-            @panic("external texture slot free-list allocation failed");
-    }
-
-    fn register(self: *Self, gpa: std.mem.Allocator) !u32 {
-        const idx = self.take();
-        errdefer self.restore(gpa, idx);
-        try self.live_indices.put(gpa, idx, {});
-        return idx;
-    }
-
-    fn unregister(self: *Self, gpa: std.mem.Allocator, idx: u32) bool {
-        if (self.live_indices.fetchRemove(idx) == null) return false;
-        self.reusable_indices.append(gpa, idx) catch
-            @panic("external texture slot free-list allocation failed");
-        return true;
-    }
-};
-
-const TextureRegistry = struct {
-    const Self = TextureRegistry;
-
-    gpu: *noapi.Gpu,
-    gpa: std.mem.Allocator,
-    heap: noapi.DescriptorHeap,
-    /// Global descriptor slot allocation. External ownership is tracked
-    /// separately by `external_slots`; map entries remain registry-owned.
-    external_slots: ExternalTextureSlots = .{},
-    /// The app's texture handle → heap index.
-    map: std.AutoHashMapUnmanaged(noapi.TextureHandle, u32) = .empty,
-    /// The storage-image table has one active slot for the Mandelbrot shader.
-    storage_owner: ?u32 = null,
-
-    fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu) !Self {
-        const heap = try gpu.descHeapCreate(16, 0, 1);
-        errdefer gpu.descHeapDestroy(heap);
-        const sampler = gpu.samplerDescriptor(.{
-            .min_filter = .linear,
-            .mag_filter = .linear,
-            .mip_filter = .linear,
-            .address_mode_u = .clamp_to_edge,
-            .address_mode_v = .clamp_to_edge,
-            .address_mode_w = .clamp_to_edge,
-        });
-        gpu.descHeapSetSamplers(heap, 0, &.{sampler});
-        return .{ .gpu = gpu, .gpa = gpa, .heap = heap };
-    }
-
-    fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-        // Ordinary window-owned textures remain registry-owned. Component
-        // textures use registerExternalWithStorage() and free themselves
-        // during deinitGpu; only their descriptor slots are cleared here.
-        var it = self.map.keyIterator();
-        while (it.next()) |h| self.gpu.textureDestroy(h.*);
-        self.map.deinit(gpa);
-        self.external_slots.deinit(gpa);
-        self.gpu.descHeapDestroy(self.heap);
-        self.* = undefined;
-    }
-
-    /// Register a texture: write its view descriptor into the heap at a
-    /// stable index (returned) — descHeapSetTextures, once per texture.
-    /// Idempotent: a handle already registered returns its index.
-    fn register(self: *Self, gpa: std.mem.Allocator, tex: noapi.TextureHandle) !u32 {
-        if (self.map.get(tex)) |idx| return idx;
-        const idx = self.external_slots.take();
-        errdefer self.external_slots.restore(gpa, idx);
-        const desc = self.gpu.textureViewDescriptor(tex, .{ .format = .default });
-        self.gpu.descHeapSetTextures(self.heap, idx, &.{desc});
-        try self.map.put(gpa, tex, idx);
-        return idx;
-    }
-
-    /// Register a component-owned storage texture without putting its handle
-    /// in the registry's destruction map. Its sampled and storage descriptors
-    /// are cleared by unregisterExternalWithStorage().
-    fn registerExternalWithStorage(self: *Self, tex: noapi.TextureHandle) !u32 {
-        const idx = try self.external_slots.register(self.gpa);
-        const desc = self.gpu.textureViewDescriptor(tex, .{ .format = .default });
-        self.gpu.descHeapSetTextures(self.heap, idx, &.{desc});
-        const rw_desc = self.gpu.textureRwViewDescriptor(tex, .{ .format = .default });
-        self.gpu.descHeapSetTexturesRw(self.heap, idx, &.{rw_desc});
-        self.gpu.descHeapSetTexturesRw(self.heap, 0, &.{rw_desc});
-        self.storage_owner = idx;
-        return idx;
-    }
-
-    /// Unregister a component-owned texture. The live-index set makes this
-    /// callback idempotent, so a repeated deinit cannot reuse a slot twice.
-    fn unregisterExternalWithStorage(self: *Self, idx: u32) void {
-        if (!self.external_slots.unregister(self.gpa, idx)) return;
-        const null_desc: u64 = 0;
-        self.gpu.descHeapSetTextures(self.heap, idx, &.{null_desc});
-        self.gpu.descHeapSetTexturesRw(self.heap, idx, &.{null_desc});
-        if (self.storage_owner) |owner| {
-            if (owner == idx) {
-                self.gpu.descHeapSetTexturesRw(self.heap, 0, &.{null_desc});
-                self.storage_owner = null;
-            }
-        }
-    }
-};
-
-fn registerRuntimeTexture(ptr: *anyopaque, texture: noapi.TextureHandle) anyerror!u32 {
-    const registry: *TextureRegistry = @ptrCast(@alignCast(ptr));
-    return registry.registerExternalWithStorage(texture);
-}
-
-fn unregisterRuntimeTexture(ptr: *anyopaque, index: u32) void {
-    const registry: *TextureRegistry = @ptrCast(@alignCast(ptr));
-    registry.unregisterExternalWithStorage(index);
-}
-
-test "TextureRegistry: external slots reuse released indices" {
-    var slots: ExternalTextureSlots = .{};
-    defer slots.deinit(std.testing.allocator);
-
-    const first = try slots.register(std.testing.allocator);
-    const second = try slots.register(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 0), first);
-    try std.testing.expectEqual(@as(u32, 1), second);
-    try std.testing.expect(slots.unregister(std.testing.allocator, first));
-
-    const reused = try slots.register(std.testing.allocator);
-    try std.testing.expectEqual(first, reused);
-}
-
-test "TextureRegistry: double external unregister is idempotent" {
-    var slots: ExternalTextureSlots = .{};
-    defer slots.deinit(std.testing.allocator);
-
-    const index = try slots.register(std.testing.allocator);
-    try std.testing.expect(slots.unregister(std.testing.allocator, index));
-    try std.testing.expect(!slots.unregister(std.testing.allocator, index));
-
-    const reused = try slots.register(std.testing.allocator);
-    try std.testing.expectEqual(index, reused);
-    const next = try slots.register(std.testing.allocator);
-    try std.testing.expectEqual(index + 1, next);
-}
-
 /// Demo texture pixels: a 64x64 procedural Oklab stripe pattern — eight
 /// 8px-wide vertical stripes of distinct saturated colors. The demo card
 /// is a full-width, ~16px-tall strip (the root column stretches it), so
@@ -630,7 +632,7 @@ fn writeDemoTexturePixels(pixels: [*]f32) void {
 /// staging buffer), register it in the GUI texture heap and return its
 /// heap index (tex_idx). The texture's OWNED by the registry (destroyed
 /// with it).
-fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *TextureRegistry) !u32 {
+fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *BindlessHeap) !u32 {
     const tex = try gpu.textureCreate(.{
         .dimensions = .{ demo_tex_size, demo_tex_size, 1 },
         .format = .rgba32_float,
@@ -647,6 +649,10 @@ fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Texture
     // layout — textureCreate transitions it there; the heap's descriptors
     // use .general too), then idle before the first GUI frame.
     var cmd = try gpu.commandsBegin();
+    var command_pending = true;
+    errdefer if (command_pending) {
+        gpu.commandsCancel(&cmd) catch @panic("upload recording cancellation failed");
+    };
     cmd.copyToTexture(.{
         .gpu = gpu,
         .handle = tex,
@@ -654,32 +660,35 @@ fn uploadDemoTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Texture
         .format = .rgba32_float,
     }, buf, .{ .size = .{ demo_tex_size, demo_tex_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
+    command_pending = false;
     try gpu.waitIdle();
 
     return registry.register(gpa, tex);
 }
 
-/// Decode and upload one local track's artwork during window setup. The
-/// registry owns the sampled texture after registration; no frame allocates.
-fn uploadArtworkTexture(
-    gpa: std.mem.Allocator,
+/// Create a sampled rgba32_float texture and fill it through the noapi
+/// staging path: `write` receives the host-visible destination as one
+/// float4 per pixel, row-major. rgba8 UNORM could not hold the negative
+/// Oklab chroma the pipeline renders in, so every image the demo samples is
+/// uploaded as floats. Callers run this outside the frame loop — it ends in
+/// a queue idle. `write` may fail (a decoded surface can be shorter than its
+/// own rows); the error surfaces before any command references the staging
+/// buffer.
+pub fn createFloatTexture(
+    comptime write: fn (*const anyopaque, [*]f32, usize) anyerror!void,
     gpu: *noapi.Gpu,
-    registry: *TextureRegistry,
-    artwork: ffmpeg_decoder.Artwork,
-) !u32 {
-    var decoded = try ffmpeg_decoder.decodeArtwork(gpa, artwork);
-    defer decoded.deinit(gpa);
-
-    const pixel_count = try std.math.mul(
-        usize,
-        @as(usize, decoded.width),
-        @as(usize, decoded.height),
-    );
-    const float_count = try std.math.mul(usize, pixel_count, 4);
+    width: u32,
+    height: u32,
+    context: *const anyopaque,
+) !noapi.TextureHandle {
+    const pixel_count = std.math.mul(usize, width, height) catch
+        return error.SurfaceCapacity;
+    const float_count = std.math.mul(usize, pixel_count, 4) catch
+        return error.SurfaceCapacity;
     const staging_bytes: u64 = @intCast(float_count * @sizeOf(f32));
 
     const texture = try gpu.textureCreate(.{
-        .dimensions = .{ decoded.width, decoded.height, 1 },
+        .dimensions = .{ width, height, 1 },
         .format = .rgba32_float,
         .usage = .{ .sampled = true },
     });
@@ -687,32 +696,92 @@ fn uploadArtworkTexture(
 
     const staging = try gpu.gpuMalloc(staging_bytes, 64, .default);
     defer gpu.gpuFree(staging);
-    const destination: [*]f32 = @ptrCast(@alignCast(staging.cpu));
-    for (0..pixel_count) |pixel_index| {
-        const source_offset = pixel_index * 4;
-        const color = srgbToOklab(.{
-            @as(f32, @floatFromInt(decoded.pixels[source_offset])) / 255.0,
-            @as(f32, @floatFromInt(decoded.pixels[source_offset + 1])) / 255.0,
-            @as(f32, @floatFromInt(decoded.pixels[source_offset + 2])) / 255.0,
-            @as(f32, @floatFromInt(decoded.pixels[source_offset + 3])) / 255.0,
-        });
-        const destination_offset = pixel_index * 4;
-        destination[destination_offset + 0] = color[0];
-        destination[destination_offset + 1] = color[1];
-        destination[destination_offset + 2] = color[2];
-        destination[destination_offset + 3] = color[3];
-    }
+    try write(context, @ptrCast(@alignCast(staging.cpu)), pixel_count);
 
     var command = try gpu.commandsBegin();
+    var command_pending = true;
+    errdefer if (command_pending) {
+        gpu.commandsCancel(&command) catch @panic("upload recording cancellation failed");
+    };
     command.copyToTexture(.{
         .gpu = gpu,
         .handle = texture,
-        .dimensions = .{ decoded.width, decoded.height, 1 },
+        .dimensions = .{ width, height, 1 },
         .format = .rgba32_float,
-    }, staging, .{ .size = .{ decoded.width, decoded.height, 1 } });
+    }, staging, .{ .size = .{ width, height, 1 } });
     try gpu.queueSubmit(&.{command});
+    command_pending = false;
     try gpu.waitIdle();
+    return texture;
+}
 
+/// A decoded RGBA8 surface's pixels as pipeline floats: Oklab for full-color
+/// art, a premultiplied WHITE coverage mask for tinted monochrome art (the
+/// scene rect's Oklab tint then supplies the icon's color).
+const SurfaceUpload = struct {
+    image: *const svg_mod.DecodedImage,
+    mask: bool,
+
+    fn write(context: *const anyopaque, out: [*]f32, _: usize) !void {
+        const self: *const SurfaceUpload = @ptrCast(@alignCast(context));
+        if (self.mask) {
+            try svg_mod.writeFloats(svg_mod.coverageMask, out, self.image);
+            return;
+        }
+        try svg_mod.writeFloats(srgbToOklab, out, self.image);
+    }
+};
+
+pub fn createSurfaceTexture(
+    gpu: *noapi.Gpu,
+    image: *const svg_mod.DecodedImage,
+    mask: bool,
+) !noapi.TextureHandle {
+    var upload: SurfaceUpload = .{ .image = image, .mask = mask };
+    return createFloatTexture(
+        SurfaceUpload.write,
+        gpu,
+        image.width,
+        image.height,
+        &upload,
+    );
+}
+
+/// Decode and upload one local track's artwork during window setup. The
+/// registry owns the sampled texture after registration; no frame allocates.
+fn uploadArtworkTexture(
+    gpa: std.mem.Allocator,
+    gpu: *noapi.Gpu,
+    registry: *BindlessHeap,
+    artwork: ffmpeg_decoder.Artwork,
+) !u32 {
+    var decoded = try ffmpeg_decoder.decodeArtwork(gpa, artwork);
+    defer decoded.deinit(gpa);
+    const texture = try createFloatTexture(
+        struct {
+            fn write(context: *const anyopaque, out: [*]f32, count: usize) !void {
+                const pixels: *const ffmpeg_decoder.DecodedArtwork = @ptrCast(@alignCast(context));
+                for (0..count) |pixel_index| {
+                    const source = pixel_index * 4;
+                    const color = srgbToOklab(.{
+                        @as(f32, @floatFromInt(pixels.pixels[source + 0])) / 255.0,
+                        @as(f32, @floatFromInt(pixels.pixels[source + 1])) / 255.0,
+                        @as(f32, @floatFromInt(pixels.pixels[source + 2])) / 255.0,
+                        @as(f32, @floatFromInt(pixels.pixels[source + 3])) / 255.0,
+                    });
+                    const destination = pixel_index * 4;
+                    out[destination + 0] = color[0];
+                    out[destination + 1] = color[1];
+                    out[destination + 2] = color[2];
+                    out[destination + 3] = color[3];
+                }
+            }
+        }.write,
+        gpu,
+        decoded.width,
+        decoded.height,
+        &decoded,
+    );
     return registry.register(gpa, texture);
 }
 
@@ -721,7 +790,7 @@ fn uploadLocalArtwork(
     gpa: std.mem.Allocator,
     root: *T,
     gpu: *noapi.Gpu,
-    registry: *TextureRegistry,
+    registry: *BindlessHeap,
     tracks: []const LocalTrack,
 ) void {
     if (comptime T != spotify_ui.SpotifyApp) return;
@@ -744,7 +813,7 @@ fn uploadLocalArtwork(
 /// as an rgba32_float texture and registered (ui.tiger_ref_idx) for the
 /// sampler-only TYPE_TEXTURE path.
 const tiger_ref_size = 512;
-fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *TextureRegistry) !void {
+fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *BindlessHeap) !void {
     const tex = try gpu.textureCreate(.{
         .dimensions = .{ tiger_ref_size, tiger_ref_size, 1 },
         .format = .rgba32_float,
@@ -775,6 +844,10 @@ fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Te
     }
 
     var cmd = try gpu.commandsBegin();
+    var command_pending = true;
+    errdefer if (command_pending) {
+        gpu.commandsCancel(&cmd) catch @panic("upload recording cancellation failed");
+    };
     cmd.copyToTexture(.{
         .gpu = gpu,
         .handle = tex,
@@ -782,669 +855,30 @@ fn uploadReferenceTexture(gpa: std.mem.Allocator, gpu: *noapi.Gpu, registry: *Te
         .format = .rgba32_float,
     }, buf, .{ .size = .{ tiger_ref_size, tiger_ref_size, 1 } });
     try gpu.queueSubmit(&.{cmd});
+    command_pending = false;
     try gpu.waitIdle();
 
     ui.tiger_ref_idx = try registry.register(gpa, tex);
 }
-fn noteSceneGrowth(out: *const std.ArrayList(SceneRect), counter_sink: *const CounterSink) void {
-    if (out.items.len != out.capacity) return;
-    counter_sink.add(.slice_rect_growth_events, 1);
-    counter_sink.add(
-        .slice_rect_growth_copy_bytes,
-        @as(u64, @intCast(out.items.len)) * @sizeOf(SceneRect),
-    );
-}
-/// 1. Every DrawCmd rect becomes a SceneRect. Ring cmds (borders) get a
-///    rounded-rect ring material (type 2, full box radius + border width +
-///    border-box size); radius-bearing fill cmds get a rounded-rect fill
-///    material (type 2, radius minus border, border 0, inset rect size);
-///    solid cmds (no radius) stay material 0. Materials are written into
-///    slots allocated downward from the top of the engine's material
-///    buffer (rewritten every frame; glyph slots live at the bottom, so
-///    there is never a collision). Each cmd gets its own slot because the
-///    material carries per-rect geometry.
-/// 2. Slider thumbs paint next (rounded bar, before the glyphs so it never
-///    occludes the slider's own label).
-/// 3. Hover + focus outlines paint after the fills (before the glyphs, so
-///    they never overdraw text at the box edges).
-/// 4. Every text-bearing node (labels and visible slider labels) emits one
-///    glyph SceneRect per character at its ABSOLUTE content box. SVG icon
-///    buttons append their cached path rects after glyph emission, with no
-///    text fallback.
-fn buildSliceRects(
-    gpa: std.mem.Allocator,
-    text_engine: *TextEngine,
-    svg_view: ?*SvgView,
-    icon_cache: ?*const IconCache,
-    cmds: []const DrawCmd,
-    tree: *const WidgetTree,
-    hover_id: ?Id,
-    hover_alpha: f32,
-    focus_id: ?Id,
-    out: *std.ArrayList(SceneRect),
-) !void {
-    const counter_sink = text_engine.counterSink();
-    const zone = tracy.Zone.begin(.{ .name = "buildSliceRects", .src = @src() });
-    defer zone.end();
-    // Rounded-rect material slots, allocated from the top of the buffer
-    // downward (glyphs own slots 1..next_slot-1 from the bottom; the
-    // assert in text.zig caps glyphs well below the top). The SVG view's
-    // materials own the TOP region [svg_material_base, MAX_MATERIALS) —
-    // the decorations descend from svg_material_base, never into the
-    // tiger's slots.
-    var material_slot: u32 = svg_material_base;
-    // Guard the decoration writes against the LIVE glyph count: glyph
-    // slots ascend from slot 1 as the frame's text is rasterized, so the
-    // headroom below is next_slot, not 1. With `> 1` a burst of
-    // decorations could silently write into in-flight glyph material;
-    // with the live count the assert fires instead.
-    const glyph_slots = text_engine.glyphSlotCount();
-
-    for (cmds) |cmd| {
-        counter_sink.add(.draw_cmd_value_bind_bytes, @sizeOf(DrawCmd));
-        const paint = cmd.paint;
-        const corner_l: f32 = if (cmd.ring)
-            paint.radius.left
-        else
-            @max(0, paint.radius.left - cmd.border.left);
-        const corner_r: f32 = if (cmd.ring)
-            paint.radius.right
-        else
-            @max(0, paint.radius.right - cmd.border.right);
-        const corner_t: f32 = if (cmd.ring)
-            paint.radius.top
-        else
-            @max(0, paint.radius.top - cmd.border.top);
-        const corner_b: f32 = if (cmd.ring)
-            paint.radius.bottom
-        else
-            @max(0, paint.radius.bottom - cmd.border.bottom);
-
-        // Rounded-rect material geometry: one radius per axis (the SDF
-        // rounds all four corners; demo boxes use uniform radii). Rings
-        // always need the ring material (their interior is punched out);
-        // fills need one only when they carry a radius.
-        const rx: f32 = @max(corner_l, corner_r);
-        const ry: f32 = @max(corner_t, corner_b);
-        const border: f32 = if (cmd.ring)
-            @max(
-                @max(cmd.border.left, cmd.border.right),
-                @max(cmd.border.top, cmd.border.bottom),
-            )
-        else
-            0;
-
-        var material_index: u32 = 0;
-        // The shadow cmd's rect is the border box plus the core's
-        // drop-shadow offset, so its corners are the box's radii (not the
-        // border-inset radii used for fills).
-        var slice_corner_l: f32 = corner_l;
-        var slice_corner_r: f32 = corner_r;
-        var slice_corner_t: f32 = corner_t;
-        var slice_corner_b: f32 = corner_b;
-        if (cmd.paint.shadow > 0) {
-            // Shadow cmd: feathered rounded-rect material (type 3). The
-            // shader fades the coverage over feather/2 px BEYOND the SDF
-            // edge — so the quad must be expanded by the feather on every
-            // side or the fade is clipped at the quad boundary (the old
-            // quad was exactly the widget's rect: shadows rendered as a
-            // ~1px line). The material's win_w/h stay the WIDGET's size
-            // (the SDF's rect) and the origin stays its top-left; only the
-            // rasterized quad grows.
-            slice_corner_l = paint.radius.left;
-            slice_corner_r = paint.radius.right;
-            slice_corner_t = paint.radius.top;
-            slice_corner_b = paint.radius.bottom;
-            const shadow_rx: f32 = @max(paint.radius.left, paint.radius.right);
-            const shadow_ry: f32 = @max(paint.radius.top, paint.radius.bottom);
-            const feather = cmd.paint.shadow;
-            std.debug.assert(material_slot > glyph_slots); // never reach the live glyph slots
-            material_slot -= 1;
-            renderer.GlyphSweeper.writeShadowMaterial(
-                text_engine.materials,
-                material_slot,
-                shadow_rx,
-                shadow_ry,
-                feather,
-                cmd.rect.w,
-                cmd.rect.h,
-            );
-            material_index = material_slot;
-            noteSceneGrowth(out, counter_sink);
-            try out.append(gpa, .{
-                .dst = .{
-                    cmd.rect.x - feather,
-                    cmd.rect.y - feather,
-                    cmd.rect.w + 2 * feather,
-                    cmd.rect.h + 2 * feather,
-                },
-                .src = .{ 0, 0, 1, 1 },
-                .corners = .{ slice_corner_l, slice_corner_r, slice_corner_t, slice_corner_b },
-                .color = srgbToOklab(cmd.color),
-                .curve = .{ 0, 0, 0, 0 },
-                .material_index = material_index,
-                .clip_id = cmd.clip_id,
-                .origin = .{ cmd.rect.x, cmd.rect.y },
-                .tex_idx = cmd.tex_idx,
-                .z = cmd.paint.layer,
-            });
-            continue;
-        } else if (cmd.ring or rx > 0 or ry > 0) {
-            std.debug.assert(material_slot > glyph_slots); // never reach the live glyph slots
-            material_slot -= 1;
-            // Ring materials always carry the ring's gradient (the demo sets
-            // none); fills carry one only when the gradient flag is set.
-            const gradient: [4]f32 = if (cmd.ring or cmd.paint.gradient[3] > 0) cmd.paint.gradient else .{ 0, 0, 0, 0 };
-            renderer.GlyphSweeper.writeRoundedRectMaterial(
-                text_engine.materials,
-                material_slot,
-                rx,
-                ry,
-                border,
-                cmd.rect.w,
-                cmd.rect.h,
-                gradient,
-            );
-            material_index = material_slot;
-        }
-
-        noteSceneGrowth(out, counter_sink);
-        try out.append(gpa, .{
-            .dst = .{ cmd.rect.x, cmd.rect.y, cmd.rect.w, cmd.rect.h },
-            .src = .{ 0, 0, 1, 1 },
-            .corners = .{ slice_corner_l, slice_corner_r, slice_corner_t, slice_corner_b },
-            // The drawcmd colors are sRGB-authored EXCEPT the textured
-            // fill's identity tint: the tint must stay (1,1,1) in the
-            // Oklab space the shader multiplies in — converting it through
-            // srgbToOklab yields Oklab white (1,0,0), which zeroes the
-            // sample's a/b chroma (every texture renders grayscale).
-            .color = if (cmd.tex_idx != 0xFFFFFFFF) cmd.color else srgbToOklab(cmd.color),
-            .curve = .{ 0, 0, 0, 0 },
-            .material_index = material_index,
-            .clip_id = cmd.clip_id,
-            .origin = .{ cmd.rect.x, cmd.rect.y },
-            .tex_idx = cmd.tex_idx,
-            .z = cmd.paint.layer,
-        });
-    }
-
-    // Slider progress and thumbs paint before glyphs so a thumb never covers
-    // the slider's own visible label.
-    for (tree.nodes.items) |*n| {
-        if (n.kind != .slider) continue;
-        const s = n.kind.slider;
-        const r = visualBorderRect(tree, n.id);
-        if (r.w <= 0 or r.h <= 0) continue;
-        // A max <= min slider has no valid range: 0/0 (or overflow) would
-        // yield NaN/inf and poison the progress or thumb rect. Center both.
-        const range = s.max - s.min;
-        const frac = std.math.clamp(if (range <= 0) 0.5 else (s.value.* - s.min) / range, 0, 1);
-        const progress_w = frac * r.w;
-        if (progress_w > 0) {
-            const progress_radius: f32 = @min(2, r.h / 2);
-            std.debug.assert(material_slot > glyph_slots);
-            material_slot -= 1;
-            renderer.GlyphSweeper.writeRoundedRectMaterial(
-                text_engine.materials,
-                material_slot,
-                progress_radius,
-                progress_radius,
-                0,
-                progress_w,
-                r.h,
-                .{ 0, 0, 0, 0 },
-            );
-            noteSceneGrowth(out, counter_sink);
-            try out.append(gpa, .{
-                .dst = .{ r.x, r.y, progress_w, r.h },
-                .src = .{ 0, 0, 1, 1 },
-                .corners = .{ progress_radius, progress_radius, progress_radius, progress_radius },
-                .color = srgbToOklab(s.color),
-                .curve = .{ 0, 0, 0, 0 },
-                .material_index = material_slot,
-                .clip_id = n.paint_clip_id,
-                .origin = .{ r.x, r.y },
-            });
-        }
-
-        const thumb = sliderThumbRect(r, frac);
-        if (thumb.w <= 0 or thumb.h <= 0) continue;
-        const thumb_radius: f32 = @min(3, @min(thumb.w, thumb.h) / 2);
-        std.debug.assert(material_slot > glyph_slots);
-        material_slot -= 1;
-        renderer.GlyphSweeper.writeRoundedRectMaterial(
-            text_engine.materials,
-            material_slot,
-            thumb_radius,
-            thumb_radius,
-            0,
-            thumb.w,
-            thumb.h,
-            .{ 0, 0, 0, 0 },
-        );
-        noteSceneGrowth(out, counter_sink);
-        try out.append(gpa, .{
-            .dst = .{ thumb.x, thumb.y, thumb.w, thumb.h },
-            .src = .{ 0, 0, 1, 1 },
-            .corners = .{ thumb_radius, thumb_radius, thumb_radius, thumb_radius },
-            .color = srgbToOklab(.{ 0.82, 0.82, 0.85, 1 }),
-            .curve = .{ 0, 0, 0, 0 },
-            .material_index = material_slot,
-            .clip_id = n.paint_clip_id,
-            .origin = .{ thumb.x, thumb.y },
-        });
-    }
-
-    // Hover outline: a 2px rounded ring around the hovered node (type-2
-    // ring material — the SDF punches the interior), painted before the
-    // glyphs so it never overdraws the text at the box edges.
-    if (hover_id) |hid| {
-        for (tree.nodes.items) |*n| {
-            counter_sink.add(.hover_focus_node_comparisons, 1);
-            if (n.id != hid) continue;
-            const r = visualBorderRect(tree, n.id);
-            if (r.w <= 0 or r.h <= 0) break;
-            const ring_rx: f32 = @max(n.paint.radius.left, n.paint.radius.right);
-            const ring_ry: f32 = @max(n.paint.radius.top, n.paint.radius.bottom);
-            std.debug.assert(material_slot > glyph_slots);
-            material_slot -= 1;
-            renderer.GlyphSweeper.writeRoundedRectMaterial(
-                text_engine.materials,
-                material_slot,
-                ring_rx,
-                ring_ry,
-                2,
-                r.w,
-                r.h,
-                .{ 0, 0, 0, 0 },
-            );
-            noteSceneGrowth(out, counter_sink);
-            try out.append(gpa, .{
-                .dst = .{ r.x, r.y, r.w, r.h },
-                .src = .{ 0, 0, 1, 1 },
-                .corners = .{
-                    n.paint.radius.left,
-                    n.paint.radius.right,
-                    n.paint.radius.top,
-                    n.paint.radius.bottom,
-                },
-                // Amber ring fades in by hover_alpha (the core eases it);
-                // hover_alpha 1 reproduces the solid ring.
-                .color = srgbToOklab(.{ 1.0, 0.8, 0.2, hover_alpha }),
-                .curve = .{ 0, 0, 0, 0 },
-                .material_index = material_slot,
-                .clip_id = n.paint_clip_id,
-                .origin = .{ r.x, r.y },
-            });
-            break;
-        }
-    }
-
-    // Focus ring: a 2px cyan rounded ring around the keyboard-focused node.
-    if (focus_id) |fid| {
-        for (tree.nodes.items) |*n| {
-            counter_sink.add(.hover_focus_node_comparisons, 1);
-            if (n.id != fid) continue;
-            const r = visualBorderRect(tree, n.id);
-            if (r.w <= 0 or r.h <= 0) break;
-            const ring_rx: f32 = @max(n.paint.radius.left, n.paint.radius.right);
-            const ring_ry: f32 = @max(n.paint.radius.top, n.paint.radius.bottom);
-            std.debug.assert(material_slot > glyph_slots);
-            material_slot -= 1;
-            renderer.GlyphSweeper.writeRoundedRectMaterial(
-                text_engine.materials,
-                material_slot,
-                ring_rx,
-                ring_ry,
-                2,
-                r.w,
-                r.h,
-                .{ 0, 0, 0, 0 },
-            );
-            noteSceneGrowth(out, counter_sink);
-            try out.append(gpa, .{
-                .dst = .{ r.x, r.y, r.w, r.h },
-                .src = .{ 0, 0, 1, 1 },
-                .corners = .{
-                    n.paint.radius.left,
-                    n.paint.radius.right,
-                    n.paint.radius.top,
-                    n.paint.radius.bottom,
-                },
-                .color = srgbToOklab(.{ 0.25, 0.85, 0.85, 1 }),
-                .curve = .{ 0, 0, 0, 0 },
-                .material_index = material_slot,
-                .clip_id = n.paint_clip_id,
-                .origin = .{ r.x, r.y },
-            });
-            break;
-        }
-    }
-
-    for (tree.nodes.items) |*n| {
-        const text: ?[]const u8 = switch (n.kind) {
-            // Buttons emit through their child label node — one text path.
-            .label => |l| l.text,
-            .slider => sliderVisualLabel(n.kind),
-            else => null,
-        };
-        const t = text orelse continue;
-        if (t.len == 0) continue;
-        const content = visualContentRect(tree, n.id);
-        if (content.w == 0 or content.h == 0) continue;
-        const size: u32 = if (n.font_size > 0) @intFromFloat(@round(n.font_size)) else font_size_px;
-        const text_color: [4]f32 = switch (n.kind) {
-            .label => |l| l.color,
-            .slider => |s| s.color,
-            else => unreachable,
-        };
-        // The node's clip id (stamped by collectDrawCmds): glyphs inside
-        // a `.clip` container are clipped to its rect like any other cmd.
-        // The node's layer key stamps the glyphs' z: a layered node's text
-        // must ride its OWN layer (the layer-1 badge's caption would
-        // otherwise sort below the badge's z=1 fill and vanish behind it).
-        const before = out.items.len;
-        switch (n.text_overflow) {
-            .ellipsis => {
-                const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
-                const max_width: f32 = @min(content.w, n.text_max_width orelse content.w);
-                try text_engine.emitTextWithWidth(
-                    t,
-                    content.x,
-                    baseline_y,
-                    size,
-                    n.font_id,
-                    n.clip_id,
-                    srgbToOklab(text_color),
-                    max_width,
-                    out,
-                );
-            },
-            .clip => if (n.text_max_width != null) {
-                const baseline_y = text_engine.baselineIn(content.y, content.h, size, n.font_id);
-                try text_engine.emitText(
-                    t,
-                    content.x,
-                    baseline_y,
-                    size,
-                    n.font_id,
-                    n.clip_id,
-                    srgbToOklab(text_color),
-                    out,
-                );
-            } else {
-                try text_engine.emitTextFlow(
-                    t,
-                    content.x,
-                    content.y,
-                    content.w,
-                    content.h,
-                    size,
-                    n.font_id,
-                    n.clip_id,
-                    srgbToOklab(text_color),
-                    out,
-                );
-            },
-            .visible => try text_engine.emitTextFlow(
-                t,
-                content.x,
-                content.y,
-                content.w,
-                content.h,
-                size,
-                n.font_id,
-                n.clip_id,
-                srgbToOklab(text_color),
-                out,
-            ),
-        }
-        if (n.paint.layer > 0) {
-            for (out.items[before..]) |*r| r.z = n.paint.layer;
-        }
-    }
-
-    // SVG icon buttons use the cache initialized by both `run` and
-    // `runShot`. The fixed 16px sweep space means this frame loop only
-    // copies cached SceneRects.
-    if (icon_cache) |cache| {
-        for (tree.nodes.items) |*n| {
-            const button = switch (n.kind) {
-                .button => |b| b,
-                else => continue,
-            };
-            const icon = button.icon orelse continue;
-            const content = visualContentRect(tree, n.id);
-            if (content.w <= 0 or content.h <= 0) continue;
-            const view = cache.get(icon);
-            const bounds = view.boundsRect();
-            if (bounds.w <= 0 or bounds.h <= 0) continue;
-            const ox = content.x + (content.w - bounds.w) / 2 - bounds.x;
-            const oy = content.y + (content.h - bounds.h) / 2 - bounds.y;
-            for (view.rects()) |r| {
-                noteSceneGrowth(out, counter_sink);
-                try out.append(gpa, .{
-                    .dst = .{ ox + r.dst[0], oy + r.dst[1], r.dst[2], r.dst[3] },
-                    .src = r.src,
-                    .corners = r.corners,
-                    .color = srgbToOklab(button.color),
-                    .curve = r.curve,
-                    .material_index = r.material_index,
-                    .clip_id = n.clip_id,
-                    .origin = .{ ox + r.origin[0], oy + r.origin[1] },
-                    .tex_idx = r.tex_idx,
-                    .z = n.paint.layer,
-                });
-            }
-        }
-    }
-
-    // The SVG showcase: inject the tiger's cached scene rects, scaled +
-    // translated into the reserved card's content rect (the tiger's
-    // viewBox is 900×900 — an aspect-fit into the square box). The rects
-    // are the glyph-style quads with the per-path materials from the
-    // shared buffer's SVG region.
-    if (svg_view) |sv| {
-        const card = try svgCardRect(tree);
-        const card_rect = card.rect;
-        const vb = sv.boundsRect();
-        if (card_rect.w > 0 and card_rect.h > 0 and vb.w > 0 and vb.h > 0) {
-            // The stroke test scene's algo + oversize sliders, applied to
-            // the stroke materials each frame (the tiger's defaults: algo
-            // 0, oversize 1).
-            sv.setStrokeStyle(@intFromFloat(@min(@max(ui.stroke_algo, 0), 2)), ui.stroke_oversize);
-            // Fit the paths' ACTUAL union bounds (the tiger's paths extend
-            // beyond its viewBox with negative coords — the viewBox fit
-            // would land them off-card), translated so the bounds' origin
-            // maps into the card. The stroke test scene multiplies the fit
-            // by its scale slider (the tiger's default 1.0).
-            const scale: f32 = @min(card_rect.w / vb.w, card_rect.h / vb.h) * ui.stroke_scale;
-            const ox = card_rect.x + (card_rect.w - vb.w * scale) / 2 - vb.x * scale;
-            const oy = card_rect.y + (card_rect.h - vb.h * scale) / 2 - vb.y * scale;
-            // The curves are swept in pixel space (the glyph branch's 1x1
-            // window) — bake the fit scale into the GPU curve buffers.
-            sv.setScale(scale);
-            // std.log.info("svg: card=({d:.0},{d:.0},{d:.0},{d:.0}) scale={d:.3}", .{
-            //     card_rect.x, card_rect.y, card_rect.w, card_rect.h, scale
-            // });
-            for (sv.rects()) |r| {
-                noteSceneGrowth(out, counter_sink);
-                try out.append(gpa, .{
-                    .dst = .{ ox + r.dst[0] * scale, oy + r.dst[1] * scale, r.dst[2] * scale, r.dst[3] * scale },
-                    .src = .{ 0, 0, 1, 1 },
-                    .corners = .{ 0, 0, 0, 0 },
-                    .color = r.color,
-                    .curve = .{ r.curve[0] * scale, r.curve[1] * scale, r.curve[2] * scale, r.curve[3] * scale },
-                    .material_index = r.material_index,
-                    .clip_id = r.clip_id,
-                    .origin = .{ ox + r.origin[0] * scale, oy + r.origin[1] * scale },
-                    .tex_idx = r.tex_idx,
-                    // Paint ON the card: the default z=0 would sort the
-                    // rects BEHIND the card's fill (every box layer > 0).
-                    .z = card.layer,
-                });
-            }
-        }
-    }
-
-    // The v1 bag contract: stamp the submission counter — the stable
-    // tiebreaker the CS1 sort keys on. The paint order IS the append
-    // order; reversing the bag (--gpu-sort-verify) changes the buffer
-    // positions but not the counters, so the sort restores the paint
-    // order. Stamped at the END so the SVG injection's rects (appended
-    // after the tree pass) get their true positions too.
-    for (out.items, 0..) |*r, i| r.order = @intCast(i);
-}
-/// Collect one frame's draw commands and convert them into renderer scene rects.
-/// The caller owns the temporary draw-command storage.
-fn buildFrameScene(
-    gpa: std.mem.Allocator,
-    text_engine: *TextEngine,
-    svg_view: ?*SvgView,
-    icon_cache: ?*const IconCache,
-    frame: *const nogui.FrameOutput,
-    out: *std.ArrayList(SceneRect),
-    gpu_sort_verify: bool,
-) !void {
-    var draw_cmds: std.ArrayList(DrawCmd) = .empty;
-    defer draw_cmds.deinit(gpa);
-    const capacity = std.math.mul(usize, frame.tree.nodes.items.len, 3) catch return error.OutOfMemory;
-    try draw_cmds.ensureTotalCapacity(gpa, capacity);
-    try buildFrameSceneInto(
-        gpa,
-        text_engine,
-        svg_view,
-        icon_cache,
-        frame,
-        out,
-        &draw_cmds,
-        gpu_sort_verify,
-    );
-}
-
-/// Convert a laid-out tree into scene rects using caller-owned draw commands.
-/// The command list is cleared and filled without allocation or free.
-fn buildFrameSceneInto(
-    gpa: std.mem.Allocator,
-    text_engine: *TextEngine,
-    svg_view: ?*SvgView,
-    icon_cache: ?*const IconCache,
-    frame: *const nogui.FrameOutput,
-    out: *std.ArrayList(SceneRect),
-    draw_cmds: *std.ArrayList(DrawCmd),
-    gpu_sort_verify: bool,
-) !void {
-    try collectDrawCmdsInto(
-        @constCast(frame.tree),
-        frame.pressed,
-        frame.press_alpha,
-        draw_cmds,
-    );
-    try buildSliceRects(
-        gpa,
-        text_engine,
-        svg_view,
-        icon_cache,
-        draw_cmds.items,
-        frame.tree,
-        frame.hover,
-        frame.hover_alpha,
-        frame.focus,
-        out,
-    );
-    // --gpu-sort-verify: submit the bag in REVERSE paint order — the
-    // CS1 sort (stable on (z, order)) must restore the paint order.
-    if (gpu_sort_verify) std.mem.reverse(SceneRect, out.items);
-}
-
-/// Render the current app frame into the offscreen Oklab target. Shared by
-/// run() (presented via the blit pass) and runShot() (read back).
-/// `texture_heap` is the GUI texture heap (the bindless textures the
-/// fragment shader samples) — bound ONCE per frame before the renderer draw;
-/// the blit pass binds its own heap later.
-fn recordFrameScene(
-    gui_renderer: *Renderer,
-    cmd: *noapi.CommandBuffer,
-    slice_rects: []const SceneRect,
-    clip_rects: []const ClipRect,
-    render_target: noapi.TextureHandle,
-    surface_size: noapi.Extent2D,
-    texture_heap: noapi.DescriptorHeap,
-) !void {
-    const zone = tracy.Zone.begin(.{ .name = "renderPass1", .src = @src() });
-    defer zone.end();
-    const sw: f32 = @floatFromInt(surface_size.width);
-    const sh: f32 = @floatFromInt(surface_size.height);
-
-    // CS1 (V1b) FIRST, outside the render pass: Renderer.prepare uploads
-    // the borrowed scene, dispatches the stable radix sort, and records
-    // the compute → graphics barriers. Compute cannot run inside dynamic
-    // rendering, so the prepare/draw split mirrors the pass structure.
-    const render_clip_rects: []const renderer.ClipRect = @ptrCast(clip_rects);
-    const scene: RenderScene = .{
-        .rects = slice_rects,
-        .clips = render_clip_rects,
-    };
-    try gui_renderer.prepare(cmd, scene);
-
-    cmd.beginRendering(.{ .color_attachments = &.{
-        .{ .texture = render_target, .load_op = .clear, .store_op = .store, .clear_color = oklab_gray },
-    }, .render_area_size = .{ surface_size.width, surface_size.height } });
-
-    // The v1 general blending pipeline (spec §4): ONE uniform alpha blend
-    // for every drawable — translucency is a material/color property,
-    // never a pipeline switch. src_alpha/one_minus_src_alpha (the
-    // straight-alpha convention: the blend scales the source rgb by the
-    // source alpha, so the SDF branches' coverage × color and the solid
-    // branch's straight output are both correct without shader-side
-    // premultiplication).
-    cmd.setBlendState(.{
-        .enable = true,
-        .color_op = .add,
-        .src_color_factor = .src_alpha,
-        .dst_color_factor = .one_minus_src_alpha,
-        .alpha_op = .add,
-        .src_alpha_factor = .one,
-        .dst_alpha_factor = .one_minus_src_alpha,
-    });
-    // Bind the GUI texture heap (set 0 = app-registered textures, set 2 =
-    // samplers) — ONE call; bindings are not draws, so the one-draw
-    // invariant holds. The blit pass re-binds its own heap afterwards.
-    cmd.bindDescriptorSets(texture_heap);
-    // Renderer.draw records the one indirect GUI draw inside the pass.
-    gui_renderer.draw(cmd, sw, sh);
-    cmd.setBlendEnable(false);
-    cmd.endRendering();
-}
-
-fn recordColorConversion(
-    cmd: *noapi.CommandBuffer,
-    destination: noapi.TextureHandle,
-    surface_size: noapi.Extent2D,
-    blit_vert: noapi.Shader,
-    blit_frag: noapi.Shader,
-    blit_heap: noapi.DescriptorHeap,
-) void {
-    cmd.beginRendering(.{ .color_attachments = &.{
-        .{ .texture = destination, .load_op = .clear, .store_op = .store, .clear_color = .{ 0, 0, 0, 1 } },
-    }, .render_area_size = .{ surface_size.width, surface_size.height } });
-
-    cmd.setShaders(blit_vert, blit_frag);
-    cmd.setRasterState(.{ .topology = .triangle_list, .cull_mode = .none });
-    cmd.bindDescriptorSets(blit_heap);
-    cmd.setBlendEnable(false);
-    cmd.draw(noapi.PushData{}, 3, 1);
-    cmd.endRendering();
-}
+// The tree-to-scene lowering (`buildSliceRects`, the `FramePaint` paint
+// list, the material partition) and the GPU recording (`recordFrameScene`,
+// the Oklab blit) now live in the reusable `v7_frame/scene.zig`. The demo
+// keeps only what makes its frames demo-shaped: the librsvg documents, the
+// raster caches, the palette, and the perf policy. Every callsite below
+// goes through `frame_scene` with a caller-owned `SceneScratch` whose two
+// lists retain their capacity across frames, so the hot path allocates
+// nothing.
 
 const PerfResources = struct {
+    host_app: *HostApplication,
+    logical_size: WindowSize,
     gpa: std.mem.Allocator,
     io: Io,
     gpu: *noapi.Gpu,
     text_engine: *TextEngine,
     gui_renderer: *Renderer,
-    tex_registry: *TextureRegistry,
-    svg_view: *SvgView,
+    tex_registry: *BindlessHeap,
+    svg_scene: *SvgScene,
     icon_cache: *IconCache,
     gpu_endpoint: *nogui.GpuEndpoint,
     blit_vert: noapi.Shader,
@@ -1544,8 +978,33 @@ pub const OffscreenSlots = struct {
 
 const perf_width: u32 = 954;
 const perf_height: u32 = 1044;
-const perf_extent: noapi.Extent2D = .{ .width = perf_width, .height = perf_height };
+const perf_device_extent: noapi.Extent2D = .{ .width = perf_width, .height = perf_height };
 const perf_draw_cmd_capacity: usize = 16 * 1024;
+
+const FrameDemand = nogui.frame_demand.FrameDemand;
+const taskDeadlineWaitMilliseconds = nogui.frame_demand.taskDeadlineWaitMilliseconds;
+
+fn nextWaitMilliseconds(
+    demand: *const FrameDemand,
+    now_ms: u64,
+    now_ns: i96,
+    task_deadline_ns: ?i96,
+    shortcut_wait: ?u31,
+) ?u31 {
+    const frame_timeout = demand.waitMilliseconds(now_ms);
+    const task_deadline = task_deadline_ns orelse return earliest(frame_timeout, shortcut_wait);
+    const task_timeout = taskDeadlineWaitMilliseconds(now_ns, task_deadline);
+    const waited: ?u31 = if (frame_timeout) |ms| @min(ms, task_timeout) else task_timeout;
+    return earliest(waited, shortcut_wait);
+}
+
+fn earliest(a: ?u31, b: ?u31) ?u31 {
+    if (a) |ms| {
+        if (b) |other| return @min(ms, other);
+        return ms;
+    }
+    return b;
+}
 
 pub const RunOptions = struct {
     subpixel: bool = false,
@@ -1553,9 +1012,13 @@ pub const RunOptions = struct {
     bgr_order: bool = false,
     damp_chroma: bool = true,
     gpu_sort_verify: bool = false,
+    uncapped: bool = false,
     max_frames: ?u32 = null,
     audio_tracks: ?[]const LocalTrack = null,
     perf: ?perf.Config = null,
+    /// Appended to the window title. A benchmark that shares a display with
+    /// other tools sets it so an operator can tell the windows apart.
+    window_title_suffix: []const u8 = "",
 
     pub fn validate(self: RunOptions) (error{
         PerfOptionConflict,
@@ -1569,12 +1032,96 @@ pub const RunOptions = struct {
             if (self.bgr_order) return error.PerfOptionConflict;
             if (!self.damp_chroma) return error.PerfOptionConflict;
             if (self.gpu_sort_verify) return error.PerfOptionConflict;
+            if (self.uncapped) return error.PerfOptionConflict;
             if (self.max_frames != null) return error.PerfOptionConflict;
             if (self.audio_tracks != null) return error.PerfOptionConflict;
         }
         return self;
     }
 };
+
+fn windowCanRender(flags: sdl3.video.Window.Flags, has_presented: bool) bool {
+    // Some compositors report a new surface occluded until its first buffer.
+    return !flags.hidden and !flags.minimized and (!has_presented or !flags.occluded);
+}
+
+fn needsContinuous(comptime T: type, root: *T, options: RunOptions, audio_active: bool) bool {
+    if (options.uncapped or options.max_frames != null or options.perf != null or ui.gpu_remount_smoke) return true;
+    if (comptime T == ui.TodoApp) return root.mandelbrot_visible;
+    if (comptime T == spotify_ui.SpotifyApp) return audio_active and root.is_playing;
+    return false;
+}
+
+test "api-w05 continuous policy keeps Mandelbrot and finite or uncapped frames advancing" {
+    const old_smoke = ui.gpu_remount_smoke;
+    defer ui.gpu_remount_smoke = old_smoke;
+    ui.gpu_remount_smoke = false;
+    var todo: ui.TodoApp = .{};
+    try std.testing.expect(needsContinuous(ui.TodoApp, &todo, .{}, false));
+    todo.setMandelbrotVisible(false);
+    try std.testing.expect(!needsContinuous(ui.TodoApp, &todo, .{}, false));
+    try std.testing.expect(needsContinuous(ui.TodoApp, &todo, .{ .max_frames = 3 }, false));
+    try std.testing.expect(needsContinuous(ui.TodoApp, &todo, .{ .uncapped = true }, false));
+    ui.gpu_remount_smoke = true;
+    try std.testing.expect(needsContinuous(ui.TodoApp, &todo, .{}, false));
+}
+
+test "api-w05 idle roots stop continuous frames while active audio can opt in" {
+    var calc: calculator_ui.CalculatorApp = .{};
+    try std.testing.expect(!needsContinuous(calculator_ui.CalculatorApp, &calc, .{}, false));
+    var spotify: spotify_ui.SpotifyApp = .{};
+    try std.testing.expect(!needsContinuous(spotify_ui.SpotifyApp, &spotify, .{}, false));
+    try std.testing.expect(needsContinuous(spotify_ui.SpotifyApp, &spotify, .{}, true));
+    spotify.is_playing = false;
+    try std.testing.expect(!needsContinuous(spotify_ui.SpotifyApp, &spotify, .{}, true));
+}
+
+test "api-w05 hidden frame deadline does not mask an earlier task or chord deadline" {
+    var demand: FrameDemand = .{};
+    _ = demand.take(0).?;
+    demand.finish(true);
+    demand.setDeadline(500);
+    demand.setVisible(false);
+    try std.testing.expectEqual(
+        @as(?u31, 4),
+        nextWaitMilliseconds(&demand, 100, 100_000_000, 103_000_001, null),
+    );
+    try std.testing.expectEqual(
+        @as(?u31, 2),
+        nextWaitMilliseconds(&demand, 100, 100_000_000, 103_000_001, 2),
+    );
+    try std.testing.expectEqual(
+        @as(?u31, null),
+        nextWaitMilliseconds(&demand, 500, 500_000_000, null, null),
+    );
+    demand.setVisible(true);
+    _ = demand.take(500).?;
+    demand.finish(true);
+    demand.setDeadline(600);
+    try std.testing.expectEqual(
+        @as(?u31, 2),
+        nextWaitMilliseconds(&demand, 501, 501_000_000, 503_000_000, null),
+    );
+    // A chord deadline is the earliest wait even with no task deadline and
+    // no frame work: the loop must wake to resolve it.
+    try std.testing.expectEqual(
+        @as(?u31, 0),
+        nextWaitMilliseconds(&demand, 501, 501_000_000, null, 0),
+    );
+}
+
+test "api-w05 startup presents once before trusting compositor occlusion" {
+    var flags: sdl3.video.Window.Flags = .{ .occluded = true };
+    try std.testing.expect(windowCanRender(flags, false));
+    try std.testing.expect(!windowCanRender(flags, true));
+    flags.occluded = false;
+    try std.testing.expect(windowCanRender(flags, true));
+    flags.minimized = true;
+    try std.testing.expect(!windowCanRender(flags, false));
+    flags.minimized = false;
+    flags.hidden = true;
+    try std.testing.expect(!windowCanRender(flags, false));
+}
 
 /// Run the graphical demo. Blocks until the window closes.
 /// Generic over the root component (any type with pub draw(self, ctx) !void).
@@ -1590,6 +1137,7 @@ pub fn run(
     const bgr = validated_options.bgr_order;
     const damp = validated_options.damp_chroma;
     const gpu_sort_verify = validated_options.gpu_sort_verify;
+    const uncapped = validated_options.uncapped;
     const max_frames = validated_options.max_frames;
     const audio_tracks = validated_options.audio_tracks;
     const perf_config = validated_options.perf;
@@ -1605,15 +1153,12 @@ pub fn run(
 
     const gpa = app.gpa;
 
-    // OVERRIDE priority: the SDL gives env vars precedence over
-    // default-priority hints, so a session-set SDL_VIDEODRIVER makes
-    // plain hints.set fail with "An environment variable is taking
-    // priority". The demo REQUIRES the wayland + vulkan drivers; its
-    // choice must win.
-    try sdl3.hints.setWithPriority(.video_driver, "wayland", .override);
-    try sdl3.hints.setWithPriority(.render_driver, "vulkan", .override);
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
+    // The demo overrides session hints; the reusable host leaves driver
+    // selection to SDL unless the caller requests a driver explicitly.
+    var host_app = try HostApplication.init(gpa, app.session, .{
+        .render_driver = "vulkan",
+    });
+    defer host_app.deinit();
 
     // Io backs shader reads and the dedicated audio worker.
     var io_impl = std.Io.Threaded.init(gpa, .{});
@@ -1652,15 +1197,30 @@ pub fn run(
 
     const perf_window = perf_config != null;
     const perf_offscreen = if (perf_config) |config| config.mode == .offscreen else false;
-    const window_width: u32 = if (perf_window) perf_width else 1100;
-    const window_height: u32 = if (perf_window) perf_height else 1160;
-    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", window_width, window_height, .{
+    const window_logical_width: u32 = if (perf_window) perf_width else 1100;
+    const window_logical_height: u32 = if (perf_window) perf_height else 1160;
+    var title_storage: [128]u8 = undefined;
+    const window_title: [:0]const u8 = if (validated_options.window_title_suffix.len == 0)
+        "nogui v7 demo"
+    else
+        try std.fmt.bufPrintSentinel(
+            &title_storage,
+            "nogui v7 demo{s}",
+            .{validated_options.window_title_suffix},
+            0,
+        );
+    const window_handle = try host_app.openWindowWithApp(app, .{
+        .title = window_title,
+        .width = window_logical_width,
+        .height = window_logical_height,
         .resizable = !perf_window,
-        .hidden = perf_offscreen,
-        .vulkan = true,
+        .visible = !perf_offscreen,
+        .gpu_surface = true,
     });
-    defer sdl_win.deinit();
-    if (!perf_offscreen) try sdl_win.show();
+    const managed = try host_app.getWindow(window_handle);
+    const sdl_win = managed.native.sdl;
+    var logical_size = try logicalWindowSize(sdl_win);
+    try host_app.start();
 
     // Vulkan loader via SDL3.
     try sdl3.vulkan.loadLibrary(null);
@@ -1698,12 +1258,25 @@ pub fn run(
 
     // Text engine owns FreeType, per-size font states, and the glyph
     // material buffer. Renderer owns the quad shaders and draw buffers.
-    var text_engine = try TextEngine.init(gpa, &gpu);
+    // The font bytes stay in the demo; the engine borrows nothing and
+    // embeds nothing. The first registered family is the one a node that
+    // names no family resolves to.
+    var text_engine = try TextEngine.init(gpa, &gpu, &.{
+        .{ .family = "InterVariable", .bytes = @embedFile("InterVariable.ttf") },
+        .{ .family = "Fira Code Nerd Font", .bytes = @embedFile("FiraCodeNerdFont-Regular.ttf") },
+    });
     defer text_engine.deinit();
-    TextEngine.measure_engine = &text_engine;
-    app.measure = TextEngine.measureForFlex;
+    try text_engine.setGlyphSlotLimit(glyph_material_ceiling);
+    // The App measures through this engine's own `MeasureSource`: a measured
+    // label and the glyphs the frame rasterizes are one measurement, and the
+    // source is a value the App holds, not a thread-local a scope sets.
+    app.measure = text_engine.measurer();
     var gui_renderer = try Renderer.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
     defer gui_renderer.deinit();
+    // One retained scratch for the whole run: the scene rects and the draw
+    // commands keep their capacity, so no frame allocates.
+    var scene_scratch = frame_scene.SceneScratch.init(gpa, &gui_renderer);
+    defer scene_scratch.deinit();
     var render_options: RenderOptions = .{
         .material_bda = text_engine.materialBda(),
         .subpixel = subpixel,
@@ -1717,7 +1290,7 @@ pub fn run(
     // registered textures, set 2 = the shared linear/clamp sampler), bound
     // once per frame before the renderer draw. The demo registers one
     // procedural texture and the UI draws it via `.texture = idx`.
-    var tex_registry = try TextureRegistry.init(gpa, &gpu);
+    var tex_registry = try BindlessHeap.init(gpa, &gpu);
     defer tex_registry.deinit(gpa);
     ui.texture_idx = try uploadDemoTexture(gpa, &gpu, &tex_registry);
     try uploadReferenceTexture(gpa, &gpu, &tex_registry);
@@ -1725,27 +1298,22 @@ pub fn run(
         uploadLocalArtwork(T, gpa, root, &gpu, &tex_registry, tracks);
     }
 
-    // SVG showcase: the tiger, parsed + converted once (the paths →
-    // conics → glyph materials + cached scene rects).
+    // SVG showcase: the reserved box's document, rasterized by librsvg
+    // through the reusable host adapter and uploaded as one Oklab texture.
     // The stroke test scene (the TestStrokesApp root) loads the curved
     // thin-stroke set; everything else loads the tiger.
-    var svg_view = if (comptime T == ui.TestStrokesApp)
-        try initStrokeView(gpa, &gpu, &text_engine)
-    else
-        try initSvgView(gpa, &gpu, &text_engine);
-    defer svg_view.deinit(&gpu);
+    var svg_scene = SvgScene.init(gpa, &gpu, &tex_registry, sceneDocument(T), sceneDocumentBox(T));
+    defer svg_scene.deinit();
     var perf_counters_storage: if (v7_options.perf_counters) nogui.Counters else void =
         if (v7_options.perf_counters) .{} else {};
     if (comptime v7_options.perf_counters) {
         app.setCounterSink(&perf_counters_storage);
         text_engine.setCounterSink(&perf_counters_storage);
-        svg_view.setCounterSink(&perf_counters_storage);
     }
-    // Transport icons share TextEngine's material buffer but are initialized
-    // only in the interactive window. No parsing or GPU allocation occurs
-    // in the frame loop.
-    var icon_cache = try IconCache.init(gpa, &gpu, &text_engine);
-    defer icon_cache.deinit(&gpu);
+    // Transport icons rasterize on their first frame and re-rasterize only
+    // when the display scale changes. No frame uploads or allocates.
+    var icon_cache = IconCache.init(gpa, &gpu, &tex_registry);
+    defer icon_cache.deinit();
 
     // Blit shaders are common to both perf modes. Descriptor heaps are owned
     // by the active runner so offscreen owns exactly one heap per slot.
@@ -1764,32 +1332,42 @@ pub fn run(
     var rt_w: u32 = 0;
     var rt_h: u32 = 0;
     defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
-    configureGpuComponents(T, root, tex_registry.heap);
+    configureGpuComponents(T, root, tex_registry.handle);
 
-    // The endpoint borrows the window-owned GPU and texture registry for the
+    // The endpoint borrows the window-owned GPU and bindless heap for the
     // graphical lifetime. Components initialize here, before the first
     // begun Surface frame, and detach while those resources are still alive.
-    var gpu_texture_runtime: nogui.TextureRegistry = .{
-        .ptr = &tex_registry,
-        .register = registerRuntimeTexture,
-        .unregister = unregisterRuntimeTexture,
-    };
+    var gpu_texture_runtime = tex_registry.runtimeRegistry();
     var gpu_endpoint: nogui.GpuEndpoint = .{
         .gpu = &gpu,
         .textures = &gpu_texture_runtime,
     };
     try app.attachGpu(&gpu_endpoint);
     defer app.detachGpu();
+    const initial_resize: Event = .{ .resize = .{
+        .width = logical_size.width,
+        .height = logical_size.height,
+    } };
+    _ = try app.handle(initial_resize);
 
     if (perf_config) |config| {
+        try setScenePixelScale(
+            &text_engine,
+            &svg_scene,
+            &icon_cache,
+            logical_size,
+            perf_device_extent,
+        );
         const resources: PerfResources = .{
+            .host_app = &host_app,
+            .logical_size = logical_size,
             .gpa = gpa,
             .io = io,
             .gpu = &gpu,
             .text_engine = &text_engine,
             .gui_renderer = &gui_renderer,
             .tex_registry = &tex_registry,
-            .svg_view = &svg_view,
+            .svg_scene = &svg_scene,
             .icon_cache = &icon_cache,
             .gpu_endpoint = &gpu_endpoint,
             .blit_vert = blit_vert,
@@ -1801,18 +1379,19 @@ pub fn run(
         defer recorder.deinit();
 
         const metadata = switch (config.mode) {
-            .offscreen => try runOffscreenPerf(T, app, root, &resources, config, &recorder),
+            .offscreen => try runOffscreenPerf(app, &resources, config, &recorder),
             .presented => blk: {
-                const sdl_surface = try sdl3.vulkan.Surface.init(
-                    sdl_win,
-                    @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
-                    null,
+                // noapi creates and owns the platform surface; this caller
+                // never sees a Vulkan instance or surface handle.
+                var gw = try noapi.Surface.initSdl(
+                    &gpu,
+                    @ptrCast(sdl_win.value),
+                    @ptrCast(&sdl3.c.SDL_Vulkan_CreateSurface),
+                    .{
+                        .extent = try deviceSurfaceExtent(sdl_win),
+                        .present_mode = .fifo,
+                    },
                 );
-                const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-                var gw = try noapi.Surface.init(&gpu, surface, .{
-                    .extent = perf_extent,
-                    .present_mode = .fifo,
-                });
                 defer gw.deinit();
                 const refresh_hz: ?f32 = refresh: {
                     const disp = sdl_win.getDisplayForWindow() catch break :refresh null;
@@ -1824,9 +1403,7 @@ pub fn run(
                 defer gpu.descHeapDestroy(blit_heap);
                 gpu.descHeapSetSamplers(blit_heap, 0, &.{blit_sampler});
                 break :blk try runPresentedPerf(
-                    T,
                     app,
-                    root,
                     &resources,
                     config,
                     &recorder,
@@ -1843,18 +1420,20 @@ pub fn run(
     const blit_heap = try gpu.descHeapCreate(8, 0, 1);
     defer gpu.descHeapDestroy(blit_heap);
     gpu.descHeapSetSamplers(blit_heap, 0, &.{blit_sampler});
-    const sdl_surface = try sdl3.vulkan.Surface.init(
-        sdl_win,
-        @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
-        null,
+    var gw = try noapi.Surface.initSdl(
+        &gpu,
+        @ptrCast(sdl_win.value),
+        @ptrCast(&sdl3.c.SDL_Vulkan_CreateSurface),
+        .{
+            .extent = try deviceSurfaceExtent(sdl_win),
+            .present_mode = if (uncapped) .immediate else .fifo,
+        },
     );
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
     defer gw.deinit();
-    const win_id = try sdl_win.getId();
+    var last_scene_scale: ?struct { logical: WindowSize, device: noapi.Extent2D } = null;
 
-    // Frame pacer (Phase 2 — tier-2 frame pacing). The FIFO swapchain is
-    // vsync-paced and blocks the CPU on the GPU once the image queue is
+    // Frame pacer (Phase 2 — tier-2 frame pacing). The default FIFO swapchain
+    // is vsync-paced and blocks the CPU on the GPU once the image queue is
     // full; `Surface.slopNs()` reports that per-frame block. The pacer
     // turns it into a sleep BEFORE the input poll so the frame lands just
     // before the vblank instead of blocking after it. The refresh rate is
@@ -1869,9 +1448,8 @@ pub fn run(
     var pacer = FramePacer.init(io, refresh_hz);
     var pacer_sleep_ns: u64 = 0;
 
-    // Main loop — the WINDOW DRIVER: translate OS events into core Events
-    // (the core never polls input or reads a clock itself), then emit one
-    // .frame event per iteration with the driver's tick + clock.
+    // The host polls and translates input before each frame. The demo applies
+    // shortcuts and sends one frame tick with its own clock.
     var tick: u32 = 1;
     // The single window's Surface frame slot advances only after a successful
     // present, matching noapi's command-buffer rotation.
@@ -1882,162 +1460,164 @@ pub fn run(
     var remount_smoke_phase: GpuRemountSmokePhase = .initial_visible;
     var remount_smoke_initial_slot: ?u32 = null;
 
+    const demand = &managed.demand;
+    try managed.refresh();
+
     while (!should_close) {
-        // Frame pacer: sleep the recommended delay BEFORE polling input so
-        // the frame lands just before the vblank instead of blocking after
-        // it (the swapchain FIFO queue full). The sleep is gated — the
-        // --frames benchmark measures raw throughput and must NOT be paced;
-        // its pacer.update still runs below for the ds/slop telemetry. The
-        // ui.frame_pacing toggle (OFF by default) parks the sleep while the
-        // cadence verification is blocked by system load.
-        if (ui.frame_pacing and max_frames == null and pacer_sleep_ns > 0) {
+        try host_app.checkWakeFailure();
+        _ = try app.session.drainTasks();
+        if (ui.gpu_remount_smoke and !app.currentRootMatches(T, root))
+            return error.GpuRemountSmokeRootReplaced;
+        demand.setContinuous(app.currentRootMatches(T, root) and
+            needsContinuous(T, root, validated_options, audio_player != null));
+        const demand_time_ms = sdl3.timer.getMillisecondsSinceInit();
+        try host_preferences.applyReducedMotion(app, demand_time_ms);
+        demand.setDeadline(app.animationDemand(demand_time_ms, 16).deadline_ms);
+        var session_redraw = false;
+        defer if (session_redraw) app.session.requestRedraw(app.window) catch
+            @panic("failed to rearm session redraw");
+        var frame_claimed = false;
+        defer if (frame_claimed) demand.finish(false);
+        if (demand.visible and try app.session.takeRedraw(app.window)) {
+            demand.invalidateLayout();
+            session_redraw = true;
+        }
+
+        // A published completion stays queued even if it races the last
+        // drain and arrives just before SDL_WaitEvent.
+        var first_event: ?sdl3.events.Event = null;
+        if (!demand.pending(sdl3.timer.getMillisecondsSinceInit())) {
+            const timeout = nextWaitMilliseconds(
+                demand,
+                sdl3.timer.getMillisecondsSinceInit(),
+                Io.Timestamp.now(io, .awake).toNanoseconds(),
+                try app.session.nextTaskDeadline(),
+                app.nextShortcutWaitMilliseconds(),
+            );
+            first_event = if (timeout) |ms|
+                sdl3.events.waitAndPopTimeout(ms)
+            else
+                try sdl3.events.waitAndPop();
+        } else if (demand.visible and demand.continuous and
+            !uncapped and ui.frame_pacing and max_frames == null and pacer_sleep_ns > 0)
+        {
+            // FramePacer is for continuous GPU frames, not idle demand.
             pacer.beginSleep(io);
             try Io.sleep(io, Io.Duration.fromNanoseconds(pacer_sleep_ns), .real);
             pacer.endSleep(io);
         }
-        // OS events -> core events. Input dispatches against the LAST
-        // PRESENTED tree (valid — double-buffered); mutations show up on
-        // the next frame.
-        while (sdl3.events.poll()) |ev| {
-            switch (ev) {
-                .quit => should_close = true,
-                .window_close_requested => |we| {
-                    if (we.id == win_id) should_close = true;
+
+        // Translate SDL input against the last presented tree. Registered
+        // task-wake events fall through translation; drainTasks runs below.
+        while (true) {
+            const raw = blk: {
+                if (first_event) |queued| {
+                    first_event = null;
+                    break :blk queued;
+                }
+                break :blk host_app.pollEvent() orelse break;
+            };
+            switch (raw) {
+                .quit => {
+                    should_close = true;
+                    break;
                 },
-                .window_pixel_size_changed => |we| {
-                    if (we.id == win_id) {
-                        const pix = try sdl_win.getSizeInPixels();
-                        gw.notifyResize(.{ .width = @intCast(pix[0]), .height = @intCast(pix[1]) });
-                        const event: Event = .{ .resize = .{
-                            .width = @floatFromInt(pix[0]),
-                            .height = @floatFromInt(pix[1]),
-                        } };
-                        dispatchRootEvent(T, root, event);
-                        _ = try app.handle(T, root, event);
+                .window_close_requested => |closing| {
+                    if (closing.id == managed.native.id) {
+                        should_close = true;
+                        break;
                     }
-                },
-                .window_resized => |we| {
-                    if (we.id == win_id) {
-                        const pix = try sdl_win.getSizeInPixels();
-                        gw.notifyResize(.{ .width = @intCast(pix[0]), .height = @intCast(pix[1]) });
-                        const event: Event = .{ .resize = .{
-                            .width = @floatFromInt(pix[0]),
-                            .height = @floatFromInt(pix[1]),
-                        } };
-                        dispatchRootEvent(T, root, event);
-                        _ = try app.handle(T, root, event);
-                    }
-                },
-                .mouse_motion => |mm| {
-                    const pos = try toSurfacePoint(sdl_win, &gw, .{ mm.x, mm.y });
-                    const event: Event = .{ .mouse_move = .{ .x = pos[0], .y = pos[1] } };
-                    dispatchRootEvent(T, root, event);
-                    _ = try app.handle(T, root, event);
-                },
-                .window_mouse_leave => |we| {
-                    if (we.id == win_id) {
-                        const event: Event = .{ .mouse_leave = {} };
-                        dispatchRootEvent(T, root, event);
-                        _ = try app.handle(T, root, event);
-                    }
-                },
-                .mouse_button_down => |mb| {
-                    const pos = try toSurfacePoint(sdl_win, &gw, .{ mb.x, mb.y });
-                    const button: MouseButton = if (mb.button == .left)
-                        .left
-                    else if (mb.button == .right)
-                        .right
-                    else
-                        .middle;
-                    const event: Event = .{ .mouse_down = .{
-                        .button = button,
-                        .x = pos[0],
-                        .y = pos[1],
-                    } };
-                    dispatchRootEvent(T, root, event);
-                    _ = try app.handle(T, root, event);
-                },
-                .mouse_button_up => |mb| {
-                    const pos = try toSurfacePoint(sdl_win, &gw, .{ mb.x, mb.y });
-                    const button: MouseButton = if (mb.button == .left)
-                        .left
-                    else if (mb.button == .right)
-                        .right
-                    else
-                        .middle;
-                    const event: Event = .{ .mouse_up = .{
-                        .button = button,
-                        .x = pos[0],
-                        .y = pos[1],
-                    } };
-                    dispatchRootEvent(T, root, event);
-                    _ = try app.handle(T, root, event);
-                },
-                .mouse_wheel => |mw| {
-                    const pos = try toSurfacePoint(sdl_win, &gw, .{ mw.x, mw.y });
-                    const event: Event = .{ .mouse_wheel = .{
-                        .x = pos[0],
-                        .y = pos[1],
-                        .delta_x = mw.scroll_x,
-                        .delta_y = mw.scroll_y,
-                    } };
-                    dispatchRootEvent(T, root, event);
-                    _ = try app.handle(T, root, event);
-                },
-                .key_down => |kd| {
-                    if (kd.key) |kc| {
-                        if (kc == .s) {
-                            render_options.subpixel = !render_options.subpixel;
-                            gui_renderer.configure(render_options);
-                            std.log.info("subpixel AA: {s}", .{if (render_options.subpixel) "on" else "off"});
-                            continue;
-                        }
-                        if (kc == .d) {
-                            render_options.quad_debug = !render_options.quad_debug;
-                            gui_renderer.configure(render_options);
-                            std.log.info("quad debug: {s}", .{if (render_options.quad_debug) "on" else "off"});
-                            continue;
-                        }
-                        if (kc == .a) {
-                            // Cycle the stroke algo: 0 = naive SDF, 1 =
-                            // marching quads, 2 = the spec'd marching quads.
-                            const algo_idx: u32 = @intFromFloat(@min(@max(ui.stroke_algo, 0), 2));
-                            ui.stroke_algo = @floatFromInt((algo_idx + 1) % 3);
-                            std.log.info("stroke algo: {d} ({s})", .{
-                                ui.stroke_algo,
-                                switch (@as(u32, @intFromFloat(@min(@max(ui.stroke_algo, 0), 2)))) {
-                                    0 => "naive SDF",
-                                    1 => "marching quads",
-                                    else => "spec'd marching quads",
-                                },
-                            });
-                            continue;
-                        }
-                        if (kc == .o) {
-                            render_options.bgr_order = !render_options.bgr_order;
-                            gui_renderer.configure(render_options);
-                            std.log.info("subpixel order: {s}", .{if (render_options.bgr_order) "BGR" else "RGB"});
-                            continue;
-                        }
-                        if (kc == .c) {
-                            render_options.damp_chroma = !render_options.damp_chroma;
-                            gui_renderer.configure(render_options);
-                            std.log.info("chroma damping: {s}", .{if (render_options.damp_chroma) "on" else "off"});
-                            continue;
-                        }
-                        if (kc == .p and dispatchRootPrecisionKey(T, root)) continue;
-                    }
-                    const core_key = mapSdlKey(kd.key orelse continue) orelse continue;
-                    const shift = kd.mod.left_shift or kd.mod.right_shift;
-                    const event: Event = .{ .key_down = .{ .key = core_key, .shift = shift } };
-                    dispatchRootEvent(T, root, event);
-                    _ = try app.handle(T, root, event);
                 },
                 else => {},
             }
+            const host_event = (try host_app.dispatch(&raw)) orelse continue;
+            const routed = switch (host_event) {
+                .window => |value| value,
+                .drop => continue,
+                .display, .system_wake => continue,
+            };
+            if (!std.meta.eql(routed.handle, window_handle)) continue;
+            const translated = routed.translated orelse continue;
+            switch (translated) {
+                .close => should_close = true,
+                .resize => |resize| {
+                    demand.invalidateLayout();
+                    // Layout and input use window units; only the swapchain uses pixels.
+                    logical_size = .{
+                        .width = resize.core.resize.width,
+                        .height = resize.core.resize.height,
+                    };
+                    gw.notifyResize(.{
+                        .width = resize.pixels.width,
+                        .height = resize.pixels.height,
+                    });
+                    _ = try app.handle(resize.core);
+                },
+                .input => |event| {
+                    demand.invalidateLayout();
+                    // One route: the App resolves the committed tree, the
+                    // phase and the owning component for this event.
+                    _ = try app.handle(event);
+                },
+                .key_down => |key| {
+                    demand.invalidateLayout();
+                    _ = try app.handle(key.core);
+                    if (app.last_input_default_prevented) continue;
+                    if (key.repeat) continue;
+                    const kc = key.native;
+                    if (kc == .s) {
+                        render_options.subpixel = !render_options.subpixel;
+                        gui_renderer.configure(render_options);
+                        std.log.info("subpixel AA: {s}", .{if (render_options.subpixel) "on" else "off"});
+                        continue;
+                    }
+                    if (kc == .d) {
+                        render_options.quad_debug = !render_options.quad_debug;
+                        gui_renderer.configure(render_options);
+                        std.log.info("quad debug: {s}", .{if (render_options.quad_debug) "on" else "off"});
+                        continue;
+                    }
+                    if (kc == .o) {
+                        render_options.bgr_order = !render_options.bgr_order;
+                        gui_renderer.configure(render_options);
+                        std.log.info("subpixel order: {s}", .{if (render_options.bgr_order) "BGR" else "RGB"});
+                        continue;
+                    }
+                    if (kc == .c) {
+                        render_options.damp_chroma = !render_options.damp_chroma;
+                        gui_renderer.configure(render_options);
+                        std.log.info("chroma damping: {s}", .{if (render_options.damp_chroma) "on" else "off"});
+                        continue;
+                    }
+                    if (kc == .p and app.dispatchRootPrecisionKey()) continue;
+                },
+            }
         }
+        _ = try app.session.drainTasks();
+        try host_app.checkWakeFailure();
         if (should_close) break;
+        if (ui.gpu_remount_smoke and !app.currentRootMatches(T, root))
+            return error.GpuRemountSmokeRootReplaced;
+        demand.setContinuous(app.currentRootMatches(T, root) and
+            needsContinuous(T, root, validated_options, audio_player != null));
+        if (demand.visible and try app.session.takeRedraw(app.window)) {
+            demand.invalidateLayout();
+            session_redraw = true;
+        }
+        const time_ms: u64 = sdl3.timer.getMillisecondsSinceInit();
+        try host_preferences.applyReducedMotion(app, time_ms);
+        demand.setDeadline(app.animationDemand(time_ms, 16).deadline_ms);
+        // A pending chord deadline has to resolve with no SDL input at all:
+        // the wait above already counted it, so a deadline that is due here
+        // is the one thing this iteration still owes the keymap.
+        if (app.nextShortcutWaitMilliseconds() == 0) {
+            try app.tickShortcuts();
+            demand.invalidateLayout();
+        }
+        const frame_work = demand.take(time_ms) orelse continue;
+        frame_claimed = true;
         if (ui.gpu_remount_smoke) {
+            if (!app.currentRootMatches(T, root)) return error.GpuRemountSmokeRootReplaced;
             const visible = switch (remount_smoke_phase) {
                 .initial_visible, .remounted => true,
                 .hidden => false,
@@ -2061,17 +1641,16 @@ pub fn run(
         }
 
         // Sync the toggle state for the UI's header line (the UI cannot
-        // import the window; the debug_state lives in text.zig).
-        text_mod.debug_state = .{
+        // import the window; the debug_state lives in debug_state.zig).
+        debug_state_mod.debug_state = .{
             .subpixel = render_options.subpixel,
             .bgr = render_options.bgr_order,
             .damp = render_options.damp_chroma,
             .quad_debug = render_options.quad_debug,
         };
 
-        // Frame event: the driver clock is sampled before the Surface frame;
-        // the begun frame is then borrowed by App for GPU lifecycle hooks.
-        const time_ms: u64 = sdl3.timer.getMillisecondsSinceInit();
+        // The host clock was sampled at the demand claim. The Surface
+        // frame now begins, then App borrows its GPU recording.
         const schedule = gw.beginFrame() catch |e| {
             if (e == error.OutOfDateKHR) {
                 try Io.sleep(io, Io.Duration.fromMilliseconds(16), .real);
@@ -2080,28 +1659,44 @@ pub fn run(
             @panic("beginFrame");
         };
         _ = schedule;
-        const size = gw.surfaceSize();
-        try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, size.width, size.height, blit_heap);
+        const device_extent = gw.surfaceSize();
         var cmd = gw.commandsBegin();
-        dispatchRootFrame(T, root, time_ms);
         var gpu_frame: nogui.GpuFrame = .{
             .endpoint = &gpu_endpoint,
             .command_buffer = &cmd,
-            .extent = size,
+            .extent = device_extent,
             .frame_index = frame_index,
+            .recording = .{ .active = .{ .context = &gw, .abort = cancelSurfaceRecording } },
         };
+        var recording_active = true;
+        errdefer if (recording_active) {
+            gpu_frame.cancelRecording() catch @panic("surface recording cancellation failed");
+        };
+        if (last_scene_scale == null or
+            !std.meta.eql(last_scene_scale.?.logical, logical_size) or
+            !std.meta.eql(last_scene_scale.?.device, device_extent))
+        {
+            try setScenePixelScale(&text_engine, &svg_scene, &icon_cache, logical_size, device_extent);
+            last_scene_scale = .{ .logical = logical_size, .device = device_extent };
+        }
+        try ensureRenderTarget(
+            &gpu,
+            &render_target,
+            &rt_w,
+            &rt_h,
+            device_extent.width,
+            device_extent.height,
+            blit_heap,
+        );
+        app.dispatchRootFrame(time_ms);
         const out = try app.frameWithGpuAtTime(
-            T,
-            root,
             tick,
             time_ms,
-            .{
-                .width = @floatFromInt(size.width),
-                .height = @floatFromInt(size.height),
-            },
+            .{ .width = logical_size.width, .height = logical_size.height },
             &gpu_frame,
         );
         if (ui.gpu_remount_smoke) {
+            if (!app.currentRootMatches(T, root)) return error.GpuRemountSmokeRootReplaced;
             const observed = gpuRemountSmokeObservation(T, root);
             switch (remount_smoke_phase) {
                 .initial_visible => {
@@ -2144,6 +1739,12 @@ pub fn run(
             }
         }
 
+        if (audio_player) |*player| {
+            if (!app.currentRootMatches(T, root)) {
+                player.deinit();
+                audio_player = null;
+            }
+        }
         if (audio_player) |*player| {
             if (comptime T == spotify_ui.SpotifyApp) {
                 const sync_result = player.sync(
@@ -2195,28 +1796,36 @@ pub fn run(
         }
         defer if (out.json) |j| gpa.free(j);
 
-        var slice_rects = std.ArrayList(SceneRect).empty;
-        defer slice_rects.deinit(gpa);
-        try buildFrameScene(
-            gpa,
+        // The retained scene scratch: an allocation-free lowering per frame,
+        // the same lists the perf runner reuses.
+        scene_scratch.beginFrame();
+        var frame_paint = try frame_scene.buildFrameScene(
+            &scene_scratch,
             &text_engine,
-            &svg_view,
-            &icon_cache,
+            sceneOptions(&svg_scene, &icon_cache),
             &out,
-            &slice_rects,
             gpu_sort_verify,
         );
+        defer frame_paint.deinit();
 
         // Pass 1: GUI into the offscreen Oklab target.
-        cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
-        try recordFrameScene(
+        const record_ctx = recordContext(
+            &out,
             &gui_renderer,
+            &text_engine,
+            false,
+            logical_size,
+            device_extent,
+            tex_registry.handle,
+        );
+        cmd.beginZone(.{ .name = "renderPass1_gpu", .src = @src() });
+        _ = try frame_scene.recordFrameScene(
+            &record_ctx,
             &cmd,
-            slice_rects.items,
-            out.tree.clip_rects[0..out.tree.clip_count],
+            &scene_scratch,
+            scene_scratch.rects.items,
+            &frame_paint,
             render_target,
-            size,
-            tex_registry.heap,
         );
         cmd.endZone();
 
@@ -2228,7 +1837,7 @@ pub fn run(
         recordColorConversion(
             &cmd,
             gw.currentImage(),
-            size,
+            device_extent,
             blit_vert,
             blit_frag,
             blit_heap,
@@ -2236,12 +1845,19 @@ pub fn run(
         cmd.endZone();
 
         const frame_result = try gw.endFrame(.{ .blit_to_swapchain = true });
+        gpu_frame.finishRecording();
+        recording_active = false;
         _ = frame_result;
         frame_index = (frame_index + 1) % @as(u32, gpu.frames_in_flight);
+        managed.markPresented();
+        app.framePresented(sdl3.timer.getMillisecondsSinceInit());
+        demand.finish(true);
+        frame_claimed = false;
+        session_redraw = false;
 
         // Rolling FPS (an EMA over the frame deltas) for the demo header.
-        // The unconditional 16ms sleep is GONE — it doubled the vsync pacing
-        // and added latency; the swapchain's FIFO/MAILBOX mode paces now.
+        // The unconditional 16ms sleep is GONE. The selected swapchain
+        // present mode determines whether presentation waits for a vblank.
         const now_ms = sdl3.timer.getMillisecondsSinceInit();
         if (last_frame_ms != 0) {
             const dt_ms: f32 = @floatFromInt(@min(now_ms -| last_frame_ms, 1 << 24));
@@ -2253,9 +1869,12 @@ pub fn run(
         // Mark the frame boundary — without this the tracy profiler thread
         // stays gated on its futex and never processes the connection.
         tracy.frameMark(null);
-        // Frame pacer: feed the slop (CPU ns blocked on the GPU this frame)
-        // and get the sleep recommendation for the next frame.
-        pacer_sleep_ns = pacer.update(io, gw.slopNs());
+        // FIFO pacing only measures continuous runs, never a long idle gap.
+        if (!uncapped and frame_work.continuous) {
+            pacer_sleep_ns = pacer.update(io, gw.slopNs());
+        } else {
+            pacer_sleep_ns = 0;
+        }
         if (ui.gpu_remount_smoke and remount_smoke_phase == .complete) break;
 
         if (perf_config != null) {
@@ -2273,56 +1892,7 @@ pub fn run(
     try gpu.waitIdle();
 }
 
-/// Oklab → linear sRGB, ported from shaders/blit_oklab.frag.
-fn oklabToLinearSrgb(lab: [3]f32) [3]f32 {
-    const l_ = lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2];
-    const m_ = lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2];
-    const s_ = lab[0] - 0.0894841775 * lab[1] - 1.2914855480 * lab[2];
-    const lms = [_]f32{ l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_ };
-    return .{
-        4.0767416621 * lms[0] - 3.3077115913 * lms[1] + 0.2309699292 * lms[2],
-        -1.2684380046 * lms[0] + 2.6097574011 * lms[1] - 0.3413193965 * lms[2],
-        -0.0041960863 * lms[0] - 0.7034186147 * lms[1] + 1.7076147010 * lms[2],
-    };
-}
-
-/// Linear sRGB → gamma-encoded 8-bit channel (PPM stores sRGB bytes).
-fn linearToSrgbByte(v: f32) u8 {
-    const c = std.math.clamp(v, 0.0, 1.0);
-    const enc = if (c <= 0.0031308) c * 12.92 else 1.055 * std.math.pow(f32, c, 1.0 / 2.4) - 0.055;
-    const scaled = std.math.clamp(enc, 0.0, 1.0) * 255.0;
-    return @intFromFloat(@round(scaled));
-}
-
-/// Write a P6 PPM of the offscreen Oklab target's pixels (rgba32_float,
-/// tightly packed rows): header + one gamma-encoded sRGB byte per channel.
-fn writePpm(gpa: std.mem.Allocator, io: Io, path: []const u8, pixels: [*]const f32, w: u32, h: u32) !void {
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(gpa);
-
-    try buf.print(gpa, "P6\n{d} {d}\n255\n", .{ w, h });
-
-    const row = try gpa.alloc(u8, @as(usize, w) * 3);
-    defer gpa.free(row);
-    const row_px: usize = w;
-    for (0..h) |y| {
-        for (0..w) |x| {
-            const lab = pixels[(y * row_px + x) * 4 ..][0..4];
-            const lin = oklabToLinearSrgb(.{ lab[0], lab[1], lab[2] });
-            row[x * 3 + 0] = linearToSrgbByte(lin[0]);
-            row[x * 3 + 1] = linearToSrgbByte(lin[1]);
-            row[x * 3 + 2] = linearToSrgbByte(lin[2]);
-        }
-        try buf.appendSlice(gpa, row);
-    }
-
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
-}
-
-/// Render exactly ONE frame into the offscreen Oklab target, copy it back
-/// to a readback buffer and write the result as a P6 PPM at `path`. Same
-/// init as run(), minus the event loop and the swapchain blit. FreeType
-/// glyphs render into the shot — this is the text-renders proof.
+/// Whether a presented perf run received timing feedback and a refresh estimate.
 const PerfRunMetadata = struct {
     present_feedback: bool,
     refresh_hz: ?f32,
@@ -2351,8 +1921,8 @@ fn beginPerfRoot(phase: perf.Phase) tracy.Zone {
     };
 }
 
-fn drainPerfSetupEvents() void {
-    while (sdl3.events.poll()) |_| {}
+fn drainPerfSetupEvents(host_app: *HostApplication) void {
+    while (host_app.pollEvent()) |_| {}
 }
 
 fn isPerfEventRejected(name: []const u8) bool {
@@ -2367,8 +1937,8 @@ fn isPerfEventRejected(name: []const u8) bool {
         std.mem.eql(u8, name, "window_mouse_leave");
 }
 
-fn rejectPerfEvents() !void {
-    while (sdl3.events.poll()) |event| {
+fn rejectPerfEvents(host_app: *HostApplication) !void {
+    while (host_app.pollEvent()) |event| {
         if (isPerfEventRejected(@tagName(event))) {
             std.log.err("performance run interrupted by {s}", .{@tagName(event)});
             return error.PerfUnexpectedEvent;
@@ -2387,12 +1957,13 @@ const perf_first_recorded_present_id: u64 = 2;
 
 fn stabilizePerfSurface(
     io: Io,
+    host_app: *HostApplication,
     surface: *noapi.Surface,
     submitted_gpu_work: *bool,
     start: Io.Timestamp,
 ) !void {
     while (true) {
-        drainPerfSetupEvents();
+        drainPerfSetupEvents(host_app);
         const schedule = surface.beginFrame() catch |err| switch (err) {
             error.OutOfDateKHR => {
                 if (try perfElapsed(start, perfNow(io)) >= 5_000_000_000) {
@@ -2404,12 +1975,18 @@ fn stabilizePerfSurface(
             else => return err,
         };
         _ = schedule;
-        if (!std.meta.eql(surface.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+        var frame_active = true;
+        errdefer if (frame_active) {
+            surface.abortFrame() catch @panic("surface recording cancellation failed");
+            submitted_gpu_work.* = true;
+        };
+        if (!std.meta.eql(surface.surfaceSize(), perf_device_extent)) return error.PerfExtentChanged;
         _ = surface.commandsBegin();
         submitted_gpu_work.* = true;
         const frame_result = try surface.endFrame(.{ .blit_to_swapchain = true });
+        frame_active = false;
         if (!frame_result.present_out_of_date) {
-            drainPerfSetupEvents();
+            drainPerfSetupEvents(host_app);
             return;
         }
         if (try perfElapsed(start, perfNow(io)) >= 5_000_000_000) {
@@ -2428,13 +2005,14 @@ const PerfPreflightPoll = enum {
 
 fn pollPerfPreflightFeedback(
     io: Io,
+    host_app: *HostApplication,
     surface: *noapi.Surface,
     feedback_buffer: []noapi.PresentFeedback,
     start: Io.Timestamp,
     expected_present_id: u64,
 ) !PerfPreflightPoll {
     while (true) {
-        drainPerfSetupEvents();
+        drainPerfSetupEvents(host_app);
         const feedback_count = surface.pollPresentFeedback(feedback_buffer) catch |err| switch (err) {
             error.PresentTimingDataUnavailable => {
                 return if (surface.supportsPresentTiming()) .retry else .unsupported;
@@ -2456,6 +2034,7 @@ fn pollPerfPreflightFeedback(
 
 fn preflightPerfPresentation(
     io: Io,
+    host_app: *HostApplication,
     surface: *noapi.Surface,
     submitted_gpu_work: *bool,
 ) !?u64 {
@@ -2467,16 +2046,21 @@ fn preflightPerfPresentation(
         if (preflight_state.deadlineExpired(try perfElapsed(mode_start, perfNow(io)))) {
             return error.PerfTimingFeedbackTimeout;
         }
-        drainPerfSetupEvents();
+        drainPerfSetupEvents(host_app);
         const schedule = surface.beginFrame() catch |err| switch (err) {
             error.OutOfDateKHR => {
-                try stabilizePerfSurface(io, surface, submitted_gpu_work, mode_start);
+                try stabilizePerfSurface(io, host_app, surface, submitted_gpu_work, mode_start);
                 continue;
             },
             else => return err,
         };
         _ = schedule;
-        if (!std.meta.eql(surface.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+        var frame_active = true;
+        errdefer if (frame_active) {
+            surface.abortFrame() catch @panic("surface recording cancellation failed");
+            submitted_gpu_work.* = true;
+        };
+        if (!std.meta.eql(surface.surfaceSize(), perf_device_extent)) return error.PerfExtentChanged;
         _ = surface.commandsBegin();
         submitted_gpu_work.* = true;
         const timing_id = preflight_state.reservedId();
@@ -2485,26 +2069,30 @@ fn preflightPerfPresentation(
             .timing_id = timing_id,
         }) catch |err| switch (err) {
             error.OutOfDateKHR => {
-                try stabilizePerfSurface(io, surface, submitted_gpu_work, mode_start);
+                try surface.abortFrame();
+                frame_active = false;
+                try stabilizePerfSurface(io, host_app, surface, submitted_gpu_work, mode_start);
                 continue;
             },
             else => return err,
         };
+        frame_active = false;
         if (frame_result.present_out_of_date) {
-            try stabilizePerfSurface(io, surface, submitted_gpu_work, mode_start);
+            try stabilizePerfSurface(io, host_app, surface, submitted_gpu_work, mode_start);
             continue;
         }
 
         const feedback_start = perfNow(io);
         switch (try pollPerfPreflightFeedback(
             io,
+            host_app,
             surface,
             feedback_buffer[0..],
             feedback_start,
             timing_id,
         )) {
             .feedback => {
-                drainPerfSetupEvents();
+                drainPerfSetupEvents(host_app);
                 return try preflight_state.recordedBase();
             },
             .retry => {
@@ -2513,7 +2101,7 @@ fn preflightPerfPresentation(
                 mode_start = perfNow(io);
             },
             .unsupported => {
-                drainPerfSetupEvents();
+                drainPerfSetupEvents(host_app);
                 return null;
             },
             .timeout => return error.PerfTimingFeedbackTimeout,
@@ -2853,50 +2441,39 @@ const PerfAppFrame = struct {
 };
 
 fn buildPerfAppFrame(
-    comptime T: type,
     app: *App,
-    root: *T,
     resources: *const PerfResources,
-    cmd: *noapi.CommandBuffer,
+    gpu_frame: *nogui.GpuFrame,
     frame_id: u64,
 ) !PerfAppFrame {
     ui.fps = 120.0;
     const time_ms = try perfFrameTimeMs(frame_id);
-    dispatchRootFrame(T, root, time_ms);
-    var gpu_frame: nogui.GpuFrame = .{
-        .endpoint = resources.gpu_endpoint,
-        .command_buffer = cmd,
-        .extent = perf_extent,
-        .frame_index = @intCast(frame_id % 3),
-    };
+    app.dispatchRootFrame(time_ms);
     const out = try app.frameWithGpuAtTime(
-        T,
-        root,
         @intCast(frame_id + 1),
         time_ms,
-        .{ .width = @floatFromInt(perf_width), .height = @floatFromInt(perf_height) },
-        &gpu_frame,
+        .{ .width = resources.logical_size.width, .height = resources.logical_size.height },
+        gpu_frame,
     );
     return .{ .out = out };
 }
 
+/// The perf runner's per-frame lowering. The scratch is the runner's own
+/// retained state: its rects are cleared (capacity kept) and its draw
+/// commands keep the reservation `perf_draw_cmd_capacity` set up front, so
+/// no sampled frame allocates.
 fn buildPerfScene(
     resources: *const PerfResources,
+    scratch: *frame_scene.SceneScratch,
     out: *const nogui.FrameOutput,
-    rects: *std.ArrayList(SceneRect),
-    draw_cmds: *std.ArrayList(DrawCmd),
-    gpu_sort_verify: bool,
-) !void {
-    rects.clearRetainingCapacity();
-    try buildFrameSceneInto(
-        resources.gpa,
+) !frame_scene.FramePaint {
+    scratch.beginFrame();
+    return frame_scene.buildFrameScene(
+        scratch,
         resources.text_engine,
-        resources.svg_view,
-        resources.icon_cache,
+        sceneOptions(resources.svg_scene, resources.icon_cache),
         out,
-        rects,
-        draw_cmds,
-        gpu_sort_verify,
+        false,
     );
 }
 
@@ -2928,9 +2505,7 @@ fn waitPerfTimelineOrPanic(gpu: *noapi.Gpu, timeline: noapi.Semaphore, value: u6
 }
 
 fn runOffscreenPerf(
-    comptime T: type,
     app: *App,
-    root: *T,
     resources: *const PerfResources,
     config: perf.Config,
     recorder: *perf.Recorder,
@@ -2949,16 +2524,14 @@ fn runOffscreenPerf(
     }
     var queue: noapi.Queue = .{ .gpu = resources.gpu };
     var query_slots: perf.QuerySlotScheduler = .{};
-    var scene_rects = std.ArrayList(SceneRect).empty;
-    defer scene_rects.deinit(resources.gpa);
-    var draw_cmds: std.ArrayList(DrawCmd) = .empty;
-    defer draw_cmds.deinit(resources.gpa);
-    try draw_cmds.ensureTotalCapacity(resources.gpa, perf_draw_cmd_capacity);
+    var scene_scratch = frame_scene.SceneScratch.init(resources.gpa, resources.gui_renderer);
+    defer scene_scratch.deinit();
+    try scene_scratch.draw_cmds.ensureTotalCapacity(resources.gpa, perf_draw_cmd_capacity);
 
-    drainPerfSetupEvents();
+    drainPerfSetupEvents(resources.host_app);
     var frame_id: u64 = 0;
     while (frame_id < total_frames) : (frame_id += 1) {
-        try rejectPerfEvents();
+        try rejectPerfEvents(resources.host_app);
         const phase: perf.Phase = if (frame_id < config.warmup_frames) .warmup else .sample;
         var root_zone = beginPerfRoot(phase);
         defer root_zone.end();
@@ -2978,6 +2551,19 @@ fn runOffscreenPerf(
             }
         }
         var cmd = try resources.gpu.commandsBegin();
+        var gpu_frame: nogui.GpuFrame = .{
+            .endpoint = resources.gpu_endpoint,
+            .command_buffer = &cmd,
+            .extent = perf_device_extent,
+            .frame_index = @intCast(frame_id % OffscreenSlots.count),
+            .recording = .{
+                .active = .{ .context = resources.gpu, .abort = cancelOffscreenRecording },
+            },
+        };
+        var recording_active = true;
+        errdefer if (recording_active) {
+            gpu_frame.cancelRecording() catch @panic("offscreen recording cancellation failed");
+        };
         if (comptime v7_options.gpu_timestamps) {
             const query_set = slots.timestamp_queries orelse return error.GpuTimestampUnavailable;
             const first: u32 = @intCast(slot * 2);
@@ -2985,28 +2571,37 @@ fn runOffscreenPerf(
             try cmd.timestampWrite(query_set, first, .all_commands_start);
         }
         if (comptime v7_options.perf_counters) resources.counters.reset();
-        var app_frame = try buildPerfAppFrame(T, app, root, resources, &cmd, frame_id);
+        var app_frame = try buildPerfAppFrame(app, resources, &gpu_frame, frame_id);
         defer if (app_frame.out.json) |json| resources.gpa.free(json);
         const scene_start = perfNow(resources.io);
-        try buildPerfScene(resources, &app_frame.out, &scene_rects, &draw_cmds, false);
+        var frame_paint = try buildPerfScene(resources, &scene_scratch, &app_frame.out);
+        defer frame_paint.deinit();
         const record_start = perfNow(resources.io);
         const mechanism_snapshot = if (comptime v7_options.perf_counters)
             try resources.counters.snapshot()
         else {};
-        try recordFrameScene(
+        const perf_record_ctx = recordContext(
+            &app_frame.out,
             resources.gui_renderer,
+            resources.text_engine,
+            false,
+            resources.logical_size,
+            perf_device_extent,
+            resources.tex_registry.handle,
+        );
+        _ = try frame_scene.recordFrameScene(
+            &perf_record_ctx,
             &cmd,
-            scene_rects.items,
-            app_frame.out.tree.clip_rects[0..app_frame.out.tree.clip_count],
+            &scene_scratch,
+            scene_scratch.rects.items,
+            &frame_paint,
             slots.oklab_targets[slot],
-            perf_extent,
-            resources.tex_registry.heap,
         );
         cmd.barrier(.{ .color_output = true }, .{ .fragment = true }, .{});
         recordColorConversion(
             &cmd,
             slots.srgb_targets[slot],
-            perf_extent,
+            perf_device_extent,
             resources.blit_vert,
             resources.blit_frag,
             slots.blit_heaps[slot],
@@ -3030,6 +2625,8 @@ fn runOffscreenPerf(
         } else {
             try queue.submitSignal(&.{cmd}, slots.timeline, timeline.signal_value);
         }
+        gpu_frame.finishRecording();
+        recording_active = false;
         const submit_end = perfNow(resources.io);
         highest_submitted_timeline = timeline.signal_value;
 
@@ -3063,9 +2660,7 @@ fn runOffscreenPerf(
 }
 
 fn runPresentedPerf(
-    comptime T: type,
     app: *App,
-    root: *T,
     resources: *const PerfResources,
     config: perf.Config,
     recorder: *perf.Recorder,
@@ -3074,7 +2669,7 @@ fn runPresentedPerf(
     refresh_hz: ?f32,
 ) !PerfRunMetadata {
     const total_frames = try config.totalFrames();
-    if (!std.meta.eql(gw.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+    if (!std.meta.eql(gw.surfaceSize(), perf_device_extent)) return error.PerfExtentChanged;
     var render_target: noapi.TextureHandle = .{};
     var render_target_width: u32 = 0;
     var render_target_height: u32 = 0;
@@ -3090,18 +2685,23 @@ fn runPresentedPerf(
         if (timestamp_queries) |queries| resources.gpu.timestampQuerySetDestroy(queries);
         if (render_target.texture.id != 0) resources.gpu.textureDestroy(render_target);
     }
-    drainPerfSetupEvents();
+    drainPerfSetupEvents(resources.host_app);
     sdl3.timer.delayMilliseconds(10);
-    try stabilizePerfSurface(resources.io, gw, &submitted_gpu_work, perfNow(resources.io));
+    try stabilizePerfSurface(resources.io, resources.host_app, gw, &submitted_gpu_work, perfNow(resources.io));
     var present_id_base = perf_first_recorded_present_id;
-    const preflight_base = try preflightPerfPresentation(resources.io, gw, &submitted_gpu_work);
+    const preflight_base = try preflightPerfPresentation(
+        resources.io,
+        resources.host_app,
+        gw,
+        &submitted_gpu_work,
+    );
     var present_feedback_live = false;
     if (preflight_base) |base| {
         present_id_base = base;
         present_feedback_live = true;
     }
     if (!present_feedback_live) {
-        try stabilizePerfSurface(resources.io, gw, &submitted_gpu_work, perfNow(resources.io));
+        try stabilizePerfSurface(resources.io, resources.host_app, gw, &submitted_gpu_work, perfNow(resources.io));
     }
 
     recorder.mode = .presented;
@@ -3119,11 +2719,9 @@ fn runPresentedPerf(
         timestamp_queries = try resources.gpu.timestampQuerySetCreate(OffscreenSlots.query_count);
     }
 
-    var scene_rects = std.ArrayList(SceneRect).empty;
-    defer scene_rects.deinit(resources.gpa);
-    var draw_cmds: std.ArrayList(DrawCmd) = .empty;
-    defer draw_cmds.deinit(resources.gpa);
-    try draw_cmds.ensureTotalCapacity(resources.gpa, perf_draw_cmd_capacity);
+    var scene_scratch = frame_scene.SceneScratch.init(resources.gpa, resources.gui_renderer);
+    defer scene_scratch.deinit();
+    try scene_scratch.draw_cmds.ensureTotalCapacity(resources.gpa, perf_draw_cmd_capacity);
     var query_slots: perf.QuerySlotScheduler = .{};
     var feedback_queue: PerfFeedbackQueue = .{
         // SAFETY: count starts at zero and grows only after each record is written.
@@ -3134,9 +2732,9 @@ fn runPresentedPerf(
     var frame_id: u64 = 0;
     while (frame_id < total_frames) : (frame_id += 1) {
         if (frame_id == 0) {
-            drainPerfSetupEvents();
+            drainPerfSetupEvents(resources.host_app);
         } else {
-            try rejectPerfEvents();
+            try rejectPerfEvents(resources.host_app);
         }
         const phase: perf.Phase = if (frame_id < config.warmup_frames) .warmup else .sample;
         var root_zone = beginPerfRoot(phase);
@@ -3144,7 +2742,19 @@ fn runPresentedPerf(
 
         const acquire_start = perfNow(resources.io);
         _ = try gw.beginFrame();
-        if (!std.meta.eql(gw.surfaceSize(), perf_extent)) return error.PerfExtentChanged;
+        var cmd = gw.commandsBegin();
+        var gpu_frame: nogui.GpuFrame = .{
+            .endpoint = resources.gpu_endpoint,
+            .command_buffer = &cmd,
+            .extent = perf_device_extent,
+            .frame_index = @intCast(frame_id % 3),
+            .recording = .{ .active = .{ .context = gw, .abort = cancelSurfaceRecording } },
+        };
+        var recording_active = true;
+        errdefer if (recording_active) {
+            gpu_frame.cancelRecording() catch @panic("surface recording cancellation failed");
+        };
+        if (!std.meta.eql(gw.surfaceSize(), perf_device_extent)) return error.PerfExtentChanged;
         const app_start = perfNow(resources.io);
         if (comptime v7_options.gpu_timestamps) {
             if (try query_slots.begin(frame_id)) |completed_frame| {
@@ -3152,7 +2762,6 @@ fn runPresentedPerf(
                 try attachGpuQueries(resources.gpu, query_set, recorder, completed_frame);
             }
         }
-        var cmd = gw.commandsBegin();
         if (comptime v7_options.gpu_timestamps) {
             const query_set = timestamp_queries orelse return error.GpuTimestampUnavailable;
             const first: u32 = @intCast((frame_id % 3) * 2);
@@ -3160,28 +2769,37 @@ fn runPresentedPerf(
             try cmd.timestampWrite(query_set, first, .all_commands_start);
         }
         if (comptime v7_options.perf_counters) resources.counters.reset();
-        var app_frame = try buildPerfAppFrame(T, app, root, resources, &cmd, frame_id);
+        var app_frame = try buildPerfAppFrame(app, resources, &gpu_frame, frame_id);
         defer if (app_frame.out.json) |json| resources.gpa.free(json);
         const scene_start = perfNow(resources.io);
-        try buildPerfScene(resources, &app_frame.out, &scene_rects, &draw_cmds, false);
+        var frame_paint = try buildPerfScene(resources, &scene_scratch, &app_frame.out);
+        defer frame_paint.deinit();
         const record_start = perfNow(resources.io);
         const mechanism_snapshot = if (comptime v7_options.perf_counters)
             try resources.counters.snapshot()
         else {};
-        try recordFrameScene(
+        const perf_record_ctx = recordContext(
+            &app_frame.out,
             resources.gui_renderer,
+            resources.text_engine,
+            false,
+            resources.logical_size,
+            perf_device_extent,
+            resources.tex_registry.handle,
+        );
+        _ = try frame_scene.recordFrameScene(
+            &perf_record_ctx,
             &cmd,
-            scene_rects.items,
-            app_frame.out.tree.clip_rects[0..app_frame.out.tree.clip_count],
+            &scene_scratch,
+            scene_scratch.rects.items,
+            &frame_paint,
             render_target,
-            perf_extent,
-            resources.tex_registry.heap,
         );
         cmd.barrier(.{ .color_output = true }, .{ .fragment = true }, .{});
         recordColorConversion(
             &cmd,
             gw.currentImage(),
-            perf_extent,
+            perf_device_extent,
             resources.blit_vert,
             resources.blit_frag,
             blit_heap,
@@ -3202,6 +2820,8 @@ fn runPresentedPerf(
             else
                 null,
         });
+        gpu_frame.finishRecording();
+        recording_active = false;
         const slop_after = gw.slopNs();
         const submit_end = perfNow(resources.io);
         if (frame_result.present_out_of_date) return error.OutOfDateKHR;
@@ -3244,7 +2864,7 @@ fn runPresentedPerf(
     if (present_feedback_live) {
         const drain_start = perfNow(resources.io);
         while (next_present_frame_id < @as(u64, total_frames)) {
-            try rejectPerfEvents();
+            try rejectPerfEvents(resources.host_app);
             if (!try pollPerfPresentFeedback(
                 gw,
                 &feedback_queue,
@@ -3296,24 +2916,11 @@ pub fn runShot(
 ) !void {
     const gpa = app.gpa;
 
-    // OVERRIDE priority: the SDL gives env vars precedence over
-    // default-priority hints, so a session-set SDL_VIDEODRIVER makes
-    // plain hints.set fail with "An environment variable is taking
-    // priority". The demo REQUIRES the wayland + vulkan drivers; its
-    // choice must win.
-    try sdl3.hints.setWithPriority(.video_driver, "wayland", .override);
-    try sdl3.hints.setWithPriority(.render_driver, "vulkan", .override);
-    try sdl3.init(.{ .video = true, .events = true });
-    defer sdl3.quit(.{ .video = true, .events = true });
-    const sdl_win = try sdl3.video.Window.init("nogui v7 demo", 1100, 1160, .{ .resizable = true });
-    defer sdl_win.deinit();
-    try sdl_win.show();
-
-    try sdl3.vulkan.loadLibrary(null);
-    const get_proc_addr = try sdl3.vulkan.getVkGetInstanceProcAddr();
-    const sdl_exts = try sdl3.vulkan.getInstanceExtensions();
-    exts_copy_global = try gpa.dupe([*:0]const u8, sdl_exts);
-    defer gpa.free(exts_copy_global);
+    // These logical and device extents were captured from the native
+    // 2026-09-30 Todo/Spotify shot (both 954x1044 at scale 1). A shot is
+    // independent of the compositor and opens no native window.
+    const logical_size: nogui.geometry.WindowSize = .{ .width = 954, .height = 1044 };
+    const device_extent: noapi.Extent2D = .{ .width = 954, .height = 1044 };
 
     var io_impl = std.Io.Threaded.init(gpa, .{});
     defer io_impl.deinit();
@@ -3325,36 +2932,36 @@ pub fn runShot(
     defer quad_frag_f.deinit(gpa);
     var sort_comp_f = try ShaderFile.load(gpa, io, "shaders/sort_comp.spv");
     defer sort_comp_f.deinit(gpa);
-    var fullscreen_vert_f = try ShaderFile.load(gpa, io, "shaders/fullscreen_vert.spv");
-    defer fullscreen_vert_f.deinit(gpa);
-    var blit_oklab_f = try ShaderFile.load(gpa, io, "shaders/blit_oklab.spv");
-    defer blit_oklab_f.deinit(gpa);
-
-    var gpu = try noapi.Gpu.init(.{
-        .frames_in_flight = 3,
-        .app_name = "v7-demo",
-        .validation = false,
-        .loader = .{
-            .get_instance_proc_addr = @ptrCast(get_proc_addr),
-            .get_instance_extensions = &getExts,
-        },
+    var system_loader = try v7_frame_mod.SystemVulkanLoader.open();
+    defer system_loader.close();
+    var offscreen = try v7_frame_mod.Offscreen.init(.{
+        .allocator = gpa,
         .io = io,
+        .loader = system_loader.options(),
+        .extent = device_extent,
+        .app_name = "v7-demo",
     });
-    defer gpu.deinit();
-
-    const sdl_surface = try sdl3.vulkan.Surface.init(sdl_win, @ptrFromInt(@intFromEnum(gpu.instanceHandle())), null);
-    const surface: vk.SurfaceKHR = @enumFromInt(@intFromPtr(sdl_surface.surface));
-    var gw = try noapi.Surface.init(&gpu, surface, .{ .extent = .{ .width = 1100, .height = 1160 } });
-    defer gw.deinit();
+    defer offscreen.deinit();
+    const gpu = offscreen.gpu();
 
     // Text engine owns FreeType, per-size font states, and the glyph
     // material buffer. Renderer owns the quad shaders and draw buffers.
-    var text_engine = try TextEngine.init(gpa, &gpu);
+    // The font bytes stay in the demo; the engine borrows nothing and
+    // embeds nothing. The first registered family is the one a node that
+    // names no family resolves to.
+    var text_engine = try TextEngine.init(gpa, gpu, &.{
+        .{ .family = "InterVariable", .bytes = @embedFile("InterVariable.ttf") },
+        .{ .family = "Fira Code Nerd Font", .bytes = @embedFile("FiraCodeNerdFont-Regular.ttf") },
+    });
     defer text_engine.deinit();
-    TextEngine.measure_engine = &text_engine;
-    app.measure = TextEngine.measureForFlex;
-    var gui_renderer = try Renderer.init(&gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
+    try text_engine.setGlyphSlotLimit(glyph_material_ceiling);
+    app.measure = text_engine.measurer();
+    var gui_renderer = try Renderer.init(gpu, quad_vert_f.spv, quad_frag_f.spv, sort_comp_f.spv);
     defer gui_renderer.deinit();
+    // The shot lowers exactly one frame; the scratch exists for that frame
+    // and dies with it.
+    var scene_scratch = frame_scene.SceneScratch.init(gpa, &gui_renderer);
+    defer scene_scratch.deinit();
     const render_options: RenderOptions = .{
         .material_bda = text_engine.materialBda(),
         .subpixel = subpixel,
@@ -3366,83 +2973,60 @@ pub fn runShot(
 
     // GUI texture heap + registry + the demo's procedural texture — the
     // shot renders it like run() (the texture card is part of the frame).
-    var tex_registry = try TextureRegistry.init(gpa, &gpu);
-    defer tex_registry.deinit(gpa);
-    ui.texture_idx = try uploadDemoTexture(gpa, &gpu, &tex_registry);
-    try uploadReferenceTexture(gpa, &gpu, &tex_registry);
+    const tex_registry = offscreen.heap();
+    ui.texture_idx = try uploadDemoTexture(gpa, gpu, tex_registry);
+    try uploadReferenceTexture(gpa, gpu, tex_registry);
 
-    // The stroke test scene (the TestStrokesApp root) loads the curved
-    // thin-stroke set; everything else loads the tiger.
-    var svg_view = if (comptime T == ui.TestStrokesApp)
-        try initStrokeView(gpa, &gpu, &text_engine)
-    else
-        try initSvgView(gpa, &gpu, &text_engine);
-    defer svg_view.deinit(&gpu);
-    // Transport icons share TextEngine's material buffer but are initialized
-    // for the one-shot frame so icon-only controls render their cached paths.
-    var icon_cache = try IconCache.init(gpa, &gpu, &text_engine);
-    defer icon_cache.deinit(&gpu);
+    // The reserved showcase box's document (the stroke scene for the
+    // TestStrokesApp root, the tiger otherwise) and the transport icons.
+    // Both rasterize through librsvg on their first frame, so the one-shot
+    // frame records them like every later frame.
+    var svg_scene = SvgScene.init(gpa, gpu, tex_registry, sceneDocument(T), sceneDocumentBox(T));
+    defer svg_scene.deinit();
+    var icon_cache = IconCache.init(gpa, gpu, tex_registry);
+    defer icon_cache.deinit();
 
-    const blit_vert = try gpu.shaderCreate(fullscreen_vert_f.spv, .vertex, "main", "fullscreen_vert");
-    defer gpu.shaderDestroy(blit_vert);
-    const blit_frag = try gpu.shaderCreate(blit_oklab_f.spv, .fragment, "main", "blit_oklab");
-    defer gpu.shaderDestroy(blit_frag);
-    const blit_heap = try gpu.descHeapCreate(8, 0, 1);
-    defer gpu.descHeapDestroy(blit_heap);
-    const blit_sampler = gpu.samplerDescriptor(.{
-        .min_filter = .nearest,
-        .mag_filter = .nearest,
-        .mip_filter = .nearest,
-    });
-    gpu.descHeapSetSamplers(blit_heap, 0, &.{blit_sampler});
-
-    var render_target: noapi.TextureHandle = .{};
-    var rt_w: u32 = 0;
-    var rt_h: u32 = 0;
-    defer if (render_target.texture.id != 0) gpu.textureDestroy(render_target);
-    configureGpuComponents(T, root, tex_registry.heap);
-    var gpu_texture_runtime: nogui.TextureRegistry = .{
-        .ptr = &tex_registry,
-        .register = registerRuntimeTexture,
-        .unregister = unregisterRuntimeTexture,
-    };
-    var gpu_endpoint: nogui.GpuEndpoint = .{
-        .gpu = &gpu,
-        .textures = &gpu_texture_runtime,
-    };
-    try app.attachGpu(&gpu_endpoint);
+    configureGpuComponents(T, root, tex_registry.handle);
+    try app.attachGpu(offscreen.endpoint());
     defer app.detachGpu();
+    const initial_resize: Event = .{ .resize = .{
+        .width = logical_size.width,
+        .height = logical_size.height,
+    } };
+    _ = try app.handle(initial_resize);
 
     // Sync the toggle state BEFORE the frame builds the tree: the shot's
     // header status line reads debug_state, so a late sync would stamp the
     // PREVIOUS frame's toggles onto this shot. Same order as run()'s loop.
-    text_mod.debug_state = .{
+    debug_state_mod.debug_state = .{
         .subpixel = render_options.subpixel,
         .bgr = render_options.bgr_order,
         .damp = render_options.damp_chroma,
         .quad_debug = render_options.quad_debug,
     };
 
-    // One frame: fresh tree + layout at the fixed window size.
-    const surface_size = gw.surfaceSize();
-    try ensureRenderTarget(&gpu, &render_target, &rt_w, &rt_h, surface_size.width, surface_size.height, blit_heap);
-    var cmd = try gpu.commandsBegin();
-    var gpu_frame: nogui.GpuFrame = .{
-        .endpoint = &gpu_endpoint,
-        .command_buffer = &cmd,
-        .extent = surface_size,
-        .frame_index = 0,
+    // The shot lays out in window units, then reads back physical pixels.
+    std.log.info("shot dimensions: logical={d}x{d} device={d}x{d}", .{
+        logical_size.width,
+        logical_size.height,
+        device_extent.width,
+        device_extent.height,
+    });
+    try setScenePixelScale(&text_engine, &svg_scene, &icon_cache, logical_size, device_extent);
+    // SAFETY: `beginFrame` writes both out-parameters before either is read,
+    // and the recording guard below reads only what it filled in.
+    var cmd: noapi.CommandBuffer = undefined;
+    // SAFETY: the same out-parameter, filled by the same `beginFrame` call.
+    var gpu_frame: nogui.GpuFrame = undefined;
+    try offscreen.beginFrame(0, &cmd, &gpu_frame);
+    errdefer if (gpu_frame.recording == .active) {
+        gpu_frame.cancelRecording() catch @panic("offscreen recording cancellation failed");
     };
-    dispatchRootFrame(T, root, 1200);
+    app.dispatchRootFrame(1200);
     var out = try app.frameWithGpuAtTime(
-        T,
-        root,
         1,
         1200,
-        .{
-            .width = @floatFromInt(surface_size.width),
-            .height = @floatFromInt(surface_size.height),
-        },
+        .{ .width = logical_size.width, .height = logical_size.height },
         &gpu_frame,
     );
     defer if (out.json) |j| gpa.free(j);
@@ -3451,62 +3035,64 @@ pub fn runShot(
     // hovered (no easing in a one-frame shot); 0 otherwise.
     out.pressed = null;
     out.press_alpha = 0;
-    out.hover = if (hover) |p| hitTest(out.tree, p) else null;
+    out.hover = if (hover) |p| blk: {
+        var frame_id = hitTest(out.tree, p) orelse break :blk null;
+        for (0..out.tree.nodes.items.len) |_| {
+            const node = out.tree.nodeConst(frame_id) orelse break :blk null;
+            if (node.widget_id) |widget_id| break :blk widget_id;
+            if (frame_id == .root) break :blk null;
+            frame_id = node.parent;
+        }
+        break :blk null;
+    } else null;
     out.hover_alpha = if (out.hover != null) 1 else 0;
     out.focus = null;
 
-    var slice_rects = std.ArrayList(SceneRect).empty;
-    defer slice_rects.deinit(gpa);
-    try buildFrameScene(
-        gpa,
+    scene_scratch.beginFrame();
+    var frame_paint = try frame_scene.buildFrameScene(
+        &scene_scratch,
         &text_engine,
-        &svg_view,
-        &icon_cache,
+        sceneOptions(&svg_scene, &icon_cache),
         &out,
-        &slice_rects,
         gpu_sort_verify,
     );
+    defer frame_paint.deinit();
 
-    // Readback buffer: one rgba32_float pixel per screen pixel.
-    const pixel_bytes: u64 = @as(u64, surface_size.width) * surface_size.height * 4 * @sizeOf(f32);
-    const readback = try gpu.gpuMalloc(pixel_bytes, 64, .readback);
-    defer gpu.gpuFree(readback);
-
-    try recordFrameScene(
+    const shot_record_ctx = recordContext(
+        &out,
         &gui_renderer,
-        &cmd,
-        slice_rects.items,
-        out.tree.clip_rects[0..out.tree.clip_count],
-        render_target,
-        surface_size,
-        tex_registry.heap,
+        &text_engine,
+        gpu_sort_verify,
+        logical_size,
+        device_extent,
+        tex_registry.handle,
     );
-    cmd.barrier(.{ .color_output = true }, .{ .transfer = true }, .{});
-
-    const tex: noapi.Texture = .{
-        .gpu = &gpu,
-        .handle = render_target,
-        .dimensions = .{ surface_size.width, surface_size.height, 1 },
-        .format = .rgba32_float,
-    };
-    cmd.copyFromTexture(tex, readback, .{
-        .size = .{ surface_size.width, surface_size.height, 1 },
-    });
-
-    try gpu.queueSubmit(&.{cmd});
-    try gpu.waitIdle();
+    const verified_rects = try frame_scene.recordFrameScene(
+        &shot_record_ctx,
+        &cmd,
+        &scene_scratch,
+        scene_scratch.rects.items,
+        &frame_paint,
+        offscreen.target(),
+    );
+    const pixels = try offscreen.submitRead(&gpu_frame);
 
     // --gpu-sort-verify: the REVERSED bag must produce the paint-order
     // permutation. Read the sort's output back and check it against a
     // CPU-side stable (z, order) reference — the assertion the flag is
     // about (the runShot itself is the pixel-level check).
     if (gpu_sort_verify) {
-        const n = slice_rects.items.len;
+        const n = verified_rects.len;
         const perm_rb = try gpu.gpuMalloc(@as(u64, n) * @sizeOf(u32), 64, .readback);
         defer gpu.gpuFree(perm_rb);
         var cmd2 = try gpu.commandsBegin();
+        var command_pending = true;
+        errdefer if (command_pending) {
+            gpu.commandsCancel(&cmd2) catch @panic("offscreen recording cancellation failed");
+        };
         cmd2.memCopy(perm_rb, gui_renderer.permutationBuffer(), @as(u64, n) * @sizeOf(u32));
         try gpu.queueSubmit(&.{cmd2});
+        command_pending = false;
         try gpu.waitIdle();
         const got: [*]const u32 = @ptrCast(@alignCast(perm_rb.cpu));
         const RectSort = struct {
@@ -3523,7 +3109,7 @@ pub fn runShot(
         var ref = try gpa.alloc(u32, n);
         defer gpa.free(ref);
         for (0..n) |i| ref[i] = @intCast(i);
-        std.sort.insertion(u32, ref, RectSort{ .rects = slice_rects.items }, RectSort.lessThan);
+        std.sort.insertion(u32, ref, RectSort{ .rects = verified_rects }, RectSort.lessThan);
         var bad: ?usize = null;
         for (ref, 0..) |want, i| {
             if (got[i] != want) {
@@ -3534,7 +3120,7 @@ pub fn runShot(
         if (bad) |i| {
             std.log.err(
                 "gpu-sort-verify FAILED: perm[{d}] = {d}, want {d} (z={d} order={d})",
-                .{ i, got[i], ref[i], slice_rects.items[ref[i]].z, slice_rects.items[ref[i]].order },
+                .{ i, got[i], ref[i], verified_rects[ref[i]].z, verified_rects[ref[i]].order },
             );
             return error.GpuSortVerifyMismatch;
         }
@@ -3542,8 +3128,7 @@ pub fn runShot(
     }
 
     // Convert Oklab floats → sRGB bytes and write the PPM.
-    const pixels: [*]const f32 = @ptrCast(@alignCast(readback.cpu));
-    try writePpm(gpa, io, path, pixels, surface_size.width, surface_size.height);
+    try v7_frame_mod.writePpm(gpa, io, path, pixels, device_extent);
 }
 
 test "perf slot run options accept only fixed render defaults" {
@@ -3615,31 +3200,4 @@ test "perf feedback queue reserves preflight ID and preserves gaps" {
     try queue.attachReady(&recorder, &next_frame_id, 2);
     try std.testing.expectEqual(@as(u64, 0), next_frame_id);
     try std.testing.expectEqual(@as(usize, 1), queue.count);
-}
-
-test "scene append counters record allocation growth" {
-    var counters: nogui.Counters = .{};
-    var sink = CounterSink.init(&counters);
-    var rects: std.ArrayList(SceneRect) = .empty;
-    defer rects.deinit(std.testing.allocator);
-    noteSceneGrowth(&rects, &sink);
-    try rects.append(std.testing.allocator, .{
-        .dst = .{ 0, 0, 0, 0 },
-        .src = .{ 0, 0, 1, 1 },
-        .corners = .{ 0, 0, 0, 0 },
-        .color = .{ 0, 0, 0, 1 },
-        .curve = .{ 0, 0, 0, 0 },
-        .material_index = 0,
-    });
-    const snapshot = try counters.snapshot();
-    if (comptime v7_options.perf_counters) {
-        try std.testing.expectEqual(@as(u64, 1), snapshot.value(.slice_rect_growth_events));
-        try std.testing.expectEqual(
-            @as(u64, 0),
-            snapshot.value(.slice_rect_growth_copy_bytes),
-        );
-    } else {
-        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.slice_rect_growth_events));
-        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.slice_rect_growth_copy_bytes));
-    }
 }

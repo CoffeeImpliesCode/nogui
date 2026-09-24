@@ -1,6 +1,5 @@
-// Blit pass: sample the Oklab render target, convert to linear sRGB
-// (ported from blit_oklab.frag). Separate texture + sampler descriptors
-// (set 0 = image, set 2 = sampler) — the heap binds all sets once.
+// Final blit: sample the Oklab render target and convert to linear sRGB.
+// The texture and sampler use separate descriptor sets (0 and 2).
 
 import lib.color;
 

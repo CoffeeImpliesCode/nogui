@@ -1,7 +1,7 @@
 //! Specifies final-slot remeasurement across the block-to-flex dispatcher bridge.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const dispatch = @import("dispatch.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
@@ -32,8 +32,8 @@ fn autoStyle(display: style.Display) Style {
 
 fn appendNode(
     tree: *WidgetTree,
-    id: Id,
-    parent: Id,
+    id: FrameNodeId,
+    parent: FrameNodeId,
     node_style: Style,
     kind: WidgetKind,
 ) !void {
@@ -61,7 +61,7 @@ fn expectRect(expected: Rect, actual: Rect) !void {
     try std.testing.expectApproxEqAbs(expected.h, actual.h, tolerance);
 }
 
-fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
+fn expectRelative(tree: *const WidgetTree, id: FrameNodeId, expected: Rect) !void {
     const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
     try expectRect(expected, node.rect);
 }
@@ -70,12 +70,12 @@ test "block float slot remeasures auto flex subtree at final width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const first_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
-    const inner_id: Id = @enumFromInt(4);
-    const mixed_id: Id = @enumFromInt(5);
-    const root_id: Id = @enumFromInt(6);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const first_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
+    const inner_id: FrameNodeId = @enumFromInt(4);
+    const mixed_id: FrameNodeId = @enumFromInt(5);
+    const root_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(&tree, first_id, inner_id, fixedStyle(.block, 30, 10), .{ .spacer = .{} });
     try appendNode(&tree, second_id, inner_id, fixedStyle(.block, 30, 10), .{ .spacer = .{} });

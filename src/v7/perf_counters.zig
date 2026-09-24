@@ -95,7 +95,7 @@ pub fn Sink(comptime enabled: bool) type {
     };
 }
 
-pub const CounterSink = Sink(v7_options.perf_counters);
+pub const CounterSink: type = Sink(v7_options.perf_counters);
 
 comptime {
     std.debug.assert(std.meta.fields(Counter).len == 15);

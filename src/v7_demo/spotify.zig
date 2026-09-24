@@ -3,11 +3,12 @@
 const std = @import("std");
 
 const nogui = @import("nogui");
+const nogui_text = @import("nogui_text");
 const DrawCtx = nogui.DrawCtx;
 const widget = nogui.widget;
 const WidgetTree = widget.WidgetTree;
 const headless = nogui.headless;
-const measure_cpu = @import("measure_cpu.zig");
+const demo_fonts = @import("fonts.zig");
 const theme = @import("spotify_theme.zig");
 const data = @import("spotify_data.zig");
 const sidebar = @import("spotify_sidebar.zig");
@@ -116,7 +117,8 @@ pub const SpotifyApp = struct {
 
         for (local_tracks[0..count], 0..) |local_track, index| {
             self.tracks[index] = .{
-                .id = @intCast(index + 1),
+                .id = (@as(u64, 1) << 60) |
+                    (std.hash.Wyhash.hash(0, local_track.path) & std.math.maxInt(u60)),
                 .title = local_track.title,
                 .artist = local_track.artist,
                 .album = local_track.album,
@@ -309,11 +311,12 @@ pub const SpotifyApp = struct {
             .grow = 1,
             .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
             .fill = c_bg,
-            .gradient = theme.srgbToOklab(c_bg),
         });
         defer ctx.pop();
 
         {
+            // The row only arranges the three panels. Each panel paints its own
+            // surface, so the gaps must reveal the outer application background.
             _ = try ctx.row(.{
                 .columns = &workspace_columns,
                 .gap = 8,
@@ -321,6 +324,7 @@ pub const SpotifyApp = struct {
                 .shrink = 1,
                 .min_height = 0,
                 .clip = true,
+                .transparent = true,
             });
             defer ctx.pop();
 
@@ -328,6 +332,7 @@ pub const SpotifyApp = struct {
             try content.draw(self, ctx, spec);
 
             if (spec.show_now_playing) {
+                // The rail column below paints the rail surface itself.
                 _ = try ctx.row(.{
                     .flex_basis = spec.now_playing_width,
                     .grow = 0,
@@ -335,6 +340,7 @@ pub const SpotifyApp = struct {
                     .min_width = spec.now_playing_width,
                     .box_sizing = .border_box,
                     .clip = true,
+                    .transparent = true,
                 });
                 defer ctx.pop();
 
@@ -388,7 +394,10 @@ test "SpotifyApp draws without error in DrawCtx" {
 fn verifySpotifyLayout(surface: widget.Size, expect_center_priority: bool) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    defer measure_cpu.deinit();
+    // SAFETY: `init` fills the measurer before this scope reads it.
+    var measurer: nogui_text.TextMeasurer = undefined;
+    try measurer.init(std.testing.allocator, &demo_fonts.pinned_fonts, demo_fonts.default_text_size);
+    defer measurer.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.deinit();
     var ctx: DrawCtx = .{
@@ -403,12 +412,12 @@ fn verifySpotifyLayout(surface: widget.Size, expect_center_priority: bool) !void
     try nogui.layout.layoutTree(&tree, .{
         .allocator = arena.allocator(),
         .available = surface,
-        .measure = measure_cpu.measure,
+        .measure = measurer.source(),
     });
     const report = try headless.verifyLayout(
         std.testing.allocator,
         &tree,
-        measure_cpu.measure,
+        measurer.source(),
         surface,
     );
     defer std.testing.allocator.free(report);
@@ -455,7 +464,9 @@ test "Spotify compact generated sidebar labels use the final button width" {
     const surface: widget.Size = .{ .width = 640, .height = 1160 };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    defer measure_cpu.deinit();
+    var measurer: nogui_text.TextMeasurer = undefined;
+    try measurer.init(std.testing.allocator, &demo_fonts.pinned_fonts, demo_fonts.default_text_size);
+    defer measurer.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.deinit();
     var ctx: DrawCtx = .{
@@ -469,7 +480,7 @@ test "Spotify compact generated sidebar labels use the final button width" {
     try nogui.layout.layoutTree(&tree, .{
         .allocator = arena.allocator(),
         .available = surface,
-        .measure = measure_cpu.measure,
+        .measure = measurer.source(),
     });
 
     // Compact sidebar buttons give each generated label a 36 px minimum.
@@ -570,7 +581,9 @@ test "SpotifyApp generated album label stays inside its button at 1100x1160" {
     const surface: widget.Size = .{ .width = 1100, .height = 1160 };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    defer measure_cpu.deinit();
+    var measurer: nogui_text.TextMeasurer = undefined;
+    try measurer.init(std.testing.allocator, &demo_fonts.pinned_fonts, demo_fonts.default_text_size);
+    defer measurer.deinit();
     var tree = WidgetTree.init(arena.allocator());
     defer tree.deinit();
     var ctx: DrawCtx = .{
@@ -584,7 +597,7 @@ test "SpotifyApp generated album label stays inside its button at 1100x1160" {
     try nogui.layout.layoutTree(&tree, .{
         .allocator = arena.allocator(),
         .available = surface,
-        .measure = measure_cpu.measure,
+        .measure = measurer.source(),
     });
 
     const expected_text = "Hurry Up, We're Dreaming";
@@ -627,6 +640,37 @@ test "SpotifyApp generated album label stays inside its button at 1100x1160" {
     try std.testing.expect(
         label_rect.y + label_rect.h <= button_content_rect.y + button_content_rect.h + epsilon,
     );
+}
+
+test "api-w02 local track IDs follow paths across queue reordering" {
+    var local_tracks: [2]data.LocalTrack = .{
+        .{
+            .path = "music/a.flac",
+            .title = "A",
+            .artist = "Artist",
+            .album = "Album",
+            .duration_str = "1:00",
+            .duration_sec = 60,
+        },
+        .{
+            .path = "music/b.flac",
+            .title = "B",
+            .artist = "Artist",
+            .album = "Album",
+            .duration_str = "1:00",
+            .duration_sec = 60,
+        },
+    };
+    var app: SpotifyApp = .{};
+    _ = app.initLocalTracks(&local_tracks);
+    const a_id = app.tracks[0].id;
+    const b_id = app.tracks[1].id;
+    try std.testing.expect(a_id != b_id);
+
+    std.mem.swap(data.LocalTrack, &local_tracks[0], &local_tracks[1]);
+    _ = app.initLocalTracks(&local_tracks);
+    try std.testing.expectEqual(b_id, app.tracks[0].id);
+    try std.testing.expectEqual(a_id, app.tracks[1].id);
 }
 
 test "SpotifyApp retains a full local queue at the shared capacity" {

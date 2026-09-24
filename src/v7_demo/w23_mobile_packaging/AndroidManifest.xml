@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The consumer's Android manifest for the W23 mobile run.
+
+  It is a SOURCE fixture, not a build input of this repository: nothing here is
+  compiled by `zig build`, and no dex, AAR or SDK is produced or installed. A
+  consumer's Gradle project includes this file (or copies the elements it needs)
+  and adds the two Java source trees below. Both paths are relative to THIS
+  file's own directory, `src/v7_demo/w23_mobile_packaging/`:
+
+    java              the consumer's activity, at
+                      java/org/libsdl/app/NoguiMobileActivity.java
+    ../../v7_host/mobile/shim
+                      the shim's Java provider, at
+                      ../../v7_host/mobile/shim/NoguiAccessibilityProvider.java
+
+  Every entry below earns its place against a fact the E04/E05 acceptance needs,
+  and the comment names that fact. An element removed from here breaks a named
+  observation rather than a cosmetic one.
+
+  The activity is `NoguiMobileActivity`, not SDL's own, because
+  `onTrimMemory` reaches the activity and nothing else: without the subclass the
+  bridge reads no memory pressure and reports "no pressure" for a process that
+  was in fact short of memory.
+
+  `configChanges` is the load-bearing part for rotation. Without
+  `orientation|screenSize|screenLayout|smallestScreenSize` the platform DESTROYS
+  and recreates the activity on rotation, which tears down the SDL window, the
+  bridge and the model with it; the E04 rotation acceptance — safe area and pixel
+  scale re-measured on a window that survived — cannot happen at all. Keeping the
+  activity alive is what lets the window survive the rotation, and SDL delivers
+  the configuration change to the same window the adapter is observing.
+
+  `adjustResize` is what makes the keyboard measurable. With it, the window
+  shrinks when the soft keyboard appears and the adapter can read an occlusion
+  rectangle to intersect the content rectangle with; with `adjustPan` or
+  `adjustNothing` the window keeps its size, the platform reports no occlusion,
+  and the keyboard phase has no fact to report.
+
+  `windowSoftInputMode` and `configChanges` are independent settings and both are
+  needed. `keyboard|keyboardHidden` keeps the activity alive across the
+  keyboard's own configuration change, and `adjustResize` is what resizes the
+  window at all.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The run drives raw touch and the platform's own pinch recogniser, so a
+         touchscreen is a real input source. It is not marked required: a device
+         without one can still run the safe-area, keyboard, background, back,
+         memory and accessibility phases, and refusing to install there would hide
+         facts this consumer can observe. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:hasCode="true"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name="org.libsdl.app.NoguiMobileActivity"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|density|uiMode|navigation|fontScale"
+            android:windowSoftInputMode="adjustResize"
+            android:screenOrientation="unspecified">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

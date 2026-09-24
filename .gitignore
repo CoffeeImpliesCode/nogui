@@ -3,6 +3,7 @@
 .direnv/
 /agent-notes
 .zig-cache/
+.zig-global-cache/
 zig-out/
 zig-pkg/
 codedb*
@@ -11,7 +12,9 @@ graphify-out/
 .omo/
 .playwright-mcp/
 *.json
-docs/
+!testdata/layout-golden.json
+!vendor/noapi-provenance.json
+!docs/perf/text-shaping-cache-diagnostic.json
 
 coverage-*.zcov
 __pycache__/

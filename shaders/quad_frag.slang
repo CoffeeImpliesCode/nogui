@@ -1,53 +1,17 @@
-// quad_frag.slang — BIT-EXACT Slang port of shaders/quad_frag.glsl.
-// Same float operation order, same literals, no reformulation, no fused
-// ops. The only changes are the mechanical GLSL → Slang translations
-// (vecN → floatN, mix → lerp, gl_FragCoord → fragPos, buffer_reference →
-// vk::BufferPointer<T>.Get(), push_constant uniform → global
-// [[vk::push_constant]] variable).
+// 9-slice fragment pass. Preserve float operation order for pixel parity.
+// Glyph coverage and color conversions share the helpers in lib/coverage
+// and lib/color. The vertex interface and push-constant offsets are the
+// renderer contract:
 //
 // Entry: main (fragment) — the runtime loads the .spv with entry "main".
 // Vertex interface (locations in GLSL order): vUv@0, vColor@1,
 // vMaterialIdx@2 (flat), vOrigin@3, vTexIdx@4 (flat, NEW — the bindless
 // texture heap index; ~0 = none, P3), vClipId@5 (flat, NEW — the clip-rect
 // index; ~0 = none); SV_Position carries gl_FragCoord.
-// Push constant ABI: PushData { uint64_t vert_data @0; uint64_t frag_data
-// @8; uint64_t indirect @16 (clip-rect buffer BDA) } — the toggle bits are
-// read from the SECOND field (GLSL pc.vp_h_packed → frag_data here; the
-// ABI is the offset, not the name).
+// Push constant ABI: vert_data @0, frag_data @8, indirect @16 (logical clip
+// rect BDA), screen @24 (logical window size), scene_bda @32, perm_bda @40,
+// pixel_scale @48 (physical framebuffer pixels per logical unit).
 //
-// GLSL source line mapping (shaders/quad_frag.glsl):
-//   in/out interface .............. 5-10
-//   TYPE_* constants ............... 12-15
-//   GlyphMaterial struct ........... 17-26
-//   QuadCurve / CurveBuf structs ... 32-42
-//   push constant .................. 163-166
-//   sweepIntersect/sweepEval/sweepSegment ... 54-132 → lib/coverage.slang
-//   linearToOklab/oklabToSRGB ...... 192-217 → lib/color.slang
-//   main() ......................... 269-433
-//     early-out vMaterialIdx==0 .... 270
-//     material fetch (materials[mat_idx] → direct .Get(); the CPU writes
-//       each glyph's material at its slot, so vert_data points straight
-//       at it) ..................... 272-274
-//     TYPE_SOLID ................... 276
-//     TYPE_GLYPH ................... 278-363
-//       curve buf + num_curves ..... 279-280
-//       cell math .................. 293-294
-//       quad-debug tint (bit 1) .... 298-307
-//       subpixel AA (bit 0) ........ 318-353
-//       grayscale sweep ............ 355-362
-//     TYPE_ROUNDED_RECT ............ 365-408
-//       outer SDF .................. 383-387 → sdRoundRect
-//       ring subtraction ........... 389-399 → sdRoundRectInner
-//       vertical gradient .......... 402-405
-//     TYPE_SHADOW .................. 410-431 → sdShadowRect
-//     fallthrough .................. 432
-//
-// Not ported (dead in the GLSL — no call sites in main): ByteBuf (44-46),
-// texelCoverage (135-141), sampleCoverage (147-161), && the scanline
-// sweeper intersectMonotonic/evalBez/scanlineSweep (169-267; it lives in
-// lib/coverage for the compute path). dFdx/ddy are absent from the GLSL
-// (the sweep windows are fixed-size), so nothing to port there.
-
 import lib.color;
 import lib.coord;
 import lib.coverage;
@@ -58,6 +22,11 @@ static const int TYPE_ROUNDED_RECT = 2;
 static const int TYPE_SHADOW = 3;
 static const int TYPE_STROKE = 4;
 static const int TYPE_SWEEP = 5; // the SVG fill: the SDF AA, no subpixel
+static const int TYPE_PATH_FILL = 6;
+static const int TYPE_PAINT_RECT = 7;
+static const int TYPE_PAINT_SHADOW = 8;
+static const int TYPE_PATH_STROKE = 9;
+
 
 // The coverage gamma (Blinn's compositing practice): the alpha is NOT the
 // literal sub-pixel area — pow(cov, 1/GAMMA) raises the low coverages so
@@ -66,18 +35,15 @@ static const int TYPE_SWEEP = 5; // the SVG fill: the SDF AA, no subpixel
 // the lighter end of the usual 1.6-2.2 range.
 static const float COVERAGE_GAMMA = 1.6;
 
-// The stroke's AA band width in fwidth units: the transition spans
-// half ± STROKE_AA*fwidth (2*fwidth total at 1.0). Wider = softer edges.
-static const float STROKE_AA = 1.5;
-// The SVG fill's sweep window in px (1.0 = the exact 1x1 pixel). Inflating
-// it box-filters the coverage over the neighborhood, smoothing the fill
-// boundaries (an experiment knob — the boundary blur grows with the size).
+// The SVG fill sweep window spans SWEEP_WINDOW device pixels (1.0 is
+// the exact physical pixel). Dividing by pixel_scale keeps the analytic
+// integration in the same logical units as the curves.
 static const float SWEEP_WINDOW = 2.0;
 
-// GLSL GlyphMaterial (std430 buffer_reference layout, 56 bytes):
+// GlyphMaterial GPU ABI (56 bytes):
 // int type @0; float bearing_y/curve_w/curve_h/win_w/win_h @4..24;
 // uint64_t curve_bda @24; uint64_t band_bda @32; float4 gradient_to @40.
-// Field order MUST match the Zig extern struct in src/proto/sweeper.zig.
+// Field order MUST match src/v7_render/sweeper.zig.
 struct GlyphMaterial {
     int type;
     float bearing_y;
@@ -89,6 +55,26 @@ struct GlyphMaterial {
     uint64_t band_bda; // the fill-band buffer BDA (TYPE_SWEEP); 0 = none
     float4 gradient_to; // gradient bottom color (Oklab); .w > 0 enables the gradient
 };
+// W13 payload lives in the renderer's three-slot ring. Sixteen 16-byte vectors.
+struct PaintExtra {
+    float4 transform_x;
+    float4 transform_y;
+    float4 size;
+    float4 radii;
+    float4 border_width;
+    float4 border_top;
+    float4 border_right;
+    float4 border_bottom;
+    float4 border_left;
+    uint4 border_styles;
+    float4 from;
+    float4 to;
+    float4 gradient;
+    float4 pattern;
+    float4 shadow;
+    uint4 mode;
+};
+
 
 struct QuadCurve {
     float2 p0;
@@ -146,20 +132,21 @@ QuadCurve curveAt(uint64_t curve_bda, uint i) {
     return vk::BufferPointer<QuadCurve>(curve_bda + 8 + 24 * i).Get();
 }
 
-// Push constant. Field order/offsets match the CPU writes: vert_data @0,
-// frag_data @8, indirect @16 (the clip-rect buffer BDA). The GLSL names
-// were material_buf_bda / vp_h_packed; the ABI is the offset, so the port
-// keeps vert_data/frag_data/indirect.
+// Push constant. The full declaration matches the vertex shader, with
+// pixel_scale at byte 48 even though the fragment does not read screen
+// or the drawable/permutation BDAs.
 struct PushData {
     uint64_t vert_data;
     uint64_t frag_data;
     uint64_t indirect;
+    float2 screen;
+    uint64_t scene_bda;
+    uint64_t perm_bda;
+    float2 pixel_scale;
 };
 
-// Clip rect (framebuffer px), 16 bytes — the CPU writes these verbatim
-// into the host-visible clip buffer; pc.indirect + 16 * clip_id indexes
-// them. An extent of -1 disables that axis; 0xFFFFFFFF (vClipId) bypasses
-// the clip lookup and disables both axes.
+// Clip rects are logical window units, stored verbatim in 16-byte entries.
+// An extent of -1 disables that axis; ~0 vClipId bypasses the lookup.
 struct ClipRect {
     float x;
     float y;
@@ -312,23 +299,26 @@ float msTri(float2 c, float2 a, float2 b, float sc, float sa, float sb) {
 }
 
 /// The mode-2 per-edge accumulation (the Cairo running-cover model): the
-/// edge's signed height across the pixel's column [px, px+1) x
-/// [py, py+1), split across the columns it spans by the fraction of its
-/// x-span in each (the subspan split — what keeps a band's left/right
-/// pairs cancelling per column and the spill streaks out). Shared by the
-/// banded run and the full loop — ONE copy of the float ops, so the two
-/// paths are bit-identical by construction. The y-clip (`ymax <= py ||
-/// ymin >= py + 1.0`) returns before any accumulation, so an edge the
-/// band includes but this fragment's clip rejects contributes exactly
-/// 0.0, like the full loop's `continue`.
-void accumulateStrokeEdge(Edge e, float px, float py, inout float cover, inout float h_here, inout float u_here) {
+/// edge's signed height across a device pixel's logical window
+/// [px, px+pixelSize.x) x [py, py+pixelSize.y), split across columns by
+/// the fraction of its x-span. Banded and full loops use the same path.
+/// Edges outside the y-window contribute exactly zero.
+void accumulateStrokeEdge(
+    Edge e,
+    float px,
+    float py,
+    float2 pixelSize,
+    inout float cover,
+    inout float h_here,
+    inout float u_here)
+{
     float ay = e.p0.y;
     float by = e.p1.y;
     float ymin = min(ay, by);
     float ymax = max(ay, by);
-    if (ymax <= py || ymin >= py + 1.0) return;
+    if (ymax <= py || ymin >= py + pixelSize.y) return;
     float yt = max(ymin, py);
-    float yb = min(ymax, py + 1.0);
+    float yb = min(ymax, py + pixelSize.y);
     float inv = (by == ay) ? 0.0 : 1.0 / (by - ay);
     float xt = e.p0.x + (e.p1.x - e.p0.x) * (yt - ay) * inv;
     float xb = e.p0.x + (e.p1.x - e.p0.x) * (yb - ay) * inv;
@@ -342,23 +332,119 @@ void accumulateStrokeEdge(Edge e, float px, float py, inout float cover, inout f
         // Vertical edge: the whole height belongs to the column at its x.
         if (xt < px) {
             cover += sign * h;
-        } else if (xt < px + 1.0) {
+        } else if (xt < px + pixelSize.x) {
             h_here += sign * h;
             u_here += sign * (xt - px) * h;
         }
         return;
     }
     if (xhi <= px) { cover += sign * h; return; }
-    if (xlo >= px + 1.0) return;
+    if (xlo >= px + pixelSize.x) return;
     // The part of the edge's x-span inside this column:
-    float hc = h * (min(xhi, px + 1.0) - max(xlo, px)) / span;
+    float hc = h * (min(xhi, px + pixelSize.x) - max(xlo, px)) / span;
     if (xlo < px) cover += sign * h * (px - xlo) / span;
     h_here += sign * hc;
     // The uncovered trapezoid: the area between the column's left and the
     // edge over the clipped y-extent.
-    float xtc = clamp(xt, px, px + 1.0);
-    float xbc = clamp(xb, px, px + 1.0);
+    float xtc = clamp(xt, px, px + pixelSize.x);
+    float xbc = clamp(xb, px, px + pixelSize.x);
     u_here += sign * 0.5 * ((xtc - px) + (xbc - px)) * hc;
+}
+
+// The logical pixel extent along the nearest rounded-box edge. For a
+// corner, use the radial SDF normal; straight edges use their own axis.
+float roundedEdgePixel(float2 q, float2 pixelSize) {
+    float2 corner = max(q, float2(0.0));
+    if (corner.x == 0.0 && corner.y == 0.0)
+        return (q.x > q.y) ? pixelSize.x : pixelSize.y;
+    return length(corner * pixelSize) / length(corner);
+}
+
+float paintRadius(float2 point, float2 size, float4 radius) {
+    float scale = min(1.0, min(
+        min(size.x / max(radius.x + radius.y, 1e-5),
+            size.x / max(radius.w + radius.z, 1e-5)),
+        min(size.y / max(radius.x + radius.w, 1e-5),
+            size.y / max(radius.y + radius.z, 1e-5))));
+    float4 r = radius * scale;
+    if (point.y < size.y * 0.5) {
+        return point.x < size.x * 0.5 ? r.x : r.y;
+    }
+    return point.x < size.x * 0.5 ? r.w : r.z;
+}
+
+float paintDistance(float2 point, float2 size, float4 radii) {
+    float radius = paintRadius(point, size, radii);
+    return sdRoundBox(point - size * 0.5, size * 0.5 - radius, radius);
+}
+
+float paintInnerDistance(float2 point, PaintExtra extra) {
+    float4 borders = extra.border_width;
+    float2 size = extra.size.xy - float2(borders.w + borders.y, borders.x + borders.z);
+    if (size.x <= 0.0 || size.y <= 0.0) return 1e8;
+    float4 radii = max(extra.radii - float4(
+        max(borders.x, borders.w), max(borders.x, borders.y),
+        max(borders.z, borders.y), max(borders.z, borders.w)), 0.0);
+    return paintDistance(point - float2(borders.w, borders.x), size, radii);
+}
+
+float4 paintColor(PaintExtra extra, float2 point) {
+    uint kind = extra.mode.x;
+    if (kind == 3u) {
+        float2 axis = extra.gradient.xy;
+        float2 size = extra.size.xy;
+        float span = max(abs(axis.x) * size.x + abs(axis.y) * size.y, 1e-5);
+        float position = dot(point - size * 0.5, axis) / span + 0.5;
+        float t = clamp((position - extra.gradient.z) /
+            (extra.gradient.w - extra.gradient.z), 0.0, 1.0);
+        return lerp(extra.from, extra.to, t);
+    }
+    if (kind == 4u || kind == 5u) {
+        float2 cell = floor(point / extra.pattern.xy);
+        float phase = kind == 4u ? cell.x + cell.y : cell.x;
+        return (int(phase) & 1) == 0 ? extra.from : extra.to;
+    }
+    if (kind == 6u) {
+        float2 uv = frac(point / extra.pattern.xy);
+        float4 sample_color = textures[NonUniformResourceIndex(extra.mode.y)].Sample(samplers[0], uv);
+        return float4(sample_color.rgb, sample_color.a * extra.from.a);
+    }
+    return extra.from;
+}
+
+int pathWinding(float2 point, uint64_t curve_bda) {
+    CurveBuf buffer = vk::BufferPointer<CurveBuf>(curve_bda).Get();
+    int winding = 0;
+    for (uint i = 0u; i < buffer.num_curves; i++) {
+        QuadCurve curve = curveAt(curve_bda, i);
+        float a = curve.p0.y - 2.0 * curve.p1.y + curve.p2.y;
+        float b = 2.0 * (curve.p1.y - curve.p0.y);
+        float c = curve.p0.y - point.y;
+        float2 roots = float2(-1.0, -1.0);
+        uint count = 0u;
+        if (abs(a) < 1e-6) {
+            if (abs(b) < 1e-6) continue;
+            roots.x = -c / b;
+            count = 1u;
+        } else {
+            float discriminant = b * b - 4.0 * a * c;
+            if (discriminant < 0.0) continue;
+            float root = sqrt(discriminant);
+            roots = float2((-b - root) / (2.0 * a), (-b + root) / (2.0 * a));
+            count = root == 0.0 ? 1u : 2u;
+        }
+        for (uint j = 0u; j < count; j++) {
+            float t = roots[j];
+            if (t < 0.0 || t >= 1.0) continue;
+            float x = (1.0 - t) * (1.0 - t) * curve.p0.x +
+                2.0 * (1.0 - t) * t * curve.p1.x + t * t * curve.p2.x;
+            if (x <= point.x) continue;
+            float derivative = 2.0 * a * t + b;
+            if (derivative > 0.0) winding++;
+            else if (derivative < 0.0) winding--;
+        }
+    }
+    return winding;
 }
 
 [shader("fragment")]
@@ -369,16 +455,16 @@ float4 main(
     [[vk::location(3)]] float2 vOrigin,
     [[vk::location(4)]] nointerpolation uint vTexIdx,
     [[vk::location(5)]] nointerpolation uint vClipId,
+    [[vk::location(6)]] float2 vLocal,
     float4 fragPos : SV_Position)
 {
-    // Clip test FIRST (before the material fetch, so even the solid
-    // early-out below respects it): a non-~0 vClipId selects a clip rect
-    // from the BDA buffer; fragments outside are discarded. With vClipId
-    // ~0 the test is a no-op — byte-identical to the unclipped draw.
+    // Rasterization supplies SV_Position in physical framebuffer pixels.
+    // Convert it once; clips, pens and material geometry are all logical.
+    float2 logicalPos = fragPos.xy / pc.pixel_scale;
     if (vClipId != 0xFFFFFFFFu) {
         ClipRect c = vk::BufferPointer<ClipRect>(pc.indirect + 16 * uint64_t(vClipId)).Get();
-        bool outsideX = c.w != -1.0 && (fragPos.x < c.x || fragPos.x >= c.x + c.w);
-        bool outsideY = c.h != -1.0 && (fragPos.y < c.y || fragPos.y >= c.y + c.h);
+        bool outsideX = c.w != -1.0 && (logicalPos.x < c.x || logicalPos.x >= c.x + c.w);
+        bool outsideY = c.h != -1.0 && (logicalPos.y < c.y || logicalPos.y >= c.y + c.h);
         if (outsideX || outsideY) {
             discard;
         }
@@ -406,24 +492,102 @@ float4 main(
     GlyphMaterial m = mat.Get();
 
     if (m.type == TYPE_SOLID) { return vColor; }
+    // One physical device pixel expressed in logical window units. Keep
+    // material geometry and curve buffers unchanged across display scales.
+    float2 pixelSize = float2(1.0, 1.0) / pc.pixel_scale;
+    float2 halfPixel = 0.5 * pixelSize;
+    if (m.type == TYPE_PATH_FILL) {
+        PaintExtra extra = vk::BufferPointer<PaintExtra>(m.band_bda).Get();
+        float2 footprint = fwidth(vLocal);
+        float covered = 0.0;
+        for (uint y = 0u; y < 4u; y++) {
+            for (uint x = 0u; x < 4u; x++) {
+                float2 sample_point = vLocal +
+                    (float2(float(x), float(y)) * 0.25 - 0.375) * footprint;
+                int winding = pathWinding(float2(sample_point.x, -sample_point.y), m.curve_bda);
+                if (extra.mode.z == 0u ? winding != 0 : (winding & 1) != 0) covered += 1.0;
+            }
+        }
+        float2 paint_point = float2(
+            dot(extra.transform_x.xy, vLocal) + extra.transform_x.z,
+            dot(extra.transform_y.xy, vLocal) + extra.transform_y.z);
+        float4 color = paintColor(extra, paint_point);
+        return float4(color.rgb, color.a * covered / 16.0);
+    }
+
+    if (m.type == TYPE_PAINT_RECT || m.type == TYPE_PAINT_SHADOW) {
+        PaintExtra extra = vk::BufferPointer<PaintExtra>(m.curve_bda).Get();
+        float2 point = vLocal - vOrigin;
+        float2 size = extra.size.xy;
+        float pixel = max(fwidth(vLocal.x), fwidth(vLocal.y));
+        float outer = clamp(0.5 - paintDistance(point, size, extra.radii) / pixel, 0.0, 1.0);
+        if (m.type == TYPE_PAINT_SHADOW) {
+            float inset_clip = outer;
+            if (extra.mode.z != 0u && any(extra.border_width > float4(0.0))) {
+                inset_clip = clamp(
+                    0.5 - paintInnerDistance(point, extra) / pixel, 0.0, 1.0);
+            }
+            float2 offset = extra.shadow.zw;
+            float spread = extra.mode.z == 0u ? extra.shadow.y : -extra.shadow.y;
+            float blur = max(extra.shadow.x, pixel);
+            float2 shifted = point - offset + spread;
+            float2 shadow_size = size + 2.0 * spread;
+            if (shadow_size.x <= 0.0 || shadow_size.y <= 0.0) {
+                return float4(vColor.rgb,
+                    extra.mode.z == 0u ? 0.0 : vColor.a * inset_clip);
+            }
+            float4 shadow_radii = max(extra.radii + spread, 0.0);
+            float distance = paintDistance(shifted, shadow_size, shadow_radii);
+            float coverage = extra.mode.z == 0u
+                ? clamp(0.5 - distance / blur, 0.0, 1.0)
+                : inset_clip * clamp(0.5 + distance / blur, 0.0, 1.0);
+            return float4(vColor.rgb, vColor.a * coverage);
+        }
+        float inner = clamp(0.5 - paintInnerDistance(point, extra) / pixel, 0.0, 1.0);
+        if (extra.mode.x == 1u) {
+            float border = clamp(outer - inner, 0.0, 1.0);
+            float4 distance = float4(point.y, size.x - point.x, size.y - point.y, point.x);
+            uint side = distance.x < distance.y ? 0u : 1u;
+            side = distance[side] < distance.z ? side : 2u;
+            side = distance[side] < distance.w ? side : 3u;
+            if (extra.border_width[side] <= 0.0 || extra.border_styles[side] == 0u)
+                discard;
+            if (extra.border_styles[side] >= 2u) {
+                float width = extra.border_width[side];
+                float along = side == 0u || side == 2u ? point.x : point.y;
+                float period = max(width * 4.0, pixel);
+                float phase = frac(along / period) * period;
+                if (extra.border_styles[side] == 2u) {
+                    border *= clamp((period * 0.6 - phase) / pixel + 0.5, 0.0, 1.0);
+                } else {
+                    float center = width;
+                    float normal = distance[side] - width * 0.5;
+                    float radius = width * 0.5;
+                    float dot_distance = length(float2(phase - center, normal));
+                    border *= clamp((radius - dot_distance) / pixel + 0.5, 0.0, 1.0);
+                }
+            }
+            float4 color = side == 0u ? extra.border_top :
+                side == 1u ? extra.border_right :
+                side == 2u ? extra.border_bottom : extra.border_left;
+            return float4(color.rgb, color.a * border);
+        }
+        float4 color = paintColor(extra, point);
+        float fill_coverage = any(extra.border_width > float4(0.0)) ? inner : outer;
+        return float4(color.rgb, color.a * fill_coverage);
+    }
+
 
     if (m.type == TYPE_GLYPH) {
         vk::BufferPointer<CurveBuf> cb = vk::BufferPointer<CurveBuf>(m.curve_bda);
         uint n = cb.Get().num_curves;
 
-        // The pixel's TRUE span, anchored at the GLYPH'S PEN: gl_FragCoord
-        // is the fragment CENTER, so the pixel at the pen-relative offset
-        // (dx, dy) covers [cell.x, cell.x+1) x [cell.y, cell.y+1) in the
-        // OUTLINE's coordinate space. The outline curves are y-UP with
-        // the origin at the pen, so cell.y is the pixel's y-up distance
-        // from the pen (vOrigin.y); the -0.5 anchors the window at the
-        // pixel's bottom-left. (The old cell was anchored at the QUAD's
-        // top-left but the curves are pen-relative — every window sat
-        // 2px up-left of its pixel, extruding the ink's top/left edges
-        // && cutting its bottom/right by the same amount. vOrigin for
-        // TYPE_GLYPH is the pen, so the two are the same space now.)
-        float2 cell = float2(fragPos.x - vOrigin.x - 0.5,
-                             vOrigin.y - fragPos.y - 0.5);
+        // The glyph's pen and outline are logical coordinates, y-up.
+        // Integrate the logical footprint of one physical pixel around
+        // SV_Position's center; at 1x this is the original 1x1 window.
+        float2 cell = float2(logicalPos.x - vOrigin.x - halfPixel.x,
+                             vOrigin.y - logicalPos.y - halfPixel.y);
+        float pixelArea = pixelSize.x * pixelSize.y;
         // QUAD DEBUG (frag_data bit 1): tint the whole quad's background —
         // the ink on top, so the quad bounds show against the glyph. The
         // color is the OKLAB of a bright sRGB magenta (0.70, 0.28, -0.17).
@@ -431,9 +595,9 @@ float4 main(
             float cov = 0.0;
             for (uint i = 0u; i < n; i++) {
                 QuadCurve cv = curveAt(m.curve_bda, i);
-                cov += sweepSegment(float2(1.0), cell, cv.p0, cv.p1, cv.p2);
+                cov += sweepSegment(pixelSize, cell, cv.p0, cv.p1, cv.p2);
             }
-            cov = clamp(cov, 0.0, 1.0);
+            cov = clamp(cov / pixelArea, 0.0, 1.0);
             return float4(lerp(float3(0.70, 0.28, -0.17), vColor.rgb, cov), 1.0);
         }
         // SUBPIXEL AA (frag_data bit 0): split the pixel into three 1/3-px
@@ -448,15 +612,17 @@ float4 main(
         // OFF (frag_data = 0): the single analytic sweep, grayscale.
         if ((pc.frag_data & uint64_t(1)) != uint64_t(0)) {
             float cl = 0.0, cm = 0.0, cr = 0.0;
+            float colStep = pixelSize.x / 3.0;
+            float2 colSize = float2(colStep, pixelSize.y);
             for (uint i = 0u; i < n; i++) {
                 QuadCurve cv = curveAt(m.curve_bda, i);
-                cl += sweepSegment(float2(1.0 / 3.0, 1.0), float2(cell.x + 0.0 / 3.0, cell.y), cv.p0, cv.p1, cv.p2);
-                cm += sweepSegment(float2(1.0 / 3.0, 1.0), float2(cell.x + 1.0 / 3.0, cell.y), cv.p0, cv.p1, cv.p2);
-                cr += sweepSegment(float2(1.0 / 3.0, 1.0), float2(cell.x + 2.0 / 3.0, cell.y), cv.p0, cv.p1, cv.p2);
+                cl += sweepSegment(colSize, cell, cv.p0, cv.p1, cv.p2);
+                cm += sweepSegment(colSize, float2(cell.x + colStep, cell.y), cv.p0, cv.p1, cv.p2);
+                cr += sweepSegment(colSize, float2(cell.x + 2.0 * colStep, cell.y), cv.p0, cv.p1, cv.p2);
             }
-            cl = clamp(cl * 3.0, 0.0, 1.0); // sweepSegment returns the filled AREA;
-            cm = clamp(cm * 3.0, 0.0, 1.0); // over a 1/3-wide column that is 1/3 of
-            cr = clamp(cr * 3.0, 0.0, 1.0); // the fraction — rescale to coverage.
+            cl = clamp(cl * 3.0 / pixelArea, 0.0, 1.0);
+            cm = clamp(cm * 3.0 / pixelArea, 0.0, 1.0);
+            cr = clamp(cr * 3.0 / pixelArea, 0.0, 1.0);
             float avg = (cl + cm + cr) / 3.0;
             // Physical LCD assembly (the reference shader's model): the
             // pixel's LINEAR RGB is the three subpixel coverages — the R
@@ -482,44 +648,33 @@ float4 main(
             return float4(L, lab.y, lab.z, avg * vColor.a);
         }
 
-        // The TEXT coverage: the exact analytic sweep (the signed area of
-        // the path over the 1x1 pixel window) — |total| for the winding.
-        // This is the glyphs' AA: exact, sharp, && the subpixel branch
-        // above applies only here. The SVG fills use TYPE_SWEEP (their
-        // own branch below) so the text && the tiger stay independent.
+        // The text coverage is the swept area of one device pixel divided
+        // by its logical area. The SVG fills use their own inflated sweep.
         float total = 0.0;
         for (uint i = 0u; i < n; i++) {
             QuadCurve cv = curveAt(m.curve_bda, i);
-            total += sweepSegment(float2(1.0), cell, cv.p0, cv.p1, cv.p2);
+            total += sweepSegment(pixelSize, cell, cv.p0, cv.p1, cv.p2);
         }
-        float coverage = clamp(abs(total), 0.0, 1.0);
+        float coverage = clamp(abs(total) / pixelArea, 0.0, 1.0);
         return float4(vColor.rgb, coverage * vColor.a);
     }
 
     if (m.type == TYPE_SWEEP) {
-        // The SVG FILL: the ANALYTICAL COVERAGE — the sweep's exact area
-        // integral over an inflated window (SWEEP_WINDOW x SWEEP_WINDOW,
-        // the "2x fill rect"), gamma-corrected. No SDF, no marching
-        // squares — the stroke owns that machinery.
-        float2 cell_f = float2(fragPos.x - vOrigin.x - 0.5,
-                               vOrigin.y - fragPos.y - 0.5);
+        // Band rows were built for a 2x2 logical window. A larger device
+        // footprint can overlap curves omitted from those fixed rows.
+        float2 cell_f = float2(logicalPos.x - vOrigin.x - halfPixel.x,
+                               vOrigin.y - logicalPos.y - halfPixel.y);
         vk::BufferPointer<CurveBuf> cb_f = vk::BufferPointer<CurveBuf>(m.curve_bda);
         uint nf = cb_f.Get().num_curves;
-        float2 win_f = float2(SWEEP_WINDOW, SWEEP_WINDOW);
-        float2 off_f = cell_f + 0.5 - 0.5 * win_f; // centered on the pixel
-        // The fill-band fast path (band_bda != 0): the per-path band
-        // buffer holds the conservative interior box + the per-pixel-row
-        // curve runs. The runs keep the ascending curve order and use the
-        // exact same y-predicate as sweepSegment's first line, so the
-        // banded sum is bit-identical to the full loop below; rows the
-        // band does not cover fall through to it.
-        if (m.band_bda != uint64_t(0)) {
+        float2 win_f = pixelSize * SWEEP_WINDOW;
+        float2 off_f = cell_f + halfPixel - 0.5 * win_f;
+        float winArea = win_f.x * win_f.y;
+        // The fill-band fast path is safe when its fixed logical y-window
+        // contains the device window. Otherwise use the complete curve set.
+        if (m.band_bda != uint64_t(0) && pc.pixel_scale.y >= 1.0) {
             BandHeader bh = vk::BufferPointer<BandHeader>(m.band_bda).Get();
-            // INTERIOR: the whole 2x2 window inside the verified interior
-            // box — no curve crosses it (every hull is eps away) and the
-            // winding there is nonzero, so |total| == the window area
-            // (4.0) and cov == 1.0. pow(1.0, 1.0/1.6) == 1.0, so return
-            // the full-alpha color directly — what the loop would produce.
+            // INTERIOR: the whole sweep window fits in the verified
+            // interior box. No curve crosses it, so coverage is one.
             if (off_f.x >= bh.interior_rect.x && off_f.y >= bh.interior_rect.y &&
                 off_f.x + win_f.x <= bh.interior_rect.x + bh.interior_rect.z &&
                 off_f.y + win_f.y <= bh.interior_rect.y + bh.interior_rect.w) {
@@ -545,7 +700,7 @@ float4 main(
                 // the blend would leave the dst untouched, so discard is
                 // pixel-identical and saves the ROP write.
                 if (total_f == 0.0) discard;
-                float cov_f = clamp(abs(total_f) / (SWEEP_WINDOW * SWEEP_WINDOW), 0.0, 1.0);
+                float cov_f = clamp(abs(total_f) / winArea, 0.0, 1.0);
                 cov_f = pow(cov_f, 1.0 / COVERAGE_GAMMA);
                 return float4(vColor.rgb, cov_f * vColor.a);
             }
@@ -570,24 +725,21 @@ float4 main(
         // banded path — total 0.0 → cov 0 → alpha 0, so discard is
         // pixel-identical and skips the ROP write.
         if (total_f == 0.0) discard;
-        float cov_f = clamp(abs(total_f) / (SWEEP_WINDOW * SWEEP_WINDOW), 0.0, 1.0);
+        float cov_f = clamp(abs(total_f) / winArea, 0.0, 1.0);
         cov_f = pow(cov_f, 1.0 / COVERAGE_GAMMA);
         return float4(vColor.rgb, cov_f * vColor.a);
     }
 
-    if (m.type == TYPE_STROKE) {
-        // The stroke: distance to the curves, banded at the half-width
-        // (bearing_y, in the scaled pixel space like the curves). The
-        // cell is bbox-relative y-up, identical to the fill's sweep. The
-        // per-tap distances come from sdfStroke (the marching-squares
-        // taps), which fetches the curve buffer itself.
-        float2 cell_s = float2(fragPos.x - vOrigin.x - 0.5,
-                               vOrigin.y - fragPos.y - 0.5);
-        // TEMPORARY: clamp the stroke width to 0.5px from below.
-        float half = max(m.bearing_y * 0.5, 0.25);
-        float2 c_s = cell_s + 0.5;
-        uint algo = uint(m.win_w + 0.5); // 0, 1 or 2 (cycled by the A key)
-        float o = m.win_h; // the pixel oversizing (the AA band / quad size)
+    if (m.type == TYPE_STROKE || m.type == TYPE_PATH_STROKE) {
+        // Curves and stroke width are in logical units. Pixel sampling
+        // uses the physical pixel's logical footprint.
+        float2 cell_s = float2(logicalPos.x - vOrigin.x - halfPixel.x,
+                               vOrigin.y - logicalPos.y - halfPixel.y);
+        float edgePixel = max(pixelSize.x, pixelSize.y);
+        float half = max(m.bearing_y * 0.5, 0.25 * edgePixel);
+        float2 c_s = cell_s + halfPixel;
+        uint algo = uint(m.win_w + 0.5); // 0, 1 or 2
+        float o = m.win_h * edgePixel; // oversize measured in physical pixels
 
         if (algo == 0u) {
             // NAIVE SDF: the exact distance at the pixel center + the
@@ -599,39 +751,17 @@ float4 main(
         }
 
         if (algo == 2u) {
-            // The EXACT CAIRO REFERENCE: the stroke's offset-outline
-            // polygon, integrated per pixel via Cairo's running-cover
-            // model (covered_height / uncovered_area). The coverage is
-            // the running covered height — the signed vertical extents of
-            // the band edges whose column lies LEFT of the pixel — plus
-            // the pixel's own column's height, minus the uncovered
-            // trapezoid between the pixel's left edge and the boundary.
-            // No abs(): the winding state (which edges are to the left) is
-            // what makes the coverage, so a right-boundary pixel gets the
-            // thin sliver on the correct side instead of its complement,
-            // and interior pixels of wide bands fill from the far-side
-            // edges' carried height.
+            // The Cairo reference integrates each device pixel through
+            // the offset-outline edges. cover and h_here accumulate
+            // logical heights; u_here is a logical area. Normalize by
+            // the pixel's logical width and height for alpha coverage.
             vk::BufferPointer<EdgeBuf> eb = vk::BufferPointer<EdgeBuf>(m.curve_bda);
             uint ne = eb.Get().count;
-            // The pixel's integration window is [cell_s, cell_s+1) — c_s is
-            // the CENTER, so the corner is c_s - 0.5. (The audit found the
-            // old code integrated [c_s, c_s+1], shifted +0.5px.)
-            float px = c_s.x - 0.5;
-            float py = c_s.y - 0.5;
-            // The stroke-band fast path (band_bda != 0): the per-path
-            // band buffer holds the per-pixel-row edge runs (see
-            // buildStrokeBands). The runs keep the ascending edge order
-            // and are a SUPERSET of the edges that pass the y-clip for
-            // ANY fragment in the row (the membership is the union over
-            // the row's py in [r, r+1) of the windows [py, py+1)), so
-            // every contributing edge is in the run and the edges the run
-            // excludes fail the clip for every py in the row — they
-            // contribute exactly 0.0, and the banded sum is bit-identical
-            // to the full loop below (both call accumulateStrokeEdge,
-            // ONE copy of the float ops). Rows the band does not cover
-            // fall through to it. No interior test: the stroke band's
-            // interior is always disabled.
-            if (m.band_bda != uint64_t(0)) {
+            // Fixed 1-unit y-windows contain device-pixel windows only
+            // when the y scale is at least one. Below that, sweep all edges.
+            float px = c_s.x - halfPixel.x;
+            float py = c_s.y - halfPixel.y;
+            if (m.band_bda != uint64_t(0) && pc.pixel_scale.y >= 1.0) {
                 BandHeader bh = vk::BufferPointer<BandHeader>(m.band_bda).Get();
                 int row = int(floor(py)) - bh.row_base;
                 if (row >= 0 && row < int(bh.row_count)) {
@@ -644,14 +774,14 @@ float4 main(
                     float u_here = 0.0;  // uncovered trapezoid area in this column
                     for (uint i = 0u; i < count; i++) {
                         uint ei = vk::BufferPointer<uint>(m.band_bda + uint64_t(4) * uint64_t(bh.indices_base + idx_off + i)).Get();
-                        accumulateStrokeEdge(edgeAt(m.curve_bda, ei), px, py, cover, h_here, u_here);
+                        accumulateStrokeEdge(edgeAt(m.curve_bda, ei), px, py, pixelSize, cover, h_here, u_here);
                     }
                     // ZERO-COVERAGE DISCARD: the accumulated total is
                     // exactly 0.0 (every edge in the run fails the y-clip
                     // for this fragment) → cov == 0 → alpha 0 — the blend
                     // would leave the dst untouched, so discard is
                     // pixel-identical and saves the ROP write.
-                    float c = cover + h_here - u_here;
+                    float c = cover + h_here - u_here / pixelSize.x;
                     if (c == 0.0) discard;
                     // |.| takes the winding magnitude: the accumulated
                     // value is the SIGNED covered area (negative for
@@ -660,14 +790,14 @@ float4 main(
                     // magnitude. With the running cover in place the abs
                     // no longer complements right edges — it only flips
                     // the whole-band sign.
-                    float cov = clamp(abs(c), 0.0, 1.0);
+                    float cov = clamp(abs(c) / pixelSize.y, 0.0, 1.0);
                     cov = pow(cov, 1.0 / COVERAGE_GAMMA);
                     return float4(vColor.rgb, cov * vColor.a);
                 }
                 // The row is outside the band (e.g. the rect's 2px AA
                 // surround): the band's row range is the union over the
                 // edges' window overlaps — a row outside it has EVERY edge
-                // failing the y-clip (ymax <= py above, ymin >= py + 1.0
+                // failing the y-clip (ymax <= py or ymin >= py + pixelSize.y
                 // below) → accumulateStrokeEdge returns before any
                 // accumulation → the total is exactly 0.0, bit-identical
                 // to the full loop. Return the coverage-0 result directly;
@@ -679,12 +809,12 @@ float4 main(
             float h_here = 0.0;  // covered height in this column
             float u_here = 0.0;  // uncovered trapezoid area in this column
             for (uint i = 0u; i < ne; i++) {
-                accumulateStrokeEdge(edgeAt(m.curve_bda, i), px, py, cover, h_here, u_here);
+                accumulateStrokeEdge(edgeAt(m.curve_bda, i), px, py, pixelSize, cover, h_here, u_here);
             }
             // ZERO-COVERAGE DISCARD (the no-band fallback): identical to
             // the banded path — total 0.0 → cov 0 → alpha 0, so discard is
             // pixel-identical and skips the ROP write.
-            float c = cover + h_here - u_here;
+            float c = cover + h_here - u_here / pixelSize.x;
             if (c == 0.0) discard;
             // |.| takes the winding magnitude: the accumulated value is
             // the SIGNED covered area (negative for CW-wound bands, e.g.
@@ -692,22 +822,23 @@ float4 main(
             // coverage is its magnitude. With the running cover in place
             // the abs no longer complements right edges — it only flips
             // the whole-band sign.
-            float cov = clamp(abs(c), 0.0, 1.0);
+            float cov = clamp(abs(c) / pixelSize.y, 0.0, 1.0);
             cov = pow(cov, 1.0 / COVERAGE_GAMMA);
             return float4(vColor.rgb, cov * vColor.a);
         }
 
-        // MARCHING QUADS (algo 1): the center's SDF early-out, then the 5 taps
-        // (center + 4 corners of the quad, half-extent 0.5+o) resolving
-        // the 4 triangles — the covered area / the quad's area.
+        // MARCHING QUADS (algo 1): sample the center and four corners of
+        // a device-pixel-scale quad, then integrate the four triangles.
+        float2 hq = (0.5 + m.win_h) * pixelSize;
+        float cutoff = (pc.pixel_scale.x == 1.0 && pc.pixel_scale.y == 1.0)
+            ? 2.0 : max(2.0 * edgePixel, length(hq));
         float sd_c = sdfStroke(c_s, m.curve_bda, half);
-        if (sd_c > 2.0) return float4(vColor.rgb, 0.0);
-        if (sd_c < -2.0) return float4(vColor.rgb, vColor.a);
-        float hq = 0.5 + o;
-        float2 tl = cell_s + float2(0.5 - hq, 0.5 - hq);
-        float2 tr = cell_s + float2(0.5 + hq, 0.5 - hq);
-        float2 br = cell_s + float2(0.5 + hq, 0.5 + hq);
-        float2 bl = cell_s + float2(0.5 - hq, 0.5 + hq);
+        if (sd_c > cutoff) return float4(vColor.rgb, 0.0);
+        if (sd_c < -cutoff) return float4(vColor.rgb, vColor.a);
+        float2 tl = cell_s + float2(halfPixel.x - hq.x, halfPixel.y - hq.y);
+        float2 tr = cell_s + float2(halfPixel.x + hq.x, halfPixel.y - hq.y);
+        float2 br = cell_s + float2(halfPixel.x + hq.x, halfPixel.y + hq.y);
+        float2 bl = cell_s + float2(halfPixel.x - hq.x, halfPixel.y + hq.y);
         float sd_tl = sdfStroke(tl, m.curve_bda, half);
         float sd_tr = sdfStroke(tr, m.curve_bda, half);
         float sd_br = sdfStroke(br, m.curve_bda, half);
@@ -718,26 +849,29 @@ float4 main(
                      msTri(c_s, tr, br, -sd_c, -sd_tr, -sd_br) +
                      msTri(c_s, br, bl, -sd_c, -sd_br, -sd_bl) +
                      msTri(c_s, bl, tl, -sd_c, -sd_bl, -sd_tl);
-        float quad_area = (2.0 * hq) * (2.0 * hq);
+        float quad_area = (2.0 * hq.x) * (2.0 * hq.y);
         float cov = clamp(area / quad_area, 0.0, 1.0);
         cov = pow(cov, 1.0 / COVERAGE_GAMMA);
         return float4(vColor.rgb, cov * vColor.a);
     }
 
     if (m.type == TYPE_ROUNDED_RECT) {
-        // Rounded-rect fill (border == 0) or ring (border > 0). Material
-        // fields: win_w/win_h = rect size, curve_w/curve_h = corner radii
-        // (x/y), bearing_y = border width. vOrigin = the rect top-left in
-        // framebuffer px, so fragPos - vOrigin = position in the rect.
+        // Rounded-rect fill or ring. Material dimensions, radii, border
+        // width and vOrigin stay in logical window coordinates.
         float2 size = float2(m.win_w, m.win_h);
         float2 radius = max(float2(m.curve_w, m.curve_h), float2(0.0));
         // Clamp radii to half the box so the SDF never inverts.
         radius = min(radius, size * 0.5);
-        float2 p = fragPos.xy - vOrigin - size * 0.5;
+        float2 p = logicalPos - vOrigin - size * 0.5;
         // Inigo Quilez sdRoundBox: one formula, no branches (sdRoundRect
         // keeps the GLSL's operation order: q = abs(p) - size*0.5 + radius).
         float d = sdRoundRect(p, size, radius);
-        float outer = clamp(0.5 - d, 0.0, 1.0);
+        float outerPixel = max(pixelSize.x, pixelSize.y);
+        if (pixelSize.x != pixelSize.y) {
+            float2 q = abs(p) - size * 0.5 + radius;
+            outerPixel = roundedEdgePixel(q, pixelSize);
+        }
+        float outer = clamp(0.5 - d / outerPixel, 0.0, 1.0);
         float coverage = outer;
         float border = m.bearing_y;
         if (border > 0.0 && border < min(size.x, size.y) * 0.5) {
@@ -745,7 +879,13 @@ float4 main(
             // border, corner radius reduced by the border) —
             // sdRoundRectInner keeps the GLSL's order verbatim.
             float id = sdRoundRectInner(p, size, radius, border);
-            float inner = clamp(0.5 - id, 0.0, 1.0);
+            float innerPixel = max(pixelSize.x, pixelSize.y);
+            if (pixelSize.x != pixelSize.y) {
+                float2 innerRadius = max(radius - border, float2(0.0));
+                float2 iq = abs(p) - (size * 0.5 - border) + innerRadius;
+                innerPixel = roundedEdgePixel(iq, pixelSize);
+            }
+            float inner = clamp(0.5 - id / innerPixel, 0.0, 1.0);
             coverage = clamp(outer - inner, 0.0, 1.0);
         }
         // Vertical gradient: gradient_to.w > 0 enables the mix. vUv.y = 0
@@ -760,21 +900,22 @@ float4 main(
     if (m.type == TYPE_SHADOW) {
         // Feathered rounded-rect shadow. win_w/win_h = the shadow rect size,
         // curve_w/curve_h = the widget's corner radii, bearing_y = the
-        // feather (px, soft-edge width). Same SDF shape as ROUNDED_RECT, but
-        // the coverage fades out over the feather instead of the hard 0.5px
-        // edge; no ring subtraction. sdShadowRect keeps the GLSL
-        // order: hbox = size*0.5 - radius first, then q = abs(p) - hbox.
+        // feather (logical soft-edge width). Same SDF shape as ROUNDED_RECT,
+        // but its fade spans the feather rather than a device pixel.
+        // There is no ring subtraction. sdShadowRect retains the GLSL
+        // order: hbox = size*0.5 - radius, then q = abs(p) - hbox.
         float2 size = float2(m.win_w, m.win_h);
         float2 radius = max(float2(m.curve_w, m.curve_h), float2(0.0));
         radius = min(radius, size * 0.5);
-        float2 p = fragPos.xy - vOrigin - size * 0.5;
+        float2 p = logicalPos - vOrigin - size * 0.5;
         // Canonical sdRoundBox (the same formula ROUNDED_RECT uses): the
         // inside term min(max(q.x,q.y), 0.0) makes the interior distance
         // the true edge distance. Without it the inside distance is just
         // -r, so zero/thin-radius shadows (r < feather/2) render at
         // 0.5 + r/feather partial opacity instead of saturating.
         float d = sdShadowRect(p, size, radius);
-        float coverage = clamp(0.5 - d / max(m.bearing_y, 0.5), 0.0, 1.0);
+        float feather = max(m.bearing_y, 0.5 * max(pixelSize.x, pixelSize.y));
+        float coverage = clamp(0.5 - d / feather, 0.0, 1.0);
         return float4(vColor.rgb, coverage * vColor.a);
     }
     return vColor;

@@ -1,0 +1,752 @@
+Carry the genuine message id through the one daemon -> module write seam.
+
+Nothing today links a byte of the module's stdin to the message that caused
+it.  output_send_data() receives only the payload, so the per message
+TSpeechDMessage has to be threaded to it, and one record per write has to be
+appended to a sideband file that the daemon itself creates.
+
+Identity in the record is PRIMARY msg->id, the same value the client sees as
+field 1 of every 7xx header and as the data line of the 225 reply, scoped by
+the physical pipe (fstat of output->pipe_in[1]), by the birth of this daemon
+and of this module instance, and by the ACTUAL byte extent that moved.
+A birth is field 22 of /proc/<pid>/stat alone, the one unsigned start
+time in clock ticks; fields 3 to 21 are stepped over as whole whitespace
+delimited tokens, because field 3 is a state letter and a signed field
+such as tpgid holds a bare -1, and a dirty or wrapped field 22 yields no
+birth at all instead of an invented one.
+msg->settings.uid and msg->settings.fd travel as auxiliary scope only and
+never attribute anything.  speaking_uid is never read.
+
+Everything is off unless NOGUI_MODULE_OBSERVER_META names a file: then the
+write path costs one load and one branch and stays byte identical to stock.
+The metadata file is created once, exclusively, mode 0600, inside an owned
+directory with no group or other bits, by this daemon and by no one else; the
+same descriptor is kept for the whole daemon life, module reload only bumps
+the epoch, module unload never closes it, and daemon shutdown releases it
+exactly once.  An existing path is refused, never truncated, adopted or
+unlinked.  A file this daemon did create in that path is removed again,
+through the same verified directory descriptor, when the setup below it
+fails, so a failed daemon leaves no empty file to refuse the next module.
+A metadata failure is permanent, silent to the module, and never
+changes a reply, a payload or a module status.
+
+Apply after tools/patches/speech-dispatcher-write-all.patch, which this
+extends: the record reports what output_write_all() actually wrote.
+
+--- a/src/server/output.c
++++ b/src/server/output.c
+@@ -23,6 +23,7 @@
+ #include <config.h>
+ #endif
+ 
++#include <sys/stat.h>
+ #include <fdsetconv.h>
+ #include <safe_io.h>
+ #include "output.h"
+@@ -449,12 +450,423 @@
+ 	return 0;
+ }
+ 
+-int output_send_data(const char *cmd, OutputModule * output, int wfr)
++/*
++ * Daemon -> module write audit sideband.
++ *
++ * Off unless NOGUI_MODULE_OBSERVER_META names a file.  When it is on, one
++ * fixed size record per daemon -> module write states how many bytes the
++ * kernel actually moved, at which offset in the stream of which physical
++ * pipe, for which message.  The record carries no payload byte, no text and
++ * no clock, and it can never change what the write itself does.
++ */
++#define AUDIT_LINE_MAX 1024
++#define AUDIT_BOOT_ID_MAX 64
++
++/* audit_state: 0 untouched, 1 armed, 2 permanently inert for this daemon. */
++static int audit_state;
++static int audit_fd = -1;	/* the ONE descriptor, for the daemon lifetime */
++static unsigned int audit_epoch;	/* one bump per native module instance */
++static unsigned int audit_daemon_pid;
++static unsigned long long audit_daemon_pticks;
++static char audit_boot_id[AUDIT_BOOT_ID_MAX];
++static pthread_mutex_t audit_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++/* Read a small procfs file whole into a caller supplied fixed buffer. */
++static ssize_t audit_slurp(const char *path, char *buf, size_t size)
++{
++	int fd;
++	ssize_t done;
++	ssize_t got;
++	int saved;
++
++	fd = open(path, O_RDONLY | O_CLOEXEC);
++	if (fd < 0)
++		return -1;
++	done = 0;
++	while ((size_t) done + 1 < size) {
++		got = read(fd, buf + done, size - 1 - done);
++		if (got < 0) {
++			if (errno == EINTR)
++				continue;
++			saved = errno;
++			close(fd);
++			errno = saved;
++			return -1;
++		}
++		if (got == 0)
++			break;
++		done += got;
++	}
++	buf[done] = '\0';
++	close(fd);
++	return done;
++}
++
++/*
++ * Field 22 of /proc/<pid>/stat, the start of this process birth in clock
++ * ticks since boot.  The command name may hold spaces and parentheses, so
++ * parse after its last ')' instead of splitting the whole line.
++ *
++ * Only field 22 is that birth.  Fields 3 to 21 are not it and are not all
++ * numbers: field 3 is the one letter state and a signed field such as tpgid
++ * holds a bare -1, so they are stepped over as whole whitespace delimited
++ * tokens and never parsed.  Field 22 alone is read as a number, with a real
++ * end and a real overflow check, so a malformed or wrapped line yields no
++ * birth instead of an invented one.
++ */
++static int audit_start_ticks(pid_t pid, unsigned long long *out)
++{
++	char path[64];
++	char buf[1024];
++	char *p;
++	int field;
++	unsigned long long value;
++	unsigned int digit;
++
++	if (pid <= 0)
++		return 0;
++	if (pid == getpid())
++		snprintf(path, sizeof(path), "/proc/self/stat");
++	else
++		snprintf(path, sizeof(path), "/proc/%d/stat", (int) pid);
++	if (audit_slurp(path, buf, sizeof(buf)) <= 0)
++		return 0;
++	if (strchr(buf, '\n') == NULL)
++		return 0;	/* the line did not fit: do not guess */
++	p = strrchr(buf, ')');
++	if (p == NULL)
++		return 0;
++	p++;
++	for (field = 3; field < 22; field++) {
++		while (*p == ' ')
++			p++;
++		if (*p == '\0')
++			return 0;
++		while (*p != ' ' && *p != '\0')
++			p++;	/* not a birth: step over the whole token */
++	}
++	while (*p == ' ')
++		p++;
++	if (*p < '0' || *p > '9')
++		return 0;	/* field 22 is never signed: no birth here */
++	value = 0;
++	while (*p >= '0' && *p <= '9') {
++		digit = (unsigned int) (*p - '0');
++		if (value > (~(unsigned long long) 0 - digit) / 10)
++			return 0;	/* wrapped: do not invent a birth */
++		value = value * 10 + digit;
++		p++;
++	}
++	if (*p != ' ' && *p != '\n' && *p != '\0')
++		return 0;	/* trailing junk: the field was not clean */
++	*out = value;
++	return 1;
++}
++
++/*
++ * The boot UUID verbatim, or nothing.  Only lowercase hex and dashes are
++ * accepted, so a record never needs an escaping rule.
++ */
++static void audit_read_boot_id(void)
++{
++	char buf[AUDIT_BOOT_ID_MAX];
++	char *p;
++	size_t i;
++	char c;
++
++	audit_boot_id[0] = '\0';
++	if (audit_slurp("/proc/sys/kernel/random/boot_id", buf, sizeof(buf)) <= 0)
++		return;
++	p = buf;
++	while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t')
++		p++;
++	for (i = 0; p[i] != '\0'; i++) {
++		c = p[i];
++		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
++		      || c == '-'))
++			return;
++		if (i + 1 >= sizeof(audit_boot_id))
++			return;
++		audit_boot_id[i] = c;
++	}
++	audit_boot_id[i] = '\0';
++}
++
++/*
++ * Open and verify the directory that has to hold the metadata file and copy
++ * out the basename.  The descriptor is RETAINED until the file has been
++ * created and checked, and the file is then created relative to it, so a
++ * directory swapped into the path between the check and the creation cannot
++ * put the file anywhere else.  A directory counts as private here exactly
++ * when this daemon owns it and no group or other bit is set, which is the
++ * same rule the reader applies to the parent directory.
++ */
++static int audit_open_parent(const char *path, char *base, size_t base_size)
++{
++	char dir[AUDIT_LINE_MAX];
++	struct stat st;
++	const char *name;
++	char *slash;
++	size_t len;
++	int dir_fd;
++
++	if (path[0] != '/')
++		return -1;
++	slash = strrchr(path, '/');
++	if (slash == NULL || slash == path)
++		return -1;
++	name = slash + 1;
++	len = strlen(name);
++	if (len == 0 || len + 1 > base_size)
++		return -1;
++	if (!strcmp(name, ".") || !strcmp(name, ".."))
++		return -1;
++	memcpy(base, name, len + 1);
++	if ((size_t) (slash - path) >= sizeof(dir))
++		return -1;
++	memcpy(dir, path, (size_t) (slash - path));
++	dir[slash - path] = '\0';
++	dir_fd = open(dir, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
++	if (dir_fd < 0)
++		return -1;
++	if (fstat(dir_fd, &st) != 0 || !S_ISDIR(st.st_mode)
++	    || st.st_uid != geteuid() || (st.st_mode & 077) != 0) {
++		close(dir_fd);
++		return -1;
++	}
++	return dir_fd;
++}
++
++/*
++ * Create the one metadata descriptor this daemon will ever hold.  O_EXCL
++ * means an existing path is refused, never truncated, adopted or unlinked.
++ * A file this call did create is removed again, through the same verified
++ * directory descriptor, when the setup below it fails, so a failed daemon
++ * leaves no empty file behind to refuse the next module.  A path that was
++ * already there is never removed, and neither is one whose ownership this
++ * call could not bind.
++ */
++static int audit_create(const char *path)
++{
++	unsigned long long pticks;
++	char base[AUDIT_LINE_MAX];
++	struct stat st;
++	int dir_fd;
++	int fd;
++	int ok;
++
++	dir_fd = audit_open_parent(path, base, sizeof(base));
++	if (dir_fd < 0) {
++		MSG(1, "nogui: refusing module metadata %s: its directory is not an absolute private directory owned by this daemon", path);
++		return 0;
++	}
++	fd = openat(dir_fd, base,
++		    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW
++		    | O_NONBLOCK, 0600);
++	if (fd < 0) {
++		MSG(1, "nogui: cannot create module metadata %s: %s", path,
++		    strerror(errno));
++		close(dir_fd);
++		return 0;
++	}
++	ok = (fstat(fd, &st) == 0) && S_ISREG(st.st_mode)
++	    && (st.st_uid == geteuid()) && (st.st_nlink == 1)
++	    && ((st.st_mode & 0777) == 0600);
++	if (!ok) {
++		MSG(1, "nogui: module metadata %s is not an owned single link 0600 regular file, leaving it alone", path);
++		close(fd);
++		close(dir_fd);
++		return 0;
++	}
++	if (!audit_start_ticks(getpid(), &pticks)) {
++		MSG(1, "nogui: cannot read this daemon's start ticks, discarding the empty module metadata it created");
++		if (unlinkat(dir_fd, base, 0) != 0)
++			MSG(1, "nogui: cannot remove the empty module metadata %s: %s", path, strerror(errno));
++		close(fd);
++		close(dir_fd);
++		return 0;
++	}
++	audit_fd = fd;
++	audit_daemon_pid = (unsigned int) getpid();
++	audit_daemon_pticks = pticks;
++	audit_read_boot_id();
++	close(dir_fd);
++	return 1;
++}
++
++/*
++ * Called once per module instance, after the fork and before the first byte
++ * reaches the module, so the identity of this pipe, of this daemon and of
++ * this module, and the byte counter, are all settled exactly once.  An
++ * absent environment variable means no file, no lock, no read of procfs and
++ * no record at all.
++ */
++void output_init_module_audit(OutputModule * output)
++{
++	const char *path;
++	unsigned long long pticks;
++	struct stat st;
++
++	if (output == NULL)
++		return;
++	output->audit_enabled = 0;
++	output->audit_off = 0;
++	output->audit_epoch = 0;
++	output->audit_module_pid = 0;
++	output->audit_module_pticks = 0;
++	output->audit_pipe_dev = 0;
++	output->audit_pipe_ino = 0;
++	path = getenv("NOGUI_MODULE_OBSERVER_META");
++	if (path == NULL || path[0] == '\0')
++		return;
++	if (fstat(output->pipe_in[1], &st) != 0) {
++		MSG(1, "nogui: cannot identify the module pipe: %s",
++		    strerror(errno));
++		return;
++	}
++	if (!audit_start_ticks(output->pid, &pticks)) {
++		MSG(1, "nogui: cannot read the birth of module %s, leaving module metadata empty", output->name);
++		return;
++	}
++	output->audit_module_pid = (unsigned int) output->pid;
++	output->audit_module_pticks = pticks;
++	output->audit_pipe_dev = (unsigned long long) st.st_dev;
++	output->audit_pipe_ino = (unsigned long long) st.st_ino;
++	pthread_mutex_lock(&audit_mutex);
++	if (audit_state == 0)
++		audit_state = audit_create(path) ? 1 : 2;
++	if (audit_state == 1) {
++		audit_epoch++;
++		output->audit_epoch = audit_epoch;
++		output->audit_enabled = 1;
++	}
++	pthread_mutex_unlock(&audit_mutex);
++}
++
++/* The metadata descriptor belongs to the daemon, never to one module. */
++void output_audit_shutdown(void)
++{
++	pthread_mutex_lock(&audit_mutex);
++	if (audit_fd >= 0) {
++		if (close(audit_fd) != 0)
++			MSG(1, "nogui: closing module metadata failed: %s",
++			    strerror(errno));
++		audit_fd = -1;
++	}
++	audit_state = 2;
++	pthread_mutex_unlock(&audit_mutex);
++}
++
++/* A metadata failure is permanent, invisible to the module and never a
++ * speech failure: no reply, no payload and no module status changes. */
++static void audit_lost(const char *why, int errnum)
++{
++	audit_state = 2;
++	MSG(1, "nogui: %s: %s, no further module metadata is emitted",
++	    why, strerror(errnum));
++}
++
++/*
++ * Append one record for the bytes that just moved.  Called with the audit
++ * mutex held across the module pipe write itself, so the offset it reports
++ * can never disagree with the byte order on the wire.  The offset advances
++ * by what the kernel took, never by what was asked for.
++ */
++static void audit_emit(OutputModule * output, guint msg_id, guint client_id,
++		       int client_fd, int has_owner, size_t requested,
++		       size_t written, int ret, int errnum)
++{
++	char line[AUDIT_LINE_MAX];
++	char boot[AUDIT_BOOT_ID_MAX + 16];
++	char owner[96];
++	char tail[128];
++	unsigned long long off;
++	size_t len;
++	size_t done;
++	ssize_t got;
++	int saved;
++	int n;
++
++	if (ret == 0)
++		errnum = 0;
++	off = output->audit_off;
++	if (audit_boot_id[0] != '\0')
++		n = snprintf(boot, sizeof(boot), "\"boot_id\":\"%s\"",
++			     audit_boot_id);
++	else
++		n = snprintf(boot, sizeof(boot), "\"boot_id\":null");
++	if (n < 0 || (size_t) n >= sizeof(boot)) {
++		audit_lost("cannot format the boot id of a metadata record",
++			   EOVERFLOW);
++		return;
++	}
++	if (has_owner)
++		n = snprintf(owner, sizeof(owner),
++			     "\"msg_id\":%u,\"client_id\":%u,\"client_fd\":%d",
++			     msg_id, client_id, client_fd);
++	else
++		n = snprintf(owner, sizeof(owner),
++			     "\"msg_id\":null,\"client_id\":null,\"client_fd\":null");
++	if (n < 0 || (size_t) n >= sizeof(owner)) {
++		audit_lost("cannot format the owner of a metadata record",
++			   EOVERFLOW);
++		return;
++	}
++	if (errnum == 0)
++		n = snprintf(tail, sizeof(tail),
++			     ",\"offset\":%llu,\"written\":%lu,\"requested\":%lu,\"outcome\":\"complete\",\"errno\":null}\n",
++			     off, (unsigned long) written,
++			     (unsigned long) requested);
++	else
++		n = snprintf(tail, sizeof(tail),
++			     ",\"offset\":%llu,\"written\":%lu,\"requested\":%lu,\"outcome\":\"error\",\"errno\":%d}\n",
++			     off, (unsigned long) written,
++			     (unsigned long) requested, errnum);
++	if (n < 0 || (size_t) n >= sizeof(tail)) {
++		audit_lost("cannot format the extent of a metadata record",
++			   EOVERFLOW);
++		return;
++	}
++	n = snprintf(line, sizeof(line),
++		     "{\"ver\":1,\"kind\":1,\"daemon_pid\":%u,\"daemon_start_ticks\":%llu,%s,\"module_pid\":%u,\"module_start_ticks\":%llu,\"pipe_dev\":%llu,\"pipe_ino\":%llu,\"stream_epoch\":%u,\"write_fd\":%d,%s%s",
++		     audit_daemon_pid, audit_daemon_pticks, boot,
++		     output->audit_module_pid, output->audit_module_pticks,
++		     output->audit_pipe_dev, output->audit_pipe_ino,
++		     output->audit_epoch, output->pipe_in[1], owner, tail);
++	if (n < 0 || (size_t) n >= sizeof(line)) {
++		audit_lost("cannot format a metadata record", EOVERFLOW);
++		return;
++	}
++	len = (size_t) n;
++	done = 0;
++	while (done < len) {
++		got = write(audit_fd, line + done, len - done);
++		if (got < 0) {
++			if (errno == EINTR)
++				continue;
++			saved = errno;
++			audit_lost("cannot append a metadata record", saved);
++			return;
++		}
++		if (got == 0) {
++			audit_lost("cannot append a metadata record", EIO);
++			return;
++		}
++		done += (size_t) got;
++	}
++	output->audit_off = off + (unsigned long long) written;
++}
++
++int output_send_data(const char *cmd, OutputModule * output, int wfr,
++		     guint msg_id, guint client_id, int client_fd,
++		     int has_owner)
+ {
+ 	int ret;
+ 	GString *response;
+ 	size_t nbytes;
+ 	size_t written = 0;
++	int audit_on;
++	int audit_errnum;
+ 
+ 	if (output == NULL)
+ 		return -1;
+@@ -467,8 +879,18 @@
+ 		pthread_mutex_unlock(&output->read_mutex);
+ 	}
+ 
++	audit_on = output->audit_enabled;
++	if (audit_on)
++		pthread_mutex_lock(&audit_mutex);
+ 	nbytes = strlen(cmd);
+ 	ret = output_write_all(output->pipe_in[1], cmd, nbytes, &written);
++	if (audit_on) {
++		audit_errnum = errno;
++		audit_emit(output, msg_id, client_id, client_fd, has_owner,
++			   nbytes, written, ret, audit_errnum);
++		pthread_mutex_unlock(&audit_mutex);
++		errno = audit_errnum;
++	}
+ 	if (ret == -1) {
+ 		MSG(2, "Error: Broken pipe to module while sending data.");
+ 		if (wfr) {
+@@ -573,7 +995,7 @@
+ 	output->waiting_for_reply = TRUE;
+ 	pthread_mutex_unlock(&output->read_mutex);
+ 
+-	err = output_send_data(command, output, 0);
++	err = output_send_data(command, output, 0, 0, 0, 0, 0);
+ 	if (command != all_command)
+ 		free(command);
+ 	if (err < 0) {
+@@ -668,7 +1090,7 @@
+ 
+ #define SEND_CMD_N(cmd) \
+ 	do { \
+-		err = output_send_data(cmd"\n", output, 1); \
++		err = output_send_data(cmd"\n", output, 1, msg_id, client_id, client_fd, has_owner); \
+ 		if (err < 0) { \
+ 			g_string_free(set_str, 1); \
+ 			return (err); \
+@@ -676,12 +1098,12 @@
+ 	} while (0)
+ 
+ #define SEND_CMD(cmd) \
+-	do {  err = output_send_data(cmd"\n", output, 1); \
++	do {  err = output_send_data(cmd"\n", output, 1, msg_id, client_id, client_fd, has_owner); \
+ 		if (err < 0) OL_RET(err); } while (0)
+ 
+ #define SEND_DATA_N(data) \
+ 	do { \
+-		err = output_send_data(data, output, 0); \
++		err = output_send_data(data, output, 0, msg_id, client_id, client_fd, has_owner); \
+ 		if (err < 0) { \
+ 			g_string_free(set_str, 1); \
+ 			return (err); \
+@@ -689,11 +1111,11 @@
+ 	} while (0)
+ 
+ #define SEND_DATA(data) \
+-	do {  err = output_send_data(data, output, 0); \
++	do {  err = output_send_data(data, output, 0, msg_id, client_id, client_fd, has_owner); \
+ 		if (err < 0) OL_RET(err); } while (0)
+ 
+ #define SEND_CMD_GET_VALUE(data) \
+-	do {  err = output_send_data(data"\n", output, 1); \
++	do {  err = output_send_data(data"\n", output, 1, msg_id, client_id, client_fd, has_owner); \
+ 		OL_RET(err); } while (0)
+ 
+ #define ADD_SET_INT(name) \
+@@ -720,6 +1142,11 @@
+ 	GString *set_str;
+ 	char *val;
+ 	int err;
++	/* Owner of every write below is this message, never the client. */
++	guint msg_id = msg->id;
++	guint client_id = msg->settings.uid;
++	int client_fd = msg->settings.fd;
++	int has_owner = 1;
+ 
+ 	MSG(4, "Module set parameters.");
+ 	set_str = g_string_new("");
+@@ -782,6 +1209,11 @@
+ {
+ 	GString *set_str;
+ 	int err;
++	/* No message is in scope, so every write below is a control write. */
++	guint msg_id = 0;
++	guint client_id = 0;
++	int client_fd = 0;
++	int has_owner = 0;
+ 
+ 	MSG(4, "Module set parameters.");
+ 	set_str = g_string_new("");
+@@ -804,6 +1236,11 @@
+ {
+ 	GString *set_str;
+ 	int err;
++	/* No message is in scope, so every write below is a control write. */
++	guint msg_id = 0;
++	guint client_id = 0;
++	int client_fd = 0;
++	int has_owner = 0;
+ 
+ 	/* First try to get output through server */
+ 	MSG(4, "Trying to make output module use audio output through server.");
+@@ -837,6 +1274,11 @@
+ {
+ 	GString *set_str;
+ 	int err;
++	/* No message is in scope, so every write below is a control write. */
++	guint msg_id = 0;
++	guint client_id = 0;
++	int client_fd = 0;
++	int has_owner = 0;
+ 
+ 	MSG(4, "Module set parameters.");
+ 	set_str = g_string_new("");
+@@ -864,7 +1306,7 @@
+ 	output_lock();
+ 	if (flag) {
+ 		cmd_str = g_strdup_printf("DEBUG ON %s \n", log_path);
+-		err = output_send_data(cmd_str, output, 1);
++		err = output_send_data(cmd_str, output, 1, 0, 0, 0, 0);
+ 		g_free(cmd_str);
+ 		if (err) {
+ 			MSG(3,
+@@ -873,7 +1315,7 @@
+ 			OL_RET(-1);
+ 		}
+ 	} else {
+-		err = output_send_data("DEBUG OFF \n", output, 1);
++		err = output_send_data("DEBUG OFF \n", output, 1, 0, 0, 0, 0);
+ 		if (err) {
+ 			MSG(3,
+ 			    "ERROR: Can't switch debugging off for output module %s",
+@@ -891,6 +1333,11 @@
+ 	int err;
+ 	int ret;
+ 	char *newbuf;
++	/* Owner of every write below is this message, never the client. */
++	guint msg_id = msg->id;
++	guint client_id = msg->settings.uid;
++	int client_fd = msg->settings.fd;
++	int has_owner = 1;
+ 
+ 	if (msg == NULL)
+ 		return -1;
+@@ -957,6 +1404,11 @@
+ {
+ 	int err;
+ 	OutputModule *output;
++	/* STOP is steered by a client but belongs to no message. */
++	guint msg_id = 0;
++	guint client_id = 0;
++	int client_fd = 0;
++	int has_owner = 0;
+ 
+ 	output_lock();
+ 
+@@ -987,6 +1439,11 @@
+ {
+ 	static int err;
+ 	static OutputModule *output;
++	/* PAUSE is steered by a client but belongs to no message. */
++	guint msg_id = 0;
++	guint client_id = 0;
++	int client_fd = 0;
++	int has_owner = 0;
+ 
+ 	output_lock();
+ 
+@@ -1484,6 +1941,11 @@
+ 	int err;
+ 	int ret;
+ 	OutputModule *output;
++	/* STOP and QUIT are steered by a client but belong to no message. */
++	guint msg_id = 0;
++	guint client_id = 0;
++	int client_fd = 0;
++	int has_owner = 0;
+ 	output = module;
+ 
+ 	if (output == NULL)
+--- a/src/server/output.h
++++ b/src/server/output.h
+@@ -36,7 +36,9 @@
+ 
+ void output_set_speaking_monitor(TSpeechDMessage * msg, OutputModule * output);
+ GString *output_read_reply(OutputModule * output);
+-int output_send_data(const char *cmd, OutputModule * output, int wfr);
++int output_send_data(const char *cmd, OutputModule * output, int wfr,
++		     guint msg_id, guint client_id, int client_fd,
++		     int has_owner);
+ int output_send_settings(TSpeechDMessage * msg, OutputModule * output);
+ int output_send_audio_settings(OutputModule * output);
+ int output_send_loglevel_setting(OutputModule * output);
+@@ -45,3 +47,6 @@
+ 			 size_t timeout);
+ int output_close(OutputModule * module);
+ SPDVoice **output_list_voices(const char *module_name, const char *language, const char *variant);
++
++void output_init_module_audit(OutputModule * output);
++void output_audit_shutdown(void);
+--- a/src/server/module.h
++++ b/src/server/module.h
+@@ -50,6 +50,15 @@
+ 	gboolean reading_message;
+ 	gboolean reading_events;
+ 	gboolean waiting_for_reply;
++	/* Daemon -> module write audit sideband, see output.c.  audit_enabled
++	 * stays 0 until output_init_module_audit() arms this instance. */
++	int audit_enabled;
++	unsigned int audit_epoch;
++	unsigned int audit_module_pid;
++	unsigned long long audit_off;
++	unsigned long long audit_module_pticks;
++	unsigned long long audit_pipe_dev;
++	unsigned long long audit_pipe_ino;
+ } OutputModule;
+ #define AUDIOID_TOOPEN ((AudioID*) (-1))
+ 
+--- a/src/server/module.c
++++ b/src/server/module.c
+@@ -358,6 +358,15 @@
+ 	module = (OutputModule *) g_malloc(sizeof(OutputModule));
+ 	if (!module)
+ 		return NULL;
++	/* The audit sideband stays inert until output_init_module_audit()
++	 * arms it, which happens after the module has been forked. */
++	module->audit_enabled = 0;
++	module->audit_epoch = 0;
++	module->audit_module_pid = 0;
++	module->audit_off = 0;
++	module->audit_module_pticks = 0;
++	module->audit_pipe_dev = 0;
++	module->audit_pipe_ino = 0;
+ 	if (pipe(module->pipe_speak) != 0) {
+ 		g_free(module);
+ 		return NULL;
+@@ -512,8 +521,13 @@
+ 	if (ret)
+ 		FATAL("Can't set line buffering, setvbuf failed.");
+ 
++	/* Identity of this pipe, this daemon and this module, and the one
++	 * shared metadata descriptor, are settled before the first byte
++	 * reaches the module. */
++	output_init_module_audit(module);
++
+ 	MSG(4, "Trying to initialize %s.", module->name);
+-	if (output_send_data("INIT\n", module, 0) != 0) {
++	if (output_send_data("INIT\n", module, 0, 0, 0, 0, 0) != 0) {
+ 		MSG(1, "ERROR: Something wrong with %s, can't initialize",
+ 		    module->name);
+ 		output_close(module);
+@@ -637,6 +651,9 @@
+ 
+ 	output_close(module);
+ 
++	/* The daemon -> module metadata descriptor is process wide, so
++	 * unloading one module never closes the file another one is
++	 * still using.  It is released once, at daemon shutdown. */
+ 	close(module->pipe_in[1]);
+ 	close(module->pipe_out[0]);
+ 
+--- a/src/server/speechd.c
++++ b/src/server/speechd.c
+@@ -48,6 +48,7 @@
+ #include "alloc.h"
+ #include "sem_functions.h"
+ #include "speaking.h"
++#include "output.h"
+ #include "speak_queue.h"
+ #include "set.h"
+ #include "options.h"
+@@ -1462,6 +1463,10 @@
+ 	g_list_foreach(output_modules, speechd_modules_terminate, NULL);
+ 	g_list_free(output_modules);
+ 
++	/* The one shared module metadata descriptor belongs to the daemon
++	 * process, so it is released exactly once, here. */
++	output_audit_shutdown();
++
+ 	MSG(2, "Closing server connection...");
+ 	if (close(server_socket) == -1)
+ 		MSG(2, "close() failed: %s", strerror(errno));

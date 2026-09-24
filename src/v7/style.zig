@@ -1,6 +1,8 @@
 //! Typed, fieldwise-resolved layout and paint values.
 const std = @import("std");
 const values = @import("layout/values.zig");
+const paint = @import("paint.zig");
+const text = @import("text.zig");
 
 pub const Direction = values.Direction;
 pub const Float = values.Float;
@@ -16,6 +18,8 @@ pub const Layer = u32;
 
 /// Layout modes supported by the v7 dispatcher.
 pub const Display = enum { block, flex, grid, flow_root, none };
+/// Hidden nodes keep their layout boxes but do not paint or receive input.
+pub const Visibility = enum { visible, hidden };
 
 /// Whether a node participates in normal flow or is removed from it.
 pub const Position = enum { relative, absolute };
@@ -84,6 +88,18 @@ pub const AlignSelf = enum {
     baseline,
 };
 pub const TextAlign = enum { start, left, center, right };
+
+/// The paragraph alignment a resolved style alignment asks for. `start` and
+/// `end` are logical: they follow the paragraph direction, while `left` and
+/// `right` are physical.
+pub fn textAlign(self: TextAlign) text.Align {
+    return switch (self) {
+        .start => .start,
+        .left => .left,
+        .center => .center,
+        .right => .right,
+    };
+}
 pub const BoxSizing = enum { content_box, border_box };
 
 /// One non-recursive grid track bound. Percentages are fractions in 0..1.
@@ -588,6 +604,7 @@ pub const TextureOverride = union(enum) {
 /// Canonical Taffy-like layout input.
 pub const Style = struct {
     display: Display = .flex,
+    visibility: Visibility = .visible,
     position: Position = .relative,
     /// Flex axis for this container.
     direction: FlexDirection = .column,
@@ -662,6 +679,7 @@ pub const Style = struct {
     pub fn resolve(defaults: Style, local: StyleOverride) Style {
         var result = defaults;
         if (local.display) |value| result.display = value;
+        if (local.visibility) |value| result.visibility = value;
         if (local.position) |value| result.position = value;
         if (local.writing_direction) |value| result.writing_direction = value;
         if (local.float) |value| result.float = value;
@@ -805,6 +823,7 @@ pub const Style = struct {
 /// Local layout overrides. Unspecified fields retain component defaults.
 pub const StyleOverride = struct {
     display: ?Display = null,
+    visibility: ?Visibility = null,
     position: ?Position = null,
     writing_direction: ?Direction = null,
     float: ?Float = null,
@@ -860,43 +879,84 @@ pub const StyleOverride = struct {
     padding_inset: ?LengthPercentageRect = null,
 };
 
-/// Resolved paint data. Paint values never participate in layout resolution.
+/// Resolved paint values. The scalar colors and radius accept existing plain options.
+/// Rich fills, per-side colors and shadows retain their typed authored values.
 pub const PaintStyle = struct {
     fill: Color = .{ 0, 0, 0, 0 },
+    paint_fill: ?paint.Fill = null,
     border_color: Color = .{ 0, 0, 0, 1 },
+    border_colors: ?[4]paint.Color = null,
+    border_styles: [4]paint.BorderStyle = .{ .solid, .solid, .solid, .solid },
     radius: Sides = .{},
-    shadow: f32 = 0,
-    gradient: Color = .{ 0, 0, 0, 0 },
+    radii: ?paint.Radii = null,
+    shadows: []const paint.Shadow = &.{},
+    opacity: f32 = 1,
+    transform: paint.Affine = .{},
     transparent: bool = false,
     clip: bool = false,
     texture: ?TextureId = null,
     layer: Layer = 0,
 
+    pub fn resolvedRadii(self: PaintStyle) paint.Radii {
+        return self.radii orelse .{ self.radius.top, self.radius.right, self.radius.bottom, self.radius.left };
+    }
+
     pub fn resolve(defaults: PaintStyle, local: PaintStyleOverride) PaintStyle {
         var result = defaults;
-        if (local.fill) |value| result.fill = value;
-        if (local.border_color) |value| result.border_color = value;
-        if (local.radius) |value| result.radius = value;
-        if (local.shadow) |value| result.shadow = value;
-        if (local.gradient) |value| result.gradient = value;
+        if (local.fill) |value| {
+            result.fill = value;
+            result.paint_fill = null;
+            result.texture = null;
+        }
+        switch (local.paint_fill) {
+            .unspecified => {},
+            .value => |value| {
+                result.paint_fill = value;
+                if (value != null) result.texture = null;
+            },
+            .clear => result.paint_fill = null,
+        }
+        if (local.border_color) |value| {
+            result.border_color = value;
+            result.border_colors = null;
+        }
+        if (local.border_colors) |value| result.border_colors = value;
+        if (local.border_styles) |value| result.border_styles = value;
+        if (local.radius) |value| {
+            result.radius = value;
+            result.radii = null;
+        }
+        if (local.radii) |value| result.radii = value;
+        if (local.shadows) |value| result.shadows = value;
+        if (local.opacity) |value| result.opacity = value;
+        if (local.transform) |value| result.transform = value;
         if (local.transparent) |value| result.transparent = value;
         if (local.clip) |value| result.clip = value;
         switch (local.texture) {
             .unspecified => {},
-            .value => |value| result.texture = value,
+            .value => |value| {
+                result.texture = value;
+                if (value != null) result.paint_fill = null;
+            },
         }
         if (local.layer) |value| result.layer = value;
         return result;
     }
 };
 
-/// Local paint overrides. Null fields do not replace component defaults.
+/// A local override replaces only its stated field, except a broad color or
+/// radius which replaces narrower inherited side/corner values.
 pub const PaintStyleOverride = struct {
     fill: ?Color = null,
+    paint_fill: ExplicitOverride(?paint.Fill) = .unspecified,
     border_color: ?Color = null,
+    border_colors: ?[4]paint.Color = null,
+    border_styles: ?[4]paint.BorderStyle = null,
     radius: ?Sides = null,
-    shadow: ?f32 = null,
-    gradient: ?Color = null,
+    radii: ?paint.Radii = null,
+    shadows: ?[]const paint.Shadow = null,
+    opacity: ?f32 = null,
+    transform: ?paint.Affine = null,
     transparent: ?bool = null,
     clip: ?bool = null,
     texture: TextureOverride = .unspecified,
@@ -904,10 +964,13 @@ pub const PaintStyleOverride = struct {
 };
 
 /// Typed defaults scoped to one component draw. A missing half is empty and
-/// never inherits layout values from the enclosing component.
+/// never inherits layout values from the enclosing component. `text` is the
+/// authored text override a component contributes; the widget's own options
+/// layer on top of it during resolution.
 pub const ComponentDefaults = struct {
     style: ?Style = null,
     paint: ?PaintStyle = null,
+    text: ?text.TextStyleOverride = null,
 };
 
 test "ComponentDefaults keeps layout and paint scopes independently optional" {
@@ -923,6 +986,7 @@ test "ComponentDefaults keeps layout and paint scopes independently optional" {
     const empty: ComponentDefaults = .{};
     try std.testing.expectEqual(@as(?Style, null), empty.style);
     try std.testing.expectEqual(@as(?PaintStyle, null), empty.paint);
+    try std.testing.expectEqual(@as(?text.TextStyleOverride, null), empty.text);
 }
 
 test "Style text alignment defaults to logical start" {
@@ -970,7 +1034,7 @@ test "Style and PaintStyle apply explicit overrides fieldwise" {
         .min_size = .clear,
         .box_sizing = .border_box,
     });
-    const paint = PaintStyle.resolve(.{
+    const resolved_paint = PaintStyle.resolve(.{
         .fill = .{ 1, 0, 0, 1 },
         .texture = 9,
         .layer = 2,
@@ -982,9 +1046,9 @@ test "Style and PaintStyle apply explicit overrides fieldwise" {
     try std.testing.expectEqual(@as(f32, 0), layout.shrink);
     try std.testing.expectEqual(Dimension.auto, layout.min_size.width);
     try std.testing.expectEqual(BoxSizing.border_box, layout.box_sizing);
-    try std.testing.expectEqual(Color{ 0, 1, 0, 1 }, paint.fill);
-    try std.testing.expectEqual(@as(?TextureId, null), paint.texture);
-    try std.testing.expectEqual(@as(Layer, 2), paint.layer);
+    try std.testing.expectEqual(Color{ 0, 1, 0, 1 }, resolved_paint.fill);
+    try std.testing.expectEqual(@as(?TextureId, null), resolved_paint.texture);
+    try std.testing.expectEqual(@as(Layer, 2), resolved_paint.layer);
 }
 
 test "Style scrollbar width resolves fieldwise and maps physical gutters" {

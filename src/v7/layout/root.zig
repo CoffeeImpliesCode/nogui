@@ -1,19 +1,21 @@
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const context = @import("context.zig");
 const dispatch = @import("dispatch.zig");
 const widget = @import("../widget.zig");
 
 pub const MeasureInput = context.MeasureInput;
-pub const MeasureFn = context.MeasureFn;
+pub const MeasureSource = context.MeasureSource;
+pub const TextMeasurement = context.TextMeasurement;
 pub const MeasureMode = context.MeasureMode;
-
+pub const LayoutStorage = context.LayoutStorage;
 pub const Options = struct {
     allocator: std.mem.Allocator,
     available: widget.Size,
-    measure: ?MeasureFn,
+    measure: ?MeasureSource = null,
     width_mode: MeasureMode = .definite,
     height_mode: MeasureMode = .definite,
+    storage: ?*LayoutStorage = null,
 };
 
 pub const LayoutError = context.LayoutError;
@@ -34,6 +36,7 @@ pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
         .measure = options.measure,
         .width_mode = options.width_mode,
         .height_mode = options.height_mode,
+        .storage = options.storage,
     });
 }
 fn exactF32FromUsize(value: usize) f32 {
@@ -42,7 +45,11 @@ fn exactF32FromUsize(value: usize) f32 {
     return @floatCast(value_f64);
 }
 
-fn rootIntrinsicMeasure(text: []const u8, _: MeasureInput) widget.Size {
+fn rootIntrinsicMeasure(
+    _: ?*anyopaque,
+    text: []const u8,
+    _: MeasureInput,
+) LayoutError!context.TextMeasurement {
     std.debug.assert(text.len < (1 << 24));
     const height_length = text.len + 1;
     return .{
@@ -55,7 +62,7 @@ test "root max-content request uses natural leaf border on both axes" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     const text = "max-content";
     try tree.appendNode(.{
         .id = root_id,
@@ -71,7 +78,7 @@ test "root max-content request uses natural leaf border on both axes" {
     try layoutTree(&tree, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = 211, .height = 157 },
-        .measure = rootIntrinsicMeasure,
+        .measure = .{ .callback = rootIntrinsicMeasure },
         .width_mode = .max_content,
         .height_mode = .max_content,
     });
@@ -90,7 +97,7 @@ test "root definite width preserves width while height uses max-content" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     const text = "definite-width";
     const available_width: f32 = 73;
     try tree.appendNode(.{
@@ -107,7 +114,7 @@ test "root definite width preserves width while height uses max-content" {
     try layoutTree(&tree, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = available_width, .height = 157 },
-        .measure = rootIntrinsicMeasure,
+        .measure = .{ .callback = rootIntrinsicMeasure },
         .height_mode = .max_content,
     });
 

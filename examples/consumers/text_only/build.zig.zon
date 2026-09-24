@@ -1,0 +1,10 @@
+.{
+    .name = .text_only,
+    .version = "0.0.0",
+    .fingerprint = 0xe7a74d65c1ae38ff,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .nogui = .{ .path = "../../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

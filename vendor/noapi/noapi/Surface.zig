@@ -1,7 +1,8 @@
 //! Surface — unified API-level handle for a Vulkan surface + swapchain.
-//! Replaces both Gpu.Window and PlatformWindow. Created from a vk.SurfaceKHR
-//! obtained from the platform (e.g. SDL3); delegates all per-window work to
-//! the VkBackend.
+//! Created by `initSdl` from a platform window and that platform's own
+//! surface-creation callback. The caller never holds a `VkSurfaceKHR`, so the
+//! platform surface has exactly one owner and no raw handle can be handed
+//! around. Delegates all per-window work to the VkBackend.
 
 const std = @import("std");
 const tracy = @import("tracy");
@@ -29,6 +30,15 @@ pub const SurfaceOptions = struct {
     present_mode: PresentMode = .fifo,
 };
 
+/// SDL's surface constructor ABI. Applications pass the native window and
+/// this function, never a Vulkan instance or surface handle.
+pub const CreateSdlSurface = *const fn (
+    window: *anyopaque,
+    instance: *anyopaque,
+    allocator: ?*const anyopaque,
+    surface: *u64,
+) callconv(.c) bool;
+
 gpu: *Gpu,
 index: u32,
 
@@ -41,9 +51,35 @@ fn toVkPresentMode(mode: PresentMode) vk.PresentModeKHR {
     };
 }
 
-pub fn init(gpu: *Gpu, vk_surface: vk.SurfaceKHR, options: SurfaceOptions) !Surface {
+/// Create the platform surface for `window` and adopt it. The window and GPU
+/// must outlive the returned Surface.
+///
+/// THE ONLY public factory, and the only owner of the `VkSurfaceKHR` it
+/// makes: `deinit` destroys it on success and the `errdefer` below destroys
+/// it when adoption fails, so no failure path leaks one and none destroys one
+/// twice. A refused platform creation reports
+/// `error.PlatformSurfaceCreationFailed` with nothing to release; a failed
+/// adoption reports the backend's own error after releasing the surface.
+pub fn initSdl(
+    gpu: *Gpu,
+    window: *anyopaque,
+    create: CreateSdlSurface,
+    options: SurfaceOptions,
+) !Surface {
+    var native_surface: u64 = 0;
+    if (!create(
+        window,
+        @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+        null,
+        &native_surface,
+    )) return error.PlatformSurfaceCreationFailed;
+    const surface: vk.SurfaceKHR = @enumFromInt(native_surface);
+    // Adoption starts here and completes inside `addWindow`, which releases
+    // nothing on failure: it nulls the window's copy of the handle before
+    // destroying that window, which leaves this `errdefer` the single release.
+    errdefer gpu.backend.instance.destroySurfaceKHR(surface, null);
     const idx = try gpu.backend.addWindow(
-        vk_surface,
+        surface,
         options.extent,
         toVkPresentMode(options.present_mode),
     );
@@ -66,6 +102,22 @@ pub fn endFrame(self: *Surface, present: ?PresentInfo) !FrameResult {
     defer zone.end();
     const result = try self.gpu.backend.endFrame(self.index, present);
     return result;
+}
+
+/// Discard an active frame without submitting its recorded work. Releases the
+/// acquired image with a swapchain-only transition and present. On failure,
+/// the surface cannot be used again; callers must not release resources that
+/// the unfinished recording may reference.
+///
+/// A surface frame with nothing recorded is already discarded: it reports
+/// success, because hosts cancel from an `errdefer` without first checking
+/// whether a submission happened. `error.FrameNotActive` is therefore NOT in
+/// this contract; the caller that knows no frame began reports
+/// `error.FrameNotRecording` itself.
+pub fn abortFrame(self: *Surface) !void {
+    const zone = tracy.Zone.begin(.{ .src = @src() });
+    defer zone.end();
+    try self.gpu.backend.abortFrame(self.index);
 }
 
 pub fn currentImage(self: *const Surface) TextureHandle {

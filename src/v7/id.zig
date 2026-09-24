@@ -1,21 +1,21 @@
-//! v7 widget identity — components and widgets share one Id space.
-//! Per the prototype spec (notes/v7-prototype-spec.md §1).
-const std = @import("std");
+//! Dense frame nodes and persistent, registry-owned widget handles.
 
-pub const Id = enum(u32) {
+pub const FrameNodeId = enum(u32) {
     root = 0,
     _,
 
-    pub fn index(self: Id) u32 {
+    pub fn index(self: FrameNodeId) u32 {
         return @intFromEnum(self);
     }
 };
 
-test "Id: index round-trips" {
-    const id: Id = @enumFromInt(7);
-    try std.testing.expectEqual(@as(u32, 7), id.index());
-}
+/// A widget handle is valid only in its owner registry and live generation.
+pub const WidgetId = struct {
+    owner: u64,
+    slot: u32,
+    generation: u32,
 
-test "Id: root is zero" {
-    try std.testing.expectEqual(@as(u32, 0), Id.root.index());
-}
+    pub fn eql(a: WidgetId, b: WidgetId) bool {
+        return a.owner == b.owner and a.slot == b.slot and a.generation == b.generation;
+    }
+};

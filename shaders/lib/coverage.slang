@@ -1,28 +1,10 @@
 module coverage;
 
-// ── Analytic curve sweep (per-fragment coverage) ────────────────────────
-// Ported BIT-EXACT from shaders/quad_frag.glsl (the v4 analytic glyph sweep).
-// The glyph outlines are swept at DISPLAY resolution: each fragment is a
-// 1x1 window at (gl_FragCoord - vOrigin), the coverage is the summed fill
-// of the glyph's quadratics. No intermediate bitmap — the AA is exact at
-// any (sub-pixel) placement, which the CPU-bitmap path could never match.
-//
-// What quad_frag.glsl actually calls: only sweepSegment — the TYPE_GLYPH
-// branches call it at line ~302 (color coverage), ~322-324 (sub-pixel
-// triple-column coverage), and ~358 (alpha coverage). sweepEval and
-// sweepIntersect are its internal helpers.
-//
-// scanlineSweep + evalBez + intersectMonotonic are the §8.2-8.3 scanline
-// sweeper: still present in quad_frag.glsl (line ~219) but with no call
-// sites there (its canonical callers are the v4 pipeline's sweep.comp /
-// sweep.frag), so it is ported here for completeness, not consumed by the
-// fragment shader. intersectMonotonic carries the NaN guard (c2 == c0
-// returns 0.0 — degenerate horizontal segment, reachable from line_cb's
-// collinear midpoint quadratics).
-//
-// GLSL → Slang mapping: vec2/vec4 → float2/float4, abs/max/min/clamp/
-// sqrt/sign unchanged, ternary and per-component [0]/[1] indexing kept.
-// No reformulation, no fused ops, same division order, same 1e-3 epsilons.
+// Analytic curve sweep for glyph coverage. A fragment evaluates the
+// outline over a 1x1 window, without an intermediate bitmap.
+// sweepSegment calls sweepEval and sweepIntersect. The v4 research shaders
+// sweep.comp and sweep.frag also use the scanline helpers below; the active
+// quad_frag.slang does not. Keep arithmetic order for pixel parity.
 
 // sweepSegment's quadratic-root helper (no NaN guard — matches GLSL).
 float sweepIntersect(float qa, float c0, float c1, float c2, float target) {

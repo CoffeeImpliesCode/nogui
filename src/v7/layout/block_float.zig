@@ -1,5 +1,5 @@
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const layout_context = @import("context.zig");
 const overflow = @import("overflow.zig");
 const style = @import("../style.zig");
@@ -200,9 +200,9 @@ pub const LayoutPass = struct {
     }
     pub fn layoutContainer(
         self: *const LayoutPass,
-        container_id: Id,
+        container_id: FrameNodeId,
         context: sizing.SizingContext,
-        measure: ?layout_context.MeasureFn,
+        measure: ?layout_context.MeasureSource,
     ) sizing.Error!void {
         _ = try layoutPreparedContainerUnchecked(
             self.tree,
@@ -220,9 +220,9 @@ pub const LayoutPass = struct {
     /// callback bridge.
     pub fn layoutPreparedContainer(
         self: *const LayoutPass,
-        container_id: Id,
+        container_id: FrameNodeId,
         context: sizing.SizingContext,
-        measure: ?layout_context.MeasureFn,
+        measure: ?layout_context.MeasureSource,
         layout_ctx: ?*layout_context.LayoutContext,
         forced_border: ?widget.Size,
     ) sizing.Error!void {
@@ -301,8 +301,8 @@ fn measureNaturalNode(
     );
     var margin_collapse: ?MarginCollapseResult = null;
     var bfc: BfcState = .{};
-    const content = if (node.children.items.len == 0)
-        try measureNaturalLeaf(node, edges, effective_request, context.measure)
+    const content = if (node.children.items.len == 0 or widget.isLateQuery(node))
+        try measureNaturalLeaf(node, index, edges, effective_request, context)
     else switch (node.style.display) {
         .block, .flow_root => blk: {
             const block_content = try measureNaturalBlockContent(
@@ -906,12 +906,11 @@ fn isIntrinsicDimension(dimension: style.Dimension) bool {
 
 fn measureNaturalLeaf(
     node: *const widget.WidgetNode,
+    node_index: usize,
     edges: BoxEdges,
     request: layout_context.Request,
-    measure: ?layout_context.MeasureFn,
+    context: *layout_context.LayoutContext,
 ) sizing.Error!widget.Size {
-    const font_size = try finite(node.font_size);
-    if (font_size < 0) return error.InvalidStyle;
     const available_border: sizing.AvailableSize = .{
         .width = .{ .definite = try finite(request.available.width) },
         .height = .{ .definite = try finite(request.available.height) },
@@ -944,11 +943,12 @@ fn measureNaturalLeaf(
     };
     const measured = try measureLeafContent(
         node,
-        measure,
+        context.measure,
         known_dimensions,
         available_space,
-        font_size,
         .{ .width = 0, .height = 0 },
+        context,
+        node_index,
     );
     var result = measured;
     result.width = try finite(result.width);
@@ -959,41 +959,92 @@ fn measureNaturalLeaf(
 
 fn measureLeafContent(
     node: *const widget.WidgetNode,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     known_dimensions: sizing.OptionalSize,
     available_space: sizing.AvailableSize,
-    font_size: f32,
     fallback: widget.Size,
+    layout_ctx: ?*layout_context.LayoutContext,
+    node_index: usize,
 ) sizing.Error!widget.Size {
+    try layout_context.validateLeafGeometry(node.kind);
+    const input: layout_context.MeasureInput = .{
+        .known_dimensions = known_dimensions,
+        .available_space = available_space,
+        .text = node.text_request,
+        .writing_mode = node.writing_mode,
+    };
     return switch (node.kind) {
-        .label => |label| layout_context.measureText(
+        .element => try layout_context.measureElement(node, input),
+        .label => |label| if (layout_ctx) |cached_context| try cached_context.measureTextSizeCached(
+            node_index,
+            label.text,
+            input,
+            node.text_overflow,
+            node.text_max_width,
+        ) else try layout_context.measureTextSize(
             measure,
             label.text,
-            .{
-                .known_dimensions = known_dimensions,
-                .available_space = available_space,
-                .font_size = font_size,
-                .font_id = node.font_id,
-            },
+            input,
             node.text_overflow,
             node.text_max_width,
         ),
         .spacer => |spacer| .{ .width = spacer.size, .height = spacer.size },
         .button => |button| .{
-            .width = if (button.visual_label) |text|
-                if (text.len == 0) 100 else @floatFromInt(text.len * 10 + 16)
+            .width = if (button.visual_label) |value|
+                if (value.len == 0) 100 else @floatFromInt(value.len * 10 + 16)
             else
                 100,
             .height = 32,
         },
-        .slider => try layout_context.measureSliderContent(measure, node, .{
-            .known_dimensions = known_dimensions,
-            .available_space = available_space,
-            .font_size = font_size,
-            .font_id = node.font_id,
-        }),
+        .slider => if (layout_ctx) |cached_context| try cached_context.measureSliderContentCached(
+            node_index,
+            node,
+            input,
+        ) else try layout_context.measureSliderContent(measure, node, input),
+        .checkbox, .radio, .switch_control, .progress => try measureDecoratedLeaf(
+            node,
+            node_index,
+            layout_context.controlCaption(node),
+            input,
+            layout_context.textDecoration(node.kind),
+            measure,
+            layout_ctx,
+        ),
+        .separator => |separator| switch (separator.axis) {
+            .horizontal => .{ .width = 100, .height = separator.thickness },
+            .vertical => .{ .width = separator.thickness, .height = 100 },
+        },
         .row, .column => fallback,
     };
+}
+
+fn measureDecoratedLeaf(
+    node: *const widget.WidgetNode,
+    node_index: usize,
+    content: []const u8,
+    input: layout_context.MeasureInput,
+    decoration: layout_context.TextDecoration,
+    measure: ?layout_context.MeasureSource,
+    layout_ctx: ?*layout_context.LayoutContext,
+) sizing.Error!widget.Size {
+    if (layout_ctx) |cached_context| {
+        return cached_context.measureDecoratedTextSizeCached(
+            node_index,
+            content,
+            input,
+            node.text_overflow,
+            node.text_max_width,
+            decoration,
+        );
+    }
+    return layout_context.measureDecoratedTextSize(
+        measure,
+        content,
+        input,
+        node.text_overflow,
+        node.text_max_width,
+        decoration,
+    );
 }
 
 fn measureKnownDimensions(
@@ -1151,9 +1202,9 @@ fn measureAvailableSpaceForRequest(
 /// Layout one container through a fresh pass for direct one-container callers.
 pub fn layoutContainer(
     tree: *widget.WidgetTree,
-    container_id: Id,
+    container_id: FrameNodeId,
     context: sizing.SizingContext,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
 ) sizing.Error!void {
     try validateContext(context);
     const pass = try LayoutPass.init(tree);
@@ -1172,9 +1223,9 @@ pub fn layoutContainer(
 /// Lay out one container after context validation and hidden-state preparation.
 fn layoutPreparedContainerUnchecked(
     tree: *widget.WidgetTree,
-    container_id: Id,
+    container_id: FrameNodeId,
     context: sizing.SizingContext,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     forced_border_width: ?f32,
     forced_border_height: ?f32,
     is_layout_root: bool,
@@ -1872,6 +1923,7 @@ fn layoutPreparedContainerUnchecked(
             0,
         );
         try layoutMixedChild(tree, child, layout_ctx, mixed_child_context);
+        try writeLeafControlBaseline(tree, child, layout_ctx);
         if (top_collapse_open and !child_establishes_bfc and !has_clearance) {
             first_child_top = first_child_top.collapse(child_top_margin);
             if (child_collapses_through) {
@@ -2017,7 +2069,7 @@ fn layoutPreparedContainerUnchecked(
 
 fn alignBlockChildren(
     tree: *widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     content_height: f32,
     in_flow_content_height: f32,
     alignment: style.AlignContent,
@@ -2058,10 +2110,10 @@ fn resolveBlockContentOffset(
 
 fn layoutNestedBlockAtWidth(
     tree: *widget.WidgetTree,
-    child_id: Id,
+    child_id: FrameNodeId,
     parent_context: sizing.SizingContext,
     used_width: f32,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     forced_border_width: ?f32,
     forced_border_height: ?f32,
     layout_ctx: ?*layout_context.LayoutContext,
@@ -2399,7 +2451,7 @@ fn remeasureLeafAutoHeight(
     tree: *widget.WidgetTree,
     node: *const widget.WidgetNode,
     edges: BoxEdges,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     layout_ctx: ?*layout_context.LayoutContext,
     containing: sizing.SizingContext,
     border_width: f32,
@@ -2558,13 +2610,13 @@ fn styleWithResolvedEdges(
 
 fn layoutAbsoluteChildren(
     tree: *widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     area_width: f32,
     area_height: f32,
     area_origin: [2]f32,
     content_origin: [2]f32,
     direction: style.Direction,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     layout_ctx: ?*layout_context.LayoutContext,
 ) sizing.Error!void {
     const area_to_content_x = try subtractFinite(area_origin[0], content_origin[0]);
@@ -2770,7 +2822,7 @@ fn paddingBoxContributionRect(
 fn writeScrollOffset(
     tree: *widget.WidgetTree,
     container_index: usize,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     client: widget.Size,
     edges: BoxEdges,
     direction: style.Direction,
@@ -3187,7 +3239,7 @@ fn intrinsicContentSizeWithContext(
     tree: *widget.WidgetTree,
     node: *const widget.WidgetNode,
     edges: BoxEdges,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     layout_ctx: ?*layout_context.LayoutContext,
     containing: sizing.SizingContext,
     intrinsic_width: bool,
@@ -3209,7 +3261,7 @@ fn shrinkToFitContentSizeWithContext(
     tree: *widget.WidgetTree,
     node: *const widget.WidgetNode,
     edges: BoxEdges,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     layout_ctx: ?*layout_context.LayoutContext,
     containing: sizing.SizingContext,
 ) sizing.Error!widget.Size {
@@ -3230,14 +3282,14 @@ fn intrinsicContentSizeWithContextAndAxes(
     tree: *widget.WidgetTree,
     node: *const widget.WidgetNode,
     edges: BoxEdges,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     layout_ctx: ?*layout_context.LayoutContext,
     containing: sizing.SizingContext,
     intrinsic_width: bool,
     intrinsic_height_override: ?bool,
     width_mode_override: ?layout_context.MeasureMode,
 ) sizing.Error!widget.Size {
-    if (node.children.items.len != 0) {
+    if (node.children.items.len != 0 and !widget.isLateQuery(node)) {
         const block_container =
             node.style.display == .block or node.style.display == .flow_root;
         if (block_container and intrinsic_width) {
@@ -3279,6 +3331,7 @@ fn intrinsicContentSizeWithContextAndAxes(
         .definite => false,
         .min_content, .max_content => true,
     };
+    const node_index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
     return intrinsicContentSize(
         node,
         edges,
@@ -3287,20 +3340,22 @@ fn intrinsicContentSizeWithContextAndAxes(
         intrinsic_width,
         intrinsic_height,
         width_mode_override,
+        layout_ctx,
+        node_index,
     );
 }
 
 fn intrinsicContentSize(
     node: *const widget.WidgetNode,
     edges: BoxEdges,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     containing: sizing.SizingContext,
     intrinsic_width: bool,
     intrinsic_height: bool,
     width_mode_override: ?layout_context.MeasureMode,
+    layout_ctx: ?*layout_context.LayoutContext,
+    node_index: usize,
 ) sizing.Error!widget.Size {
-    const font_size = try finite(node.font_size);
-    if (font_size < 0) return error.InvalidStyle;
     const known_dimensions = try measureKnownDimensions(
         node.style,
         containing.available,
@@ -3342,11 +3397,12 @@ fn intrinsicContentSize(
         measure,
         known_dimensions,
         available_space,
-        font_size,
         .{
             .width = @max(0, node.rect.w - edges.horizontal),
             .height = @max(0, node.rect.h - edges.vertical),
         },
+        layout_ctx,
+        node_index,
     );
     return .{
         .width = @max(0, try finite(measured.width)),
@@ -3357,7 +3413,7 @@ fn intrinsicContentSize(
 fn measureNaturalBlockRequest(
     tree: *widget.WidgetTree,
     node: *const widget.WidgetNode,
-    measure: ?layout_context.MeasureFn,
+    measure: ?layout_context.MeasureSource,
     layout_ctx: ?*layout_context.LayoutContext,
     request: layout_context.Request,
 ) sizing.Error!widget.Size {
@@ -3635,14 +3691,61 @@ fn physicalTextAlignX(
 fn hasLineBox(node: *const widget.WidgetNode) bool {
     return switch (node.kind) {
         .label => |label| label.text.len != 0,
+        .checkbox, .switch_control, .radio, .progress, .separator => true,
         else => false,
     };
+}
+
+fn writeLeafControlBaseline(
+    tree: *widget.WidgetTree,
+    node: *widget.WidgetNode,
+    layout_ctx: ?*layout_context.LayoutContext,
+) sizing.Error!void {
+    if (node.children.items.len != 0 or node.first_baseline != null) return;
+    const resolved = node.resolved_box_edges orelse return error.InvalidStyle;
+    if (layout_context.visibleNodeText(node).len == 0) return;
+    const top_inset = try addFinite(resolved.border.top, resolved.padding.top);
+    // The leaf is already placed, so the text it paints is measured under the
+    // box it got. The pass cache holds that measurement, so the baseline is
+    // free.
+    const horizontal = try addFinite(
+        try addFinite(resolved.border.left, resolved.border.right),
+        try addFinite(resolved.padding.left, resolved.padding.right),
+    );
+    const vertical = try addFinite(
+        try addFinite(resolved.border.top, resolved.border.bottom),
+        try addFinite(resolved.padding.top, resolved.padding.bottom),
+    );
+    const content_width = @max(0, node.rect.w - horizontal);
+    const content_height = @max(0, node.rect.h - vertical);
+    const measured: ?layout_context.TextMeasurement = if (layout_ctx) |context|
+        try context.measureVisibleNodeTextCached(nodeIndexOf(tree, node), node, .{
+            .known_dimensions = .{ .width = content_width, .height = content_height },
+            .available_space = .{
+                .width = .{ .definite = content_width },
+                .height = .{ .definite = content_height },
+            },
+            .text = node.text_request,
+            .writing_mode = node.writing_mode,
+        })
+    else
+        null;
+    node.first_baseline = try layout_context.textNodeBaseline(node, top_inset, measured);
+}
+
+/// The dense index of a node the layout already holds a pointer to. The pass
+/// caches are keyed by it, so a borrowed index would collide with whatever
+/// node actually lives there.
+fn nodeIndexOf(tree: *widget.WidgetTree, node: *const widget.WidgetNode) usize {
+    const items = tree.nodes.items;
+    const offset = @intFromPtr(node) - @intFromPtr(items.ptr);
+    return offset / @sizeOf(widget.WidgetNode);
 }
 
 fn writeFirstBaseline(
     tree: *widget.WidgetTree,
     container_index: usize,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
 ) sizing.Error!void {
     var baseline: ?f32 = null;
     for (child_ids) |child_id| {
@@ -3705,7 +3808,7 @@ fn physicalFloat(value: style.Float, direction: style.Direction) PhysicalSide {
 
 fn clearBottom(
     tree: *const widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     prior_count: usize,
     clear: style.Clear,
     direction: style.Direction,
@@ -3727,7 +3830,7 @@ fn clearBottom(
 }
 fn walkPriorFloats(
     tree: *const widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     prior_count: usize,
     percentage_basis: ?f32,
     query: *FloatQuery,
@@ -3749,7 +3852,7 @@ fn walkPriorFloats(
 
 fn walkFloatSubtree(
     tree: *const widget.WidgetTree,
-    node_id: Id,
+    node_id: FrameNodeId,
     parent_origin_x: f32,
     parent_origin_y: f32,
     percentage_basis: ?f32,
@@ -3917,7 +4020,7 @@ fn bfcPlacementX(
 
 fn findAutoBfcPlacement(
     tree: *const widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     prior_count: usize,
     container_width: f32,
     candidate_border_width: f32,
@@ -3976,7 +4079,7 @@ fn findAutoBfcPlacement(
 
 fn findBfcSlot(
     tree: *const widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     prior_count: usize,
     container_width: f32,
     child_width: f32,
@@ -4055,7 +4158,7 @@ fn autoBorderX(
 
 fn findSlot(
     tree: *const widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     prior_count: usize,
     container_width: f32,
     child_width: f32,
@@ -4091,7 +4194,7 @@ fn findSlot(
 
 fn occupiedSlot(
     tree: *const widget.WidgetTree,
-    child_ids: []const Id,
+    child_ids: []const FrameNodeId,
     prior_count: usize,
     container_width: f32,
     candidate_y: f32,

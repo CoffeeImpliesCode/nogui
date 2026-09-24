@@ -1,7 +1,13 @@
 //! Sidebar view for the Spotify demo.
+//!
+//! The sidebar panel owns theme.c_sidebar_bg and every container under it
+//! inherits that surface: each row and column here is `.transparent` unless
+//! it paints a fill of its own, so no box falls back to the framework
+//! container grey and patches the sidebar.
 
 const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
+const ComponentKey = nogui.ComponentKey;
 const layout = @import("spotify_layout.zig");
 const theme = @import("spotify_theme.zig");
 
@@ -33,27 +39,55 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
             .left = theme.sidebar_padding,
         },
         .fill = theme.c_sidebar_bg,
-        .gradient = theme.srgbToOklab(theme.c_sidebar_bg),
     });
     defer ctx.pop();
 
     {
+        // The nav group only stacks the nav buttons, and each of those paints
+        // its own row fill. Inherits the sidebar panel's theme.c_sidebar_bg.
         _ = try ctx.column(.{
             .gap = theme.sidebar_nav_gap,
             .shrink = 0,
             .clip = true,
+            .transparent = true,
         });
         defer ctx.pop();
 
-        try navButton(ctx, "⌂", "⌂  Home", expanded, app.active_nav == .home, App.selectNavHome);
-        try navButton(ctx, "⌕", "⌕  Search", expanded, app.active_nav == .search, App.selectNavSearch);
-        try navButton(ctx, "▥", "▥  Your Library", expanded, app.active_nav == .library, App.selectNavLibrary);
+        try navButton(
+            ctx,
+            .{ .static = "nav-home" },
+            "⌂",
+            "⌂  Home",
+            expanded,
+            app.active_nav == .home,
+            App.selectNavHome,
+        );
+        try navButton(
+            ctx,
+            .{ .static = "nav-search" },
+            "⌕",
+            "⌕  Search",
+            expanded,
+            app.active_nav == .search,
+            App.selectNavSearch,
+        );
+        try navButton(
+            ctx,
+            .{ .static = "nav-library" },
+            "▥",
+            "▥  Your Library",
+            expanded,
+            app.active_nav == .library,
+            App.selectNavLibrary,
+        );
     }
 
     if (expanded) {
         try libraryHeader(ctx);
     }
 
+    // The playlist list only scrolls the rows below it. Each row paints its
+    // own fill or inherits the sidebar panel's theme.c_sidebar_bg.
     _ = try ctx.column(.{
         .grow = 1,
         .shrink = 1,
@@ -62,12 +96,14 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
         .scroll_state = &app.sidebar_scroll,
         .scroll_axis = .vertical,
         .clip = true,
+        .transparent = true,
     });
     defer ctx.pop();
 
     const pl = app.playlists;
     try playlistRow(
         ctx,
+        .{ .static = "sidebar-liked-songs" },
         "Liked Songs",
         "You",
         4,
@@ -77,6 +113,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     );
     try playlistRow(
         ctx,
+        .{ .static = "sidebar-cyberpunk" },
         pl[0].name,
         pl[0].author,
         pl[0].artwork_seed,
@@ -86,6 +123,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     );
     try playlistRow(
         ctx,
+        .{ .static = "sidebar-discover-weekly" },
         pl[1].name,
         pl[1].author,
         pl[1].artwork_seed,
@@ -95,6 +133,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     );
     try playlistRow(
         ctx,
+        .{ .static = "sidebar-release-radar" },
         pl[2].name,
         pl[2].author,
         pl[2].artwork_seed,
@@ -104,6 +143,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     );
     try playlistRow(
         ctx,
+        .{ .static = "sidebar-daily-mix" },
         pl[3].name,
         pl[3].author,
         pl[3].artwork_seed,
@@ -113,6 +153,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     );
     try playlistRow(
         ctx,
+        .{ .static = "sidebar-deep-focus" },
         pl[4].name,
         pl[4].author,
         pl[4].artwork_seed,
@@ -122,6 +163,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
     );
     try playlistRow(
         ctx,
+        .{ .static = "sidebar-chill-lofi" },
         pl[5].name,
         pl[5].author,
         pl[5].artwork_seed,
@@ -133,6 +175,7 @@ pub fn draw(app: anytype, ctx: *DrawCtx, spec: layout.Spec) !void {
 
 fn navButton(
     ctx: *DrawCtx,
+    key: ComponentKey,
     compact_label: []const u8,
     expanded_label: []const u8,
     expanded: bool,
@@ -144,6 +187,8 @@ fn navButton(
     const paint = NavButton.default_paint;
 
     if (!expanded) {
+        // The compact row only centres the button, which paints its own fill.
+        // Inherits the nav group's theme.c_sidebar_bg.
         _ = try ctx.row(.{
             .direction = style.direction,
             .flex_basis = theme.sidebar_nav_row_height,
@@ -152,10 +197,12 @@ fn navButton(
             .justify = .center,
             .@"align" = .center,
             .clip = true,
+            .transparent = true,
         });
         defer ctx.pop();
 
         _ = try ctx.button(.{
+            .key = key,
             .direction = style.direction,
             .label = expanded_label,
             .visual_label = compact_label,
@@ -170,12 +217,12 @@ fn navButton(
             .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
             .radius = paint.radius,
             .fill = fill,
-            .gradient = theme.srgbToOklab(fill),
         });
         return;
     }
 
     _ = try ctx.button(.{
+        .key = key,
         .direction = style.direction,
         .label = expanded_label,
         .on_click = on_click,
@@ -188,12 +235,13 @@ fn navButton(
         .padding = .{ .left = 10, .right = 8, .top = 0, .bottom = 0 },
         .radius = paint.radius,
         .fill = fill,
-        .gradient = theme.srgbToOklab(fill),
         .text_overflow = .ellipsis,
     });
 }
 
 fn libraryHeader(ctx: *DrawCtx) !void {
+    // The header only arranges its two labels, which paint no surface at all.
+    // Inherits the sidebar panel's theme.c_sidebar_bg.
     _ = try ctx.row(.{
         .flex_basis = theme.sidebar_nav_row_height,
         .min_height = theme.sidebar_nav_row_height,
@@ -201,6 +249,7 @@ fn libraryHeader(ctx: *DrawCtx) !void {
         .@"align" = .center,
         .padding = .{ .left = 10, .right = 8 },
         .clip = true,
+        .transparent = true,
     });
     defer ctx.pop();
 
@@ -215,6 +264,7 @@ fn libraryHeader(ctx: *DrawCtx) !void {
 
 fn playlistRow(
     ctx: *DrawCtx,
+    key: ComponentKey,
     name: []const u8,
     author: []const u8,
     artwork_seed: u8,
@@ -238,10 +288,12 @@ fn playlistRow(
             },
             .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
             .fill = theme.c_active_row,
-            .gradient = theme.srgbToOklab(theme.c_active_row),
             .clip = true,
         });
     } else {
+        // An inactive row paints no surface of its own, so the scroll column's
+        // theme.c_sidebar_bg shows through. That is the surface the selected
+        // row above replaces with theme.c_active_row.
         _ = try ctx.row(.{
             .flex_basis = theme.sidebar_row_height,
             .min_height = theme.sidebar_row_height,
@@ -256,12 +308,14 @@ fn playlistRow(
                 .bottom = 4,
             },
             .clip = true,
+            .transparent = true,
         });
     }
     defer ctx.pop();
 
     if (!expanded) {
         _ = try ctx.button(.{
+            .key = key,
             .label = name,
             .visual_label = theme.compactArtworkMark(artwork_seed),
             .accessible_label = name,
@@ -279,10 +333,20 @@ fn playlistRow(
     }
 
     _ = try theme.drawArtworkTile(ctx, theme.playlist_artwork_size, artwork_seed, null);
-    _ = try ctx.column(.{ .grow = 1, .shrink = 1, .min_width = 0, .gap = theme.sidebar_playlist_copy_gap });
+    // The copy column only arranges the transparent title button and the
+    // author label. Inherits the row's surface: theme.c_active_row while the
+    // playlist is selected, theme.c_sidebar_bg otherwise.
+    _ = try ctx.column(.{
+        .grow = 1,
+        .shrink = 1,
+        .min_width = 0,
+        .gap = theme.sidebar_playlist_copy_gap,
+        .transparent = true,
+    });
     defer ctx.pop();
 
     _ = try ctx.button(.{
+        .key = key,
         .label = name,
         .on_click = on_click,
         .grow = 1,

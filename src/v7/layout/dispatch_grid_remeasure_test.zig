@@ -1,7 +1,7 @@
 //! Specifies final-area remeasurement across the grid-to-flex dispatcher bridge.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const layout_api = @import("root.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
@@ -32,8 +32,8 @@ fn autoStyle(display: style.Display) Style {
 
 fn appendNode(
     tree: *WidgetTree,
-    id: Id,
-    parent: Id,
+    id: FrameNodeId,
+    parent: FrameNodeId,
     node_style: Style,
     kind: WidgetKind,
 ) !void {
@@ -45,7 +45,11 @@ fn appendNode(
     });
 }
 
-fn measureLabel(_: []const u8, _: layout_api.MeasureInput) widget.Size {
+fn measureLabel(
+    _: ?*anyopaque,
+    _: []const u8,
+    _: layout_api.MeasureInput,
+) layout_api.LayoutError!layout_api.TextMeasurement {
     return .{ .width = 0, .height = 0 };
 }
 
@@ -53,7 +57,7 @@ fn layout(tree: *WidgetTree, available: widget.Size) !void {
     try layout_api.layoutTree(tree, .{
         .allocator = std.testing.allocator,
         .available = available,
-        .measure = measureLabel,
+        .measure = .{ .callback = measureLabel },
     });
 }
 
@@ -65,7 +69,7 @@ fn expectRect(expected: Rect, actual: Rect) !void {
     try std.testing.expectApproxEqAbs(expected.h, actual.h, tolerance);
 }
 
-fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
+fn expectRelative(tree: *const WidgetTree, id: FrameNodeId, expected: Rect) !void {
     const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
     try expectRect(expected, node.rect);
 }
@@ -74,10 +78,10 @@ test "grid remeasures auto flex child at final area width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const flex_id: Id = @enumFromInt(3);
-    const grid_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const flex_id: FrameNodeId = @enumFromInt(3);
+    const grid_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{ .{ .fixed = 60 }, .{ .fixed = 40 } };
     const rows = [_]style.GridTrack{.{ .fixed = 30 }};
 

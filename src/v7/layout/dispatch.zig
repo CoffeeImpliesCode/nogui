@@ -1,5 +1,5 @@
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const block_float = @import("block_float.zig");
 const context = @import("context.zig");
 const flex = @import("flex.zig");
@@ -8,19 +8,63 @@ const overflow = @import("overflow.zig");
 const sizing = @import("sizing.zig");
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
+const text = @import("../text.zig");
 
 pub const Options = struct {
     allocator: std.mem.Allocator,
     available: widget.Size,
-    measure: ?context.MeasureFn,
+    measure: ?context.MeasureSource,
     width_mode: context.MeasureMode = .definite,
     height_mode: context.MeasureMode = .definite,
+    storage: ?*context.LayoutStorage = null,
 };
-
 pub const LayoutError = context.LayoutError;
 
+/// Resolve every node's text request exactly once, immediately before layout.
+///
+/// Parent inheritance is folded here rather than at draw time, so a directly
+/// assembled tree inherits exactly like a `DrawCtx` one. A node whose authored
+/// input and inherited base are unchanged keeps its existing immutable record:
+/// a repeated `layoutTree` publishes nothing new, and a re-parented node — whose
+/// inherited base changed — publishes a different one.
+///
+/// Records come from the tree's own arena, never from the caller's. The caller
+/// owns storage whose lifetime is its own, so a record published there had no
+/// owner to release it: a tree laid out repeatedly on the plain allocator leaked
+/// both its current and its superseded records. The tree arena holds every
+/// record, published or replaced, until `deinit` releases the set once.
+fn resolveTextRequests(tree: *widget.WidgetTree) LayoutError!void {
+    const records = tree.textRecordAllocator();
+    // Node order is post-order, so a reverse walk visits a parent before any of
+    // its children and every node resolves against an already published base.
+    var index = tree.nodes.items.len;
+    while (index > 0) {
+        index -= 1;
+        const node = &tree.nodes.items[index];
+        const inherited: ?*const text.NodeText = if (node.parent == .root)
+            null
+        else blk: {
+            const parent = tree.nodeConst(node.parent) orelse return error.InvalidStyle;
+            break :blk parent.text_request;
+        };
+        if (node.text_input == null and inherited == null) {
+            node.text_request = null;
+            continue;
+        }
+        const resolved = text.resolveNodeText(
+            inherited,
+            node.text_input,
+            style.textAlign(node.style.text_align),
+        );
+        if (node.text_request) |record| {
+            if (text.nodeTextMatches(record, resolved)) continue;
+        }
+        node.text_request = try text.publishNodeText(records, resolved);
+    }
+}
+
 fn validateScrollbarWidths(tree: *const widget.WidgetTree) LayoutError!void {
-    for (tree.nodes.items) |node| {
+    for (tree.nodes.items) |*node| {
         const width = node.style.scrollbar_width;
         if (!std.math.isFinite(width) or width < 0) return error.InvalidStyle;
     }
@@ -41,20 +85,38 @@ const RootMeasurement = struct {
     width: f32,
 };
 pub fn layoutTree(tree: *widget.WidgetTree, options: Options) LayoutError!void {
+    if (options.storage) |storage| storage.clearRetainingCapacity();
+    defer if (options.storage) |storage| storage.clearRetainingCapacity();
     try validateScrollbarWidths(tree);
     try validateAvailable(options.available);
+    try tree.prepareIdLookup();
     var roots = try validateTree(options.allocator, tree);
     defer roots.deinit(options.allocator);
+    try resolveTextRequests(tree);
     resetDerivedState(tree);
     for (roots.items) |root_index| {
         try markHidden(tree, root_index, false, tree.nodes.items.len + 1);
     }
+    // Postorder reversed visits parents first, so hidden paint state
+    // propagates without removing hidden nodes from layout.
+    var node_index = tree.nodes.items.len;
+    while (node_index > 0) {
+        node_index -= 1;
+        const node = &tree.nodes.items[node_index];
+        const parent_hidden = if (node.parent == .root)
+            false
+        else
+            (tree.nodeConst(node.parent) orelse return error.InvalidStyle).paint_hidden;
+        node.paint_hidden = node.layout_hidden or node.style.visibility == .hidden or parent_hidden;
+    }
+    tree.visibility_prepared = true;
 
     var layout_context: context.LayoutContext = .{
         .allocator = options.allocator,
         .measure = options.measure,
         .measure_node = measureNodeCallback,
         .layout_node = layoutNodeCallback,
+        .storage = options.storage,
     };
     defer layout_context.deinit();
     if (options.width_mode != .definite or options.height_mode != .definite) {
@@ -1042,7 +1104,7 @@ fn measureNodeCallback(
     node: *const widget.WidgetNode,
     request: context.Request,
 ) LayoutError!context.Measured {
-    if (requestForcedSizing(request) or
+    if (requestForcedSizing(request) or widget.isLateQuery(node) or
         (node.children.items.len != 0 and needsNaturalMeasurement(node, request)))
     {
         return switch (node.style.display) {
@@ -1066,6 +1128,7 @@ fn measureNodeCallback(
         request,
         tree.nodes.items.len + 1,
         self.measure,
+        self,
     );
 }
 
@@ -1108,7 +1171,7 @@ fn layoutNodeCallback(
     const node_index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
     if (&tree.nodes.items[node_index] != node) return error.InvalidStyle;
     if (node.children.items.len == 0) {
-        try layoutLeaf(self, node, request);
+        try layoutLeaf(self, node, node_index, request);
         return;
     }
     const sizing_context: sizing.SizingContext = .{
@@ -1146,11 +1209,12 @@ fn layoutNodeCallback(
 }
 
 fn measureNode(
-    _: *const widget.WidgetTree,
+    tree: *const widget.WidgetTree,
     node: *const widget.WidgetNode,
     request: context.Request,
     depth: usize,
-    measure: ?context.MeasureFn,
+    measure: ?context.MeasureSource,
+    layout_ctx: *context.LayoutContext,
 ) LayoutError!context.Measured {
     if (depth == 0) return error.InvalidStyle;
     try validateRequest(request);
@@ -1158,20 +1222,22 @@ fn measureNode(
         .content = .{ .width = 0, .height = 0 },
         .border = .{ .width = 0, .height = 0 },
     };
+    const node_index = tree.nodeIndex(node.id) orelse return error.InvalidStyle;
+    if (&tree.nodes.items[node_index] != node) return error.InvalidStyle;
     const edges = try resolveEdges(node.style, request.percentage_basis.width);
-    const intrinsic: widget.Size = if (node.children.items.len == 0)
-        try measureLeaf(node, request, edges, measure, false)
+    const intrinsic: widget.Size = if (node.children.items.len == 0 or widget.isLateQuery(node))
+        try measureLeaf(node, request, edges, measure, false, layout_ctx, node_index)
     else
         .{ .width = 0, .height = 0 };
     const width = try resolveConcreteDimension(
         node.style.size.width,
         request.percentage_basis.width,
-        if (node.children.items.len == 0) intrinsic.width else null,
+        if (node.children.items.len == 0 or widget.isLateQuery(node)) intrinsic.width else null,
     );
     const height = try resolveConcreteDimension(
         node.style.size.height,
         request.percentage_basis.height,
-        if (node.children.items.len == 0) intrinsic.height else null,
+        if (node.children.items.len == 0 or widget.isLateQuery(node)) intrinsic.height else null,
     );
     if (width == null or height == null) return error.InvalidStyle;
     const unclamped_border = try borderSize(
@@ -1199,6 +1265,7 @@ fn measureNode(
 fn layoutLeaf(
     self: *context.LayoutContext,
     node: *widget.WidgetNode,
+    node_index: usize,
     request: context.LayoutRequest,
 ) LayoutError!void {
     const edges = try resolveEdges(node.style, request.percentage_basis.width);
@@ -1207,8 +1274,39 @@ fn layoutLeaf(
         .available = .{ .width = node.rect.w, .height = node.rect.h },
         .percentage_basis = request.percentage_basis,
     };
-    const content = try measureLeaf(node, leaf_request, edges, self.measure, true);
+    const content = try measureLeaf(
+        node,
+        leaf_request,
+        edges,
+        self.measure,
+        true,
+        self,
+        node_index,
+    );
     node.layout_content_size = try overflow.contentExtent(content, edges.box_padding);
+    // The leaf is already laid out here, so the text it paints can be measured
+    // under the box it actually got. The pass cache holds that measurement, so
+    // the baseline costs no shaping.
+    const measured: ?context.TextMeasurement = if (context.visibleNodeText(node).len != 0)
+        try self.measureVisibleNodeTextCached(node_index, node, .{
+            .known_dimensions = .{
+                .width = @max(0, node.rect.w - edges.horizontal),
+                .height = @max(0, node.rect.h - edges.vertical),
+            },
+            .available_space = .{
+                .width = .{ .definite = @max(0, node.rect.w - edges.horizontal) },
+                .height = .{ .definite = @max(0, node.rect.h - edges.vertical) },
+            },
+            .text = node.text_request,
+            .writing_mode = node.writing_mode,
+        })
+    else
+        null;
+    node.first_baseline = try context.textNodeBaseline(
+        node,
+        try finiteAdd(edges.border.top, edges.padding.top),
+        measured,
+    );
     if (node.scroll) |scroll| {
         scroll.state.max_offset = try overflow.maxOffset(
             node.layout_content_size,
@@ -1226,10 +1324,11 @@ fn measureLeaf(
     node: *const widget.WidgetNode,
     request: context.Request,
     edges: Edges,
-    measure: ?context.MeasureFn,
+    measure: ?context.MeasureSource,
     ignore_known: bool,
+    layout_ctx: ?*context.LayoutContext,
+    node_index: usize,
 ) LayoutError!widget.Size {
-    const font_size = try finiteNonNegative(node.font_size);
     const known_dimensions = if (ignore_known)
         sizing.OptionalSize{ .width = null, .height = null }
     else
@@ -1250,33 +1349,86 @@ fn measureLeaf(
             request.height_mode,
         ),
     };
+    try context.validateLeafGeometry(node.kind);
+    // The resolved, frame-owned text request rides along on every call. A
+    // provider reads it instead of guessing from a scalar selector, and the
+    // same record is what the paint path builds its request from.
+    const measure_input: context.MeasureInput = .{
+        .known_dimensions = known_dimensions,
+        .available_space = available_space,
+        .text = node.text_request,
+        .writing_mode = node.writing_mode,
+    };
     const result: widget.Size = switch (node.kind) {
-        .label => |label| try context.measureText(
+        .label => |label| if (layout_ctx) |cached_context| try cached_context.measureTextSizeCached(
+            node_index,
+            label.text,
+            measure_input,
+            node.text_overflow,
+            node.text_max_width,
+        ) else try context.measureTextSize(
             measure,
             label.text,
-            .{
-                .known_dimensions = known_dimensions,
-                .available_space = available_space,
-                .font_size = font_size,
-                .font_id = node.font_id,
-            },
+            measure_input,
             node.text_overflow,
             node.text_max_width,
         ),
+        .element => try context.measureElement(node, measure_input),
         .spacer => |spacer| .{ .width = spacer.size, .height = spacer.size },
         .button => .{ .width = 100, .height = 32 },
-        .slider => try context.measureSliderContent(measure, node, .{
-            .known_dimensions = known_dimensions,
-            .available_space = available_space,
-            .font_size = font_size,
-            .font_id = node.font_id,
-        }),
+        .slider => if (layout_ctx) |cached_context| try cached_context.measureSliderContentCached(
+            node_index,
+            node,
+            measure_input,
+        ) else try context.measureSliderContent(measure, node, measure_input),
+        .checkbox, .radio, .switch_control, .progress => try measureDecoratedLeaf(
+            layout_ctx,
+            node_index,
+            node,
+            context.controlCaption(node),
+            measure_input,
+            context.textDecoration(node.kind),
+            measure,
+        ),
+        .separator => |separator| switch (separator.axis) {
+            .horizontal => .{ .width = 100, .height = separator.thickness },
+            .vertical => .{ .width = separator.thickness, .height = 100 },
+        },
         .row, .column => .{ .width = 0, .height = 0 },
     };
     return .{
         .width = try finiteNonNegative(result.width),
         .height = try finiteNonNegative(result.height),
     };
+}
+
+fn measureDecoratedLeaf(
+    layout_ctx: ?*context.LayoutContext,
+    node_index: usize,
+    node: *const widget.WidgetNode,
+    content: []const u8,
+    input: context.MeasureInput,
+    decoration: context.TextDecoration,
+    measure: ?context.MeasureSource,
+) LayoutError!widget.Size {
+    if (layout_ctx) |cached_context| {
+        return cached_context.measureDecoratedTextSizeCached(
+            node_index,
+            content,
+            input,
+            node.text_overflow,
+            node.text_max_width,
+            decoration,
+        );
+    }
+    return context.measureDecoratedTextSize(
+        measure,
+        content,
+        input,
+        node.text_overflow,
+        node.text_max_width,
+        decoration,
+    );
 }
 
 fn measureKnownDimensions(
@@ -1574,70 +1726,54 @@ fn validateTree(
 ) LayoutError!std.ArrayList(usize) {
     var roots: std.ArrayList(usize) = .empty;
     errdefer roots.deinit(allocator);
-    const visited = try allocator.alloc(bool, tree.nodes.items.len);
-    defer allocator.free(visited);
-    @memset(visited, false);
-    for (tree.nodes.items, 0..) |node, node_index| {
+    var node_indices: std.AutoHashMapUnmanaged(FrameNodeId, u32) = .empty;
+    defer node_indices.deinit(allocator);
+
+    const node_count = std.math.cast(u32, tree.nodes.items.len) orelse
+        return error.InvalidStyle;
+    try node_indices.ensureTotalCapacity(allocator, node_count);
+    for (tree.nodes.items, 0..) |*node, node_index| {
         if (node.id == .root) return error.InvalidStyle;
-        for (tree.nodes.items[0..node_index]) |prior| {
-            if (prior.id == node.id) return error.InvalidStyle;
-        }
+        const entry = node_indices.getOrPutAssumeCapacity(node.id);
+        if (entry.found_existing) return error.InvalidStyle;
+        entry.value_ptr.* = @intCast(node_index);
         if (node.parent == .root) {
             try roots.append(allocator, node_index);
         }
     }
-    for (roots.items) |root_index| {
-        try validateNode(
-            tree,
-            root_index,
-            .root,
-            visited,
-            tree.nodes.items.len + 1,
-        );
+
+    const incoming = try allocator.alloc(bool, tree.nodes.items.len);
+    defer allocator.free(incoming);
+    @memset(incoming, false);
+    for (tree.nodes.items, 0..) |*parent, parent_index| {
+        for (parent.children.items) |child_id| {
+            if (child_id == .root) return error.InvalidStyle;
+            const child_index: usize = @intCast(
+                node_indices.get(child_id) orelse return error.InvalidStyle,
+            );
+            if (child_index >= parent_index) return error.InvalidStyle;
+            const child = &tree.nodes.items[child_index];
+            if (child.parent != parent.id) return error.InvalidStyle;
+            if (incoming[child_index]) return error.InvalidStyle;
+            incoming[child_index] = true;
+        }
     }
-    for (visited) |was_visited| {
-        if (!was_visited) return error.InvalidStyle;
+
+    for (tree.nodes.items, incoming) |*node, has_incoming| {
+        if (node.parent == .root) {
+            if (has_incoming) return error.InvalidStyle;
+        } else if (!has_incoming) {
+            return error.InvalidStyle;
+        }
     }
     return roots;
 }
 
-fn validateNode(
-    tree: *const widget.WidgetTree,
-    index: usize,
-    expected_parent: Id,
-    visited: []bool,
-    depth: usize,
-) LayoutError!void {
-    if (depth == 0 or index >= tree.nodes.items.len) return error.InvalidStyle;
-    if (visited[index]) return error.InvalidStyle;
-    visited[index] = true;
-    const node = &tree.nodes.items[index];
-    if (node.parent != expected_parent) return error.InvalidStyle;
-    for (node.children.items, 0..) |child_id, child_offset| {
-        if (child_id == .root) return error.InvalidStyle;
-        for (node.children.items[0..child_offset]) |prior_id| {
-            if (prior_id == child_id) return error.InvalidStyle;
-        }
-        const child_index = tree.nodeIndex(child_id) orelse return error.InvalidStyle;
-        if (child_index >= index) return error.InvalidStyle;
-        try validateNode(tree, child_index, node.id, visited, depth - 1);
-    }
-    for (tree.nodes.items) |candidate| {
-        if (candidate.parent != node.id) continue;
-        var listed = false;
-        for (node.children.items) |child_id| {
-            if (child_id == candidate.id) {
-                listed = true;
-                break;
-            }
-        }
-        if (!listed) return error.InvalidStyle;
-    }
-}
-
 fn resetDerivedState(tree: *widget.WidgetTree) void {
+    tree.visibility_prepared = false;
     for (tree.nodes.items) |*node| {
         node.layout_hidden = false;
+        node.paint_hidden = false;
         node.first_baseline = null;
         node.layout_content_size = .{ .width = 0, .height = 0 };
         if (node.scroll) |scroll| {

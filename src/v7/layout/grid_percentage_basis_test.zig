@@ -1,7 +1,7 @@
 //! Verifies that direct grid measurement resolves percentages from the request basis.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const layout_context = @import("context.zig");
 const widget = @import("../widget.zig");
 const grid = @import("grid.zig");
@@ -30,7 +30,7 @@ test "measureNatural resolves grid percentages from percentage basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },

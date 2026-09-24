@@ -1,11 +1,12 @@
 //! Specifies the direct-tree contract for the modular grid layout engine.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const grid = @import("grid.zig");
 const layout_context = @import("context.zig");
+const layout = @import("root.zig");
 
 const Rect = widget.Rect;
 const Style = style.Style;
@@ -30,7 +31,7 @@ fn unreachableLayoutNode(
     unreachable;
 }
 
-fn appendContainer(tree: *WidgetTree, id: Id, parent: Id, node_style: Style) !void {
+fn appendContainer(tree: *WidgetTree, id: FrameNodeId, parent: FrameNodeId, node_style: Style) !void {
     const kind: WidgetKind = switch (node_style.display) {
         .flex => .{ .row = .{} },
         .grid => .{ .column = .{} },
@@ -47,8 +48,8 @@ fn appendContainer(tree: *WidgetTree, id: Id, parent: Id, node_style: Style) !vo
 
 fn appendLeaf(
     tree: *WidgetTree,
-    id: Id,
-    parent: Id,
+    id: FrameNodeId,
+    parent: FrameNodeId,
     node_style: Style,
     kind: WidgetKind,
 ) !void {
@@ -92,9 +93,9 @@ fn fixedContainer(
 
 fn layoutContainer(
     tree: *WidgetTree,
-    container_id: Id,
+    container_id: FrameNodeId,
     available: widget.Size,
-    measure: ?grid.MeasureFn,
+    measure: ?grid.MeasureSource,
 ) !void {
     try grid.layoutContainer(tree, container_id, .{
         .allocator = std.testing.allocator,
@@ -111,12 +112,16 @@ fn expectRect(expected: Rect, actual: Rect) !void {
     try std.testing.expectApproxEqAbs(expected.h, actual.h, tolerance);
 }
 
-fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
+fn expectRelative(tree: *const WidgetTree, id: FrameNodeId, expected: Rect) !void {
     const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
     try expectRect(expected, node.rect);
 }
 
-fn measureLabel(text: []const u8, _: layout_context.MeasureInput) widget.Size {
+fn measureLabel(
+    _: ?*anyopaque,
+    text: []const u8,
+    _: layout_context.MeasureInput,
+) layout_context.LayoutError!layout_context.TextMeasurement {
     if (std.mem.eql(u8, text, "intrinsic")) {
         return .{ .width = 30, .height = 12 };
     }
@@ -127,11 +132,11 @@ test "grid fixed two by two tracks preserve gaps" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const fourth_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const fourth_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
     const columns = [_]style.GridTrack{ .{ .fixed = 30 }, .{ .fixed = 40 } };
     const rows = [_]style.GridTrack{ .{ .fixed = 10 }, .{ .fixed = 20 } };
 
@@ -160,9 +165,9 @@ test "grid explicit spans and negative lines select requested tracks" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const negative_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const negative_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{
         .{ .fixed = 20 },
         .{ .fixed = 30 },
@@ -210,9 +215,9 @@ test "grid reserves later definite items before earlier auto placement" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const auto_id: Id = @enumFromInt(1);
-    const definite_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const auto_id: FrameNodeId = @enumFromInt(1);
+    const definite_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
     try appendLeaf(&tree, auto_id, container_id, leafStyle(), .{ .spacer = .{} });
@@ -234,8 +239,8 @@ test "grid item auto margin consumes its cell free space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
     var child = leafStyle();
@@ -262,10 +267,10 @@ test "nested auto-sized grid includes track gaps in intrinsic size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const nested_id: Id = @enumFromInt(3);
-    const outer_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const nested_id: FrameNodeId = @enumFromInt(3);
+    const outer_id: FrameNodeId = @enumFromInt(4);
     const nested_columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const nested_rows = [_]style.GridTrack{.{ .fixed = 10 }};
     const outer_columns = [_]style.GridTrack{.auto};
@@ -294,14 +299,14 @@ test "grid auto placement grows more than thirty two implicit tracks" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const container_id: Id = @enumFromInt(100);
+    const container_id: FrameNodeId = @enumFromInt(100);
     const item_count: usize = 40;
     const columns = [_]style.GridTrack{.{ .fixed = 10 }};
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
     const auto_columns = [_]style.GridTrack{.{ .fixed = 10 }};
 
     for (0..item_count) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         try appendLeaf(&tree, id, container_id, spacerStyle(), .{ .spacer = .{ .size = 10 } });
     }
     var container = fixedContainer(400, 10, columns[0..], rows[0..]);
@@ -309,15 +314,15 @@ test "grid auto placement grows more than thirty two implicit tracks" {
     container.grid_auto_flow = .column;
     try appendContainer(&tree, container_id, .root, container);
     for (0..item_count) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         try tree.appendChild(container_id, id);
     }
 
     try layoutContainer(&tree, container_id, .{ .width = 400, .height = 10 }, null);
 
-    const first_id: Id = @enumFromInt(1);
-    const thirty_third_id: Id = @enumFromInt(33);
-    const last_id: Id = @enumFromInt(40);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const thirty_third_id: FrameNodeId = @enumFromInt(33);
+    const last_id: FrameNodeId = @enumFromInt(40);
     try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
     try expectRelative(&tree, thirty_third_id, .{ .x = 320, .y = 0, .w = 10, .h = 10 });
     try expectRelative(&tree, last_id, .{ .x = 390, .y = 0, .w = 10, .h = 10 });
@@ -327,12 +332,12 @@ test "grid mixed tracks resolve fixed percent auto minmax and fr" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const fixed_id: Id = @enumFromInt(1);
-    const percent_id: Id = @enumFromInt(2);
-    const intrinsic_id: Id = @enumFromInt(3);
-    const minmax_id: Id = @enumFromInt(4);
-    const fraction_id: Id = @enumFromInt(5);
-    const container_id: Id = @enumFromInt(6);
+    const fixed_id: FrameNodeId = @enumFromInt(1);
+    const percent_id: FrameNodeId = @enumFromInt(2);
+    const intrinsic_id: FrameNodeId = @enumFromInt(3);
+    const minmax_id: FrameNodeId = @enumFromInt(4);
+    const fraction_id: FrameNodeId = @enumFromInt(5);
+    const container_id: FrameNodeId = @enumFromInt(6);
     const columns = [_]style.GridTrack{
         .{ .fixed = 20 },
         .{ .percent = 0.25 },
@@ -357,7 +362,7 @@ test "grid mixed tracks resolve fixed percent auto minmax and fr" {
     try appendLeaf(&tree, minmax_id, container_id, leafStyle(), .{ .spacer = .{} });
     try appendLeaf(&tree, fraction_id, container_id, leafStyle(), .{ .spacer = .{} });
 
-    const item_ids = [_]Id{ fixed_id, percent_id, intrinsic_id, minmax_id, fraction_id };
+    const item_ids = [_]FrameNodeId{ fixed_id, percent_id, intrinsic_id, minmax_id, fraction_id };
     for (item_ids, 0..) |id, index| {
         const node = tree.node(id) orelse return error.TestUnexpectedResult;
         node.style.grid_column = .{
@@ -377,7 +382,7 @@ test "grid mixed tracks resolve fixed percent auto minmax and fr" {
         &tree,
         container_id,
         .{ .width = 200, .height = 20 },
-        measureLabel,
+        .{ .callback = measureLabel },
     );
 
     try expectRelative(&tree, fixed_id, .{ .x = 0, .y = 0, .w = 20, .h = 20 });
@@ -391,9 +396,9 @@ test "grid RTL content and item alignment reverse columns" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const inherited_id: Id = @enumFromInt(1);
-    const self_aligned_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const inherited_id: FrameNodeId = @enumFromInt(1);
+    const self_aligned_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
 
@@ -438,10 +443,10 @@ test "grid absolute insets and nested scroll geometry remain relative" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const overflowing_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const inner_id: Id = @enumFromInt(3);
-    const outer_id: Id = @enumFromInt(4);
+    const overflowing_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const inner_id: FrameNodeId = @enumFromInt(3);
+    const outer_id: FrameNodeId = @enumFromInt(4);
     const inner_columns = [_]style.GridTrack{.{ .fixed = 160 }};
     const inner_rows = [_]style.GridTrack{.{ .fixed = 100 }};
     const outer_columns = [_]style.GridTrack{.{ .fixed = 100 }};
@@ -502,9 +507,9 @@ test "grid display none zeroes its subtree" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const hidden_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const hidden_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 40 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -531,7 +536,7 @@ test "grid rejects non-finite available size" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const container_id: Id = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(1);
         const columns = [_]style.GridTrack{.{ .fixed = 40 }};
         const rows = [_]style.GridTrack{.{ .fixed = 20 }};
         try appendContainer(&tree, container_id, .root, fixedContainer(40, 20, columns[0..], rows[0..]));
@@ -551,9 +556,9 @@ test "grid indefinite fr track sizing scales proportionally to max fr contributi
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 2 } };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -594,10 +599,10 @@ test "grid multi-track span includes track gaps when comparing item size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const spanning_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const spanning_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{ .auto, .auto, .auto };
     const rows = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
 
@@ -642,8 +647,8 @@ test "grid track minmax expands non-fr tracks up to max limit before fr tracks" 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{
         .{ .minmax = .{
             .min = .{ .fixed = 10 },
@@ -679,8 +684,8 @@ test "grid item auto margins absorb space under stretch alignment" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 40 }};
 
@@ -708,9 +713,9 @@ test "grid fit-content limit does not undercut automatic minimum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{
         .{ .fit_content = .{ .length = 50 } },
         .{ .fit_content = .{ .length = 50 } },
@@ -746,9 +751,9 @@ test "grid fit-content percentage caps track against definite axis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const marker_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const marker_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{
         .{ .fit_content = .{ .percent = 0.5 } },
         .{ .fixed = 30 },
@@ -784,9 +789,9 @@ test "grid minmax fit-content maximum does not undercut fixed minimum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const marker_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const marker_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{
         .{ .minmax = .{
             .min = .{ .fixed = 60 },
@@ -826,8 +831,8 @@ test "grid fit-content percentage is unbounded against indefinite axis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fit_content = .{ .percent = 0.5 } }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -855,8 +860,8 @@ test "grid measureNatural treats indefinite fit-content percentage as unbounded"
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fit_content = .{ .percent = 0.5 } }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -900,8 +905,8 @@ test "grid min-content and max-content tracks size to item contributions" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.max_content};
     const rows = [_]style.GridTrack{.min_content};
 
@@ -924,10 +929,10 @@ test "grid fr track sizing with upper bound constraint freezing" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     // 3 columns: minmax(0, 60px), 1fr, 1fr. Container width = 240px.
     // Without freezing, each 1fr track would hypothetically get 240 / 3 = 80px.
@@ -964,8 +969,8 @@ test "grid multi-track span grows minmax non-fr tracks to max before fr tracks" 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{
         .{ .minmax = .{
             .min = .{ .fixed = 20 },
@@ -1001,9 +1006,9 @@ test "grid justify-content space distribution accounts for item margins and gaps
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     const columns = [_]style.GridTrack{
         .{ .fixed = 50 },
@@ -1052,9 +1057,9 @@ test "grid baseline alignment aligns items with differing font sizes to shared b
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     const columns = [_]style.GridTrack{
         .{ .fixed = 80 },
@@ -1062,21 +1067,21 @@ test "grid baseline alignment aligns items with differing font sizes to shared b
     };
     const rows = [_]style.GridTrack{.{ .fixed = 60 }};
 
-    // First item: font_size 20 -> ascent = 20 * 0.8 = 16
+    // First item: a 20px request -> ascent = 20 * 0.8 = 16
     var first = leafStyle();
     first.size = .{ .width = .{ .length = 60 }, .height = .{ .length = 20 } };
     first.grid_align_self = .baseline;
     try appendLeaf(&tree, first_id, container_id, first, .{ .label = .{ .text = "First" } });
     const first_node = tree.node(first_id) orelse return error.TestUnexpectedResult;
-    first_node.font_size = 20;
+    first_node.text_input = &.{ .style = .{ .font_fields = .{ .size = 20 } } };
 
-    // Second item: font_size 40 -> ascent = 40 * 0.8 = 32
+    // Second item: a 40px request -> ascent = 40 * 0.8 = 32
     var second = leafStyle();
     second.size = .{ .width = .{ .length = 60 }, .height = .{ .length = 40 } };
     second.grid_align_self = .baseline;
     try appendLeaf(&tree, second_id, container_id, second, .{ .label = .{ .text = "Second" } });
     const second_node = tree.node(second_id) orelse return error.TestUnexpectedResult;
-    second_node.font_size = 40;
+    second_node.text_input = &.{ .style = .{ .font_fields = .{ .size = 40 } } };
 
     var container = fixedContainer(160, 60, columns[0..], rows[0..]);
     container.grid_align_items = .baseline;
@@ -1097,9 +1102,9 @@ test "grid absolute item positioned in grid area defined by grid-column 2 / 4 wi
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const in_flow_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const in_flow_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     const columns = [_]style.GridTrack{
         .{ .fixed = 50 },
@@ -1149,9 +1154,9 @@ test "grid percentage tracks 50% 50% in definite container" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     const columns = [_]style.GridTrack{
         .{ .percent = 0.5 },
@@ -1185,9 +1190,9 @@ test "grid fr floor freeze respects track base before redistribution" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 1 } };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
@@ -1219,9 +1224,9 @@ test "grid minmax track clamps at max before fr track absorbs remainder" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     const columns = [_]style.GridTrack{
         .{ .minmax = .{
@@ -1258,8 +1263,8 @@ test "grid min-width clamp makes post-clamp 1fr track definite" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fr = 1 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -1303,9 +1308,9 @@ test "grid percent width items in two fr columns use grid-area width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 1 } };
     const rows = [_]style.GridTrack{.{ .fixed = 100 }};
 
@@ -1346,8 +1351,8 @@ test "grid RTL absolute auto insets use physical end static position" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fr = 1 }};
     const rows = [_]style.GridTrack{.{ .fixed = 160 }};
 
@@ -1385,8 +1390,8 @@ test "grid RTL absolute auto insets use physical end of definite area" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{
         .{ .fixed = 40 },
         .{ .fixed = 60 },
@@ -1430,8 +1435,8 @@ test "grid vertical scrollbar gutter reduces one fr column" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fr = 1 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -1452,8 +1457,8 @@ test "grid RTL vertical scrollbar gutter shifts content origin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fr = 1 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -1479,8 +1484,8 @@ test "grid horizontal scrollbar gutter reduces one fr row" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fr = 1 }};
 
@@ -1501,8 +1506,8 @@ test "grid content-box vertical scrollbar gutter reduces one fr column" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fr = 1 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -1524,8 +1529,8 @@ test "grid intrinsic border-box scrollbars add gutters without filling available
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.auto};
     const rows = [_]style.GridTrack{.auto};
 
@@ -1555,9 +1560,9 @@ test "grid fractional tracks below one leave remaining free space unused" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fr = 0.3 }, .{ .fr = 0.2 } };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -1583,9 +1588,9 @@ test "grid zero fr tracks retain intrinsic minimum widths" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fr = 0 }, .{ .fr = 0 } };
     const rows = [_]style.GridTrack{.{ .fixed = 50 }};
 
@@ -1622,9 +1627,9 @@ test "grid normal content alignment stretches auto columns" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .auto, .auto };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -1661,10 +1666,10 @@ test "grid center content alignment preserves signed overflow offset" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
     const rows = [_]style.GridTrack{
         .{ .fixed = 40 },
@@ -1694,10 +1699,10 @@ test "grid distributed content alignment falls back to start on overflow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
     const rows = [_]style.GridTrack{
         .{ .fixed = 40 },
@@ -1743,8 +1748,8 @@ test "negative grid inline free space distinguishes safe and unsafe center" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
         try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
         var container = fixedContainer(120, 40, columns[0..], rows[0..]);
         container.column_gap = .{ .length = 10 };
@@ -1784,8 +1789,8 @@ test "negative grid block free space distinguishes safe and unsafe center" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
         try appendLeaf(&tree, child_id, container_id, leafStyle(), .{ .spacer = .{} });
         var container = fixedContainer(40, 120, columns[0..], rows[0..]);
         container.row_gap = .{ .length = 10 };
@@ -1918,8 +1923,8 @@ test "oversized grid item distinguishes safe and unsafe alignment" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
         var child = leafStyle();
         child.size = .{
             .width = .{ .length = 40 },
@@ -1996,9 +2001,9 @@ test "positive grid free space makes all center safety variants equivalent" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const first_id: Id = @enumFromInt(1);
-        const second_id: Id = @enumFromInt(2);
-        const container_id: Id = @enumFromInt(3);
+        const first_id: FrameNodeId = @enumFromInt(1);
+        const second_id: FrameNodeId = @enumFromInt(2);
+        const container_id: FrameNodeId = @enumFromInt(3);
         var first = leafStyle();
         first.size = .{
             .width = .{ .length = 20 },
@@ -2034,13 +2039,13 @@ test "grid intrinsic cross spans batch non-flexible items before cross-flex item
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_span_id: Id = @enumFromInt(1);
-    const second_span_id: Id = @enumFromInt(2);
-    const first_marker_id: Id = @enumFromInt(3);
-    const second_marker_id: Id = @enumFromInt(4);
-    const third_marker_id: Id = @enumFromInt(5);
-    const fourth_marker_id: Id = @enumFromInt(6);
-    const container_id: Id = @enumFromInt(7);
+    const first_span_id: FrameNodeId = @enumFromInt(1);
+    const second_span_id: FrameNodeId = @enumFromInt(2);
+    const first_marker_id: FrameNodeId = @enumFromInt(3);
+    const second_marker_id: FrameNodeId = @enumFromInt(4);
+    const third_marker_id: FrameNodeId = @enumFromInt(5);
+    const fourth_marker_id: FrameNodeId = @enumFromInt(6);
+    const container_id: FrameNodeId = @enumFromInt(7);
     const tracks = [_]style.GridTrack{ .{ .fr = 1 }, .auto, .auto, .auto };
 
     var first_span = leafStyle();
@@ -2073,7 +2078,7 @@ test "grid intrinsic cross spans batch non-flexible items before cross-flex item
     };
     try appendLeaf(&tree, second_span_id, container_id, second_span, .{ .spacer = .{} });
 
-    const marker_ids = [_]Id{
+    const marker_ids = [_]FrameNodeId{
         first_marker_id,
         second_marker_id,
         third_marker_id,
@@ -2119,10 +2124,10 @@ test "grid cross-span intrinsic deficit grows flexible row before auto row" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const first_marker_id: Id = @enumFromInt(2);
-    const second_marker_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const first_marker_id: FrameNodeId = @enumFromInt(2);
+    const second_marker_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
     const rows = [_]style.GridTrack{ .{ .fr = 1 }, .auto };
 
@@ -2167,9 +2172,9 @@ test "grid zero fr track receives no positive free space share" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fr = 0 }, .{ .fr = 1 } };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -2203,9 +2208,9 @@ test "grid positive fr tracks divide free space by weight" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 3 } };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -2239,10 +2244,10 @@ test "grid zero fr absorbs cross-span intrinsic deficit before auto track" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const first_marker_id: Id = @enumFromInt(2);
-    const second_marker_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const first_marker_id: FrameNodeId = @enumFromInt(2);
+    const second_marker_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const tracks = [_]style.GridTrack{ .{ .fr = 0 }, .auto };
 
     var spanning = leafStyle();
@@ -2288,10 +2293,10 @@ test "grid zero fr cross-span intrinsic deficit falls back to equal growth" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const first_marker_id: Id = @enumFromInt(2);
-    const second_marker_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const first_marker_id: FrameNodeId = @enumFromInt(2);
+    const second_marker_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const tracks = [_]style.GridTrack{ .{ .fr = 0 }, .{ .fr = 0 } };
 
     var spanning = leafStyle();
@@ -2337,10 +2342,10 @@ test "grid minmax zero fr cross-span deficit leaves auto track at zero" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const first_marker_id: Id = @enumFromInt(2);
-    const second_marker_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const first_marker_id: FrameNodeId = @enumFromInt(2);
+    const second_marker_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const tracks = [_]style.GridTrack{
         .{ .minmax = .{
             .min = .{ .fixed = 0 },
@@ -2395,12 +2400,12 @@ test "grid equal-span intrinsic batches are source-order independent" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const second_third_span_id: Id = @enumFromInt(1);
-        const first_second_span_id: Id = @enumFromInt(2);
-        const first_marker_id: Id = @enumFromInt(3);
-        const second_marker_id: Id = @enumFromInt(4);
-        const third_marker_id: Id = @enumFromInt(5);
-        const container_id: Id = @enumFromInt(6);
+        const second_third_span_id: FrameNodeId = @enumFromInt(1);
+        const first_second_span_id: FrameNodeId = @enumFromInt(2);
+        const first_marker_id: FrameNodeId = @enumFromInt(3);
+        const second_marker_id: FrameNodeId = @enumFromInt(4);
+        const third_marker_id: FrameNodeId = @enumFromInt(5);
+        const container_id: FrameNodeId = @enumFromInt(6);
         const columns = [_]style.GridTrack{ .auto, .auto, .auto };
         const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -2446,7 +2451,7 @@ test "grid equal-span intrinsic batches are source-order independent" {
             .{ .spacer = .{} },
         );
 
-        const marker_ids = [_]Id{
+        const marker_ids = [_]FrameNodeId{
             first_marker_id,
             second_marker_id,
             third_marker_id,
@@ -2529,10 +2534,10 @@ test "grid indefinite flex crossing routes intrinsic deficit to fr track" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const spanning_id: Id = @enumFromInt(1);
-    const fr_marker_id: Id = @enumFromInt(2);
-    const auto_marker_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const spanning_id: FrameNodeId = @enumFromInt(1);
+    const fr_marker_id: FrameNodeId = @enumFromInt(2);
+    const auto_marker_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{ .{ .fr = 1 }, .auto };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -2612,11 +2617,11 @@ test "grid flexible span contributions batch before final fr distribution" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const spanning_id: Id = @enumFromInt(2);
-    const first_marker_id: Id = @enumFromInt(3);
-    const second_marker_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const spanning_id: FrameNodeId = @enumFromInt(2);
+    const first_marker_id: FrameNodeId = @enumFromInt(3);
+    const second_marker_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
     const columns = [_]style.GridTrack{ .{ .fr = 1 }, .{ .fr = 1 } };
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -2708,8 +2713,8 @@ test "grid align self-start stays at block start across direction mismatch" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 60 }};
     const rows = [_]style.GridTrack{.{ .fixed = 40 }};
 
@@ -2737,8 +2742,8 @@ test "grid align self-end stays at block end across direction mismatch" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 60 }};
     const rows = [_]style.GridTrack{.{ .fixed = 40 }};
 
@@ -2766,9 +2771,9 @@ test "grid justify self start and end flip across direction mismatch" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const self_start_id: Id = @enumFromInt(1);
-    const self_end_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const self_start_id: FrameNodeId = @enumFromInt(1);
+    const self_end_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 60 }};
     const rows = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
 
@@ -2853,10 +2858,10 @@ test "grid negative line prepends implicit columns before the explicit grid" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const negative_id: Id = @enumFromInt(1);
-        const auto_id: Id = @enumFromInt(2);
-        const second_row_id: Id = @enumFromInt(3);
-        const container_id: Id = @enumFromInt(4);
+        const negative_id: FrameNodeId = @enumFromInt(1);
+        const auto_id: FrameNodeId = @enumFromInt(2);
+        const second_row_id: FrameNodeId = @enumFromInt(3);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         var negative = leafStyle();
         negative.writing_direction = direction;
@@ -2912,9 +2917,9 @@ test "grid row flow places column-definite row-auto items in source order" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const auto_id: Id = @enumFromInt(1);
-        const column_definite_id: Id = @enumFromInt(2);
-        const container_id: Id = @enumFromInt(3);
+        const auto_id: FrameNodeId = @enumFromInt(1);
+        const column_definite_id: FrameNodeId = @enumFromInt(2);
+        const container_id: FrameNodeId = @enumFromInt(3);
 
         try appendLeaf(&tree, auto_id, container_id, leafStyle(), .{ .spacer = .{} });
 
@@ -2974,10 +2979,10 @@ test "grid dense row flow places column-definite row-auto items in source order"
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_auto_id: Id = @enumFromInt(1);
-    const second_auto_id: Id = @enumFromInt(2);
-    const reserved_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_auto_id: FrameNodeId = @enumFromInt(1);
+    const second_auto_id: FrameNodeId = @enumFromInt(2);
+    const reserved_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{
         .{ .fixed = 20 },
         .{ .fixed = 20 },
@@ -3010,8 +3015,8 @@ test "grid positive line beyond 1024 creates an implicit auto track" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
     const auto_rows = [_]style.GridTrack{.{ .fixed = 0 }};
 
@@ -3039,8 +3044,8 @@ test "grid negative line beyond 1024 prepends an implicit auto track" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
     const rows: []const style.GridTrack = &.{};
     const auto_rows = [_]style.GridTrack{.{ .fixed = 0 }};
@@ -3084,10 +3089,10 @@ test "grid multi-span auto tracks mirror taffy issue 624 in both directions" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const first_id: Id = @enumFromInt(1);
-        const second_id: Id = @enumFromInt(2);
-        const third_id: Id = @enumFromInt(3);
-        const container_id: Id = @enumFromInt(4);
+        const first_id: FrameNodeId = @enumFromInt(1);
+        const second_id: FrameNodeId = @enumFromInt(2);
+        const third_id: FrameNodeId = @enumFromInt(3);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         var first = leafStyle();
         first.writing_direction = direction;
@@ -3161,11 +3166,11 @@ test "grid absolute placement uses the parent padding and border frame" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const fourth_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const fourth_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
 
     const empty_tracks: []const style.GridTrack = &.{};
     const absolute_size: style.DimensionSize = .{
@@ -3255,8 +3260,8 @@ test "grid absolute column start defaults its opposite side to the padding frame
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{
         .{ .fixed = 40 },
         .{ .fixed = 40 },
@@ -3299,7 +3304,7 @@ test "grid absolute justify-self positions sized items across the containing are
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const container_id: Id = @enumFromInt(9);
+    const container_id: FrameNodeId = @enumFromInt(9);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 100 }};
     const justifies = [_]style.AlignSelf{
@@ -3314,7 +3319,7 @@ test "grid absolute justify-self positions sized items across the containing are
     };
     const widths = [_]f32{ 20, 60, 20, 60, 20, 60, 20, 60 };
     const expected_x = [_]f32{ 0, 0, 80, 40, 40, 20, 0, 0 };
-    const child_ids = [_]Id{
+    const child_ids = [_]FrameNodeId{
         @enumFromInt(1),
         @enumFromInt(2),
         @enumFromInt(3),
@@ -3343,7 +3348,7 @@ test "grid absolute justify-self positions sized items across the containing are
         fixedContainer(100, 100, columns[0..], rows[0..]),
     );
     for (0..justifies.len) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         try tree.appendChild(container_id, id);
     }
 
@@ -3351,7 +3356,7 @@ test "grid absolute justify-self positions sized items across the containing are
 
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
     for (expected_x, widths, 0..) |x, width, index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         try expectRelative(&tree, id, .{ .x = x, .y = 0, .w = width, .h = width });
     }
 }
@@ -3360,8 +3365,8 @@ test "grid absolute full insets resolve percentage frame before aspect ratio" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const empty_tracks: []const style.GridTrack = &.{};
 
     var absolute = leafStyle();
@@ -3414,11 +3419,11 @@ test "grid negative align-content distribution preserves signed row offsets in R
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const inner_id: Id = @enumFromInt(10);
-        const outer_id: Id = @enumFromInt(11);
+        const inner_id: FrameNodeId = @enumFromInt(10);
+        const outer_id: FrameNodeId = @enumFromInt(11);
 
         for (1..10) |child_number| {
-            const child_id: Id = @enumFromInt(@as(u32, @intCast(child_number)));
+            const child_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_number)));
             var child = leafStyle();
             child.writing_direction = .rtl;
             try appendLeaf(&tree, child_id, inner_id, child, .{ .spacer = .{} });
@@ -3432,7 +3437,7 @@ test "grid negative align-content distribution preserves signed row offsets in R
         inner.grid_justify_content = .center;
         try appendContainer(&tree, inner_id, outer_id, inner);
         for (1..10) |child_number| {
-            const child_id: Id = @enumFromInt(@as(u32, @intCast(child_number)));
+            const child_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_number)));
             try tree.appendChild(inner_id, child_id);
         }
 
@@ -3457,7 +3462,7 @@ test "grid negative align-content distribution preserves signed row offsets in R
         try expectRelative(&tree, outer_id, .{ .x = 0, .y = 0, .w = 360, .h = 360 });
         try expectRelative(&tree, inner_id, .{ .x = 120, .y = 0, .w = 120, .h = 120 });
         for (1..10) |child_number| {
-            const child_id: Id = @enumFromInt(@as(u32, @intCast(child_number)));
+            const child_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_number)));
             const child_index = child_number - 1;
             const row_index = child_index / 3;
             const column_index = child_index % 3;
@@ -3484,9 +3489,9 @@ test "grid baseline propagation keeps simple RTL rows on their shared grid" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 50 }};
     const empty_rows: []const style.GridTrack = &.{};
 
@@ -3535,8 +3540,8 @@ test "grid safe and unsafe align-self control oversized item overflow" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
         var child = leafStyle();
         child.size = .{
             .width = .{ .length = 50 },
@@ -3568,7 +3573,7 @@ test "grid definite percentage column gap expands max-content span tracks" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const container_id: Id = @enumFromInt(10);
+    const container_id: FrameNodeId = @enumFromInt(10);
     const columns = [_]style.GridTrack{
         .{ .fixed = 40 },
         .max_content,
@@ -3581,7 +3586,7 @@ test "grid definite percentage column gap expands max-content span tracks" {
     };
 
     for (0..9) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         var child = leafStyle();
         if (index == 1) {
             child.grid_column.start = .{ .span = 2 };
@@ -3598,7 +3603,7 @@ test "grid definite percentage column gap expands max-content span tracks" {
     container.row_gap = .{ .length = 0 };
     try appendContainer(&tree, container_id, .root, container);
     for (0..9) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         try tree.appendChild(container_id, id);
     }
 
@@ -3618,7 +3623,7 @@ test "grid definite percentage column gap expands max-content span tracks" {
     };
     try expectRelative(&tree, container_id, expected[0]);
     for (1..10) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index)));
         try expectRelative(&tree, id, expected[index]);
     }
 }
@@ -3627,7 +3632,7 @@ test "grid indefinite percentage gap stays zero intrinsically then resolves at f
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const container_id: Id = @enumFromInt(10);
+    const container_id: FrameNodeId = @enumFromInt(10);
     const columns = [_]style.GridTrack{
         .{ .fixed = 40 },
         .max_content,
@@ -3640,7 +3645,7 @@ test "grid indefinite percentage gap stays zero intrinsically then resolves at f
     };
 
     for (0..9) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         var child = leafStyle();
         if (index == 1) {
             child.grid_column.start = .{ .span = 2 };
@@ -3658,7 +3663,7 @@ test "grid indefinite percentage gap stays zero intrinsically then resolves at f
     container.row_gap = .{ .length = 0 };
     try appendContainer(&tree, container_id, .root, container);
     for (0..9) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index + 1)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index + 1)));
         try tree.appendChild(container_id, id);
     }
 
@@ -3678,7 +3683,7 @@ test "grid indefinite percentage gap stays zero intrinsically then resolves at f
     };
     try expectRelative(&tree, container_id, expected[0]);
     for (1..10) |index| {
-        const id: Id = @enumFromInt(@as(u32, @intCast(index)));
+        const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index)));
         try expectRelative(&tree, id, expected[index]);
     }
 }
@@ -3687,9 +3692,9 @@ test "grid prepended implicit auto track stretches before explicit track" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const auto_id: Id = @enumFromInt(1);
-    const explicit_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const auto_id: FrameNodeId = @enumFromInt(1);
+    const explicit_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 20 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -3742,9 +3747,9 @@ test "grid RTL start uses container edge while self-start uses child edge" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const start_id: Id = @enumFromInt(1);
-    const self_start_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const start_id: FrameNodeId = @enumFromInt(1);
+    const self_start_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
 
@@ -3798,9 +3803,9 @@ test "grid RTL absolute start and end use container edges" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const start_id: Id = @enumFromInt(1);
-    const end_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const start_id: FrameNodeId = @enumFromInt(1);
+    const end_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
     const auto_insets: style.Insets = .{
@@ -3848,8 +3853,8 @@ test "grid absolute intrinsic auto size is excluded from default stretch" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 100 }};
 
@@ -3880,8 +3885,8 @@ test "grid absolute aspect ratio resolves height before opposing insets" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 200 }};
 
@@ -3912,13 +3917,49 @@ test "grid absolute aspect ratio resolves height before opposing insets" {
 
     try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
 }
+test "grid absolute aspect ratio derives width from definite height" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
+    const columns = [_]style.GridTrack{.{ .fixed = 100 }};
+    const rows = [_]style.GridTrack{.{ .fixed = 200 }};
+
+    var child = leafStyle();
+    child.position = .absolute;
+    child.aspect_ratio = 2;
+    child.size = .{
+        .width = .auto,
+        .height = .{ .length = 50 },
+    };
+    child.inset = .{
+        .top = .{ .length = 0 },
+        .right = .auto,
+        .bottom = .{ .length = 0 },
+        .left = .auto,
+    };
+    try appendLeaf(&tree, child_id, container_id, child, .{ .spacer = .{ .size = 20 } });
+
+    try appendContainer(
+        &tree,
+        container_id,
+        .root,
+        fixedContainer(100, 200, columns[0..], rows[0..]),
+    );
+    try tree.appendChild(container_id, child_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 200 }, null);
+
+    try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 100, .h = 50 });
+}
 
 test "grid absolute auto margins do not shift inset-positioned item" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 100 }};
 
@@ -3959,9 +4000,9 @@ test "grid cyclic percentage row gap resolves after intrinsic auto height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{ .{ .fixed = 40 }, .{ .fixed = 40 } };
 
@@ -3997,9 +4038,9 @@ test "definite Grid availability does not define an auto percentage axis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 10 }};
     const rows = [_]style.GridTrack{ .{ .fixed = 10 }, .{ .fixed = 10 } };
 
@@ -4042,9 +4083,9 @@ test "grid bounded occupancy lays out a two by ten-thousand definite span" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const definite_id: Id = @enumFromInt(1);
-    const auto_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const definite_id: FrameNodeId = @enumFromInt(1);
+    const auto_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.{ .fixed = 1 }} ** 10_000;
     const rows = [_]style.GridTrack{ .{ .fixed = 1 }, .{ .fixed = 1 } };
 
@@ -4082,10 +4123,10 @@ test "grid sparse occupancy jumps past collision rectangles" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_blocker_id: Id = @enumFromInt(1);
-    const second_blocker_id: Id = @enumFromInt(2);
-    const spanning_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_blocker_id: FrameNodeId = @enumFromInt(1);
+    const second_blocker_id: FrameNodeId = @enumFromInt(2);
+    const spanning_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{.{ .fixed = 1 }} ** 5_000;
     const rows = [_]style.GridTrack{
         .{ .fixed = 1 },
@@ -4153,9 +4194,9 @@ test "grid phase three pre-sizes implicit columns before auto placement" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const spanning_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const spanning_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows: []const style.GridTrack = &.{};
     const auto_columns = [_]style.GridTrack{.{ .fixed = 20 }};
@@ -4188,9 +4229,9 @@ test "grid sparse phase two resets column cursor for each definite row" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
 
@@ -4224,8 +4265,8 @@ test "grid absolute explicit stretch preserves intrinsic auto size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 100 }};
 
@@ -4259,8 +4300,8 @@ test "grid RTL absolute static position uses padding box end" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -4292,10 +4333,10 @@ test "grid sparse phase two advances every spanned row cursor" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const blocker_id: Id = @enumFromInt(1);
-    const spanning_id: Id = @enumFromInt(2);
-    const later_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const blocker_id: FrameNodeId = @enumFromInt(1);
+    const spanning_id: FrameNodeId = @enumFromInt(2);
+    const later_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
     const columns = [_]style.GridTrack{
         .{ .fixed = 20 },
         .{ .fixed = 20 },
@@ -4346,9 +4387,9 @@ test "grid sparse phase four wraps decreasing definite columns" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const later_column_id: Id = @enumFromInt(1);
-    const earlier_column_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const later_column_id: FrameNodeId = @enumFromInt(1);
+    const earlier_column_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{
         .{ .fixed = 20 },
         .{ .fixed = 20 },
@@ -4398,13 +4439,13 @@ test "grid contribution phases separate minima and growth limits across fit and 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const growth_id: Id = @enumFromInt(1);
-    const fit_id: Id = @enumFromInt(2);
-    const spanning_id: Id = @enumFromInt(3);
-    const first_marker_id: Id = @enumFromInt(4);
-    const second_marker_id: Id = @enumFromInt(5);
-    const third_marker_id: Id = @enumFromInt(6);
-    const container_id: Id = @enumFromInt(7);
+    const growth_id: FrameNodeId = @enumFromInt(1);
+    const fit_id: FrameNodeId = @enumFromInt(2);
+    const spanning_id: FrameNodeId = @enumFromInt(3);
+    const first_marker_id: FrameNodeId = @enumFromInt(4);
+    const second_marker_id: FrameNodeId = @enumFromInt(5);
+    const third_marker_id: FrameNodeId = @enumFromInt(6);
+    const container_id: FrameNodeId = @enumFromInt(7);
     const columns = [_]style.GridTrack{
         .{ .minmax = .{
             .min = .auto,
@@ -4478,7 +4519,7 @@ test "grid contribution phases separate minima and growth limits across fit and 
         .{ .spacer = .{ .size = 70 } },
     );
 
-    const marker_ids = [_]Id{ first_marker_id, second_marker_id, third_marker_id };
+    const marker_ids = [_]FrameNodeId{ first_marker_id, second_marker_id, third_marker_id };
     for (marker_ids, 0..) |marker_id, index| {
         var marker = leafStyle();
         marker.grid_column = .{
@@ -4553,9 +4594,9 @@ test "grid auto-fit repeat collapses empty track and adjacent gutter" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const first_id: Id = @enumFromInt(1);
-        const trailing_id: Id = @enumFromInt(2);
-        const container_id: Id = @enumFromInt(3);
+        const first_id: FrameNodeId = @enumFromInt(1);
+        const trailing_id: FrameNodeId = @enumFromInt(2);
+        const container_id: FrameNodeId = @enumFromInt(3);
 
         var first = leafStyle();
         first.grid_column = .{
@@ -4602,18 +4643,18 @@ test "grid cyclic implicit list representation gap preserves source order on bot
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const negative_ids = [_]Id{
+    const negative_ids = [_]FrameNodeId{
         @enumFromInt(1),
         @enumFromInt(2),
         @enumFromInt(3),
     };
-    const explicit_id: Id = @enumFromInt(4);
-    const positive_ids = [_]Id{
+    const explicit_id: FrameNodeId = @enumFromInt(4);
+    const positive_ids = [_]FrameNodeId{
         @enumFromInt(5),
         @enumFromInt(6),
         @enumFromInt(7),
     };
-    const container_id: Id = @enumFromInt(8);
+    const container_id: FrameNodeId = @enumFromInt(8);
     const negative_lines = [_]i16{ -5, -4, -3 };
     const positive_lines = [_]i16{ 2, 3, 4 };
     const auto_columns = [_]style.GridTrack{
@@ -4699,8 +4740,8 @@ test "grid lays out a child beyond the 10000-track cap" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     var child = leafStyle();
     child.grid_column = .{
         .start = .{ .line = 10_001 },
@@ -4724,17 +4765,18 @@ test "grid lays out a child beyond the 10000-track cap" {
     try expectRelative(&tree, child_id, .{ .x = 10_000, .y = 0, .w = 1, .h = 1 });
 }
 
-test "grid overlarge line and span saturate at ten-thousand-track repeat boundary" {
+test "grid preserves representable line and span limits" {
     {
-        var columns = try std.testing.allocator.alloc(style.GridTrack, 10_000);
+        const track_count: usize = 10_001;
+        var columns = try std.testing.allocator.alloc(style.GridTrack, track_count);
         defer std.testing.allocator.free(columns);
         for (columns) |*track| track.* = .{ .fixed = 1 };
         const rows = [_]style.GridTrack{.{ .fixed = 1 }};
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
         var child = leafStyle();
         child.grid_column = .{
             .start = .{ .line = std.math.maxInt(i16) },
@@ -4749,26 +4791,28 @@ test "grid overlarge line and span saturate at ten-thousand-track repeat boundar
             &tree,
             container_id,
             .root,
-            fixedContainer(10_000, 1, columns[0..], rows[0..]),
+            fixedContainer(10_001, 1, columns[0..], rows[0..]),
         );
         try tree.appendChild(container_id, child_id);
 
-        try layoutContainer(&tree, container_id, .{ .width = 10_000, .height = 1 }, null);
+        try layoutContainer(&tree, container_id, .{ .width = 10_001, .height = 1 }, null);
 
-        // The oversized positive line resolves to the final bounded track.
-        try expectRelative(&tree, child_id, .{ .x = 9_999, .y = 0, .w = 1, .h = 1 });
+        // The representable positive line remains distinct from the old
+        // ten-thousand-track clamp.
+        try expectRelative(&tree, child_id, .{ .x = 10_001, .y = 0, .w = 0, .h = 1 });
     }
 
     {
-        var columns = try std.testing.allocator.alloc(style.GridTrack, 10_000);
+        const track_count: usize = 10_001;
+        var columns = try std.testing.allocator.alloc(style.GridTrack, track_count);
         defer std.testing.allocator.free(columns);
         for (columns) |*track| track.* = .{ .fixed = 1 };
         const rows = [_]style.GridTrack{.{ .fixed = 1 }};
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
         var child = leafStyle();
         child.grid_column = .{
             .start = .{ .line = 1 },
@@ -4783,14 +4827,15 @@ test "grid overlarge line and span saturate at ten-thousand-track repeat boundar
             &tree,
             container_id,
             .root,
-            fixedContainer(10_000, 1, columns[0..], rows[0..]),
+            fixedContainer(10_001, 1, columns[0..], rows[0..]),
         );
         try tree.appendChild(container_id, child_id);
 
-        try layoutContainer(&tree, container_id, .{ .width = 10_000, .height = 1 }, null);
+        try layoutContainer(&tree, container_id, .{ .width = 10_001, .height = 1 }, null);
 
-        // The oversized span saturates at the ten-thousand-track bound.
-        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 10_000, .h = 1 });
+        // The representable span keeps all explicit tracks instead of
+        // saturating at the old storage boundary.
+        try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 10_001, .h = 1 });
     }
 }
 
@@ -4798,8 +4843,8 @@ test "grid percentage margins defer in an indefinite intrinsic axis then resolve
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.max_content};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -4841,8 +4886,8 @@ test "grid border-box leaf measurement reports content-box known width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -4877,7 +4922,7 @@ test "grid border-box leaf measurement reports content-box known width" {
         &tree,
         container_id,
         .{ .width = 100, .height = 20 },
-        ContentBoxMeasureProbe.measure,
+        ContentBoxMeasureProbe.source,
     );
 
     const known_width = ContentBoxMeasureProbe.known_width orelse return error.TestUnexpectedResult;
@@ -4892,8 +4937,8 @@ test "grid auto-fill reserves suffix tracks when counting repeats" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const suffix_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const suffix_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const repeated_tracks = [_]style.GridTrack{.{ .fixed = 20 }};
     const columns = [_]style.GridTrack{
         .{ .repeat = .{
@@ -4930,8 +4975,8 @@ test "grid auto-fill uses definite minmax maximum for repeat count" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const suffix_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const suffix_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const repeated_tracks = [_]style.GridTrack{.{ .minmax = .{
         .min = .{ .fixed = 100 },
         .max = .{ .fixed = 200 },
@@ -4971,8 +5016,8 @@ test "grid auto-fill counts against a nonbinding maximum size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const repeated_tracks = [_]style.GridTrack{.{ .fixed = 100 }};
     const columns = [_]style.GridTrack{.{ .repeat = .{
         .kind = .auto_fill,
@@ -5007,8 +5052,8 @@ test "grid auto-fill min-only size creates repetitions that overflow minimum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const repeated_tracks = [_]style.GridTrack{.{ .fixed = 100 }};
     const columns = [_]style.GridTrack{.{ .repeat = .{
         .kind = .auto_fill,
@@ -5040,12 +5085,12 @@ test "grid auto-fill min-only size creates repetitions that overflow minimum" {
     try expectRelative(&tree, child_id, .{ .x = 200, .y = 0, .w = 100, .h = 20 });
 }
 
-test "grid zero-size auto-fill saturates before suffix truncation" {
+test "grid zero-size auto-fill uses a one-pixel repetition floor" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const repeated_tracks = [_]style.GridTrack{.{ .fixed = 0 }};
     const columns = [_]style.GridTrack{
         .{ .repeat = .{
@@ -5072,14 +5117,7 @@ test "grid zero-size auto-fill saturates before suffix truncation" {
     try appendContainer(&tree, container_id, .root, container);
     try tree.appendChild(container_id, child_id);
 
-    try layoutContainer(
-        &tree,
-        container_id,
-        .{ .width = 10_000, .height = 1 },
-        null,
-    );
-
-    // Saturation at 10,000 tracks truncates the one-pixel suffix.
+    try layoutContainer(&tree, container_id, .{ .width = 10_000, .height = 1 }, null);
     try expectRelative(&tree, child_id, .{ .x = 0, .y = 0, .w = 0, .h = 1 });
 }
 
@@ -5087,8 +5125,8 @@ test "grid negative explicit line resolves after auto-fill expansion" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const repeated_tracks = [_]style.GridTrack{.{ .fixed = 100 }};
     const columns = [_]style.GridTrack{.{ .repeat = .{
         .kind = .auto_fill,
@@ -5128,9 +5166,9 @@ test "grid direct relayout clears a subtree hidden after first layout" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const overflowing_id: Id = @enumFromInt(1);
-    const inner_id: Id = @enumFromInt(2);
-    const outer_id: Id = @enumFromInt(3);
+    const overflowing_id: FrameNodeId = @enumFromInt(1);
+    const inner_id: FrameNodeId = @enumFromInt(2);
+    const outer_id: FrameNodeId = @enumFromInt(3);
     const inner_columns = [_]style.GridTrack{.{ .fixed = 40 }};
     const inner_rows = [_]style.GridTrack{.{ .fixed = 20 }};
     const outer_columns = [_]style.GridTrack{.{ .fixed = 80 }};
@@ -5214,7 +5252,7 @@ test "grid nested intrinsic measurement stays within finite mode bound" {
     defer tree.deinit();
 
     const nesting_depth: usize = 6;
-    const leaf_id: Id = @enumFromInt(1);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
     const columns = [_]style.GridTrack{.{ .fixed = 10 }};
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
 
@@ -5228,8 +5266,8 @@ test "grid nested intrinsic measurement stays within finite mode bound" {
 
     var child_id = leaf_id;
     for (0..nesting_depth) |level| {
-        const grid_id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
-        const parent_id: Id = if (level + 1 == nesting_depth)
+        const grid_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(level + 2)));
+        const parent_id: FrameNodeId = if (level + 1 == nesting_depth)
             .root
         else
             @enumFromInt(@as(u32, @intCast(level + 3)));
@@ -5253,7 +5291,7 @@ test "grid nested intrinsic measurement stays within finite mode bound" {
         &tree,
         child_id,
         .{ .width = 100, .height = 20 },
-        NestedMeasureCounter.measure,
+        .{ .callback = NestedMeasureCounter.measure },
     );
 
     const request_mode_count: usize = 3 * 3;
@@ -5266,8 +5304,8 @@ test "grid content sizing ignores root constraints and stays on the target" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     const columns = [_]style.GridTrack{.max_content};
     const rows = [_]style.GridTrack{.max_content};
 
@@ -5301,7 +5339,7 @@ test "grid content sizing ignores root constraints and stays on the target" {
     ContentRootChildProbe.reset();
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = ContentRootChildProbe.measure,
+        .measure = ContentRootChildProbe.source,
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -5332,9 +5370,9 @@ test "grid content sizing does not leak through nested grid children" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
-    const inner_id: Id = @enumFromInt(2);
-    const outer_id: Id = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
+    const inner_id: FrameNodeId = @enumFromInt(2);
+    const outer_id: FrameNodeId = @enumFromInt(3);
     const columns = [_]style.GridTrack{.max_content};
     const rows = [_]style.GridTrack{.max_content};
 
@@ -5363,7 +5401,7 @@ test "grid content sizing does not leak through nested grid children" {
     ContentRootChildProbe.reset();
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = ContentRootChildProbe.measure,
+        .measure = ContentRootChildProbe.source,
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -5390,7 +5428,7 @@ test "grid content sizing converts known border only at the leaf callback" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
     var leaf = leafStyle();
     leaf.display = .grid;
     leaf.size = .{
@@ -5423,7 +5461,7 @@ test "grid content sizing converts known border only at the leaf callback" {
     ContentRootLeafProbe.reset();
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = ContentRootLeafProbe.measure,
+        .measure = ContentRootLeafProbe.source,
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -5453,7 +5491,7 @@ test "grid measurement cache identifies the complete sizing request" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: Id = @enumFromInt(1);
+    const leaf_id: FrameNodeId = @enumFromInt(1);
     var leaf = leafStyle();
     leaf.display = .grid;
     leaf.size = .{
@@ -5471,7 +5509,7 @@ test "grid measurement cache identifies the complete sizing request" {
     CacheIdentityProbe.reset();
     var context: layout_context.LayoutContext = .{
         .allocator = std.testing.allocator,
-        .measure = CacheIdentityProbe.measure,
+        .measure = CacheIdentityProbe.source,
         .measure_node = unreachableMeasureNode,
         .layout_node = unreachableLayoutNode,
     };
@@ -5532,12 +5570,18 @@ const ContentRootChildProbe = struct {
         saw_known_height = false;
     }
 
-    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        input: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         calls += 1;
         saw_known_width = saw_known_width or input.known_dimensions.width != null;
         saw_known_height = saw_known_height or input.known_dimensions.height != null;
         return .{ .width = 12, .height = 12 };
     }
+
+    const source: layout_context.MeasureSource = .{ .callback = measure };
 };
 
 const ContentRootLeafProbe = struct {
@@ -5549,11 +5593,17 @@ const ContentRootLeafProbe = struct {
         known_height = null;
     }
 
-    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        input: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         saw_known_width = saw_known_width or input.known_dimensions.width != null;
         if (input.known_dimensions.height) |height| known_height = height;
         return .{ .width = 17, .height = 13 };
     }
+
+    const source: layout_context.MeasureSource = .{ .callback = measure };
 };
 
 const CacheIdentityProbe = struct {
@@ -5563,10 +5613,16 @@ const CacheIdentityProbe = struct {
         calls = 0;
     }
 
-    fn measure(_: []const u8, _: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        _: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         calls += 1;
         return .{ .width = 20, .height = 10 };
     }
+
+    const source: layout_context.MeasureSource = .{ .callback = measure };
 };
 
 const ContentBoxMeasureProbe = struct {
@@ -5576,10 +5632,16 @@ const ContentBoxMeasureProbe = struct {
         known_width = null;
     }
 
-    fn measure(_: []const u8, input: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        input: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         if (input.known_dimensions.width) |width| known_width = width;
         return .{ .width = 0, .height = 0 };
     }
+
+    const source: layout_context.MeasureSource = .{ .callback = measure };
 };
 
 const NestedMeasureCounter = struct {
@@ -5589,8 +5651,182 @@ const NestedMeasureCounter = struct {
         calls = 0;
     }
 
-    fn measure(_: []const u8, _: layout_context.MeasureInput) widget.Size {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        _: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
         calls += 1;
         return .{ .width = 10, .height = 10 };
     }
+
+    const source: layout_context.MeasureSource = .{ .callback = measure };
 };
+/// A provider that shapes a first baseline of 8 inside a 40-tall box, so a
+/// baseline-aligned sibling needs a 32px shim to reach that shared line.
+const BaselineShimMeasure = struct {
+    fn measure(
+        _: ?*anyopaque,
+        _: []const u8,
+        _: layout_context.MeasureInput,
+    ) layout_context.LayoutError!layout_context.TextMeasurement {
+        return .{ .width = 10, .height = 40, .first_baseline = 8 };
+    }
+
+    const source: grid.MeasureSource = .{ .callback = measure };
+};
+test "grid baseline shim skips items that opt out of baseline alignment" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const donor_id: FrameNodeId = @enumFromInt(1);
+    const participant_id: FrameNodeId = @enumFromInt(2);
+    const outsider_id: FrameNodeId = @enumFromInt(3);
+    const probe_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
+
+    // Three columns so all three items share row 0; probe goes to row 1.
+    const columns = [_]style.GridTrack{
+        .{ .fixed = 30 },
+        .{ .fixed = 30 },
+        .{ .fixed = 30 },
+    };
+    const rows: []const style.GridTrack = &.{};
+    var participant_value = false;
+    var outsider_value = false;
+
+    // The donor is a textless leaf whose box is 40 tall; its bottom edge
+    // establishes the shared baseline at 40. The participant's caption
+    // shapes a baseline of 8 (via BaselineShimMeasure) in its own 40-tall
+    // box, so it needs a 32px shim to reach the shared line. The outsider
+    // opts out of baseline alignment (align-self: start) and is 48 tall,
+    // so if it incorrectly received the 32px shim its contribution would
+    // be 80 and the shared row would grow from 72 to 80. The probe in the
+    // next row reports the row's real height.
+    var donor = leafStyle();
+    donor.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 40 } };
+    try appendLeaf(&tree, donor_id, container_id, donor, .{ .spacer = .{} });
+
+    var participant = leafStyle();
+    participant.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 40 } };
+    try appendLeaf(&tree, participant_id, container_id, participant, .{
+        .checkbox = .{ .label = "B", .value = &participant_value },
+    });
+
+    var outsider = leafStyle();
+    outsider.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 48 } };
+    outsider.grid_align_self = .start;
+    try appendLeaf(&tree, outsider_id, container_id, outsider, .{
+        .checkbox = .{ .label = "C", .value = &outsider_value },
+    });
+
+    var probe = leafStyle();
+    probe.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 8 } };
+    try appendLeaf(&tree, probe_id, container_id, probe, .{ .spacer = .{} });
+
+    var container = fixedContainer(100, 100, columns[0..], rows);
+    container.grid_align_items = .baseline;
+    container.grid_justify_items = .start;
+    container.grid_align_content = .start;
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+
+    try tree.appendChild(container_id, donor_id);
+    try tree.appendChild(container_id, participant_id);
+    try tree.appendChild(container_id, outsider_id);
+    try tree.appendChild(container_id, probe_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = BaselineShimMeasure.source,
+    });
+
+    // The donor keeps the line at 40. The participant is shimmed down by 32
+    // so its own baseline of 8 meets the donor's 40.
+    try expectRelative(&tree, donor_id, .{ .x = 0, .y = 0, .w = 30, .h = 40 });
+    try expectRelative(&tree, participant_id, .{ .x = 30, .y = 32, .w = 30, .h = 40 });
+    // The outsider aligns to its own start edge and never receives a shim,
+    // so it sits at the row top rather than 32 below it.
+    try expectRelative(&tree, outsider_id, .{ .x = 60, .y = 0, .w = 30, .h = 48 });
+    // The shared row is 40 from the donor and 40 + 32 from the shimmed
+    // participant, never the 80 a leaked shim on the outsider would make it.
+    try expectRelative(&tree, probe_id, .{ .x = 0, .y = 72, .w = 30, .h = 8 });
+}
+
+test "grid baseline shim leaves a non participant row track unsized" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const donor_id: FrameNodeId = @enumFromInt(1);
+    const participant_id: FrameNodeId = @enumFromInt(2);
+    const outsider_id: FrameNodeId = @enumFromInt(3);
+    const probe_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
+    var participant_value = false;
+    var outsider_value = false;
+
+    // Same three-column layout, but the participant is only 8 tall so the
+    // shared row is 40 tall (donor's height). The outsider is 48 tall and
+    // opts out; if it were counted as a baseline participant it would
+    // donate a baseline of 8 and force a 32px shim on itself, pushing its
+    // contribution from 48 to 80 and growing the row from 48 to 80.
+    // The probe in the next row proves the row track stayed at 48.
+    const columns = [_]style.GridTrack{
+        .{ .fixed = 30 },
+        .{ .fixed = 30 },
+        .{ .fixed = 30 },
+    };
+    const rows: []const style.GridTrack = &.{};
+    var donor = leafStyle();
+    donor.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 40 } };
+    try appendLeaf(&tree, donor_id, container_id, donor, .{ .spacer = .{} });
+
+    var participant = leafStyle();
+    participant.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 8 } };
+    try appendLeaf(&tree, participant_id, container_id, participant, .{
+        .checkbox = .{ .label = "B", .value = &participant_value },
+    });
+
+    var outsider = leafStyle();
+    outsider.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 48 } };
+    outsider.grid_align_self = .start;
+    try appendLeaf(&tree, outsider_id, container_id, outsider, .{
+        .checkbox = .{ .label = "C", .value = &outsider_value },
+    });
+
+    var probe = leafStyle();
+    probe.size = .{ .width = .{ .length = 30 }, .height = .{ .length = 8 } };
+    try appendLeaf(&tree, probe_id, container_id, probe, .{ .spacer = .{} });
+
+    var container = fixedContainer(100, 100, columns[0..], rows);
+    container.grid_align_items = .baseline;
+    container.grid_justify_items = .start;
+    container.grid_align_content = .start;
+    container.grid_justify_content = .start;
+    try appendContainer(&tree, container_id, .root, container);
+
+    try tree.appendChild(container_id, donor_id);
+    try tree.appendChild(container_id, participant_id);
+    try tree.appendChild(container_id, outsider_id);
+    try tree.appendChild(container_id, probe_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = BaselineShimMeasure.source,
+    });
+
+    // The donor keeps the line at 40. The participant is shimmed down by 32
+    // so its own baseline of 8 meets the donor's 40.
+    try expectRelative(&tree, donor_id, .{ .x = 0, .y = 0, .w = 30, .h = 40 });
+    try expectRelative(&tree, participant_id, .{ .x = 30, .y = 32, .w = 30, .h = 8 });
+    // The outsider aligns to its own start edge and never receives a shim,
+    // so it sits at the row top and the row track stays at 48 (donor's 40
+    // and the participant's 40 from shimmed 8). A leaked shim would push
+    // the outsider's contribution to 80 and the row to 80.
+    try expectRelative(&tree, outsider_id, .{ .x = 60, .y = 0, .w = 30, .h = 48 });
+    // The shared row is 40 from the donor and 40 from the shimmed
+    // participant, never the 80 a leaked shim on the outsider would make it.
+    try expectRelative(&tree, probe_id, .{ .x = 0, .y = 48, .w = 30, .h = 8 });
+}

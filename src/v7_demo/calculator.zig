@@ -4,6 +4,10 @@
 //!   zig build calculator
 //!   zig build v7 -- --calculator --sim script.json
 //!
+//! Every container here either paints its own fill or is `.transparent`, so
+//! none of them falls back to the framework container grey and patchworks the
+//! card surface behind it.
+//!
 //! Arithmetic is immediate-execution; all state persists in CalculatorApp.
 
 const std = @import("std");
@@ -16,8 +20,6 @@ const WidgetTree = nogui.WidgetTree;
 const WidgetNode = nogui.WidgetNode;
 const App = nogui.App;
 
-const srgbToOklab = @import("text.zig").srgbToOklab;
-
 // ── Palette (same dark theme as the TodoApp demo; sRGB in, Oklab render) ──
 const c_card: [4]f32 = .{ 0.13, 0.14, 0.19, 1 };
 const c_border: [4]f32 = .{ 0.24, 0.25, 0.33, 0.55 };
@@ -28,6 +30,11 @@ const c_text_muted: [4]f32 = .{ 0.46, 0.47, 0.56, 1 };
 const c_accent: [4]f32 = .{ 0.40, 0.34, 0.78, 1 };
 const c_on_accent: [4]f32 = .{ 0.95, 0.94, 1, 1 };
 const c_error: [4]f32 = .{ 0.85, 0.36, 0.39, 1 };
+const card_shadow = [_]nogui.paint.Shadow{.{
+    .color = .{ .srgb = .{ .r = 0, .g = 0, .b = 0, .a = 0.35 } },
+    .offset = .{ .x = 0, .y = 3 },
+    .blur = 6,
+}};
 
 const entry_capacity = 32;
 
@@ -102,18 +109,20 @@ pub const CalculatorApp = struct {
             .border_color = c_border_strong,
             .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
             .fill = c_key,
-            .gradient = srgbToOklab(c_key),
         };
 
         pub fn draw(self: *Keypad, ctx: *DrawCtx) !void {
             _ = self;
             for (0..5) |row_index| {
                 const key_index_start = row_index * 4;
+                // The row only arranges four keys, so it inherits the
+                // calculator card's c_card surface. A zero-alpha `.fill` is
+                // not an explicit fill and would repaint the card in the
+                // framework container grey, so the row is `.transparent`.
                 _ = try ctx.row(.{
                     .border_color = .{ 0, 0, 0, 1 },
                     .radius = .{},
-                    .fill = .{ 0, 0, 0, 0 },
-                    .gradient = .{ 0, 0, 0, 0 },
+                    .transparent = true,
                 });
                 defer ctx.pop();
 
@@ -123,6 +132,7 @@ pub const CalculatorApp = struct {
                 ) |key, key_index| {
                     const fill = if (key.accent) c_accent else default_paint.fill;
                     _ = try ctx.button(.{
+                        .key = .{ .u64 = @as(u64, @intCast(key_index)) },
                         .label = key.label,
                         .on_click_with_data = nogui.bind(Keypad.onKey, key_index),
                         .color = if (key.accent) c_on_accent else c_text,
@@ -132,7 +142,6 @@ pub const CalculatorApp = struct {
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = if (key.accent) c_accent else default_paint.border_color,
                         .fill = fill,
-                        .gradient = if (key.accent) srgbToOklab(c_accent) else default_paint.gradient,
                     });
                 }
             }
@@ -304,8 +313,7 @@ pub const CalculatorApp = struct {
             .radius = .{ .top = 14, .right = 14, .bottom = 14, .left = 14 },
             .padding = .{ .top = 14, .right = 14, .bottom = 14, .left = 14 },
             .fill = c_card,
-            .gradient = srgbToOklab(c_card),
-            .shadow = 6,
+            .shadows = &card_shadow,
         });
         defer ctx.pop();
 
@@ -326,7 +334,6 @@ pub const CalculatorApp = struct {
                 .border_color = c_border_strong,
                 .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                 .fill = c_key,
-                .gradient = srgbToOklab(c_key),
             });
             defer ctx.pop();
 
@@ -353,6 +360,10 @@ fn buildTree(app: *CalculatorApp) !WidgetTree {
     var tree = WidgetTree.init(alloc);
     var ctx: DrawCtx = .{ .tree = &tree, .arena = alloc };
     try app.draw(&ctx);
+    try nogui.layout.layoutTree(&tree, .{
+        .allocator = alloc,
+        .available = .{ .width = 360, .height = 520 },
+    });
     return tree;
 }
 
@@ -368,6 +379,15 @@ fn findButton(tree: *const WidgetTree, label: []const u8) ?*const WidgetNode {
     return null;
 }
 
+/// The display is the one label whose RESOLVED request carries the large
+/// size. A node holds no scalar size any more: the resolved `NodeText` the
+/// layout measured and the scene painted is the one place a size lives, so
+/// this reads the request the frame really used.
+fn isDisplaySized(node: *const WidgetNode) bool {
+    const request = node.text_request orelse return false;
+    return request.style.font.size > 20;
+}
+
 fn displayLabel(
     arena: std.mem.Allocator,
     tree: *const WidgetTree,
@@ -376,7 +396,7 @@ fn displayLabel(
     const display = try app.displayText(arena);
     for (tree.nodes.items) |*node| {
         if (node.kind == .label and node.kind.label.text.len == display.len and
-            std.mem.eql(u8, node.kind.label.text, display) and node.font_size > 20)
+            std.mem.eql(u8, node.kind.label.text, display) and isDisplaySized(node))
         {
             // The label text lives in the tree arena; copy so the caller
             // can free with the testing allocator, and drop the probe
@@ -523,17 +543,17 @@ test "clear resets the display in the next frame" {
 }
 
 test "app frame: display text survives the JSON dump" {
-    var core = App.init(std.testing.allocator);
+    var calc: CalculatorApp = .{};
+    var session = try nogui.Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var core = try App.init(std.testing.allocator, &session);
     defer core.deinit();
     core.serialize_json = true;
-
-    var calc: CalculatorApp = .{};
-    _ = try core.register(CalculatorApp, &calc);
-
+    try core.mountRoot(CalculatorApp, &calc);
     calc.digit(1);
     calc.digit(2);
     calc.setOp(.add);
-    const out = try core.frame(CalculatorApp, &calc, 1, .{ .width = 360, .height = 520 });
+    const out = try core.frame(1, .{ .width = 360, .height = 520 });
     defer if (out.json) |j| std.testing.allocator.free(j);
     // The entry ("12") is the live display while an operator is pending.
     try std.testing.expect(std.mem.indexOf(u8, out.json.?, "\"12\"") != null);

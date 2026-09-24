@@ -1,7 +1,7 @@
 //! Specifies the direct-tree contract for block, float, clear, absolute, and none layout.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const style = @import("../style.zig");
 const widget = @import("../widget.zig");
 const block_float = @import("block_float.zig");
@@ -14,7 +14,7 @@ const Style = style.Style;
 const WidgetKind = widget.WidgetKind;
 const WidgetTree = widget.WidgetTree;
 
-fn appendNode(tree: *WidgetTree, id: Id, parent: Id, node_style: Style) !void {
+fn appendNode(tree: *WidgetTree, id: FrameNodeId, parent: FrameNodeId, node_style: Style) !void {
     const kind: WidgetKind = switch (node_style.display) {
         .flex => .{ .row = .{} },
         .block, .flow_root, .grid => .{ .column = .{} },
@@ -38,8 +38,8 @@ fn definiteContext(width: f32, height: f32) sizing.SizingContext {
     };
 }
 
-fn layoutContainer(tree: *WidgetTree, container_id: Id, width: f32, height: f32) !void {
-    const measure: ?layout_context.MeasureFn = null;
+fn layoutContainer(tree: *WidgetTree, container_id: FrameNodeId, width: f32, height: f32) !void {
+    const measure: ?layout_context.MeasureSource = null;
     try block_float.layoutContainer(
         tree,
         container_id,
@@ -64,7 +64,7 @@ fn expectRect(expected: Rect, actual: Rect) !void {
     try std.testing.expectApproxEqAbs(expected.h, actual.h, tolerance);
 }
 
-fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
+fn expectRelative(tree: *const WidgetTree, id: FrameNodeId, expected: Rect) !void {
     const node = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
     try expectRect(expected, node.rect);
 }
@@ -87,9 +87,17 @@ fn unreachableLayoutNode(
     unreachable;
 }
 
-fn intrinsicAspectMeasure(_: []const u8, _: layout_context.MeasureInput) widget.Size {
+fn intrinsicAspectMeasure(
+    _: ?*anyopaque,
+    _: []const u8,
+    _: layout_context.MeasureInput,
+) layout_context.LayoutError!layout_context.TextMeasurement {
     return .{ .width = 360, .height = 10 };
 }
+
+const intrinsic_aspect_source: layout_context.MeasureSource = .{
+    .callback = intrinsicAspectMeasure,
+};
 
 test "absolute leaf aspect ratio transfers after width and height constraints" {
     const scenarios = [_]struct {
@@ -131,8 +139,8 @@ test "absolute leaf aspect ratio transfers after width and height constraints" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const absolute_id: Id = @enumFromInt(1);
-        const root_id: Id = @enumFromInt(2);
+        const absolute_id: FrameNodeId = @enumFromInt(1);
+        const root_id: FrameNodeId = @enumFromInt(2);
         try tree.appendNode(.{
             .id = absolute_id,
             .kind = .{ .label = .{ .text = "intrinsic" } },
@@ -161,7 +169,7 @@ test "absolute leaf aspect ratio transfers after width and height constraints" {
             &tree,
             root_id,
             definiteContext(400, 300),
-            intrinsicAspectMeasure,
+            intrinsic_aspect_source,
         );
 
         try expectRelative(&tree, absolute_id, scenario.expected);
@@ -172,9 +180,9 @@ test "flow root clears a left float before the following block" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const clear_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const clear_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -206,9 +214,9 @@ test "absolute child uses containing padding box without advancing block flow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const normal_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const normal_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
@@ -261,9 +269,9 @@ test "display none receives a zero rect and contributes no block height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const hidden_id: Id = @enumFromInt(1);
-    const visible_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const hidden_id: FrameNodeId = @enumFromInt(1);
+    const visible_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, hidden_id, root_id, .{
         .display = .none,
@@ -294,8 +302,8 @@ test "rtl flow root places an ordinary block at the right inline origin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -324,9 +332,9 @@ test "auto-height root resolves bottom absolute child after normal flow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const normal_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const normal_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, normal_id, root_id, .{
         .display = .block,
@@ -372,8 +380,8 @@ test "absolute percentage insets use the definite content basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
@@ -411,8 +419,8 @@ test "scrolling block establishes a float-containing formatting context" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -462,9 +470,9 @@ test "hidden overflow on either axis contains floats while clip does not" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const float_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
-        const root_id: Id = @enumFromInt(3);
+        const float_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
+        const root_id: FrameNodeId = @enumFromInt(3);
 
         try appendNode(&tree, float_id, container_id, .{
             .display = .block,
@@ -502,8 +510,8 @@ test "minimum width clamp drives block child aspect-ratio height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -533,8 +541,8 @@ test "auto block width transfers through aspect ratio" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -559,8 +567,8 @@ test "indefinite percentage height behaves as auto" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -594,7 +602,7 @@ test "container minimum width changes its final border box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
 
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -618,7 +626,7 @@ test "container maximum width changes its final border box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
 
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -642,7 +650,7 @@ test "container aspect ratio changes its final border box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: Id = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(1);
 
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
@@ -663,8 +671,8 @@ test "absolute auto width fills between paired horizontal insets" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
@@ -702,8 +710,8 @@ test "rtl absolute child prefers the right inset for its origin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
@@ -741,9 +749,9 @@ test "auto-width flow root re-resolves after moving below a float" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const flow_root_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const flow_root_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -779,10 +787,10 @@ test "display none parent recursively zeroes its child" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const hidden_id: Id = @enumFromInt(2);
-    const visible_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const hidden_id: FrameNodeId = @enumFromInt(2);
+    const visible_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, child_id, hidden_id, .{
         .display = .block,
@@ -828,8 +836,8 @@ test "oversized fixed rtl block keeps its negative right origin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -858,10 +866,10 @@ test "later float respects the placement ceiling established by a cleared float"
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const blocking_float_id: Id = @enumFromInt(1);
-    const cleared_float_id: Id = @enumFromInt(2);
-    const later_float_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const blocking_float_id: FrameNodeId = @enumFromInt(1);
+    const cleared_float_id: FrameNodeId = @enumFromInt(2);
+    const later_float_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, blocking_float_id, root_id, .{
         .display = .block,
@@ -914,9 +922,9 @@ test "all-auto absolute child keeps its static y after normal flow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const normal_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const normal_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, normal_id, root_id, .{
         .display = .block,
@@ -953,9 +961,9 @@ test "rtl all-auto absolute child uses its static inline end after normal flow" 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const normal_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const normal_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, normal_id, root_id, .{
         .display = .block,
@@ -994,8 +1002,8 @@ test "finite horizontal paired insets that overflow return InvalidStyle" {
     defer tree.deinit();
 
     const extreme_inset: f32 = -3.0e38;
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try std.testing.expect(std.math.isFinite(extreme_inset));
     try appendNode(&tree, absolute_id, root_id, .{
@@ -1025,8 +1033,8 @@ test "finite vertical paired insets that overflow return InvalidStyle" {
     defer tree.deinit();
 
     const extreme_inset: f32 = -3.0e38;
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try std.testing.expect(std.math.isFinite(extreme_inset));
     try appendNode(&tree, absolute_id, root_id, .{
@@ -1055,9 +1063,9 @@ test "prepared pass recursively sizes nested auto-height blocks in relative coor
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const descendant_id: Id = @enumFromInt(1);
-    const nested_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const descendant_id: FrameNodeId = @enumFromInt(1);
+    const nested_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, descendant_id, nested_id, .{
         .display = .block,
@@ -1121,9 +1129,9 @@ test "nested auto width resolves percent descendants after margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const descendant_id: Id = @enumFromInt(1);
-    const nested_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const descendant_id: FrameNodeId = @enumFromInt(1);
+    const nested_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, descendant_id, nested_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -1159,9 +1167,9 @@ test "absolute nested block resolves descendants before auto height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const descendant_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const descendant_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, descendant_id, absolute_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -1198,9 +1206,9 @@ test "absolute auto size measures child before max height and bottom placement" 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, child_id, absolute_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -1238,9 +1246,9 @@ test "absolute paired vertical insets clamp auto height before nested layout" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, child_id, absolute_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -1279,9 +1287,9 @@ test "absolute max-width clamp remeasures percentage child aspect-ratio height" 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const descendant_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const descendant_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, descendant_id, absolute_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -1320,9 +1328,9 @@ test "absolute specified width max-width clamp remeasures percentage child aspec
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const descendant_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const descendant_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, descendant_id, absolute_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -1361,8 +1369,8 @@ test "absolute paired insets reserve child margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
         .position = .absolute,
@@ -1398,8 +1406,8 @@ test "absolute paired horizontal insets split fixed-width auto margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
         .position = .absolute,
@@ -1435,8 +1443,8 @@ test "absolute paired horizontal auto margins split positive free space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
         .position = .absolute,
@@ -1472,8 +1480,8 @@ test "absolute paired vertical insets split fixed-height auto margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
         .position = .absolute,
@@ -1509,8 +1517,8 @@ test "absolute paired insets leave auto margins zero for auto width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
         .position = .absolute,
@@ -1546,8 +1554,8 @@ test "absolute auto margin stays zero without its corresponding inset" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
         .position = .absolute,
@@ -1583,9 +1591,9 @@ test "float margins reserve clear and flow extent" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const clear_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const clear_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
         .float = .left,
@@ -1624,9 +1632,9 @@ test "floated auto-height block contains its inner float" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const inner_float_id: Id = @enumFromInt(1);
-    const outer_float_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const inner_float_id: FrameNodeId = @enumFromInt(1);
+    const outer_float_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, inner_float_id, outer_float_id, .{
         .display = .block,
         .float = .left,
@@ -1658,11 +1666,11 @@ test "nested BFC reflows after descendant height resolves" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_float_id: Id = @enumFromInt(1);
-    const second_float_id: Id = @enumFromInt(2);
-    const descendant_id: Id = @enumFromInt(3);
-    const bfc_id: Id = @enumFromInt(4);
-    const root_id: Id = @enumFromInt(5);
+    const first_float_id: FrameNodeId = @enumFromInt(1);
+    const second_float_id: FrameNodeId = @enumFromInt(2);
+    const descendant_id: FrameNodeId = @enumFromInt(3);
+    const bfc_id: FrameNodeId = @enumFromInt(4);
+    const root_id: FrameNodeId = @enumFromInt(5);
     try appendNode(&tree, first_float_id, root_id, .{
         .display = .block,
         .float = .left,
@@ -1705,8 +1713,8 @@ test "root block contains floated height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
         .float = .left,
@@ -1730,9 +1738,9 @@ test "absolute paired height insets provide descendant percentage basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const descendant_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const descendant_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, descendant_id, absolute_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -1769,9 +1777,9 @@ test "prepared pass applies margins and relative insets without shifting later f
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const relative_id: Id = @enumFromInt(1);
-    const following_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const relative_id: FrameNodeId = @enumFromInt(1);
+    const following_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, relative_id, root_id, .{
         .display = .block,
@@ -1822,9 +1830,9 @@ test "prepared pass collapses positive sibling margins to their maximum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -1868,9 +1876,9 @@ test "prepared pass collapses negative sibling margins to the most negative" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -1914,9 +1922,9 @@ test "prepared pass collapses mixed sibling margins by their extrema" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -1960,9 +1968,9 @@ test "prepared pass resolves percentage sibling margins against width and collap
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -2006,9 +2014,9 @@ test "prepared pass collapses larger parent top margin through first child" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, child_id, parent_id, .{
         .display = .block,
@@ -2061,9 +2069,9 @@ test "prepared pass collapses larger first-child top margin through parent" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, child_id, parent_id, .{
         .display = .block,
@@ -2116,9 +2124,9 @@ test "prepared pass combines mixed parent and first-child top margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, child_id, parent_id, .{
         .display = .block,
@@ -2171,11 +2179,11 @@ test "prepared pass collapses last-child bottom margin through auto-height paren
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const last_id: Id = @enumFromInt(2);
-    const parent_id: Id = @enumFromInt(3);
-    const following_id: Id = @enumFromInt(4);
-    const root_id: Id = @enumFromInt(5);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const last_id: FrameNodeId = @enumFromInt(2);
+    const parent_id: FrameNodeId = @enumFromInt(3);
+    const following_id: FrameNodeId = @enumFromInt(4);
+    const root_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, first_id, parent_id, .{
         .display = .block,
@@ -2246,9 +2254,9 @@ test "prepared pass keeps first-child top margin inside flow root" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const parent_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const parent_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, child_id, parent_id, .{
         .display = .block,
@@ -2301,9 +2309,9 @@ test "relative percentage insets use container width and zero height basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const relative_id: Id = @enumFromInt(1);
-    const following_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const relative_id: FrameNodeId = @enumFromInt(1);
+    const following_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, relative_id, root_id, .{
         .display = .block,
@@ -2342,8 +2350,8 @@ test "prepared pass centers fixed-width block with horizontal auto margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -2374,8 +2382,8 @@ test "prepared pass gives one auto margin all remaining inline space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -2406,8 +2414,8 @@ test "prepared pass uses physical auto-margin coordinates under rtl" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -2439,8 +2447,8 @@ test "prepared pass gives auto-width block no auto-margin expansion" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -2471,9 +2479,9 @@ test "adjacent positive vertical margins collapse to their maximum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -2516,9 +2524,9 @@ test "adjacent negative vertical margins collapse to the most negative" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -2560,9 +2568,9 @@ test "percentage vertical sibling margins collapse against parent width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -2604,9 +2612,9 @@ test "ordinary block collapses its first child top margin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const inner_id: Id = @enumFromInt(1);
-    const outer_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const inner_id: FrameNodeId = @enumFromInt(1);
+    const outer_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, inner_id, outer_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -2652,9 +2660,9 @@ test "ordinary block collapses its last child bottom margin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const inner_id: Id = @enumFromInt(1);
-    const outer_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const inner_id: FrameNodeId = @enumFromInt(1);
+    const outer_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, inner_id, outer_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -2697,9 +2705,9 @@ test "top border blocks parent first-child margin collapse" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const inner_id: Id = @enumFromInt(1);
-    const outer_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const inner_id: FrameNodeId = @enumFromInt(1);
+    const outer_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
     try appendNode(&tree, inner_id, outer_id, .{
         .display = .block,
         .box_sizing = .border_box,
@@ -2748,9 +2756,9 @@ test "prepared pass updates scroll limits after recursive child geometry" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{ .max_offset = .{ 99, 99 } };
-    const descendant_id: Id = @enumFromInt(1);
-    const nested_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const descendant_id: FrameNodeId = @enumFromInt(1);
+    const nested_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, descendant_id, nested_id, .{
         .display = .block,
@@ -2793,11 +2801,11 @@ test "prepared pass classifies once and lays out many containers without allocat
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    var hidden_ids: [hidden_count]Id = undefined;
-    var child_ids: [hidden_count]Id = undefined;
+    var hidden_ids: [hidden_count]FrameNodeId = undefined;
+    var child_ids: [hidden_count]FrameNodeId = undefined;
     for (0..hidden_count) |index| {
-        const child_id: Id = @enumFromInt(@as(u32, @intCast(index * 2 + 1)));
-        const hidden_id: Id = @enumFromInt(@as(u32, @intCast(index * 2 + 2)));
+        const child_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index * 2 + 1)));
+        const hidden_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(index * 2 + 2)));
         child_ids[index] = child_id;
         hidden_ids[index] = hidden_id;
 
@@ -2814,7 +2822,7 @@ test "prepared pass classifies once and lays out many containers without allocat
         try tree.appendChild(hidden_id, child_id);
     }
 
-    const root_id: Id = @enumFromInt(@as(u32, @intCast(hidden_count * 2 + 1)));
+    const root_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(hidden_count * 2 + 1)));
     try appendNode(&tree, root_id, .root, .{
         .display = .flow_root,
         .box_sizing = .border_box,
@@ -2887,8 +2895,8 @@ test "block: vertical percentage padding and margin resolve against containing b
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -2935,10 +2943,10 @@ test "block: empty block self-collapsing margin chains" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const empty_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const empty_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -2999,11 +3007,11 @@ test "block: multiple empty blocks with mixed margins collapse through to siblin
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const empty1_id: Id = @enumFromInt(2);
-    const empty2_id: Id = @enumFromInt(3);
-    const third_id: Id = @enumFromInt(4);
-    const root_id: Id = @enumFromInt(5);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const empty1_id: FrameNodeId = @enumFromInt(2);
+    const empty2_id: FrameNodeId = @enumFromInt(3);
+    const third_id: FrameNodeId = @enumFromInt(4);
+    const root_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -3075,10 +3083,10 @@ test "block: float margin clearance prevents margin collapsing with preceding co
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const first_id: Id = @enumFromInt(2);
-    const clear_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const first_id: FrameNodeId = @enumFromInt(2);
+    const clear_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -3135,9 +3143,9 @@ test "block: block child with width: min-content sizes to child intrinsic conten
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const inner_id: Id = @enumFromInt(1);
-    const block_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const inner_id: FrameNodeId = @enumFromInt(1);
+    const block_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, inner_id, block_id, .{
         .display = .block,
@@ -3169,10 +3177,10 @@ test "block: block child with width: max-content sizes to child intrinsic conten
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_inner_id: Id = @enumFromInt(1);
-    const second_inner_id: Id = @enumFromInt(2);
-    const block_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const first_inner_id: FrameNodeId = @enumFromInt(1);
+    const second_inner_id: FrameNodeId = @enumFromInt(2);
+    const block_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, first_inner_id, block_id, .{
         .display = .block,
@@ -3211,9 +3219,9 @@ test "block: block child with width: fit-content clamped by containing block wid
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const inner_id: Id = @enumFromInt(1);
-    const block_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const inner_id: FrameNodeId = @enumFromInt(1);
+    const block_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, inner_id, block_id, .{
         .display = .block,
@@ -3244,8 +3252,8 @@ test "block: definite parent height resolves child percentage height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -3270,8 +3278,8 @@ test "block: absolute percentage insets resolve against the containing box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
@@ -3303,13 +3311,13 @@ test "block intrinsic auto width ignores positive and negative percentage child 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const positive_child_id: Id = @enumFromInt(1);
-    const positive_auto_id: Id = @enumFromInt(2);
-    const positive_intrinsic_id: Id = @enumFromInt(3);
-    const negative_child_id: Id = @enumFromInt(4);
-    const negative_auto_id: Id = @enumFromInt(5);
-    const negative_intrinsic_id: Id = @enumFromInt(6);
-    const root_id: Id = @enumFromInt(7);
+    const positive_child_id: FrameNodeId = @enumFromInt(1);
+    const positive_auto_id: FrameNodeId = @enumFromInt(2);
+    const positive_intrinsic_id: FrameNodeId = @enumFromInt(3);
+    const negative_child_id: FrameNodeId = @enumFromInt(4);
+    const negative_auto_id: FrameNodeId = @enumFromInt(5);
+    const negative_intrinsic_id: FrameNodeId = @enumFromInt(6);
+    const root_id: FrameNodeId = @enumFromInt(7);
 
     try appendNode(&tree, positive_child_id, positive_auto_id, .{
         .display = .block,
@@ -3389,8 +3397,8 @@ test "absolute oversized child keeps negative free space in one auto margin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
@@ -3428,8 +3436,8 @@ test "vertical scrollbar gutter reduces percentage child width without changing 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -3459,7 +3467,7 @@ test "horizontal scrollbar gutter contributes to empty auto border height" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const scroll_id: Id = @enumFromInt(1);
+        const scroll_id: FrameNodeId = @enumFromInt(1);
         try appendNode(&tree, scroll_id, .root, .{
             .display = .block,
             .box_sizing = .border_box,
@@ -3477,7 +3485,7 @@ test "horizontal scrollbar gutter contributes to empty auto border height" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const hidden_id: Id = @enumFromInt(1);
+        const hidden_id: FrameNodeId = @enumFromInt(1);
         try appendNode(&tree, hidden_id, .root, .{
             .display = .block,
             .box_sizing = .border_box,
@@ -3497,8 +3505,8 @@ test "rtl vertical scrollbar gutter shifts the absolute content origin" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const root_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const root_id: FrameNodeId = @enumFromInt(2);
 
         try appendNode(&tree, child_id, root_id, .{
             .display = .block,
@@ -3532,8 +3540,8 @@ test "rtl vertical scrollbar gutter shifts the absolute content origin" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const root_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const root_id: FrameNodeId = @enumFromInt(2);
 
         try appendNode(&tree, child_id, root_id, .{
             .display = .block,
@@ -3568,8 +3576,8 @@ test "vertical scrollbar gutter stays inside fixed content box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -3598,9 +3606,9 @@ test "fixed-width BFC resolves auto margins inside a float-avoiding slot" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const bfc_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const bfc_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -3643,9 +3651,9 @@ test "float-avoiding BFC does not subtract its fixed margin twice" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const bfc_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const bfc_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -3688,9 +3696,9 @@ test "auto-width BFC resolves auto margins inside a float-avoiding slot" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const bfc_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const bfc_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -3734,9 +3742,9 @@ test "auto-width BFC ignores a small negative leading margin beside a float" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const bfc_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const bfc_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -3781,9 +3789,9 @@ test "auto-width BFC absorbs a positive leading margin beside a float" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const bfc_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const bfc_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -3828,9 +3836,9 @@ test "large negative leading margin moves an auto-width BFC below a float" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const bfc_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const bfc_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, float_id, root_id, .{
         .display = .block,
@@ -3875,10 +3883,10 @@ test "BFC avoids a float from a preceding sibling subtree" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const preceding_id: Id = @enumFromInt(2);
-    const bfc_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const preceding_id: FrameNodeId = @enumFromInt(2);
+    const bfc_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, float_id, preceding_id, .{
         .display = .block,
@@ -3924,11 +3932,11 @@ test "forced clearance ignores an adjoining collapsed top margin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const float_parent_id: Id = @enumFromInt(2);
-    const clear_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
-    const root_id: Id = @enumFromInt(5);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const float_parent_id: FrameNodeId = @enumFromInt(2);
+    const clear_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
+    const root_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, float_id, float_parent_id, .{
         .display = .block,
@@ -3987,12 +3995,12 @@ test "negative clearance preserves following sibling collapse geometry" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const clear_id: Id = @enumFromInt(2);
-    const inner_id: Id = @enumFromInt(3);
-    const following_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
-    const root_id: Id = @enumFromInt(6);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const clear_id: FrameNodeId = @enumFromInt(2);
+    const inner_id: FrameNodeId = @enumFromInt(3);
+    const following_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
+    const root_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(&tree, float_id, inner_id, .{
         .display = .block,
@@ -4058,12 +4066,12 @@ test "fixed-width BFC retries past every float in a preceding sibling subtree" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_float_id: Id = @enumFromInt(1);
-    const second_float_id: Id = @enumFromInt(2);
-    const third_float_id: Id = @enumFromInt(3);
-    const preceding_id: Id = @enumFromInt(4);
-    const bfc_id: Id = @enumFromInt(5);
-    const root_id: Id = @enumFromInt(6);
+    const first_float_id: FrameNodeId = @enumFromInt(1);
+    const second_float_id: FrameNodeId = @enumFromInt(2);
+    const third_float_id: FrameNodeId = @enumFromInt(3);
+    const preceding_id: FrameNodeId = @enumFromInt(4);
+    const bfc_id: FrameNodeId = @enumFromInt(5);
+    const root_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(&tree, first_float_id, preceding_id, .{
         .display = .block,
@@ -4133,12 +4141,12 @@ test "auto-width BFC retries past every float in a preceding sibling subtree" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_float_id: Id = @enumFromInt(1);
-    const second_float_id: Id = @enumFromInt(2);
-    const third_float_id: Id = @enumFromInt(3);
-    const preceding_id: Id = @enumFromInt(4);
-    const bfc_id: Id = @enumFromInt(5);
-    const root_id: Id = @enumFromInt(6);
+    const first_float_id: FrameNodeId = @enumFromInt(1);
+    const second_float_id: FrameNodeId = @enumFromInt(2);
+    const third_float_id: FrameNodeId = @enumFromInt(3);
+    const preceding_id: FrameNodeId = @enumFromInt(4);
+    const bfc_id: FrameNodeId = @enumFromInt(5);
+    const root_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(&tree, first_float_id, preceding_id, .{
         .display = .block,
@@ -4212,12 +4220,12 @@ test "flex-item block keeps vertical margins inside its BFC" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const fourth_id: Id = @enumFromInt(4);
-    const block_item_id: Id = @enumFromInt(5);
-    const flex_root_id: Id = @enumFromInt(6);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const fourth_id: FrameNodeId = @enumFromInt(4);
+    const block_item_id: FrameNodeId = @enumFromInt(5);
+    const flex_root_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(&tree, first_id, block_item_id, .{
         .display = .block,
@@ -4313,10 +4321,10 @@ test "flex-item block contains a float before a following flow root" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: Id = @enumFromInt(1);
-    const flow_root_id: Id = @enumFromInt(2);
-    const block_item_id: Id = @enumFromInt(3);
-    const flex_root_id: Id = @enumFromInt(4);
+    const float_id: FrameNodeId = @enumFromInt(1);
+    const flow_root_id: FrameNodeId = @enumFromInt(2);
+    const block_item_id: FrameNodeId = @enumFromInt(3);
+    const flex_root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, float_id, block_item_id, .{
         .display = .block,
@@ -4377,8 +4385,8 @@ fn expectTextAlignCase(
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -4426,9 +4434,9 @@ test "flex-item BFC contains an empty child's collapsed margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const empty_id: Id = @enumFromInt(1);
-    const block_item_id: Id = @enumFromInt(2);
-    const flex_root_id: Id = @enumFromInt(3);
+    const empty_id: FrameNodeId = @enumFromInt(1);
+    const block_item_id: FrameNodeId = @enumFromInt(2);
+    const flex_root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, empty_id, block_item_id, .{
         .display = .block,
@@ -4476,11 +4484,11 @@ test "flex-item BFC natural height contains staggered opposing floats" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const left_float_id: Id = @enumFromInt(1);
-    const first_right_float_id: Id = @enumFromInt(2);
-    const second_right_float_id: Id = @enumFromInt(3);
-    const block_item_id: Id = @enumFromInt(4);
-    const flex_root_id: Id = @enumFromInt(5);
+    const left_float_id: FrameNodeId = @enumFromInt(1);
+    const first_right_float_id: FrameNodeId = @enumFromInt(2);
+    const second_right_float_id: FrameNodeId = @enumFromInt(3);
+    const block_item_id: FrameNodeId = @enumFromInt(4);
+    const flex_root_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, left_float_id, block_item_id, .{
         .display = .block,
@@ -4558,8 +4566,8 @@ fn expectBfcTextAlignCase(
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = child_display,
@@ -4608,11 +4616,11 @@ test "flex-item BFC clear uses only the requested float side" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const left_float_id: Id = @enumFromInt(1);
-    const right_float_id: Id = @enumFromInt(2);
-    const clear_id: Id = @enumFromInt(3);
-    const block_item_id: Id = @enumFromInt(4);
-    const flex_root_id: Id = @enumFromInt(5);
+    const left_float_id: FrameNodeId = @enumFromInt(1);
+    const right_float_id: FrameNodeId = @enumFromInt(2);
+    const clear_id: FrameNodeId = @enumFromInt(3);
+    const block_item_id: FrameNodeId = @enumFromInt(4);
+    const flex_root_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, left_float_id, block_item_id, .{
         .display = .block,
@@ -4677,8 +4685,8 @@ test "full inset absolute aspect ratio overrides height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, absolute_id, root_id, .{
         .display = .block,
@@ -4712,9 +4720,9 @@ test "block container align content center" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -4748,9 +4756,9 @@ test "block container align content end" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -4784,9 +4792,9 @@ test "block container align content space between retains normal block flow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const root_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, root_id, .{
         .display = .block,
@@ -4823,11 +4831,11 @@ fn expectBlockOverflowAlignment(
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
-    const child_ids = [_]Id{ first_id, second_id, third_id };
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
+    const child_ids = [_]FrameNodeId{ first_id, second_id, third_id };
 
     for (child_ids) |child_id| {
         try appendNode(&tree, child_id, root_id, .{
@@ -4892,8 +4900,8 @@ test "auto block min height aligns content in the final box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const root_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, root_id, .{
         .display = .block,
@@ -4929,7 +4937,7 @@ test "absolute children use the padding box for opposing insets and margins" {
     defer tree.deinit();
 
     const Case = struct {
-        id: Id,
+        id: FrameNodeId,
         inset: style.Insets,
         margin: style.Insets = .{
             .top = .{ .length = 0 },
@@ -4998,7 +5006,7 @@ test "absolute children use the padding box for opposing insets and margins" {
             .expected_absolute = .{ .x = 30, .y = 30, .w = 50, .h = 50 },
         },
     };
-    const root_id: Id = @enumFromInt(5);
+    const root_id: FrameNodeId = @enumFromInt(5);
 
     for (cases) |case| {
         try appendNode(&tree, case.id, root_id, .{
@@ -5050,10 +5058,10 @@ test "float placement preserves a preceding collapsed bottom margin strut" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const preceding_id: Id = @enumFromInt(1);
-    const float_id: Id = @enumFromInt(2);
-    const following_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const preceding_id: FrameNodeId = @enumFromInt(1);
+    const float_id: FrameNodeId = @enumFromInt(2);
+    const following_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, preceding_id, root_id, .{
         .display = .block,
@@ -5107,10 +5115,10 @@ test "intrinsic auto width packs a same-side float run in a nested shrink-to-fit
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_float_id: Id = @enumFromInt(1);
-    const second_float_id: Id = @enumFromInt(2);
-    const shrink_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const first_float_id: FrameNodeId = @enumFromInt(1);
+    const second_float_id: FrameNodeId = @enumFromInt(2);
+    const shrink_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, first_float_id, shrink_id, .{
         .display = .block,
@@ -5182,10 +5190,10 @@ test "empty flex and grid children keep vertical margins from collapsing through
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const preceding_id: Id = @enumFromInt(1);
-        const independent_id: Id = @enumFromInt(2);
-        const following_id: Id = @enumFromInt(3);
-        const root_id: Id = @enumFromInt(4);
+        const preceding_id: FrameNodeId = @enumFromInt(1);
+        const independent_id: FrameNodeId = @enumFromInt(2);
+        const following_id: FrameNodeId = @enumFromInt(3);
+        const root_id: FrameNodeId = @enumFromInt(4);
 
         try appendNode(&tree, preceding_id, root_id, .{
             .display = .block,
@@ -5248,10 +5256,10 @@ test "aspect-ratio block contributes transferred height between collapsing margi
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const preceding_id: Id = @enumFromInt(1);
-    const ratio_id: Id = @enumFromInt(2);
-    const following_id: Id = @enumFromInt(3);
-    const root_id: Id = @enumFromInt(4);
+    const preceding_id: FrameNodeId = @enumFromInt(1);
+    const ratio_id: FrameNodeId = @enumFromInt(2);
+    const following_id: FrameNodeId = @enumFromInt(3);
+    const root_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, preceding_id, root_id, .{
         .display = .block,

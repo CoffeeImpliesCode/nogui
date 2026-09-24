@@ -1,17 +1,10 @@
 //! v7 demo UI — one interactive TodoApp component with several parts.
 //!
-//! Demo-side code: imports std plus the pure v7 module via relative paths.
-//! All state lives in struct fields; every frame re-draws everything (no
-//! dirty tracking). The App loop (or a test) sets `frame_count` before each
-//! draw. Buttons carry distinct labels so click injection can target them
-//! by scanning the tree — scan by kind, never by position (node order is
-//! post-order, ids are not array indices).
-//!
-//! Import note: Zig 0.16 roots a single-file `zig test <file>` module at
-//! the file's directory and rejects imports outside it, so `../v7/...`
-//! cannot be imported from here. `src/v7_demo/v7` is therefore a symlink
-//! to `../v7`, keeping this file standalone-compilable and testable with
-//! `zig test src/v7_demo/ui.zig`.
+//! Demo-side code imports the canonical `nogui` module.
+//! Demo state lives in struct fields; every frame re-draws everything (no
+//! dirty tracking). The frame tick comes from DrawCtx.frame_info. Widgets
+//! have semantic labels for input injection; scan by kind, never by position
+//! (node order is post-order, ids are not array indices).
 
 const std = @import("std");
 const noapi = @import("noapi");
@@ -21,46 +14,48 @@ const DrawCtx = nogui.DrawCtx;
 const Style = nogui.Style;
 const PaintStyle = nogui.PaintStyle;
 const ComponentKey = nogui.ComponentKey;
-const srgbToOklab = @import("text.zig").srgbToOklab;
-const text_mod = @import("text.zig");
+const debug_mod = @import("debug_state.zig");
 const WidgetTree = nogui.WidgetTree;
 const WidgetNode = nogui.WidgetNode;
 const App = nogui.App;
-const Id = nogui.Id;
+const FrameNodeId = nogui.FrameNodeId;
 const Event = nogui.Event;
 const MandelbrotComponent = @import("mandelbrot_component.zig").MandelbrotComponent;
 
 /// The demo texture's bindless heap index, set by the window backend after
 /// it creates + registers the procedural texture (the demo UI cannot touch
 /// the GPU). Null = not registered (headless/sim runs) — the textured card
-/// then renders as a plain fill. Same driver→UI channel as text_mod.
+/// then renders as a plain fill. Same driver→UI channel as debug_mod.
 pub var texture_idx: ?u32 = null;
 
-/// The SVG showcase box's node id (the window injects the tiger's scene
-/// rects at this box's absolute rect each frame).
+/// The SVG showcase box's node id: the window rasterizes its document
+/// through librsvg for this box's device-pixel size and samples the result
+/// over the box each frame.
 pub var svg_box_id: ?u32 = null;
 
-/// The stroke test scene's tunables (driven by sliders): `stroke_scale`
-/// (the whole scene's extra scale), `stroke_algo` (0 = naive SDF, 1 =
-/// marching quads, 2 = Cairo running-cover), `stroke_oversize` (the AA
-/// band / quad half-extent).
-/// The window applies them to the SvgView each frame.
-pub var stroke_scale: f32 = 1.0;
-pub var stroke_algo: f32 = 2; // 2 = Cairo running-cover (the tiger's current look)
+/// The showcase raster the window produced this frame: viewport width and
+/// height in device pixels, plus the display scale it was rasterized for.
+/// {0, 0} until the first raster lands (headless/sim runs never get one).
+pub var svg_raster: [2]u32 = .{ 0, 0 };
+pub var svg_raster_scale: f32 = 1;
 /// Tier-2 frame pacing toggle: the FIFO swapchain + the slop-driven sleep
 /// before the input poll. OFF by default — the pacing's cadence must be
 /// verified on a quiet machine (the double-framing regression under load
 /// is why it's off). Flip to true once the measurements are trustworthy.
 pub var frame_pacing: bool = false;
-pub var stroke_oversize: f32 = 0.0;
 /// The tiger reference render's bindless heap index (the window uploads
-/// the rsvg-rendered tiger PNG as a texture; the tiger demo samples it
-/// next to our GPU sweep).
+/// the pinned rsvg-rendered tiger as a texture; the tiger showcase samples
+/// it beside the live host rasterizer output for comparison).
 pub var tiger_ref_idx: ?u32 = null;
 /// Enables the bounded GPU lifecycle smoke path. The window driver sets this
 /// only for `--gpu-remount-smoke`; normal windowed and headless paths leave it
 /// false, so Mandelbrot remains mounted as usual.
 pub var gpu_remount_smoke: bool = false;
+
+/// Opt-in native custom-element smoke; normal Todo layout stays unchanged.
+pub var custom_ruler_smoke: bool = false;
+/// Opt-in W13 noapi pixel specimen; normal Todo frames remain unchanged.
+pub var custom_paint_smoke: bool = false;
 
 /// Frames per second (a rolling average), set by the window driver each frame.
 pub var fps: f32 = 0;
@@ -68,9 +63,16 @@ pub var fps: f32 = 0;
 /// A pill-click toggle request, applied by the window driver before the
 /// next frame (the window owns the batch state the pills mirror; the UI
 /// cannot reach the batch, so the click sets a request the window honors).
+/// The showcase boxes' declared edge in logical window units. The window
+/// reports the raster it rasterized from this size before the first
+/// measured one exists, so the stroke scene's panel is right on the very
+/// first frame.
+pub const tiger_scene_box_size: f32 = 480;
+pub const stroke_scene_box_size: f32 = 620;
+
 /// The tiger showcase root: the minimal UI (title + the two large
-/// cards). The window drives the SvgView injection via svg_box_id and
-/// the reference texture via tiger_ref_idx.
+/// cards). The window rasterizes tiger.svg for the reserved box named by
+/// svg_box_id and samples the pinned reference through tiger_ref_idx.
 pub const TigerApp = struct {
     pub fn draw(self: *TigerApp, ctx: *DrawCtx) !void {
         _ = self;
@@ -82,14 +84,14 @@ pub const TigerApp = struct {
             defer ctx.pop();
             _ = try labelColorSized(
                 ctx,
-                "TIGER SHOWCASE — GPU SWEEP VS REFERENCE",
+                "TIGER SHOWCASE — HOST RASTERIZER VS PINNED REFERENCE",
                 c_text,
                 18,
                 .{ .static = "tiger-title" },
             );
             _ = try caption(
                 ctx,
-                "Left: our SvgView sweep of tiger.svg   |   Right: librsvg reference",
+                "Left: tiger.svg rasterized live by librsvg/Cairo   |   Right: the pinned rsvg render",
                 0,
                 .{ .static = "tiger-header-caption" },
             );
@@ -101,47 +103,63 @@ pub const TigerApp = struct {
             {
                 _ = try card(false, ctx, false);
                 defer ctx.pop();
-                _ = try caption(ctx, "GPU — OUR SWEEP", 0, .{ .static = "tiger-gpu-caption" });
+                _ = try caption(ctx, "HOST — LIVE LIBRSVG", 0, .{ .static = "tiger-gpu-caption" });
                 {
                     _ = try ctx.row(.{});
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
-                        .flex_basis = 480,
+                        .flex_basis = tiger_scene_box_size,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                     }));
                     defer ctx.pop();
-                    _ = try ctx.spacer(.{ .size = 480 });
+                    _ = try ctx.spacer(.{ .size = tiger_scene_box_size });
                 }
             }
             {
                 _ = try card(false, ctx, false);
                 defer ctx.pop();
-                _ = try caption(ctx, "REFERENCE — LIBRSVG", 0, .{ .static = "tiger-reference-caption" });
+                _ = try caption(ctx, "REFERENCE — PINNED RSVG", 0, .{ .static = "tiger-reference-caption" });
                 {
                     _ = try ctx.row(.{});
                     defer ctx.pop();
-                    _ = try ctx.column(.{
-                        .texture = tiger_ref_idx,
-                        .flex_basis = 480,
+                    const reference: nogui.image_view.Source = if (tiger_ref_idx) |index|
+                        .{ .ready = .{ .index = index, .generation = 1 } }
+                    else
+                        .pending;
+                    _ = try ctx.elementLeaf(nogui.image_view.ImageView, .{
+                        .intrinsic = .{ .width = 512, .height = 512 },
+                        .source = reference,
+                        .generation = 1,
+                        .fit = .contain,
+                        .label = "Pinned SVG tiger reference",
+                    }, .{
+                        .key = @as(ComponentKey, .{ .static = "tiger-reference-image" }),
+                        .width = tiger_scene_box_size,
+                        .height = tiger_scene_box_size,
+                        .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
+                        .clip = true,
                     });
-                    defer ctx.pop();
-                    _ = try ctx.spacer(.{ .size = 480 });
+                    _ = try ctx.spacer(.{ .size = tiger_scene_box_size });
                 }
             }
         }
     }
 };
 
-/// The stroke test scene: a set of curved thin strokes at increasing
-/// widths, with sliders for the scene scale, the stroke algorithm
-/// (naive SDF vs marching quads) and the pixel oversizing. The window
-/// drives the SvgView injection + the per-frame setStrokeStyle.
+/// The stroke scene's document viewBox in user units, reported by the
+/// scene's panel. The window rasterizes the very same document string.
+pub const stroke_scene_viewbox: [2]f32 = .{ 420, 620 };
+
+/// The stroke test scene: curved thin strokes at increasing widths,
+/// rasterized by librsvg through the host's SVG adapter. The window
+/// re-rasterizes the document whenever the box's device-pixel size or the
+/// display scale changes; the panel reports the raster it produced.
 pub const TestStrokesApp = struct {
     pub fn draw(self: *TestStrokesApp, ctx: *DrawCtx) !void {
         _ = self;
@@ -154,7 +172,7 @@ pub const TestStrokesApp = struct {
             _ = try labelColorSized(ctx, "STROKE TEST SCENE", c_text, 18, .{ .static = "strokes-title" });
             _ = try caption(
                 ctx,
-                "Curved thin strokes at widths 0.1 - 4.0   |   A cycles the stroke algo",
+                "Curved thin strokes at widths 0.1 - 4.0   |   rasterized by librsvg/Cairo",
                 0,
                 .{ .static = "strokes-header-caption" },
             );
@@ -172,52 +190,44 @@ pub const TestStrokesApp = struct {
                     _ = try ctx.row(.{});
                     defer ctx.pop();
                     svg_box_id = @intFromEnum(try ctx.column(.{
-                        .flex_basis = 620,
+                        .flex_basis = stroke_scene_box_size,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
                         .border_color = c_border,
                         .radius = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
                     }));
                     defer ctx.pop();
-                    _ = try ctx.spacer(.{ .size = 620 });
+                    _ = try ctx.spacer(.{ .size = stroke_scene_box_size });
                 }
             }
             {
                 _ = try card(false, ctx, false);
                 defer ctx.pop();
-                _ = try caption(ctx, "CONTROLS", 0, .{ .static = "strokes-controls-caption" });
-                const algo_idx: u32 = @intFromFloat(@min(@max(stroke_algo, 0), 2));
-                const algo_name = switch (algo_idx) {
-                    0 => "naive SDF",
-                    1 => "marching quads",
-                    else => "Cairo running-cover",
-                };
-                const algo_text = try std.fmt.allocPrint(
+                _ = try caption(ctx, "RASTER", 0, .{ .static = "strokes-controls-caption" });
+                const viewport_text = try std.fmt.allocPrint(
                     ctx.arena,
-                    "MODE {d}: {s}   (A cycles)",
-                    .{ algo_idx, algo_name },
+                    "viewport  {d} x {d} px",
+                    .{ svg_raster[0], svg_raster[1] },
                 );
-                _ = try labelColor(ctx, algo_text, c_accent, .{ .static = "strokes-algo-mode" });
-                const scale_text = try std.fmt.allocPrint(ctx.arena, "scale: {d:.2}", .{stroke_scale});
-                _ = try labelColor(ctx, scale_text, c_text_sec, .{ .static = "strokes-scale-value" });
-                _ = try ctx.slider(.{
-                    .label = "stroke-scale",
-                    .value = &stroke_scale,
-                    .min = 0.25,
-                    .max = 4,
-                    .color = c_accent,
-                    .padding = .{ .left = 6, .right = 10 },
-                });
-                const oversize_text = try std.fmt.allocPrint(ctx.arena, "pixel oversizing: {d:.2}", .{stroke_oversize});
-                _ = try labelColor(ctx, oversize_text, c_text_sec, .{ .static = "strokes-oversize-value" });
-                _ = try ctx.slider(.{
-                    .label = "stroke-oversize",
-                    .value = &stroke_oversize,
-                    .min = 0,
-                    .max = 4,
-                    .color = c_accent,
-                    .padding = .{ .left = 6, .right = 10 },
-                });
+                _ = try labelColor(ctx, viewport_text, c_accent, .{ .static = "strokes-raster-viewport" });
+                const scale_text = try std.fmt.allocPrint(
+                    ctx.arena,
+                    "scale     {d:.2}x",
+                    .{svg_raster_scale},
+                );
+                _ = try labelColor(ctx, scale_text, c_text_sec, .{ .static = "strokes-raster-scale" });
+                const viewbox_text = try std.fmt.allocPrint(
+                    ctx.arena,
+                    "viewBox   {d:.0} x {d:.0}",
+                    .{ stroke_scene_viewbox[0], stroke_scene_viewbox[1] },
+                );
+                _ = try labelColor(ctx, viewbox_text, c_text_sec, .{ .static = "strokes-raster-viewbox" });
+                _ = try labelColor(
+                    ctx,
+                    "engine    librsvg + Cairo",
+                    c_text_sec,
+                    .{ .static = "strokes-raster-engine" },
+                );
             }
         }
     }
@@ -225,6 +235,14 @@ pub const TestStrokesApp = struct {
 
 pub const ToggleKind = enum { subpixel, bgr, damp, debug };
 pub var toggle_request: ?ToggleKind = null;
+
+/// The card elevation the retired numeric `shadow` field expressed: a
+/// soft, downward black blur. Typed so the paint pass can composite it.
+const card_shadow = [_]nogui.paint.Shadow{.{
+    .color = .{ .srgb = .{ .r = 0, .g = 0, .b = 0, .a = 0.35 } },
+    .offset = .{ .x = 0, .y = 2 },
+    .blur = 4,
+}};
 
 /// ── Modern dark palette (sRGB-authored; the pipeline converts to Oklab) ──
 /// Surfaces: canvas → card → raised. One violet-indigo accent owns the
@@ -241,6 +259,9 @@ const c_text_muted: [4]f32 = .{ 0.46, 0.47, 0.56, 1 }; // captions/stats
 const c_accent: [4]f32 = .{ 0.40, 0.34, 0.78, 1 };
 const c_accent_dim: [4]f32 = .{ 0.24, 0.21, 0.47, 1 }; // accent-tinted surface
 const c_on_accent: [4]f32 = .{ 0.95, 0.94, 1, 1 }; // text on the accent
+fn solidFill(c: [4]f32) nogui.paint.Fill {
+    return .{ .solid = .{ .srgb = .{ .r = c[0], .g = c[1], .b = c[2], .a = c[3] } } };
+}
 
 /// A non-interactive label scope. Its defaults replace any surrounding
 /// component defaults, so labels keep their original column/box behavior
@@ -252,7 +273,7 @@ const PaddedLabel = struct {
     color: [4]f32 = .{ 1, 1, 1, 1 },
     font_size: f32 = 0,
     layer: u32 = 0,
-    label_id: Id = .root,
+    label_id: FrameNodeId = .root,
 
     pub const default_style: Style = .{
         .direction = .column,
@@ -284,7 +305,7 @@ const ShowcaseLabel = struct {
 
     text: []const u8,
     variant: Variant,
-    label_id: Id = .root,
+    label_id: FrameNodeId = .root,
 
     const Variant = enum { pad, ring, margin };
 
@@ -346,7 +367,7 @@ const Card = struct {
     pub const default_paint: PaintStyle = .{
         .border_color = c_border,
         .radius = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 },
-        .shadow = 4,
+        .shadows = &card_shadow,
     };
 };
 
@@ -373,7 +394,7 @@ const GhostButton = struct {
         .border_color = c_border_strong,
         .radius = .{ .top = 7, .right = 7, .bottom = 7, .left = 7 },
         .fill = c_card_deep,
-        .gradient = srgbToOklab(c_card_deep),
+        .paint_fill = solidFill(c_card_deep),
     };
 };
 
@@ -400,7 +421,7 @@ const PrimaryButton = struct {
         .border_color = c_accent,
         .radius = .{ .top = 7, .right = 7, .bottom = 7, .left = 7 },
         .fill = c_accent,
-        .gradient = srgbToOklab(c_accent),
+        .paint_fill = solidFill(c_accent),
     };
 };
 
@@ -420,7 +441,7 @@ const ActivePill = struct {
     pub const default_paint: PaintStyle = .{
         .radius = .{ .top = 9, .right = 9, .bottom = 9, .left = 9 },
         .fill = c_accent_dim,
-        .gradient = srgbToOklab(c_accent_dim),
+        .paint_fill = solidFill(c_accent_dim),
     };
 };
 
@@ -447,7 +468,7 @@ const InactivePill = struct {
         .border_color = c_border,
         .radius = .{ .top = 9, .right = 9, .bottom = 9, .left = 9 },
         .fill = c_card_deep,
-        .gradient = srgbToOklab(c_card_deep),
+        .paint_fill = solidFill(c_card_deep),
     };
 };
 
@@ -458,7 +479,7 @@ fn scopedLabel(
     color: [4]f32,
     font_size: f32,
     layer: u32,
-) !Id {
+) !FrameNodeId {
     var component: PaddedLabel = .{
         .text = text,
         .color = color,
@@ -469,7 +490,12 @@ fn scopedLabel(
     return component.label_id;
 }
 
-fn labelSized(ctx: *DrawCtx, text: []const u8, font_size: f32, key: ComponentKey) !Id {
+fn labelSized(
+    ctx: *DrawCtx,
+    text: []const u8,
+    font_size: f32,
+    key: ComponentKey,
+) !FrameNodeId {
     return scopedLabel(ctx, text, key, .{ 1, 1, 1, 1 }, font_size, 0);
 }
 
@@ -479,12 +505,17 @@ fn labelColorSized(
     color: [4]f32,
     font_size: f32,
     key: ComponentKey,
-) !Id {
+) !FrameNodeId {
     return scopedLabel(ctx, text, key, color, font_size, 0);
 }
 
 /// A colored label (text color, not the box).
-fn labelColor(ctx: *DrawCtx, text: []const u8, color: [4]f32, key: ComponentKey) !Id {
+fn labelColor(
+    ctx: *DrawCtx,
+    text: []const u8,
+    color: [4]f32,
+    key: ComponentKey,
+) !FrameNodeId {
     return scopedLabel(ctx, text, key, color, 0, 0);
 }
 
@@ -492,13 +523,13 @@ fn labelColor(ctx: *DrawCtx, text: []const u8, color: [4]f32, key: ComponentKey)
 /// stamps the caption's own layer key — a caption inside a layered
 /// container must ride that layer or its glyphs sort below the container's
 /// z>0 fill and vanish behind it.
-fn caption(ctx: *DrawCtx, text: []const u8, layer: u32, key: ComponentKey) !Id {
+fn caption(ctx: *DrawCtx, text: []const u8, layer: u32, key: ComponentKey) !FrameNodeId {
     return scopedLabel(ctx, text, key, c_text_muted, 11, layer);
 }
 
 /// Apply the shared card defaults to one container without introducing a
 /// component boundary around its interactive children.
-fn card(comptime grow: bool, ctx: *DrawCtx, clip: bool) !Id {
+fn card(comptime grow: bool, ctx: *DrawCtx, clip: bool) !FrameNodeId {
     const style = Card.default_style;
     const paint = Card.default_paint;
     return ctx.column(.{
@@ -510,17 +541,18 @@ fn card(comptime grow: bool, ctx: *DrawCtx, clip: bool) !Id {
         .border_color = paint.border_color,
         .radius = paint.radius,
         .padding = style.padding_inset,
-        .shadow = paint.shadow,
+        .shadows = paint.shadows,
     });
 }
 
 /// Secondary (ghost) button: a flat card-deep fill + a soft border (the
 /// fill = the box's flat color, the gradient = the same → no two-tone).
 /// The text inherits the node's color (default near-white).
-fn btn(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
+fn btn(ctx: *DrawCtx, key: ComponentKey, text: []const u8, on_click: anytype) !FrameNodeId {
     const style = GhostButton.default_style;
     const paint = GhostButton.default_paint;
     return ctx.button(.{
+        .key = key,
         .label = text,
         .on_click = on_click,
         .color = c_text,
@@ -533,7 +565,7 @@ fn btn(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
         .border_color = paint.border_color,
         .radius = paint.radius,
         .fill = paint.fill,
-        .gradient = paint.gradient,
+        .paint_fill = paint.paint_fill,
     });
 }
 
@@ -542,10 +574,16 @@ fn btn(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
 /// in the accent color, so its fill insets exactly like the ghost's (the
 /// ghost's border insets its fill; a borderless accent fill reads 2px
 /// taller than its siblings).
-fn btnPrimary(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
+fn btnPrimary(
+    ctx: *DrawCtx,
+    key: ComponentKey,
+    text: []const u8,
+    on_click: anytype,
+) !FrameNodeId {
     const style = PrimaryButton.default_style;
     const paint = PrimaryButton.default_paint;
     return ctx.button(.{
+        .key = key,
         .label = text,
         .on_click = on_click,
         .color = c_on_accent,
@@ -558,17 +596,24 @@ fn btnPrimary(ctx: *DrawCtx, text: []const u8, on_click: anytype) !Id {
         .border_color = paint.border_color,
         .radius = paint.radius,
         .fill = paint.fill,
-        .gradient = paint.gradient,
+        .paint_fill = paint.paint_fill,
     });
 }
 
 /// Toggle pills use the same scoped defaults as the original on/off
 /// variants; only their semantic state and text color remain local.
-fn pill(ctx: *DrawCtx, text: []const u8, on: bool, on_click: anytype) !Id {
+fn pill(
+    ctx: *DrawCtx,
+    key: ComponentKey,
+    text: []const u8,
+    on: bool,
+    on_click: anytype,
+) !FrameNodeId {
     if (on) {
         const style = ActivePill.default_style;
         const paint = ActivePill.default_paint;
         return ctx.button(.{
+            .key = key,
             .label = text,
             .on_click = on_click,
             .color = c_accent,
@@ -579,12 +624,13 @@ fn pill(ctx: *DrawCtx, text: []const u8, on: bool, on_click: anytype) !Id {
             .padding = style.padding_inset,
             .radius = paint.radius,
             .fill = paint.fill,
-            .gradient = paint.gradient,
+            .paint_fill = paint.paint_fill,
         });
     }
     const style = InactivePill.default_style;
     const paint = InactivePill.default_paint;
     return ctx.button(.{
+        .key = key,
         .label = text,
         .on_click = on_click,
         .color = c_text_muted,
@@ -597,7 +643,7 @@ fn pill(ctx: *DrawCtx, text: []const u8, on: bool, on_click: anytype) !Id {
         .border_color = paint.border_color,
         .radius = paint.radius,
         .fill = paint.fill,
-        .gradient = paint.gradient,
+        .paint_fill = paint.paint_fill,
     });
 }
 
@@ -620,6 +666,7 @@ const VolumeSlider = struct {
         defer ctx.pop();
         _ = try caption(ctx, "VOLUME", 0, .{ .static = "volume-caption" });
         _ = try ctx.slider(.{
+            .key = .{ .static = "volume-level" },
             .label = "volume-slider",
             .value = &self.volume,
             .min = 0,
@@ -630,7 +677,7 @@ const VolumeSlider = struct {
         {
             _ = try ctx.row(.{ .direction = .row, .@"align" = .center });
             defer ctx.pop();
-            _ = try btn(ctx, "mute", VolumeSlider.mute);
+            _ = try btn(ctx, .{ .static = "volume-mute" }, "mute", VolumeSlider.mute);
             _ = try labelColor(ctx, text, c_text_sec, .{ .static = "volume-value" });
         }
     }
@@ -639,7 +686,12 @@ const VolumeSlider = struct {
         self.volume = 0;
     }
 };
-fn showcaseLabel(ctx: *DrawCtx, text: []const u8, variant: ShowcaseLabel.Variant, key: ComponentKey) !Id {
+fn showcaseLabel(
+    ctx: *DrawCtx,
+    text: []const u8,
+    variant: ShowcaseLabel.Variant,
+    key: ComponentKey,
+) !FrameNodeId {
     var component: ShowcaseLabel = .{ .text = text, .variant = variant };
     try ctx.component(ShowcaseLabel, .{ .key = key }, &component);
     return component.label_id;
@@ -682,12 +734,109 @@ const Showcase = struct {
     }
 };
 
+const CustomRuler = struct {
+    pub const PhaseState = struct {};
+
+    pub fn measure(_: *const CustomRuler, input: nogui.element.MeasureInput) nogui.element.Error!nogui.Size {
+        return .{
+            .width = input.known_dimensions.width orelse 240,
+            .height = input.known_dimensions.height orelse 18,
+        };
+    }
+
+    pub fn paint(
+        _: *const CustomRuler,
+        _: *PhaseState,
+        geometry: nogui.element.Geometry,
+        writer: *nogui.element.PaintWriter,
+    ) nogui.element.Error!void {
+        try writer.rect(.{
+            .x = 0,
+            .y = 0,
+            .w = geometry.content.w,
+            .h = 1,
+        }, .{ 0.8, 0.3, 0.1, 1 });
+        var x: f32 = 0;
+        while (x < geometry.content.w) : (x += 10) {
+            try writer.rect(.{
+                .x = x,
+                .y = 1,
+                .w = 1,
+                .h = 5,
+            }, .{ 0.8, 0.3, 0.1, 1 });
+        }
+    }
+
+    pub fn semantics(
+        _: *const CustomRuler,
+        _: *PhaseState,
+        _: nogui.element.Geometry,
+    ) nogui.element.Error!?nogui.element.Semantic {
+        return .{ .role = .image, .label = "measurement ruler" };
+    }
+};
+
+const PaintSpecimen = struct {
+    pub const PhaseState = struct {};
+    pub fn measure(_: *const PaintSpecimen, input: nogui.element.MeasureInput) nogui.element.Error!nogui.Size {
+        return .{
+            .width = input.known_dimensions.width orelse 240,
+            .height = input.known_dimensions.height orelse 72,
+        };
+    }
+
+    pub fn paint(
+        _: *const PaintSpecimen,
+        _: *PhaseState,
+        geometry: nogui.element.Geometry,
+        writer: *nogui.element.PaintWriter,
+    ) nogui.element.Error!void {
+        const red: nogui.paint.Color = .{ .srgb = .{ .r = 1, .g = 0, .b = 0 } };
+        const blue: nogui.paint.Color = .{ .srgb = .{ .r = 0, .g = 0, .b = 1 } };
+        const green: nogui.paint.Color = .{ .srgb = .{ .r = 0, .g = 1, .b = 0 } };
+        try writer.addRect(.{
+            .bounds = .{ .x = 0, .y = 0, .w = geometry.content.w, .h = geometry.content.h },
+            .fill = .{ .gradient = .{
+                .first = .{ .color = red, .position = 0 },
+                .second = .{ .color = blue, .position = 1 },
+                .angle = 0,
+            } },
+            .radii = .{ 4, 12, 8, 2 },
+            .borders = .{ .{ .width = 2, .color = green }, .{}, .{}, .{} },
+        });
+        try writer.addRect(.{
+            .bounds = .{ .x = 96, .y = 8, .w = 48, .h = 48 },
+            .fill = .{ .pattern = .{
+                .first = red,
+                .second = blue,
+                .cell = .{ .x = 8, .y = 8 },
+            } },
+            .shadows = &.{.{
+                .color = blue,
+                .offset = .{ .x = 4, .y = 2 },
+                .blur = 3,
+            }},
+        });
+        const commands = [_]nogui.path.Command{
+            .{ .move = .{ .x = 0, .y = 0 } },
+            .{ .line = .{ .x = 40, .y = 0 } },
+            .{ .line = .{ .x = 20, .y = 40 } },
+            .{ .close = {} },
+        };
+        try writer.addPath(.{
+            .bounds = .{ .x = 12, .y = 12, .w = 40, .h = 40 },
+            .path = .{ .commands = &commands },
+            .fill = .{ .solid = green },
+            .stroke = .{ .color = blue, .width = 2, .dash = &.{ 4, 3 } },
+        });
+    }
+};
+
 /// The demo root component: title row, counter block, volume block, todo
 /// list block and a done-count footer, stacked in a root column (gap 12,
 /// blocks use gap 6).
 pub const TodoApp = struct {
-    // --- state (set/mutated by the demo loop and the interaction methods) ---
-    frame_count: u32 = 0, // the App loop sets this before each frame
+    // --- state (mutated by the demo loop and the interaction methods) ---
     counter: u32 = 0, // 0..99
     volume: VolumeSlider = .{},
     showcase: Showcase = .{},
@@ -697,7 +846,11 @@ pub const TodoApp = struct {
     mandelbrot_visible: bool = true,
 
     done: [4]bool = .{ false, false, false, false },
+    /// Each value is an index into items/done and stays fixed as rows move.
+    item_order: [4]u8 = .{ 0, 1, 2, 3 },
     visible_count: u8 = 2, // how many of the 4 pool items are shown (1..4)
+    demo_switch: bool = false,
+    demo_radio_choice: ?u32 = 0,
 
     /// The fixed pool of candidate todo items.
     pub const items = [4][]const u8{ "buy milk", "water plants", "write docs", "exercise" };
@@ -707,12 +860,16 @@ pub const TodoApp = struct {
     };
 
     pub fn draw(self: *TodoApp, ctx: *DrawCtx) !void {
-        const frame_text = try std.fmt.allocPrint(ctx.arena, "Frame: {d}   FPS: {d:.0}", .{ self.frame_count, fps });
+        const frame_text = try std.fmt.allocPrint(
+            ctx.arena,
+            "Frame: {d}   FPS: {d:.0}",
+            .{ ctx.frame_info.?.tick, fps },
+        );
         const counter_text = try std.fmt.allocPrint(ctx.arena, "Counter: {d}", .{self.counter});
 
         var done_count: u32 = 0;
-        for (0..self.visible_count) |i| {
-            if (self.done[i]) done_count += 1;
+        for (self.item_order[0..self.visible_count]) |item_index| {
+            if (self.done[item_index]) done_count += 1;
         }
         const footer_text = try std.fmt.allocPrint(ctx.arena, "{d} of {d} done", .{ done_count, self.visible_count });
         const badge_style = Card.default_style;
@@ -744,8 +901,8 @@ pub const TodoApp = struct {
             .radius = badge_paint.radius,
             .padding = badge_style.padding_inset,
             .fill = c_accent_dim,
-            .gradient = srgbToOklab(c_accent_dim),
-            .shadow = badge_paint.shadow,
+            .paint_fill = solidFill(c_accent_dim),
+            .shadows = badge_paint.shadows,
         });
         _ = try caption(ctx, "LAYER 1", 1, .{ .static = "todo-layer-caption" });
         // The badge — explicit, NOT deferred (a deferred pop fires at the end
@@ -772,17 +929,31 @@ pub const TodoApp = struct {
             {
                 _ = try ctx.row(.{ .direction = .row, .gap = 6 });
                 defer ctx.pop();
-                const st = text_mod.debug_state;
-                _ = try pill(ctx, if (st.bgr) "BGR" else "RGB", st.bgr, TodoApp.toggleBgr);
-                _ = try pill(ctx, "damp", st.damp, TodoApp.toggleDamp);
-                _ = try pill(ctx, "debug", st.quad_debug, TodoApp.toggleDebug);
+                const st = debug_mod.debug_state;
+                _ = try pill(
+                    ctx,
+                    .{ .static = "toggle-bgr" },
+                    if (st.bgr) "BGR" else "RGB",
+                    st.bgr,
+                    TodoApp.toggleBgr,
+                );
+                _ = try pill(ctx, .{ .static = "toggle-damp" }, "damp", st.damp, TodoApp.toggleDamp);
+                _ = try pill(ctx, .{ .static = "toggle-debug" }, "debug", st.quad_debug, TodoApp.toggleDebug);
             }
         }
 
+        if (custom_ruler_smoke) {
+            _ = try ctx.elementLeaf(CustomRuler, .{}, .{});
+        }
+        if (custom_paint_smoke) {
+            _ = try ctx.elementLeaf(PaintSpecimen, .{}, .{ .width = 240, .height = 72 });
+        }
+
         {
-            // Font-sizes showcase: labels at 13/16/20/24/32 px. The
-            // per-node font_size selects the matching font state; S toggles
-            // the subpixel AA for comparison at every size.
+            // Font-sizes showcase: labels at 13/16/20/24/32 px. Each label's
+            // authored size resolves into its own text request, so the host
+            // measures and paints that size; S toggles the subpixel AA for
+            // comparison at every size.
             _ = try card(false, ctx, false);
             defer ctx.pop();
             _ = try caption(ctx, "FONT SIZES — S TOGGLES SUBPIXEL AA", 0, .{ .static = "todo-font-caption" });
@@ -806,49 +977,6 @@ pub const TodoApp = struct {
             );
         }
 
-        // The ghostty font (Fira Code Nerd Font) at the same sizes — commented
-        // out for now (the multi-font showcase is redundant; keep it for later).
-        // _ = try ctx.column(.{
-        //     .gap = 6,
-        //     .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
-        //     .border_color = .{ 0.4, 0.4, 0.46, 1 },
-        //     .radius = .{ .top = 4, .right = 4, .bottom = 4, .left = 4 },
-        //     .padding = .{ .top = 8, .right = 8, .bottom = 8, .left = 8 },
-        // });
-        // defer ctx.pop();
-        // _ = try label(ctx, "Fira Code Nerd Font (ghostty):");
-        // _ = try ctx.label(.{
-        //     .text = "10px: The quick brown fox jumps over the lazy dog",
-        //     .font_size = 10,
-        //     .font_id = 1,
-        //     .padding = .{ .left = 6, .right = 6 },
-        // });
-        // _ = try ctx.label(.{
-        //     .text = "13px: The quick brown fox jumps over the lazy dog",
-        //     .font_size = 13,
-        //     .font_id = 1,
-        //     .padding = .{ .left = 6, .right = 6 },
-        // });
-        // _ = try ctx.label(.{
-        //     .text = "16px: The quick brown fox jumps over the lazy dog",
-        //     .font_size = 16,
-        //     .font_id = 1,
-        //     .padding = .{ .left = 6, .right = 6 },
-        // });
-        // _ = try ctx.label(.{
-        //     .text = "20px: The quick brown fox jumps over the lazy dog",
-        //     .font_size = 20,
-        //     .font_id = 1,
-        //     .padding = .{ .left = 6, .right = 6 },
-        // });
-        // _ = try ctx.label(.{
-        //     .text = "24px: The quick brown fox jumps over the lazy dog",
-        //     .font_size = 24,
-        //     .font_id = 1,
-        //     .padding = .{ .left = 6, .right = 6 },
-        // });
-        // }
-
         // Counter + volume side by side in a horizontal flex box. The row's
         // pop MUST be explicit (not deferred) — a deferred pop fires at the
         // end of the whole draw and collects every following block into the
@@ -864,9 +992,9 @@ pub const TodoApp = struct {
             {
                 _ = try ctx.row(.{ .direction = .row, .gap = 6 });
                 defer ctx.pop();
-                _ = try btn(ctx, "dec", TodoApp.dec);
-                _ = try btn(ctx, "reset", TodoApp.reset);
-                _ = try btnPrimary(ctx, "inc", TodoApp.inc);
+                _ = try btn(ctx, .{ .static = "counter-dec" }, "dec", TodoApp.dec);
+                _ = try btn(ctx, .{ .static = "counter-reset" }, "reset", TodoApp.reset);
+                _ = try btnPrimary(ctx, .{ .static = "counter-inc" }, "inc", TodoApp.inc);
             }
         }
 
@@ -879,8 +1007,8 @@ pub const TodoApp = struct {
         _ = try ctx.spacer(.{ .size = 8 });
 
         {
-            // Todo block: a card with the done-count header + the
-            // add/remove buttons + one toggle row per visible item.
+            // Todo block: the done-count header, add/remove buttons, and
+            // one bound checkbox row per visible item.
             _ = try card(false, ctx, false);
             defer ctx.pop();
             {
@@ -892,41 +1020,53 @@ pub const TodoApp = struct {
             {
                 _ = try ctx.row(.{ .direction = .row, .gap = 6 });
                 defer ctx.pop();
-                _ = try btn(ctx, "remove", TodoApp.remove);
-                _ = try btnPrimary(ctx, "add", TodoApp.add);
+                _ = try btn(ctx, .{ .static = "todo-remove" }, "remove", TodoApp.remove);
+                _ = try btnPrimary(ctx, .{ .static = "todo-add" }, "add", TodoApp.add);
             }
-            // Unrolled so each toggle button can bind its own comptime
-            // handler; the runtime check hides rows beyond visible_count.
-            // Toggle button label doubles as the state indicator:
-            // "toggle{i}: [ ]" undone, "toggle{i}: [x]" done.
-            inline for (0..4) |i| {
-                if (i < self.visible_count) {
-                    // Per-node transient: how many frames this toggle row
-                    // has been drawn. Node-local (each row has its own),
-                    // reset to 0 when the row is hidden by "remove" (its
-                    // state directory entry dies with the frame).
-                    const frames = try ctx.state(u32, "toggle-frames", 0);
-                    frames.* += 1;
-                    const toggle_text = try std.fmt.allocPrint(
-                        ctx.arena,
-                        "toggle{d}: [{s}] n={d}",
-                        .{ i, if (self.done[i]) "x" else " ", frames.* },
-                    );
-                    const item_text = if (self.done[i])
-                        (try std.fmt.allocPrint(ctx.arena, "DONE: {s}", .{items[i]}))
-                    else
-                        items[i];
-                    _ = try ctx.row(.{ .direction = .row, .gap = 8, .@"align" = .center });
-                    defer ctx.pop();
-                    _ = try btn(ctx, toggle_text, comptime switch (i) {
-                        0 => TodoApp.onToggle0,
-                        1 => TodoApp.onToggle1,
-                        2 => TodoApp.onToggle2,
-                        else => TodoApp.onToggle3,
-                    });
-                    _ = try labelColor(ctx, item_text, if (self.done[i]) c_text_muted else c_text, .{ .u64 = 700 + i });
-                }
+            for (self.item_order[0..self.visible_count]) |item_index| {
+                _ = try ctx.checkbox(.{
+                    .key = .{ .u64 = item_index },
+                    .label = items[item_index],
+                    .value = &self.done[item_index],
+                    .color = if (self.done[item_index]) c_text_muted else c_accent,
+                });
             }
+            _ = try ctx.separator(.{ .axis = .horizontal, .color = c_border_strong });
+            _ = try caption(ctx, "NATIVE CONTROLS", 0, .{ .static = "todo-controls-caption" });
+            {
+                _ = try ctx.row(.{ .direction = .row, .gap = 12, .@"align" = .center });
+                defer ctx.pop();
+                _ = try ctx.switchControl(.{
+                    .key = .{ .static = "demo-switch" },
+                    .label = "Demo switch",
+                    .value = &self.demo_switch,
+                    .color = c_accent,
+                });
+                _ = try ctx.radio(.{
+                    .key = .{ .static = "demo-radio-a" },
+                    .label = "Choice A",
+                    .selected = &self.demo_radio_choice,
+                    .option = 0,
+                    .color = c_accent,
+                });
+                _ = try ctx.radio(.{
+                    .key = .{ .static = "demo-radio-b" },
+                    .label = "Choice B",
+                    .selected = &self.demo_radio_choice,
+                    .option = 1,
+                    .color = c_accent,
+                });
+            }
+            const completion = @as(f32, @floatFromInt(done_count)) /
+                @as(f32, @floatFromInt(self.visible_count));
+            _ = try ctx.progress(.{
+                .key = .{ .static = "demo-progress" },
+                .label = "Completion",
+                .value = completion,
+                .min = 0,
+                .max = 1,
+                .color = c_accent,
+            });
         }
 
         {
@@ -988,12 +1128,12 @@ pub const TodoApp = struct {
         self.mandelbrot.onFrame(time_ms);
     }
 
+    /// The showcase slot mounts or unmounts the Mandelbrot component. Hiding
+    /// it retires its pointer surface at once, so no routed event can reach
+    /// a viewport the next frame is about to remove.
     pub fn setMandelbrotVisible(self: *TodoApp, visible: bool) void {
+        if (!visible) self.mandelbrot.clearInputTarget();
         self.mandelbrot_visible = visible;
-    }
-
-    pub fn onEvent(self: *TodoApp, event: *const Event) void {
-        self.mandelbrot.onEvent(event);
     }
 
     pub fn onPrecisionKey(self: *TodoApp) void {
@@ -1035,10 +1175,6 @@ pub const TodoApp = struct {
         self.volume.mute();
     }
 
-    pub fn toggle(self: *TodoApp, i: usize) void {
-        if (i < self.done.len) self.done[i] = !self.done[i];
-    }
-
     pub fn add(self: *TodoApp) void {
         if (self.visible_count < 4) self.visible_count += 1;
     }
@@ -1046,30 +1182,13 @@ pub const TodoApp = struct {
     pub fn remove(self: *TodoApp) void {
         if (self.visible_count > 1) self.visible_count -= 1;
     }
-
-    // Per-index adapters so each toggle button binds a type-erased
-    // `fn (*TodoApp) void` handler.
-    pub fn onToggle0(self: *TodoApp) void {
-        self.toggle(0);
-    }
-    pub fn onToggle1(self: *TodoApp) void {
-        self.toggle(1);
-    }
-    pub fn onToggle2(self: *TodoApp) void {
-        self.toggle(2);
-    }
-    pub fn onToggle3(self: *TodoApp) void {
-        self.toggle(3);
-    }
 };
 
 // --- tests -----------------------------------------------------------------
 
-/// Fresh WidgetTree + DrawCtx over a per-tree arena, run `app.draw`,
-/// return the tree for inspection. DrawCtx duplicates label strings into
-/// the arena, so the arena must outlive the tree: call freeTree().
-/// (Tests run sequentially; a new buildTree() releases the previous arena,
-/// so one test may build several trees.)
+/// Build a WidgetTree with fixed frame metadata and an arena-backed DrawCtx.
+/// Keep the arena alive while inspecting the tree; call freeTree() afterward.
+/// A new buildTree() releases the prior arena.
 var test_arena: ?std.heap.ArenaAllocator = null;
 
 fn buildTree(app: *TodoApp) !WidgetTree {
@@ -1079,7 +1198,16 @@ fn buildTree(app: *TodoApp) !WidgetTree {
     const arena = if (test_arena) |*a| a else unreachable;
     const alloc = arena.allocator();
     var tree = WidgetTree.init(alloc); // mutable: DrawCtx takes *WidgetTree
-    var ctx: DrawCtx = .{ .tree = &tree, .arena = alloc };
+    var ctx: DrawCtx = .{
+        .tree = &tree,
+        .arena = alloc,
+        .frame_info = .{
+            .tick = 1,
+            .time_ms = 0,
+            .generation = 1,
+            .surface = .{ .width = 1100, .height = 1160 },
+        },
+    };
     try app.draw(&ctx);
     return tree;
 }
@@ -1104,7 +1232,7 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
     const n_roots = tree.roots(&roots_buf);
     try std.testing.expect(n_roots >= 3);
     const badge_col = roots_buf[0];
-    try std.testing.expectEqual(Id.root, badge_col.parent);
+    try std.testing.expectEqual(FrameNodeId.root, badge_col.parent);
     try std.testing.expectEqual(@as(u32, 1), badge_col.paint.layer);
     var caption_has_layer = false;
     for (tree.nodes.items) |n| {
@@ -1117,16 +1245,19 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
     // advance exactly, so the Showcase row starts at y=0 and the root
     // column follows it directly — no badge-induced offset anywhere.
     const Rect = nogui.Rect;
-    const Size = nogui.Size;
-    const fakeMeasure = struct {
-        fn f(_: []const u8, _: nogui.layout.MeasureInput) Size {
+    const Ruler = struct {
+        fn f(
+            _: ?*anyopaque,
+            _: []const u8,
+            _: nogui.layout.MeasureInput,
+        ) nogui.layout.LayoutError!nogui.layout.TextMeasurement {
             return .{ .width = 40, .height = 24 };
         }
-    }.f;
+    };
     try nogui.layout.layoutTree(&tree, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = 1100, .height = 1160 },
-        .measure = fakeMeasure,
+        .measure = .{ .callback = Ruler.f },
     });
 
     try std.testing.expectEqual(Rect{ .x = 20, .y = 0, .w = 200, .h = 44 }, badge_col.rect);
@@ -1135,6 +1266,17 @@ test "layer badge: first root, layer 1, its height cancels exactly" {
         roots_buf[1].rect.y + roots_buf[1].rect.h,
         roots_buf[2].rect.y,
     ); // root column, unchanged
+}
+
+fn clickAt(app: *App, rect: nogui.Rect) !void {
+    const x = rect.x + rect.w / 2;
+    const y = rect.y + rect.h / 2;
+    _ = try app.handle(.{
+        .mouse_down = .{ .button = .left, .x = x, .y = y },
+    });
+    _ = try app.handle(.{
+        .mouse_up = .{ .button = .left, .x = x, .y = y },
+    });
 }
 
 /// Scan by kind (never by position): node order is post-order and ids are
@@ -1151,88 +1293,368 @@ fn expectLabel(tree: *const WidgetTree, text: []const u8) !void {
     return error.LabelNotFound;
 }
 
-/// Count button nodes whose label starts with `prefix`.
-fn countButtonLabelsWithPrefix(tree: *const WidgetTree, prefix: []const u8) usize {
+/// Count the currently visible TodoApp checkbox rows.
+fn countTodoCheckboxes(tree: *const WidgetTree) usize {
     var count: usize = 0;
-    for (tree.nodes.items) |n| {
-        switch (n.kind) {
-            .button => |b| {
-                if (std.mem.startsWith(u8, b.label, prefix)) count += 1;
-            },
-            else => {},
-        }
+    for (tree.nodes.items) |node| {
+        if (node.kind == .checkbox) count += 1;
     }
     return count;
 }
 
-test "draw: tree contains the expected button labels and title" {
-    var app: TodoApp = .{ .frame_count = 7 };
-    const tree = try buildTree(&app);
-    defer freeTree();
-
-    var found_inc = false;
-    var found_dec = false;
-    var found_reset = false;
-    var found_mute = false;
-    var found_add = false;
-    var found_remove = false;
-    for (tree.nodes.items) |n| {
-        switch (n.kind) {
-            .button => |b| {
-                if (std.mem.eql(u8, b.label, "inc")) found_inc = true;
-                if (std.mem.eql(u8, b.label, "dec")) found_dec = true;
-                if (std.mem.eql(u8, b.label, "reset")) found_reset = true;
-                if (std.mem.eql(u8, b.label, "mute")) found_mute = true;
-                if (std.mem.eql(u8, b.label, "add")) found_add = true;
-                if (std.mem.eql(u8, b.label, "remove")) found_remove = true;
-            },
-            else => {},
-        }
-    }
-    try std.testing.expect(found_inc and found_dec and found_reset and found_mute and found_add and found_remove);
-
-    // Default visible_count of 2 -> exactly two toggle rows, all undone.
-    try std.testing.expectEqual(@as(usize, 2), countButtonLabelsWithPrefix(&tree, "toggle"));
-
-    try expectLabel(&tree, "nogui v7 demo");
-    try expectLabel(&tree, "Frame: 7   FPS: 0");
+/// True when a node authors a fill of its own — the `explicit_fill` test the
+/// paint pass applies before it falls back to a kind's default surface
+/// (`src/v7/drawcmd.zig:271`).
+fn authorsFill(node: *const WidgetNode) bool {
+    return node.paint.fill[3] > 0 or
+        node.paint.paint_fill != null or node.paint.texture != null;
 }
 
-test "toggle(0) marks the item done in the next draw" {
+/// Whether `node` sits anywhere under `ancestor`.
+fn descendsFrom(tree: *const WidgetTree, node: *const WidgetNode, ancestor: FrameNodeId) bool {
+    var cursor = node.parent;
+    while (cursor != .root) {
+        if (cursor == ancestor) return true;
+        const parent = tree.nodeConst(cursor) orelse return false;
+        cursor = parent.parent;
+    }
+    return false;
+}
+
+/// Build a tree from one draw callback, so a test can state a paint shape
+/// directly instead of reaching it through TodoApp. Same arena lifetime rules
+/// as `buildTree`.
+fn buildScene(draw: anytype) !WidgetTree {
+    freeTree();
+    test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    errdefer freeTree();
+    const alloc = if (test_arena) |*a| a else unreachable;
+    const alloc_ctx = alloc.allocator();
+    var tree = WidgetTree.init(alloc_ctx);
+    var ctx: DrawCtx = .{
+        .tree = &tree,
+        .arena = alloc_ctx,
+        .frame_info = .{
+            .tick = 1,
+            .time_ms = 0,
+            .generation = 1,
+            .surface = .{ .width = 1100, .height = 1160 },
+        },
+    };
+    try draw(&ctx);
+    return tree;
+}
+
+/// The first filled container in `tree` that has an unfilled row/column
+/// child, or null when the scene has no patchwork. Null is the assertion the
+/// Todo scene passes; the control below shows the finder reports a real one.
+fn findPatchwork(tree: *const WidgetTree) ?FrameNodeId {
+    for (tree.nodes.items) |node| {
+        if (node.kind != .column and node.kind != .row) continue;
+        if (!authorsFill(&node)) continue;
+        for (tree.nodes.items) |child| {
+            if (child.id == node.id) continue;
+            if (child.kind != .column and child.kind != .row) continue;
+            if (!descendsFrom(tree, &child, node.id)) continue;
+            if (authorsFill(&child)) continue;
+            if (!child.paint.transparent) return node.id;
+        }
+    }
+    return null;
+}
+
+// The Todo scene itself: no container's fill is covered by a child that
+// paints the default surface over it.
+//
+// A row or column that authors NO fill is painted `palette.container`
+// (`src/v7/drawcmd.zig:273-277`). Nested inside a container that DID author
+// a surface, such a child covers that surface with the fallback colour and
+// leaves the parent's fill showing only in the gaps between children — the
+// patchwork the Spotify track rows had, where the active row's highlight
+// survived around its eight children instead of under them.
+//
+// Every filled container is swept, so authoring a card fill cannot
+// reintroduce the split unnoticed. The Todo scene passes for a structural
+// reason, not by luck: `card()` authors no fill either, so a card and its
+// child rows resolve to the SAME `palette.container` and the split has
+// nothing to show. Adding a fill to `Card.default_paint` is exactly the
+// change that would turn those children into visible offenders.
+test "todo scene: no unfilled row or column covers a filled container" {
     var app: TodoApp = .{};
-    app.toggle(0);
-    const tree = try buildTree(&app);
+    var tree = try buildTree(&app);
+    defer freeTree();
+    try std.testing.expectEqual(@as(?FrameNodeId, null), findPatchwork(&tree));
+}
+
+// Positive control for `findPatchwork`, and the exact Spotify shape: a row
+// that paints a highlight with a plain unfilled row inside it. The inner
+// row covers the highlight, which then survives only in the gaps between
+// children. If this ever reports null the finder is broken and the Todo
+// scene's passing result would mean nothing.
+test "patchwork finder reports a filled row covered by an unfilled child row" {
+    var tree = try buildScene(struct {
+        fn draw(ctx: *DrawCtx) !void {
+            _ = try ctx.row(.{
+                .fill = c_accent_dim,
+                .paint_fill = solidFill(c_accent_dim),
+            });
+            defer ctx.pop();
+            // The defect: no fill, so the paint pass gives this child the
+            // `palette.container` fallback instead of letting the row's own
+            // highlight show through.
+            _ = try ctx.row(.{ .gap = 0 });
+            ctx.pop();
+        }
+    }.draw);
     defer freeTree();
 
-    // The toggle0 button label now shows "[x]"; toggle1 stays "[ ]".
-    var toggle0_shows_done = false;
-    var toggle1_shows_undone = false;
-    var done_item: ?[]const u8 = null;
-    var footer: ?[]const u8 = null;
-    for (tree.nodes.items) |n| {
-        switch (n.kind) {
-            .button => |b| {
-                if (std.mem.startsWith(u8, b.label, "toggle0")) {
-                    toggle0_shows_done = std.mem.indexOf(u8, b.label, "[x]") != null;
-                }
-                if (std.mem.startsWith(u8, b.label, "toggle1")) {
-                    toggle1_shows_undone = std.mem.indexOf(u8, b.label, "[ ]") != null;
-                }
+    const offender = findPatchwork(&tree) orelse return error.PatchworkNotDetected;
+    const owner = tree.nodeConst(offender) orelse return error.MissingNode;
+    try std.testing.expect(authorsFill(owner));
+
+    // Marking the child transparent is the repair, and it must clear the
+    // report — that is what makes `.transparent` the fix rather than a
+    // cosmetic annotation.
+    for (tree.nodes.items) |*node| {
+        if (node.kind == .row and !authorsFill(node)) {
+            node.paint.transparent = true;
+            break;
+        }
+    }
+    try std.testing.expectEqual(@as(?FrameNodeId, null), findPatchwork(&tree));
+}
+
+test "todo checkbox mouse and keyboard input update the next frame" {
+    var todo: TodoApp = .{};
+    var session = try nogui.Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app = try App.init(std.testing.allocator, &session);
+    defer app.deinit();
+    try app.mountRoot(TodoApp, &todo);
+    _ = try app.handle(.{ .resize = .{ .width = 1400, .height = 1600 } });
+    const first = (try app.handle(.{ .frame = .{ .tick = 1, .time_ms = 0 } })) orelse
+        return error.MissingFrameOutput;
+    defer if (first.json) |json| std.testing.allocator.free(json);
+
+    var checkbox_id: ?FrameNodeId = null;
+    var switch_id: ?FrameNodeId = null;
+    var second_radio_id: ?FrameNodeId = null;
+    for (first.tree.nodes.items) |node| {
+        switch (node.kind) {
+            .checkbox => |checkbox| {
+                if (std.mem.eql(u8, checkbox.label, "buy milk")) checkbox_id = node.id;
             },
-            .label => |l| {
-                if (std.mem.startsWith(u8, l.text, "DONE: ")) done_item = l.text;
-                if (std.mem.endsWith(u8, l.text, "done") and std.mem.startsWith(u8, l.text, "1 of ")) footer = l.text;
+            .switch_control => |control| {
+                if (std.mem.eql(u8, control.label, "Demo switch")) switch_id = node.id;
+            },
+            .radio => |radio| {
+                if (std.mem.eql(u8, radio.label, "Choice B")) second_radio_id = node.id;
             },
             else => {},
         }
     }
-    try std.testing.expect(toggle0_shows_done);
-    try std.testing.expect(toggle1_shows_undone);
-    try std.testing.expect(done_item != null);
-    try std.testing.expectEqualStrings("DONE: buy milk", done_item.?);
-    try std.testing.expect(footer != null);
-    // 1 of 2 done with the default visible_count of 2.
-    try std.testing.expectEqualStrings("1 of 2 done", footer.?);
+    const id = checkbox_id orelse return error.MissingTodoCheckbox;
+    const switch_control_id = switch_id orelse return error.MissingDemoSwitch;
+    const radio_id = second_radio_id orelse return error.MissingDemoRadio;
+    const checkbox_rect = nogui.widget.absoluteRect(first.tree, id);
+    const switch_rect = nogui.widget.absoluteRect(first.tree, switch_control_id);
+    const radio_rect = nogui.widget.absoluteRect(first.tree, radio_id);
+    try clickAt(&app, switch_rect);
+    try clickAt(&app, radio_rect);
+    try clickAt(&app, checkbox_rect);
+    try std.testing.expect(todo.demo_switch);
+    try std.testing.expectEqual(@as(?u32, 1), todo.demo_radio_choice);
+    try std.testing.expect(todo.done[0]);
+
+    const second = (try app.handle(.{ .frame = .{ .tick = 2, .time_ms = 16 } })) orelse
+        return error.MissingFrameOutput;
+    defer if (second.json) |json| std.testing.allocator.free(json);
+    var done_checkbox = false;
+    var done_footer = false;
+    for (second.tree.nodes.items) |node| {
+        switch (node.kind) {
+            .checkbox => |checkbox| {
+                if (std.mem.eql(u8, checkbox.label, "buy milk")) {
+                    done_checkbox = checkbox.value.*;
+                }
+            },
+            .label => |label| {
+                if (std.mem.eql(u8, label.text, "1 of 2 done")) done_footer = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(done_checkbox);
+    try std.testing.expect(done_footer);
+
+    _ = try app.handle(.{ .key_down = .{ .key = .space, .shift = false } });
+    try std.testing.expect(!todo.done[0]);
+    const third = (try app.handle(.{ .frame = .{ .tick = 3, .time_ms = 32 } })) orelse
+        return error.MissingFrameOutput;
+    defer if (third.json) |json| std.testing.allocator.free(json);
+    var undone_checkbox = false;
+    var undone_footer = false;
+    for (third.tree.nodes.items) |node| {
+        switch (node.kind) {
+            .checkbox => |checkbox| {
+                if (std.mem.eql(u8, checkbox.label, "buy milk")) {
+                    undone_checkbox = !checkbox.value.*;
+                }
+            },
+            .label => |label| {
+                if (std.mem.eql(u8, label.text, "0 of 2 done")) undone_footer = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(undone_checkbox);
+    try std.testing.expect(undone_footer);
+}
+test "todo checkbox keeps keyboard focus when items change order" {
+    var todo: TodoApp = .{};
+    var session = try nogui.Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app = try App.init(std.testing.allocator, &session);
+    defer app.deinit();
+    try app.mountRoot(TodoApp, &todo);
+    const first = try app.frame(1, .{ .width = 1400, .height = 1600 });
+    defer if (first.json) |json| std.testing.allocator.free(json);
+
+    var target: ?FrameNodeId = null;
+    for (first.tree.nodes.items) |node| {
+        if (node.kind == .checkbox and node.kind.checkbox.value == &todo.done[1]) {
+            target = node.id;
+            break;
+        }
+    }
+    const rect = nogui.widget.absoluteRect(first.tree, target orelse return error.MissingTodoCheckbox);
+    try clickAt(&app, rect);
+    try std.testing.expect(todo.done[1]);
+
+    todo.item_order[0] = 1;
+    todo.item_order[1] = 0;
+    const second = try app.frame(2, .{ .width = 1400, .height = 1600 });
+    defer if (second.json) |json| std.testing.allocator.free(json);
+    var first_checkbox: ?*bool = null;
+    for (second.tree.nodes.items) |node| {
+        if (node.kind == .checkbox) {
+            first_checkbox = node.kind.checkbox.value;
+            break;
+        }
+    }
+    try std.testing.expectEqual(&todo.done[1], first_checkbox orelse return error.MissingTodoCheckbox);
+
+    _ = try app.handle(.{ .key_down = .{ .key = .space, .shift = false } });
+    try std.testing.expect(!todo.done[1]);
+    try std.testing.expect(!todo.done[0]);
+}
+
+test "TodoApp wheel zoom only over the visible Mandelbrot viewport" {
+    var todo: TodoApp = .{};
+    var session = try nogui.Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app = try App.init(std.testing.allocator, &session);
+    defer app.deinit();
+    try app.mountRoot(TodoApp, &todo);
+    const frame = try app.frame(1, .{ .width = 1100, .height = 1160 });
+    defer if (frame.json) |json| std.testing.allocator.free(json);
+    const id = todo.mandelbrot.viewport;
+    const viewport = nogui.widget.visualBorderRect(frame.tree, id);
+    try std.testing.expect(viewport.w > 0 and viewport.h > 0 and viewport.y > 8);
+    const initial = todo.mandelbrot.scale;
+
+    const outside: Event = .{ .mouse_wheel = .{
+        .x = viewport.x + viewport.w / 2,
+        .y = viewport.y - 8,
+        .delta_x = 0,
+        .delta_y = 1,
+    } };
+    _ = try app.handle(outside);
+    try std.testing.expectEqual(initial, todo.mandelbrot.scale);
+
+    const inside: Event = .{ .mouse_wheel = .{
+        .x = viewport.x + viewport.w / 2,
+        .y = viewport.y + viewport.h / 2,
+        .delta_x = 0,
+        .delta_y = 1,
+    } };
+    _ = try app.handle(inside);
+    try std.testing.expect(todo.mandelbrot.scale > initial);
+    const zoomed = todo.mandelbrot.scale;
+
+    const right_edge: Event = .{ .mouse_wheel = .{
+        .x = viewport.x + viewport.w,
+        .y = viewport.y + viewport.h / 2,
+        .delta_x = 0,
+        .delta_y = 1,
+    } };
+    _ = try app.handle(right_edge);
+    try std.testing.expectEqual(zoomed, todo.mandelbrot.scale);
+
+    todo.setMandelbrotVisible(false);
+    _ = try app.handle(inside);
+    try std.testing.expectEqual(zoomed, todo.mandelbrot.scale);
+}
+
+test "Mandelbrot pan follows the pointer outside the box and stops on cancel" {
+    const viewport_scope = nogui.ComponentId.child(.root, .{ .static = "mandelbrot" });
+    var todo: TodoApp = .{};
+    var session = try nogui.Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app = try App.init(std.testing.allocator, &session);
+    defer app.deinit();
+    try app.mountRoot(TodoApp, &todo);
+    const frame = try app.frame(1, .{ .width = 1100, .height = 1160 });
+    defer if (frame.json) |json| std.testing.allocator.free(json);
+    const viewport = nogui.widget.visualBorderRect(frame.tree, todo.mandelbrot.viewport);
+    try std.testing.expect(viewport.w > 0 and viewport.h > 0);
+    const inside: [2]f32 = .{ viewport.x + viewport.w / 2, viewport.y + viewport.h / 2 };
+    // Left of the box, still inside the surface: the pointer left the
+    // viewport, and the capture is what has to carry the input now.
+    const outside: [2]f32 = .{ viewport.x - 4, viewport.y + viewport.h / 2 };
+    try std.testing.expect(outside[0] > 0);
+
+    _ = try app.handle(.{ .mouse_down = .{ .button = .left, .x = inside[0], .y = inside[1] } });
+    try std.testing.expectEqual(
+        app.widgetIdForKey(viewport_scope, .{ .static = "viewport" }) orelse
+            return error.MissingMandelbrotViewport,
+        app.focus_manager.captured(frame.tree, .{ .mouse = .left }, null) orelse
+            return error.MissingMandelbrotCapture,
+    );
+    const pressed_center = todo.mandelbrot.center;
+    try std.testing.expect(todo.mandelbrot.drag != null);
+
+    _ = try app.handle(.{ .mouse_move = .{ .x = outside[0], .y = outside[1] } });
+    const panned = todo.mandelbrot.center;
+    try std.testing.expect(panned[0] != pressed_center[0] or panned[1] != pressed_center[1]);
+
+    // The release lands outside the box and still belongs to the capture.
+    _ = try app.handle(.{ .mouse_up = .{ .button = .left, .x = outside[0], .y = outside[1] } });
+    try std.testing.expect(todo.mandelbrot.drag == null);
+    try std.testing.expect(app.focus_manager.captured(frame.tree, .{ .mouse = .left }, null) == null);
+    _ = try app.handle(.{ .mouse_move = .{ .x = inside[0], .y = inside[1] + 40 } });
+    try std.testing.expectEqual(panned[0], todo.mandelbrot.center[0]);
+    try std.testing.expectEqual(panned[1], todo.mandelbrot.center[1]);
+
+    // A cancelled press ends the pan, and no later move restarts it.
+    _ = try app.handle(.{ .mouse_down = .{ .button = .left, .x = inside[0], .y = inside[1] } });
+    _ = try app.handle(.{ .mouse_move = .{ .x = inside[0] + 30, .y = inside[1] } });
+    const cancelled = todo.mandelbrot.center;
+    try std.testing.expect(cancelled[0] != panned[0]);
+    _ = try app.handle(.{ .mouse_cancel = .{ .button = .left, .x = inside[0] + 30, .y = inside[1] } });
+    try std.testing.expect(todo.mandelbrot.drag == null);
+    _ = try app.handle(.{ .mouse_move = .{ .x = inside[0] + 60, .y = inside[1] } });
+    try std.testing.expectEqual(cancelled[0], todo.mandelbrot.center[0]);
+
+    // A window that stopped taking input ends it too.
+    _ = try app.handle(.{ .mouse_down = .{ .button = .left, .x = inside[0], .y = inside[1] } });
+    _ = try app.handle(.{ .mouse_move = .{ .x = inside[0], .y = inside[1] + 40 } });
+    try std.testing.expect(todo.mandelbrot.drag != null);
+    _ = try app.handle(.window_focus_lost);
+    try std.testing.expect(todo.mandelbrot.drag == null);
+    const blurred = todo.mandelbrot.center;
+    _ = try app.handle(.{ .mouse_move = .{ .x = inside[0] + 60, .y = inside[1] } });
+    try std.testing.expectEqual(blurred[0], todo.mandelbrot.center[0]);
 }
 
 test "counter: inc, dec clamps at 0, reset returns to 0" {
@@ -1263,23 +1685,23 @@ test "add grows visible rows, remove shrinks, both clamp" {
     var app: TodoApp = .{};
     const tree = try buildTree(&app);
     defer freeTree();
-    try std.testing.expectEqual(@as(usize, 2), countButtonLabelsWithPrefix(&tree, "toggle"));
+    try std.testing.expectEqual(@as(usize, 2), countTodoCheckboxes(&tree));
 
     app.add();
     var tree2 = try buildTree(&app);
-    try std.testing.expectEqual(@as(usize, 3), countButtonLabelsWithPrefix(&tree2, "toggle"));
+    try std.testing.expectEqual(@as(usize, 3), countTodoCheckboxes(&tree2));
 
     app.add();
     app.add(); // clamped at 4
     var tree3 = try buildTree(&app);
-    try std.testing.expectEqual(@as(usize, 4), countButtonLabelsWithPrefix(&tree3, "toggle"));
+    try std.testing.expectEqual(@as(usize, 4), countTodoCheckboxes(&tree3));
 
     app.remove();
     app.remove();
     app.remove();
     app.remove(); // clamped at 1
     var tree4 = try buildTree(&app);
-    try std.testing.expectEqual(@as(usize, 1), countButtonLabelsWithPrefix(&tree4, "toggle"));
+    try std.testing.expectEqual(@as(usize, 1), countTodoCheckboxes(&tree4));
 }
 
 test "mute zeroes the volume label" {
@@ -1294,23 +1716,24 @@ test "mute zeroes the volume label" {
 }
 
 test "click injection: the inc button click reaches the component" {
-    var app = App.init(std.testing.allocator);
+    var todo: TodoApp = .{};
+    var session = try nogui.Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app = try App.init(std.testing.allocator, &session);
     defer app.deinit();
     app.serialize_json = true;
+    try app.mountRoot(TodoApp, &todo);
 
-    var todo: TodoApp = .{};
-    _ = try app.register(TodoApp, &todo);
-
-    const out1 = try app.frame(TodoApp, &todo, 1, .{ .width = 800, .height = 600 });
+    const out1 = try app.frame(1, .{ .width = 800, .height = 600 });
     defer if (out1.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(std.mem.indexOf(u8, out1.json.?, "Counter: 0") != null);
 
-    // Find the "inc" button by scanning by kind — ids are not positions.
-    var inc_id: ?Id = null;
+    // Find the button by kind, then use its persistent interaction identity.
+    var inc_id: ?nogui.WidgetId = null;
     for (out1.tree.nodes.items) |n| {
         switch (n.kind) {
             .button => |b| {
-                if (std.mem.eql(u8, b.label, "inc")) inc_id = n.id;
+                if (std.mem.eql(u8, b.label, "inc")) inc_id = n.widget_id;
             },
             else => {},
         }
@@ -1318,9 +1741,9 @@ test "click injection: the inc button click reaches the component" {
     try std.testing.expect(inc_id != null);
 
     // Click while the frame tree is still valid (dies at the next arena reset).
-    app.click(out1.tree, inc_id.?);
+    app.activate(out1.tree, inc_id.?);
 
-    const out2 = try app.frame(TodoApp, &todo, 2, .{ .width = 800, .height = 600 });
+    const out2 = try app.frame(2, .{ .width = 800, .height = 600 });
     defer if (out2.json) |j| std.testing.allocator.free(j);
     try std.testing.expect(std.mem.indexOf(u8, out2.json.?, "Counter: 1") != null);
 }

@@ -1,0 +1,10 @@
+{"type":"frame","tick":1,"time_ms":0}
+{"type":"key_down","key":"tab"}
+{"type":"key_down","key":"tab"}
+{"type":"key_down","key":"tab"}
+{"type":"key_down","key":"tab"}
+{"type":"key_down","key":"tab"}
+{"type":"key_down","key":"tab"}
+{"type":"frame","tick":2,"time_ms":16}
+{"type":"key_down","key":"enter"}
+{"type":"frame","tick":3,"time_ms":32}

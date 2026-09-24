@@ -20,6 +20,11 @@
 //!
 //! The hashed key keeps lookup cheap; each entry also owns the full name so a
 //! hash collision cannot merge two logical state values.
+//!
+//! T is shallow-copied. It is not deinitialized or owned by StateDir. Do not
+//! put resource ownership here; use a Session model for persistent resources.
+//! Any borrowed pointer or slice inside T must remain valid for the current
+//! and previous readable frames, including a failed build attempt.
 
 const std = @import("std");
 

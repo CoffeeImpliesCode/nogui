@@ -2,6 +2,11 @@
 //!
 //!   zig build v7                # headless: 6 frames of JSON with injected clicks
 //!   zig build v7 -- --window    # graphical: SDL3 + noapi window, mouse-driven
+//!   zig build v7 -- --keyed-reorder-smoke  # headless: verify focus across todo reorder
+//!   zig build v7 -- --shortcut-smoke  # headless: W10 actions, bindings, chords
+//!   zig build v7 -- --shortcut-layout-check=x11[:WAIT_MS]  # live layout labels + cursor
+//!   zig build v7 -- --shortcut-native[=MS]  # hosted: real window, real keys, external controller
+//!   zig build v7 -- --shortcut-native --shortcut-pixels=out.ppm  # hosted + PPM of the last frame
 const std = @import("std");
 const Io = std.Io;
 /// Enables the Tracy profiler client (the "tracy" module's zones emit only
@@ -22,15 +27,17 @@ pub const tracy_options: tracy.Options = .{
     .default_callstack_depth = 8,
 };
 const nogui = @import("nogui");
-const Id = nogui.Id;
+const nogui_test = @import("nogui_test");
+const nogui_text = @import("nogui_text");
 const ui = @import("ui.zig");
+const todo_shortcuts = @import("todo_shortcuts.zig");
 const spotify_ui = @import("spotify.zig");
 const calculator_ui = @import("calculator.zig");
 const local_library = @import("local_library.zig");
 const LocalTrack = @import("spotify_data.zig").LocalTrack;
 const window_backend = @import("window.zig");
 const perf = @import("perf.zig");
-const measure_cpu = @import("measure_cpu.zig");
+const demo_fonts = @import("fonts.zig");
 const headless = nogui.headless;
 const hitTest = nogui.hitTest;
 const App = nogui.App;
@@ -48,34 +55,112 @@ fn nextPerfArg(args_it: anytype, flag: []const u8) error{MissingArg}![]const u8 
     if (std.mem.startsWith(u8, value, "--")) return errMissingArg(flag);
     return value;
 }
+
+/// The per-step budget the hosted arm publishes. Zero is refused: a step with
+/// no budget cannot report that its evidence never arrived, which is the one
+/// thing a controller needs to hear.
+fn parseShortcutBudget(value: []const u8) error{ BadShortcutStepArg, ZeroShortcutStepBudget }!u64 {
+    const budget = std.fmt.parseUnsigned(u64, value, 10) catch return error.BadShortcutStepArg;
+    if (budget == 0) return error.ZeroShortcutStepBudget;
+    return budget;
+}
+
 const interactive_track_count_max: usize = 12;
 
 fn interactiveTracks(records: []const LocalTrack) []const LocalTrack {
     return records[0..@min(records.len, interactive_track_count_max)];
 }
 
+fn runKeyedReorderSmoke(io: Io, app: *App, todo: *ui.TodoApp) !void {
+    const surface: nogui.Size = .{ .width = 1400, .height = 1600 };
+    const first = try app.frame(1, surface);
+    const focused_id = app.widgetIdForKey(.root, .{ .u64 = 1 }) orelse
+        return error.KeyedReorderTargetMissing;
+    const other_id = app.widgetIdForKey(.root, .{ .u64 = 0 }) orelse
+        return error.KeyedReorderOtherItemMissing;
+    const first_node_id = first.tree.frameNode(focused_id) orelse
+        return error.KeyedReorderTargetMissing;
+    const first_other_id = first.tree.frameNode(other_id) orelse
+        return error.KeyedReorderOtherItemMissing;
+    const target = first.tree.nodeConst(first_node_id) orelse return error.KeyedReorderTargetMissing;
+    if (target.kind != .checkbox) return error.KeyedReorderWrongTarget;
+    if (target.kind.checkbox.value != &todo.done[1]) return error.KeyedReorderWrongTarget;
+    if (first_other_id.index() >= first_node_id.index()) return error.KeyedReorderInitialOrderWrong;
+
+    const rect = nogui.widget.absoluteRect(first.tree, first_node_id);
+    const x = rect.x + rect.w / 2;
+    const y = rect.y + rect.h / 2;
+    _ = try app.handle(.{
+        .mouse_down = .{ .button = .left, .x = x, .y = y },
+    });
+    _ = try app.handle(.{
+        .mouse_up = .{ .button = .left, .x = x, .y = y },
+    });
+    if (!todo.done[1] or todo.done[0]) return error.KeyedReorderMouseToggledWrongItem;
+    const clicked_focus = app.focus_manager.current orelse return error.KeyedReorderMouseFocusMissing;
+    if (!clicked_focus.eql(focused_id)) return error.KeyedReorderMouseFocusWrong;
+
+    todo.item_order[0] = 1;
+    todo.item_order[1] = 0;
+    const second = try app.frame(2, surface);
+    const reordered_id = app.widgetIdForKey(.root, .{ .u64 = 1 }) orelse
+        return error.KeyedReorderTargetMissing;
+    if (!reordered_id.eql(focused_id)) return error.KeyedReorderIdentityChanged;
+    const second_node_id = second.tree.frameNode(reordered_id) orelse
+        return error.KeyedReorderTargetMissing;
+    const second_other_id = second.tree.frameNode(other_id) orelse
+        return error.KeyedReorderOtherItemMissing;
+    if (second_node_id == first_node_id or second_node_id.index() >= second_other_id.index()) {
+        return error.KeyedReorderDenseOrderUnchanged;
+    }
+    const second_target = second.tree.nodeConst(second_node_id) orelse
+        return error.KeyedReorderTargetMissing;
+    if (second_target.kind != .checkbox) return error.KeyedReorderWrongTarget;
+    if (second_target.kind.checkbox.value != &todo.done[1]) return error.KeyedReorderWrongTarget;
+    const retained_focus = second.focus orelse return error.KeyedReorderFocusLost;
+    if (!retained_focus.eql(focused_id)) return error.KeyedReorderFocusMoved;
+    if (!todo.done[1] or todo.done[0]) return error.KeyedReorderFrameChangedItems;
+
+    _ = try app.handle(.{
+        .key_down = .{ .key = .space, .shift = false },
+    });
+    if (todo.done[1] or todo.done[0]) return error.KeyedReorderKeyboardToggledWrongItem;
+    try Io.File.stdout().writeStreamingAll(io, "keyed-reorder-smoke: OK\n");
+}
+
 pub fn main(init: std.process.Init) !void {
     var alloc = init.gpa;
-    // var gpa = std.heap.DebugAllocator(.{}){};
-    // defer _ = gpa.deinit();
-    // const alloc = gpa.allocator();
 
-    var app = App.init(alloc);
-    defer app.deinit();
     var todo: ui.TodoApp = .{};
     var spotify: spotify_ui.SpotifyApp = .{};
     var calc: calculator_ui.CalculatorApp = .{};
-    var tiger: ui.TigerApp = .{}; // registered at the --tiger dispatch (the App holds ONE root)
-    var strokes: ui.TestStrokesApp = .{}; // --strokes: the stroke test scene
+    var tiger: ui.TigerApp = .{};
+    var strokes: ui.TestStrokesApp = .{};
+    // Spotify's view borrows track metadata through App deinit.
+    var library: ?local_library.LocalLibrary = null;
+    defer if (library) |*value| value.deinit();
+    var session = try nogui.Session.init(alloc);
+    defer session.deinit() catch @panic("demo Session has live models or windows");
+    var app = try App.init(alloc, &session);
+    defer app.deinit();
 
     var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, alloc);
     defer args_it.deinit();
     var window_mode = false;
+    var uncapped = false;
     var spotify_mode = false; // --spotify: the Spotify layout stress scene
     var tiger_mode = false; // --tiger: the dedicated tiger showcase window
     var strokes_mode = false; // --strokes: the stroke test scene
     var calc_mode = false; // --calculator: the calculator demo window
     var gpu_remount_smoke = false; // --gpu-remount-smoke: finite GPU lifecycle run
+    var keyed_reorder_smoke = false; // --keyed-reorder-smoke: finite headless focus check
+    var ruler_smoke = false; // --ruler-smoke: opt-in custom-element Todo view
+    var paint_smoke = false; // --paint-smoke: W13 GPU pixel specimen on the Todo root
+    var shortcut_smoke = false; // --shortcut-smoke: W10 configurable Todo shortcuts
+    var shortcut_layout_spec: ?[]const u8 = null; // --shortcut-layout-check=DRIVER[:MS]
+    var shortcut_native = false; // --shortcut-native[=MS]: the hosted arm
+    var shortcut_step_ms: ?u64 = null; // --shortcut-native=MS | --shortcut-step-ms MS
+    var shortcut_pixels: ?[]const u8 = null; // --shortcut-pixels=PATH
     var perf_mode: ?perf.Mode = null;
     var perf_warmup_frames: ?u32 = null;
     var perf_sample_frames: ?u32 = null;
@@ -117,11 +202,61 @@ pub fn main(init: std.process.Init) !void {
             scene_flag_count += 1;
         } else if (std.mem.eql(u8, arg, "--window")) {
             window_mode = true;
+        } else if (std.mem.eql(u8, arg, "--uncapped")) {
+            uncapped = true;
         } else if (std.mem.eql(u8, arg, "--calculator")) {
             calc_mode = true;
             scene_flag_count += 1;
         } else if (std.mem.eql(u8, arg, "--gpu-remount-smoke")) {
             gpu_remount_smoke = true;
+        } else if (std.mem.eql(u8, arg, "--keyed-reorder-smoke")) {
+            keyed_reorder_smoke = true;
+        } else if (std.mem.eql(u8, arg, "--ruler-smoke")) {
+            ruler_smoke = true;
+        } else if (std.mem.eql(u8, arg, "--paint-smoke")) {
+            paint_smoke = true;
+        } else if (std.mem.eql(u8, arg, "--shortcut-smoke")) {
+            shortcut_smoke = true;
+        } else if (std.mem.startsWith(u8, arg, "--shortcut-layout-check=") or
+            std.mem.eql(u8, arg, "--shortcut-layout-check"))
+        {
+            // The layout phase reads the live keyboard map, so it names the
+            // SDL video driver explicitly and never inherits the session's.
+            if (shortcut_layout_spec != null) return error.DuplicateLayoutCheckFlag;
+            shortcut_layout_spec = if (std.mem.startsWith(u8, arg, "--shortcut-layout-check="))
+                arg["--shortcut-layout-check=".len..]
+            else
+                try nextPerfArg(&args_it, "--shortcut-layout-check");
+            if (shortcut_layout_spec.?.len == 0) return error.BadLayoutCheckArg;
+        } else if (std.mem.startsWith(u8, arg, "--shortcut-native=") or
+            std.mem.eql(u8, arg, "--shortcut-native"))
+        {
+            // The hosted arm drives one real window from one real controller,
+            // so it refuses to share a run with the headless gate or the
+            // layout probe: one run, one set of claims.
+            if (shortcut_native) return error.DuplicateShortcutNativeFlag;
+            if (shortcut_smoke or shortcut_layout_spec != null)
+                return error.ConflictingShortcutFlags;
+            shortcut_native = true;
+            // Only the `=` form carries a budget, so the bare flag never
+            // swallows the argument that follows it. `--shortcut-step-ms` is
+            // the form that takes the next argument.
+            if (std.mem.startsWith(u8, arg, "--shortcut-native=")) {
+                const value = arg["--shortcut-native=".len..];
+                if (value.len == 0) return error.BadShortcutStepArg;
+                shortcut_step_ms = try parseShortcutBudget(value);
+            }
+        } else if (std.mem.eql(u8, arg, "--shortcut-step-ms")) {
+            if (shortcut_step_ms != null) return error.DuplicateShortcutStepFlag;
+            shortcut_step_ms = try parseShortcutBudget(
+                try nextPerfArg(&args_it, "--shortcut-step-ms"),
+            );
+        } else if (std.mem.startsWith(u8, arg, "--shortcut-pixels=")) {
+            // The last presented frame, read back out of the run's own
+            // target and written as a P6 PPM.
+            if (shortcut_pixels != null) return error.DuplicateShortcutPixelsFlag;
+            shortcut_pixels = arg["--shortcut-pixels=".len..];
+            if (shortcut_pixels.?.len == 0) return error.BadShortcutPixelsArg;
         } else if (std.mem.eql(u8, arg, "--gpu-sort-verify")) {
             // V1b verification: the CPU submits the drawable bag in
             // REVERSE paint order; the CS1 sort (stable on (z, order))
@@ -205,23 +340,83 @@ pub fn main(init: std.process.Init) !void {
         .conflicting_flag = window_mode or frames != null or shot_path != null or
             layout_path != null or layout_diff != null or layout_write_golden != null or
             sim_path != null or library_path != null or shot_hover != null or
-            gpu_remount_smoke or gpu_sort_verify or subpixel or no_subpixel or quad_debug or
-            bgr or !damp,
+            gpu_remount_smoke or keyed_reorder_smoke or ruler_smoke or paint_smoke or
+            shortcut_smoke or shortcut_layout_spec != null or
+            shortcut_native or shortcut_step_ms != null or shortcut_pixels != null or
+            gpu_sort_verify or uncapped or subpixel or no_subpixel or quad_debug or bgr or !damp,
     });
+    if (ruler_smoke and (scene_flag_count != 0 or gpu_remount_smoke or
+        keyed_reorder_smoke or sim_path != null))
+        return error.RulerSmokeRequiresTodo;
+    // Both hosted-only options mean nothing without the hosted arm, and
+    // saying so here is cheaper than a run that opens a window to do nothing.
+    if (!shortcut_native and (shortcut_step_ms != null or shortcut_pixels != null))
+        return error.ShortcutOptionsNeedNative;
+    ui.custom_ruler_smoke = ruler_smoke;
+    defer ui.custom_ruler_smoke = false;
+    ui.custom_paint_smoke = paint_smoke;
+    defer ui.custom_paint_smoke = false;
 
-    if (spotify_mode and !gpu_remount_smoke) {
-        _ = try app.register(spotify_ui.SpotifyApp, &spotify);
-    } else if (calc_mode and !gpu_remount_smoke) {
-        _ = try app.register(calculator_ui.CalculatorApp, &calc);
-    } else if (perf_config != null and tiger_mode) {
-        _ = try app.register(ui.TigerApp, &tiger);
-    } else if (perf_config != null and strokes_mode) {
-        _ = try app.register(ui.TestStrokesApp, &strokes);
+    // The shortcut arms always run against the Todo root and return before
+    // any other driver starts, so they mount the root themselves.
+    if (shortcut_native or shortcut_pixels != null or shortcut_step_ms != null or
+        shortcut_smoke or shortcut_layout_spec != null)
+    {
+        try app.mountRoot(ui.TodoApp, &todo);
+        var options: todo_shortcuts.Options = .{ .interaction = shortcut_smoke };
+        if (shortcut_layout_spec) |spec| {
+            // The wait lets the real SDL queue deliver KEYMAP_CHANGED.
+            const colon = std.mem.indexOfScalar(u8, spec, ':') orelse spec.len;
+            const driver = spec[0..colon];
+            if (driver.len == 0) return error.BadLayoutCheckArg;
+            options.video_driver = driver;
+            if (colon == spec.len) {
+                options.layout_wait_ms = 0;
+            } else {
+                options.layout_wait_ms = std.fmt.parseUnsigned(u31, spec[colon + 1 ..], 10) catch
+                    return error.BadLayoutCheckArg;
+            }
+        }
+        if (shortcut_native) {
+            // The hosted arm owns the whole run: it opens the host window,
+            // paints the real scene and waits for a controller on the
+            // caller's own display server.
+            options.native = true;
+            options.step_ms = shortcut_step_ms orelse todo_shortcuts.native_step_ms;
+            options.pixel_path = shortcut_pixels;
+        }
+        try todo_shortcuts.run(alloc, init.io, &app, &session, &todo, options);
+        return;
+    }
+
+    // The App borrows exactly the root that the selected driver will use.
+    // Replay takes precedence over graphical scene flags; remount and keyed
+    // smokes always use Todo, even if another scene flag was also supplied.
+    if (keyed_reorder_smoke or gpu_remount_smoke) {
+        try app.mountRoot(ui.TodoApp, &todo);
+    } else if (sim_path != null) {
+        if (spotify_mode) {
+            try app.mountRoot(spotify_ui.SpotifyApp, &spotify);
+        } else if (calc_mode) {
+            try app.mountRoot(calculator_ui.CalculatorApp, &calc);
+        } else {
+            try app.mountRoot(ui.TodoApp, &todo);
+        }
+    } else if (strokes_mode) {
+        try app.mountRoot(ui.TestStrokesApp, &strokes);
+    } else if (tiger_mode) {
+        try app.mountRoot(ui.TigerApp, &tiger);
+    } else if (spotify_mode) {
+        try app.mountRoot(spotify_ui.SpotifyApp, &spotify);
+    } else if (calc_mode) {
+        try app.mountRoot(calculator_ui.CalculatorApp, &calc);
     } else {
-        // Keep the default root registered for specialized modes until they
-        // replace it below. The simulator still dispatches TodoApp for those
-        // legacy modes.
-        _ = try app.register(ui.TodoApp, &todo);
+        try app.mountRoot(ui.TodoApp, &todo);
+    }
+
+    if (keyed_reorder_smoke) {
+        try runKeyedReorderSmoke(init.io, &app, &todo);
+        return;
     }
 
     if (perf_config) |config| {
@@ -279,6 +474,7 @@ pub fn main(init: std.process.Init) !void {
                 .bgr_order = bgr,
                 .damp_chroma = damp,
                 .gpu_sort_verify = gpu_sort_verify,
+                .uncapped = uncapped,
             },
         ) catch |e| {
             std.log.err("gpu-remount-smoke failed: {s}", .{@errorName(e)});
@@ -295,8 +491,14 @@ pub fn main(init: std.process.Init) !void {
     // input stream.
     if (sim_path) |sp| {
         app.serialize_json = true;
-        defer measure_cpu.deinit();
-        app.measure = measure_cpu.measure;
+        // One `TextService` and one retained scratch arena, owned in place by
+        // this process: the App measures through the same canonical
+        // `MeasureSource` the GPU path binds, with no thread-local scope.
+        // SAFETY: `init` fills the measurer before `source()` borrows it.
+        var measurer: nogui_text.TextMeasurer = undefined;
+        try measurer.init(alloc, &demo_fonts.pinned_fonts, demo_fonts.default_text_size);
+        defer measurer.deinit();
+        app.measure = measurer.source();
 
         var io_impl = std.Io.Threaded.init(alloc, .{});
         defer io_impl.deinit();
@@ -310,32 +512,20 @@ pub fn main(init: std.process.Init) !void {
         while (it.next()) |line| {
             line_no += 1;
             if (line.len == 0) continue;
-            const ev = headless.eventFromJson(alloc, line) catch |err| {
-                std.log.err("sim line {d}: {s}", .{ line_no, @errorName(err) });
-                std.process.exit(1);
-            };
-            const out = (if (spotify_mode)
-                app.handle(spotify_ui.SpotifyApp, &spotify, ev)
-            else if (calc_mode)
-                app.handle(calculator_ui.CalculatorApp, &calc, ev)
-            else
-                app.handle(ui.TodoApp, &todo, ev)) catch |err| {
+            const out = nogui_test.dispatcher.dispatchJson(&app, null, alloc, line) catch |err| {
                 std.log.err("sim line {d}: {s}", .{ line_no, @errorName(err) });
                 std.process.exit(1);
             };
             if (out) |o| {
-                // The frame dump: layout (tree) + state decisions (focus,
-                // hover, pressed — 0 = none). Enough to debug any session.
+                // The replay dump's numeric targets index THIS tree, while
+                // App keeps stable handles across frame reorderings.
+                const focus = if (o.focus) |id| if (o.tree.frameNode(id)) |node| node.index() else 0 else 0;
+                const hover = if (o.hover) |id| if (o.tree.frameNode(id)) |node| node.index() else 0 else 0;
+                const pressed = if (o.pressed) |id| if (o.tree.frameNode(id)) |node| node.index() else 0 else 0;
                 const dump = try std.fmt.allocPrint(
                     alloc,
                     "{{\"frame\":{d},\"focus\":{d},\"hover\":{d},\"pressed\":{d},\"tree\":{s}}}\n",
-                    .{
-                        o.frame_number,
-                        if (o.focus) |f| f.index() else 0,
-                        if (o.hover) |h| h.index() else 0,
-                        if (o.pressed) |p| p.index() else 0,
-                        if (o.json) |j| j else "",
-                    },
+                    .{ o.frame_number, focus, hover, pressed, o.json orelse "[]" },
                 );
                 defer alloc.free(dump);
                 try stdout.writeStreamingAll(io, dump);
@@ -346,7 +536,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (strokes_mode) {
-        _ = try app.register(ui.TestStrokesApp, &strokes);
         if (frames) |n| {
             window_backend.run(
                 ui.TestStrokesApp,
@@ -358,6 +547,7 @@ pub fn main(init: std.process.Init) !void {
                     .bgr_order = bgr,
                     .damp_chroma = damp,
                     .gpu_sort_verify = gpu_sort_verify,
+                    .uncapped = uncapped,
                     .max_frames = n,
                 },
             ) catch |e| {
@@ -394,13 +584,13 @@ pub fn main(init: std.process.Init) !void {
                 .bgr_order = bgr,
                 .damp_chroma = damp,
                 .gpu_sort_verify = gpu_sort_verify,
+                .uncapped = uncapped,
             },
         );
         return;
     }
 
     if (tiger_mode) {
-        _ = try app.register(ui.TigerApp, &tiger);
         if (frames) |n| {
             window_backend.run(
                 ui.TigerApp,
@@ -412,6 +602,7 @@ pub fn main(init: std.process.Init) !void {
                     .bgr_order = bgr,
                     .damp_chroma = damp,
                     .gpu_sort_verify = gpu_sort_verify,
+                    .uncapped = uncapped,
                     .max_frames = n,
                 },
             ) catch |e| {
@@ -448,6 +639,7 @@ pub fn main(init: std.process.Init) !void {
                 .bgr_order = bgr,
                 .damp_chroma = damp,
                 .gpu_sort_verify = gpu_sort_verify,
+                .uncapped = uncapped,
             },
         );
         return;
@@ -478,8 +670,6 @@ pub fn main(init: std.process.Init) !void {
                 path
             else
                 null;
-            var library: ?local_library.LocalLibrary = null;
-            defer if (library) |*value| value.deinit();
             if (selected_library_root) |path| {
                 library = local_library.LocalLibrary.scan(alloc, io, path, .{}) catch |err| blk: {
                     std.log.err("Spotify library scan failed for {s}: {s}", .{ path, @errorName(err) });
@@ -514,6 +704,7 @@ pub fn main(init: std.process.Init) !void {
                     .bgr_order = bgr,
                     .damp_chroma = damp,
                     .gpu_sort_verify = gpu_sort_verify,
+                    .uncapped = uncapped,
                     .audio_tracks = audio_tracks,
                 },
             );
@@ -530,6 +721,7 @@ pub fn main(init: std.process.Init) !void {
                     .bgr_order = bgr,
                     .damp_chroma = damp,
                     .gpu_sort_verify = gpu_sort_verify,
+                    .uncapped = uncapped,
                     .max_frames = n,
                 },
             ) catch |e| {
@@ -570,6 +762,7 @@ pub fn main(init: std.process.Init) !void {
                     .bgr_order = bgr,
                     .damp_chroma = damp,
                     .gpu_sort_verify = gpu_sort_verify,
+                    .uncapped = uncapped,
                     .max_frames = n,
                 },
             ) catch |e| {
@@ -606,6 +799,7 @@ pub fn main(init: std.process.Init) !void {
                 .bgr_order = bgr,
                 .damp_chroma = damp,
                 .gpu_sort_verify = gpu_sort_verify,
+                .uncapped = uncapped,
             },
         );
         return;
@@ -622,6 +816,7 @@ pub fn main(init: std.process.Init) !void {
                 .bgr_order = bgr,
                 .damp_chroma = damp,
                 .gpu_sort_verify = gpu_sort_verify,
+                .uncapped = uncapped,
             },
         );
         return;
@@ -638,6 +833,7 @@ pub fn main(init: std.process.Init) !void {
                 .bgr_order = bgr,
                 .damp_chroma = damp,
                 .gpu_sort_verify = gpu_sort_verify,
+                .uncapped = uncapped,
                 .max_frames = n,
             },
         ) catch |e| {
@@ -672,13 +868,12 @@ pub fn main(init: std.process.Init) !void {
     // --hover outline) to the file or stdout.
     if (layout_path) |lp| {
         app.serialize_json = true;
-        defer measure_cpu.deinit();
-        app.measure = measure_cpu.measure;
-        if (!spotify_mode) todo.frame_count = 1;
-        const out = if (spotify_mode)
-            try app.frame(spotify_ui.SpotifyApp, &spotify, 1, .{ .width = 1100, .height = 1160 })
-        else
-            try app.frame(ui.TodoApp, &todo, 1, .{ .width = 1100, .height = 1160 });
+        // SAFETY: `init` fills the measurer before `source()` borrows it.
+        var measurer: nogui_text.TextMeasurer = undefined;
+        try measurer.init(alloc, &demo_fonts.pinned_fonts, demo_fonts.default_text_size);
+        defer measurer.deinit();
+        app.measure = measurer.source();
+        const out = try app.frame(1, .{ .width = 1100, .height = 1160 });
         defer if (out.json) |j| alloc.free(j);
 
         var io_impl = std.Io.Threaded.init(alloc, .{});
@@ -735,36 +930,47 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Headless: 6 frames with injected clicks to demonstrate interaction.
-    // Uses the same CPU measure so the layout matches the windowed mode.
+    // Uses the same CPU measurer so the layout matches the windowed mode.
     app.serialize_json = true;
-    defer measure_cpu.deinit();
-    app.measure = measure_cpu.measure;
+    // SAFETY: `init` fills the measurer before `source()` borrows it.
+    var measurer: nogui_text.TextMeasurer = undefined;
+    try measurer.init(alloc, &demo_fonts.pinned_fonts, demo_fonts.default_text_size);
+    defer measurer.deinit();
+    app.measure = measurer.source();
     for (0..6) |i| {
-        todo.frame_count = @intCast(i + 1);
-        const out = try app.frame(ui.TodoApp, &todo, @intCast(i + 1), .{ .width = 800, .height = 600 });
+        const out = try app.frame(@intCast(i + 1), .{ .width = 800, .height = 600 });
         defer if (out.json) |j| alloc.free(j);
         std.log.info("frame {d}: {s}", .{ i + 1, out.json orelse "" });
 
-        const click_label: ?[]const u8 = switch (i) {
-            1 => "inc",
-            2 => "toggle0",
-            3 => "add",
+        const click_key: ?nogui.ComponentKey = switch (i) {
+            1 => .{ .static = "counter-inc" },
+            2 => .{ .u64 = 0 }, // The first todo item, independent of its caption.
+            3 => .{ .static = "todo-add" },
             else => null,
         };
-        if (click_label) |label| {
-            var found: ?Id = null;
-            for (out.tree.nodes.items) |*n| {
-                if (n.kind == .button and std.mem.eql(u8, n.kind.button.label, label)) {
-                    found = n.id;
-                    break;
-                }
-            }
-            if (found) |id| app.click(out.tree, id);
+        if (click_key) |key| {
+            const id = app.widgetIdForKey(.root, key) orelse return error.DemoClickTargetMissing;
+            app.activate(out.tree, id);
         }
     }
 }
 
+// One test binary for the whole demo. Every scene file is listed here so a
+// removed import cannot silently drop that file's tests: the build graph runs
+// this artifact instead of one artifact per scene.
 test {
     _ = @import("FramePacer.zig");
+    _ = @import("audio_player.zig");
+    _ = @import("calculator.zig");
+    _ = @import("ffmpeg_decoder.zig");
+    _ = @import("local_library.zig");
+    _ = @import("mandelbrot_component.zig");
     _ = @import("perf.zig");
+    _ = @import("spotify.zig");
+    _ = @import("spotify_content.zig");
+    _ = @import("spotify_layout.zig");
+    _ = @import("svg.zig");
+    _ = @import("ui.zig");
+    _ = @import("window.zig");
+    _ = @import("fonts.zig");
 }

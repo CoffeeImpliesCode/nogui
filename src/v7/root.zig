@@ -1,13 +1,24 @@
-//! v7 prototype module root — DrawCtx + components (headless-first).
-//! See notes/v7-prototype-spec.md.
+//! Canonical v7 module root — DrawCtx, components, and headless runtime.
+//! See docs/superpowers/specs/2026-08-22-v7-canonical-design.md.
 const std = @import("std");
 const noapi = @import("noapi");
 const perf_counters = @import("perf_counters.zig");
 const v7_options = @import("v7_options");
-pub const CounterSink = perf_counters.Sink(v7_options.perf_counters);
+pub const CounterSink: type = perf_counters.CounterSink;
 pub const options = v7_options;
+pub const Session = @import("session.zig").Session;
+pub const Model = @import("model.zig").Model;
+pub const WeakModel = @import("model.zig").WeakModel;
+pub const Reservation = @import("model.zig").Reservation;
+pub const ErasedModel = @import("model.zig").ErasedModel;
+pub const ErasedWeakModel = @import("model.zig").ErasedWeakModel;
+pub const Context = @import("context.zig").Context;
+pub const FrameInfo = @import("context.zig").FrameInfo;
+pub const geometry = @import("geometry.zig");
 
-pub const Id = @import("id.zig").Id;
+pub const FrameNodeId = @import("id.zig").FrameNodeId;
+pub const WidgetId = @import("id.zig").WidgetId;
+pub const IdentityRegistry = @import("identity.zig").IdentityRegistry;
 pub const ComponentKey = @import("key.zig").ComponentKey;
 pub const ComponentId = @import("key.zig").ComponentId;
 pub const Rect = @import("widget.zig").Rect;
@@ -18,6 +29,7 @@ pub const ScrollAxis = @import("widget.zig").ScrollAxis;
 pub const ScrollState = @import("widget.zig").ScrollState;
 pub const ScrollSpec = @import("widget.zig").ScrollSpec;
 pub const TextOverflow = @import("widget.zig").TextOverflow;
+pub const SeparatorAxis = @import("widget.zig").SeparatorAxis;
 pub const WidgetKind = @import("widget.zig").WidgetKind;
 pub const WidgetNode = @import("widget.zig").WidgetNode;
 pub const WidgetTree = @import("widget.zig").WidgetTree;
@@ -42,6 +54,37 @@ pub const Counters = perf_counters.Counters;
 pub const Snapshot = perf_counters.Snapshot;
 pub const Sink = perf_counters.Sink;
 pub const style = @import("style.zig");
+pub const element = @import("element.zig");
+pub const effects = @import("effects.zig");
+pub const subscription = @import("subscription.zig");
+pub const globals = @import("globals.zig");
+pub const task = @import("task.zig");
+pub const Clock = @import("clock.zig").Clock;
+pub const frame_demand = @import("frame_demand.zig");
+pub const text = @import("text.zig");
+pub const clipboard = @import("clipboard.zig");
+pub const text_input = @import("text_input.zig");
+pub const image_types = @import("image_types.zig");
+pub const image_view = @import("image_view.zig");
+pub const asset_types = @import("asset_types.zig");
+pub const inspection = @import("inspection.zig");
+pub const semantics = @import("semantics.zig");
+pub const focus = @import("focus.zig");
+pub const animation = @import("animation.zig");
+pub const action = @import("action.zig");
+pub const keymap = @import("keymap.zig");
+pub const key_context = @import("key_context.zig");
+pub const paint = @import("paint.zig");
+pub const path = @import("path.zig");
+pub const scroll = @import("scroll.zig");
+pub const container_query = @import("container_query.zig");
+pub const uniform_list = @import("uniform_list.zig");
+pub const list = @import("list.zig");
+pub const virtual_list = @import("virtual_list.zig");
+pub const overlay = @import("overlay.zig");
+pub const drag_drop = @import("drag_drop.zig");
+pub const tooltip = @import("tooltip.zig");
+pub const window_contract = @import("window_contract.zig");
 pub const Display = style.Display;
 pub const Position = style.Position;
 pub const FlexDirection = style.FlexDirection;
@@ -101,7 +144,6 @@ pub const dimensionFrom = style.dimensionFrom;
 pub const lengthPercentageFrom = style.lengthPercentageFrom;
 pub const lengthPercentageAutoFrom = style.lengthPercentageAutoFrom;
 pub const Event = @import("event.zig").Event;
-pub const dispatchClick = @import("event.zig").dispatchClick;
 pub const FrameOutput = @import("headless.zig").FrameOutput;
 pub const treeToJson = @import("headless.zig").treeToJson;
 pub const TreeJsonOptions = @import("headless.zig").TreeJsonOptions;
@@ -122,11 +164,43 @@ test {
     _ = @import("perf_counters.zig");
     _ = @import("drawcmd.zig");
     _ = @import("drawctx.zig");
+    _ = @import("component.zig");
     _ = @import("input.zig");
     _ = @import("headless.zig");
+    _ = @import("app.zig");
+    _ = @import("identity.zig");
+    _ = @import("w03_contract_test.zig");
+    _ = @import("w04_contract_test.zig");
+    _ = @import("w08_contract_test.zig");
+    _ = @import("w05_task_contract_test.zig");
+    _ = @import("w05_demand_contract_test.zig");
+    _ = @import("w09_contract_test.zig");
+    _ = @import("w13_contract_test.zig");
+    _ = @import("w13_style_test.zig");
+    _ = @import("w13_canvas_test.zig");
+    _ = @import("w14_image_view_test.zig");
+    _ = @import("w10_action_test.zig");
+    _ = @import("w10_keymap_test.zig");
+    _ = @import("w10_app_integration_test.zig");
+    _ = @import("w17_contract_test.zig");
+    _ = @import("w15_scroll_test.zig");
+    _ = @import("w15_query_test.zig");
+    _ = @import("w15_list_test.zig");
+    _ = @import("w12_contract_test.zig");
+    _ = @import("w16_contract_test.zig");
+    _ = @import("w18_clipboard_test.zig");
+    _ = @import("w24_inspection_test.zig");
+    _ = @import("w24_action_timing_test.zig");
+    _ = @import("w16_overlay_test.zig");
+    _ = @import("w16_drag_drop_test.zig");
+    _ = @import("w16_tooltip_test.zig");
+    _ = @import("w21_semantics_test.zig");
+    _ = @import("w24_task_timing_test.zig");
+    _ = @import("controls_test.zig");
     _ = @import("layout/fixture.zig");
     _ = @import("layout/sizing_test.zig");
     _ = @import("layout/context_test.zig");
+    _ = @import("layout/text_request_test.zig");
     _ = @import("layout/root_test.zig");
     _ = @import("layout/overflow_test.zig");
     _ = @import("layout/block_float_test.zig");
@@ -156,7 +230,7 @@ test "root component defaults scope only the root draw" {
         const Self = @This();
         pub const default_style: Style = .{ .direction = .row, .gap = .{ .length = 9 } };
         pub const default_paint: PaintStyle = .{ .fill = .{ 0.25, 0.5, 0.75, 1 } };
-        label_id: Id = .root,
+        label_id: FrameNodeId = .root,
 
         pub fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             self.label_id = try ctx.label(.{ .text = "root" });
@@ -200,6 +274,8 @@ const GpuLifecycleLog = struct {
     }
 };
 
+fn cpuOnlyGpuWait() void {}
+
 const GpuLifecycleChild = struct {
     log: *GpuLifecycleLog,
 
@@ -238,11 +314,13 @@ const GpuLifecycleRoot = struct {
 test "GPU lifecycle initializes once, frames after layout, and tears down once" {
     var log: GpuLifecycleLog = .{};
     var root: GpuLifecycleRoot = .{ .child = .{ .log = &log } };
-    var app_instance = App.init(std.testing.allocator);
-    _ = try app_instance.register(GpuLifecycleRoot, &root);
+    var session = try Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app_instance = try App.init(std.testing.allocator, &session);
+    try app_instance.mountRoot(GpuLifecycleRoot, &root);
 
     var gpu: noapi.Gpu = undefined;
-    var endpoint: GpuEndpoint = .{ .gpu = &gpu };
+    var endpoint: GpuEndpoint = .{ .gpu = &gpu, .retirement_wait_for_test = cpuOnlyGpuWait };
     try app_instance.attachGpu(&endpoint);
 
     var command_buffer: noapi.CommandBuffer = undefined;
@@ -252,28 +330,25 @@ test "GPU lifecycle initializes once, frames after layout, and tears down once" 
         .extent = .{ .width = 100, .height = 100 },
         .frame_index = 0,
     };
-    _ = try app_instance.frameWithGpu(
-        GpuLifecycleRoot,
-        &root,
+    _ = try app_instance.frameWithGpuAtTime(
         1,
+        0,
         .{ .width = 100, .height = 100 },
         &gpu_frame,
     );
     gpu_frame.frame_index = 1;
-    _ = try app_instance.frameWithGpu(
-        GpuLifecycleRoot,
-        &root,
+    _ = try app_instance.frameWithGpuAtTime(
         2,
+        0,
         .{ .width = 100, .height = 100 },
         &gpu_frame,
     );
 
     root.show_child = false;
     gpu_frame.frame_index = 0;
-    _ = try app_instance.frameWithGpu(
-        GpuLifecycleRoot,
-        &root,
+    _ = try app_instance.frameWithGpuAtTime(
         3,
+        0,
         .{ .width = 100, .height = 100 },
         &gpu_frame,
     );
@@ -290,22 +365,14 @@ test "GPU lifecycle initializes once, frames after layout, and tears down once" 
 test "GPU lifecycle is a headless no-op" {
     var log: GpuLifecycleLog = .{};
     var root: GpuLifecycleRoot = .{ .child = .{ .log = &log } };
-    var app_instance = App.init(std.testing.allocator);
-    _ = try app_instance.register(GpuLifecycleRoot, &root);
+    var session = try Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app_instance = try App.init(std.testing.allocator, &session);
+    try app_instance.mountRoot(GpuLifecycleRoot, &root);
 
-    _ = try app_instance.frame(
-        GpuLifecycleRoot,
-        &root,
-        1,
-        .{ .width = 100, .height = 100 },
-    );
+    _ = try app_instance.frame(1, .{ .width = 100, .height = 100 });
     root.show_child = false;
-    _ = try app_instance.frame(
-        GpuLifecycleRoot,
-        &root,
-        2,
-        .{ .width = 100, .height = 100 },
-    );
+    _ = try app_instance.frame(2, .{ .width = 100, .height = 100 });
     app_instance.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), log.count);
@@ -314,11 +381,13 @@ test "GPU lifecycle is a headless no-op" {
 test "App deinit tears down each mounted GPU component before detach" {
     var log: GpuLifecycleLog = .{};
     var root: GpuLifecycleRoot = .{ .child = .{ .log = &log } };
-    var app_instance = App.init(std.testing.allocator);
-    _ = try app_instance.register(GpuLifecycleRoot, &root);
+    var session = try Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app_instance = try App.init(std.testing.allocator, &session);
+    try app_instance.mountRoot(GpuLifecycleRoot, &root);
 
     var gpu: noapi.Gpu = undefined;
-    var endpoint: GpuEndpoint = .{ .gpu = &gpu };
+    var endpoint: GpuEndpoint = .{ .gpu = &gpu, .retirement_wait_for_test = cpuOnlyGpuWait };
     try app_instance.attachGpu(&endpoint);
     var command_buffer: noapi.CommandBuffer = undefined;
     var gpu_frame: GpuFrame = .{
@@ -327,10 +396,9 @@ test "App deinit tears down each mounted GPU component before detach" {
         .extent = .{ .width = 100, .height = 100 },
         .frame_index = 0,
     };
-    _ = try app_instance.frameWithGpu(
-        GpuLifecycleRoot,
-        &root,
+    _ = try app_instance.frameWithGpuAtTime(
         1,
+        0,
         .{ .width = 100, .height = 100 },
         &gpu_frame,
     );

@@ -1,25 +1,26 @@
 //! v7 headless output — FrameOutput + JSON serialization.
-//! Per the prototype spec (notes/v7-prototype-spec.md §8).
 //!
 //! The JSON document produced by `treeToJson` is a **top-level array** of
 //! node objects, one per tree node in append (post-order) order. An empty
 //! tree serializes as `[]`.
 //!
-//! Node object shape — kind-specific fields are omitted when absent:
+//! Node objects include kind-specific fields only when present:
 //!   {"id":N,"kind":"column","parent":N,"rect":{"x":..,"y":..,"w":..,"h":..},
-//!    "children":[ids],"gap":{"length":..},"label":..,"value":..}
-//!   - column/row:   "children" (array of child ids) and typed "gap"
-//!                   (`{"length":..}` or `{"percent":..}`)
-//!   - label/button: "label"
-//!   - slider:       "label" and "value"
-//!   - spacer:       no extra fields
-//! All strings are JSON-escaped (\" \\ \n \r \t \uXXXX for control chars);
-//! user text is never emitted raw.
+//!    "children":[ids],"gap":{"length":..}}
+//!   - column/row: "children" and typed "gap"
+//!   - label/button: "label"; buttons can include "accessible_label"
+//!   - slider: "label", "value", and optional "visual_label"
+//!   - checkbox/switch: "label", "checked"; radio: "label", "selected", "choice"
+//!   - progress: "label", "value", "min", "max"; separator: "axis"
+//!   - spacer: no extra fields
+//! Optional diagnostics add "abs_rect" and "vis_rect". All strings are
+//! JSON-escaped; user text is never emitted raw.
 
 const std = @import("std");
 const tracy = @import("tracy");
 
-const Id = @import("id.zig").Id;
+const FrameNodeId = @import("id.zig").FrameNodeId;
+const WidgetId = @import("id.zig").WidgetId;
 const widget = @import("widget.zig");
 const Rect = widget.Rect;
 const Size = @import("widget.zig").Size;
@@ -27,13 +28,15 @@ const WidgetTree = @import("widget.zig").WidgetTree;
 const WidgetNode = @import("widget.zig").WidgetNode;
 const DrawCtx = @import("drawctx.zig").DrawCtx;
 const layout = @import("layout/root.zig");
-const MeasureFn = layout.MeasureFn;
-const Event = @import("event.zig").Event;
-const Key = @import("event.zig").Key;
-const KeyEvent = @import("event.zig").KeyEvent;
-const MouseButton = @import("event.zig").MouseButton;
+const MeasureSource = layout.MeasureSource;
+const event = @import("event.zig");
+const Event = event.Event;
+const Key = event.Key;
+const KeyEvent = event.KeyEvent;
+const MouseButton = event.MouseButton;
 const input = @import("input.zig");
 
+const semantics = @import("semantics.zig");
 /// One frame of output: the frame index plus the serialized widget tree.
 pub const FrameOutput = struct {
     frame_number: u32,
@@ -44,25 +47,29 @@ pub const FrameOutput = struct {
     /// (the windowed/frames modes don't need it). Caller frees it with
     /// that allocator.
     json: ?[]const u8 = null,
-    /// This frame's widget tree. App double-buffers its frame arenas: the
-    /// pointer stays valid until the frame AFTER next (the arena is reset
-    /// by the frame after that), so the presented tree can be read while
-    /// the next frame is being built.
+    /// This committed tree stays valid during the next frame attempt, even
+    /// if that attempt fails. Once a newer frame commits, a subsequent frame
+    /// attempt may reset this tree's arena.
     tree: *const WidgetTree,
-    /// The previous frame's tree, same node ids (same draw order). Valid
-    /// until the next frame() call; null on the first frame. Enables
-    /// id-keyed diffing: dirty flags, retained layout, hitbox carry-over.
+    /// The previous committed frame's tree. Dense node IDs may differ after
+    /// insertions or reordering; use each tree's stable widget lookup for
+    /// identity across frames. Valid only until the next frame attempt starts,
+    /// whether that attempt succeeds or fails.
     prev_tree: ?*const WidgetTree,
-    /// The node under the driver's cursor (the hover outline target).
-    hover: ?Id,
-    /// The keyboard-focus target (focus ring) — from the driver's keys.
-    focus: ?Id,
-    /// The button currently held down (pressed visual state).
-    pressed: ?Id,
-    /// Eased 0..1 visual states, driven by the driver clock: press_alpha
-    /// ramps up while a button is held (eased press-in), hover_alpha
-    /// ramps toward 1 while the cursor is over a node. Renderer-only —
-    /// the headless dump ignores them.
+    /// Published with this tree when App.semantic_publication is configured.
+    /// Borrows the publisher and tree storage for the same frame lifetime.
+    semantic_snapshot: ?*const semantics.Snapshot = null,
+    /// Stable identity of the node under the driver's cursor.
+    hover: ?WidgetId,
+    /// Stable keyboard-focus identity for the focus ring.
+    focus: ?WidgetId,
+    /// Stable identity of the held button.
+    pressed: ?WidgetId,
+    /// Visual targets may outlive pointer hover/press for the exit transition.
+    visual_pressed: ?WidgetId = null,
+    visual_hover: ?WidgetId = null,
+    /// Registry-sampled 0..1 visual states; semantic pressed/hover remain
+    /// immediate and the renderer alone consumes the eased values.
     press_alpha: f32 = 0,
     hover_alpha: f32 = 0,
 };
@@ -132,12 +139,28 @@ pub const EventParseError = error{
     UnknownKey,
 };
 
-pub fn eventFromJson(allocator: std.mem.Allocator, line: []const u8) !Event {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
-    defer parsed.deinit();
-    // Never unwrap: a non-object line (array, string, number) is a
-    // malformed event, not a crash.
-    const obj = switch (parsed.value) {
+/// Owns the parsed JSON backing all borrowed event text, including IME and
+/// logical key strings. Call deinit only after the routed event returns.
+pub const ParsedEvent = struct {
+    event: Event,
+    parsed: std.json.Parsed(std.json.Value),
+
+    pub fn deinit(self: *ParsedEvent) void {
+        self.parsed.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn parseEvent(allocator: std.mem.Allocator, line: []const u8) !ParsedEvent {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{
+        .allocate = .alloc_always,
+    });
+    errdefer parsed.deinit();
+    return .{ .event = try eventFromValue(parsed.value), .parsed = parsed };
+}
+
+fn eventFromValue(value: std.json.Value) !Event {
+    const obj = switch (value) {
         .object => |o| o,
         else => return error.WrongType,
     };
@@ -157,19 +180,26 @@ pub fn eventFromJson(allocator: std.mem.Allocator, line: []const u8) !Event {
     }
     if (std.mem.eql(u8, kind, "mouse_move")) {
         return .{ .mouse_move = .{
-            .x = @as(f32, @floatCast(try objNumber(obj, "x"))),
-            .y = @as(f32, @floatCast(try objNumber(obj, "y"))),
+            .x = @floatCast(try objNumber(obj, "x")),
+            .y = @floatCast(try objNumber(obj, "y")),
+            .buttons = try parseButtons(obj),
+            .modifiers = try parseModifiers(obj),
         } };
     }
     if (std.mem.eql(u8, kind, "mouse_wheel")) {
         return .{ .mouse_wheel = .{
-            .x = @as(f32, @floatCast(try objNumber(obj, "x"))),
-            .y = @as(f32, @floatCast(try objNumber(obj, "y"))),
-            .delta_x = @as(f32, @floatCast(try objNumber(obj, "delta_x"))),
-            .delta_y = @as(f32, @floatCast(try objNumber(obj, "delta_y"))),
+            .x = @floatCast(try objNumber(obj, "x")),
+            .y = @floatCast(try objNumber(obj, "y")),
+            .delta_x = @floatCast(try objNumber(obj, "delta_x")),
+            .delta_y = @floatCast(try objNumber(obj, "delta_y")),
+            .unit = try optionalEnum(event.ScrollUnit, obj, "unit", .line),
+            .phase = try optionalEnum(event.ScrollPhase, obj, "phase", .update),
+            .natural = try optionalBool(obj, "natural", false),
+            .modifiers = try parseModifiers(obj),
         } };
     }
     if (std.mem.eql(u8, kind, "mouse_leave")) return .mouse_leave;
+    if (std.mem.eql(u8, kind, "window_focus_lost")) return .window_focus_lost;
     if (std.mem.eql(u8, kind, "key_down") or std.mem.eql(u8, kind, "key_up")) {
         const key_name = try objString(obj, "key");
         const key: Key = if (std.mem.eql(u8, key_name, "tab"))
@@ -192,31 +222,132 @@ pub fn eventFromJson(allocator: std.mem.Allocator, line: []const u8) !Event {
             .home
         else if (std.mem.eql(u8, key_name, "end"))
             .end
+        else if (std.mem.eql(u8, key_name, "unidentified"))
+            .unidentified
         else
             return error.UnknownKey;
-        // A missing or non-bool "shift" is treated as false (lenient), so
-        // key events never crash on an optional field.
         const shift = if (obj.get("shift")) |s| s == .bool and s.bool else false;
-        const ev: KeyEvent = .{ .key = key, .shift = shift };
+        const ev: KeyEvent = .{
+            .key = key,
+            .shift = shift,
+            .modifiers = try parseModifiers(obj),
+            .physical = if (obj.get("physical") != null)
+                .{ .code = try objUint(u32, obj, "physical") }
+            else
+                null,
+            .logical = if (obj.get("logical") != null)
+                .{ .character = try objString(obj, "logical") }
+            else
+                .{ .named = key },
+            .repeat = try optionalBool(obj, "repeat", false),
+        };
         return if (std.mem.eql(u8, kind, "key_down"))
             .{ .key_down = ev }
         else
             .{ .key_up = ev };
     }
-    if (std.mem.eql(u8, kind, "mouse_down") or std.mem.eql(u8, kind, "mouse_up")) {
+    if (std.mem.eql(u8, kind, "mouse_down") or
+        std.mem.eql(u8, kind, "mouse_up") or
+        std.mem.eql(u8, kind, "mouse_cancel"))
+    {
         const button_name = try objString(obj, "button");
-        const button: MouseButton = if (std.mem.eql(u8, button_name, "right"))
+        const button: MouseButton = if (std.mem.eql(u8, button_name, "left"))
+            .left
+        else if (std.mem.eql(u8, button_name, "right"))
             .right
         else if (std.mem.eql(u8, button_name, "middle"))
             .middle
+        else if (std.mem.eql(u8, button_name, "back"))
+            .back
+        else if (std.mem.eql(u8, button_name, "forward"))
+            .forward
         else
-            .left;
-        const x: f32 = @floatCast(try objNumber(obj, "x"));
-        const y: f32 = @floatCast(try objNumber(obj, "y"));
-        return if (std.mem.eql(u8, kind, "mouse_down"))
-            .{ .mouse_down = .{ .button = button, .x = x, .y = y } }
+            return error.UnknownEvent;
+        const pointer: event.PointerEvent = .{
+            .button = button,
+            .x = @floatCast(try objNumber(obj, "x")),
+            .y = @floatCast(try objNumber(obj, "y")),
+            .click_count = try optionalUint(u8, obj, "click_count", 1),
+            .modifiers = try parseModifiers(obj),
+        };
+        if (std.mem.eql(u8, kind, "mouse_down")) return .{ .mouse_down = pointer };
+        if (std.mem.eql(u8, kind, "mouse_up")) return .{ .mouse_up = pointer };
+        return .{ .mouse_cancel = pointer };
+    }
+    if (std.mem.eql(u8, kind, "touch_start") or std.mem.eql(u8, kind, "touch_move") or
+        std.mem.eql(u8, kind, "touch_end") or std.mem.eql(u8, kind, "touch_cancel"))
+    {
+        const device = try objIdentifier(obj, "device_id");
+        const finger = try objIdentifier(obj, "finger_id");
+        const touch: event.TouchEvent = .{
+            .id = (@as(u128, device) << 64) | finger,
+            .x = @floatCast(try objNumber(obj, "x")),
+            .y = @floatCast(try objNumber(obj, "y")),
+            .pressure = @floatCast(try optionalNumber(obj, "pressure", 0)),
+        };
+        if (std.mem.eql(u8, kind, "touch_start")) return .{ .touch_start = touch };
+        if (std.mem.eql(u8, kind, "touch_move")) return .{ .touch_move = touch };
+        if (std.mem.eql(u8, kind, "touch_end")) return .{ .touch_end = touch };
+        return .{ .touch_cancel = touch };
+    }
+    if (std.mem.eql(u8, kind, "text_input")) {
+        return .{ .text_input = .{ .text = try objString(obj, "text") } };
+    }
+    if (std.mem.eql(u8, kind, "composition")) {
+        const phase_name = try objString(obj, "phase");
+        const phase: event.CompositionPhase = if (std.mem.eql(u8, phase_name, "start"))
+            .start
+        else if (std.mem.eql(u8, phase_name, "update"))
+            .update
+        else if (std.mem.eql(u8, phase_name, "end"))
+            .end
         else
-            .{ .mouse_up = .{ .button = button, .x = x, .y = y } };
+            return error.UnknownEvent;
+        return .{ .composition = .{
+            .phase = phase,
+            .text = try objString(obj, "text"),
+            .selection_start = try optionalUint(usize, obj, "selection_start", 0),
+            .selection_end = try optionalUint(usize, obj, "selection_end", 0),
+        } };
+    }
+    if (std.mem.eql(u8, kind, "activate")) {
+        const source = try optionalEnum(
+            event.ActivationSource,
+            obj,
+            "source",
+            .accessibility,
+        );
+        return .{ .activate = .{
+            .target_id = try objWidgetId(obj, "target"),
+            .source = source,
+            .click_count = try optionalUint(u8, obj, "click_count", 1),
+        } };
+    }
+    if (std.mem.eql(u8, kind, "focus_in") or std.mem.eql(u8, kind, "focus_out")) {
+        const target_id = try objWidgetId(obj, "target");
+        const related: ?WidgetId = if (obj.get("related") != null)
+            try objWidgetId(obj, "related")
+        else
+            null;
+        if (std.mem.eql(u8, kind, "focus_in")) {
+            return .{ .focus_in = .{ .target_id = target_id, .related = related } };
+        }
+        return .{ .focus_out = .{ .target_id = target_id, .related = related } };
+    }
+    if (std.mem.eql(u8, kind, "capture_lost")) {
+        const pointer_type = try objString(obj, "pointer");
+        const pointer: event.PointerId =
+            if (std.mem.eql(u8, pointer_type, "touch"))
+                .{ .touch = (@as(u128, try objIdentifier(obj, "device_id")) << 64) |
+                    try objIdentifier(obj, "finger_id") }
+            else if (std.mem.eql(u8, pointer_type, "mouse"))
+                .{ .mouse = try optionalEnum(MouseButton, obj, "button", .left) }
+            else
+                return error.UnknownEvent;
+        return .{ .capture_lost = .{
+            .target_id = try objWidgetId(obj, "target"),
+            .pointer = pointer,
+        } };
     }
     return error.UnknownEvent;
 }
@@ -249,8 +380,92 @@ fn objInteger(obj: std.json.ObjectMap, name: []const u8) !i64 {
 /// are `error.BadNumber`, so the `@intCast` below can never panic.
 fn objUint(comptime T: type, obj: std.json.ObjectMap, name: []const u8) !T {
     const i = try objInteger(obj, name);
-    if (i < 0 or i > std.math.maxInt(T)) return error.BadNumber;
-    return @intCast(i);
+    return std.math.cast(T, i) orelse error.BadNumber;
+}
+
+fn optionalUint(
+    comptime T: type,
+    obj: std.json.ObjectMap,
+    name: []const u8,
+    default: T,
+) !T {
+    if (obj.get(name) == null) return default;
+    return objUint(T, obj, name);
+}
+
+fn objIdentifier(obj: std.json.ObjectMap, name: []const u8) !u64 {
+    return switch (try objField(obj, name)) {
+        .integer => |value| std.math.cast(u64, value) orelse error.BadNumber,
+        .number_string, .string => |value| std.fmt.parseInt(u64, value, 10) catch error.BadNumber,
+        else => error.WrongType,
+    };
+}
+
+fn objWidgetId(obj: std.json.ObjectMap, name: []const u8) !WidgetId {
+    const value = try objObject(obj, name);
+    return .{
+        .owner = try objIdentifier(value, "owner"),
+        .slot = try objUint(u32, value, "slot"),
+        .generation = try objUint(u32, value, "generation"),
+    };
+}
+
+fn optionalNumber(obj: std.json.ObjectMap, name: []const u8, default: f64) !f64 {
+    if (obj.get(name) == null) return default;
+    return objNumber(obj, name);
+}
+
+fn optionalBool(obj: std.json.ObjectMap, name: []const u8, default: bool) !bool {
+    return switch (obj.get(name) orelse return default) {
+        .bool => |value| value,
+        else => error.WrongType,
+    };
+}
+
+fn optionalEnum(
+    comptime E: type,
+    obj: std.json.ObjectMap,
+    name: []const u8,
+    default: E,
+) !E {
+    if (obj.get(name) == null) return default;
+    const value = try objString(obj, name);
+    return std.meta.stringToEnum(E, value) orelse error.UnknownEvent;
+}
+
+fn parseModifiers(obj: std.json.ObjectMap) !event.Modifiers {
+    const raw = obj.get("modifiers") orelse return .{};
+    const fields = switch (raw) {
+        .object => |value| value,
+        else => return error.WrongType,
+    };
+    return .{
+        .shift = try optionalBool(fields, "shift", false),
+        .control = try optionalBool(fields, "control", false),
+        .alt = try optionalBool(fields, "alt", false),
+        .super = try optionalBool(fields, "super", false),
+        .caps_lock = try optionalBool(fields, "caps_lock", false),
+        .num_lock = try optionalBool(fields, "num_lock", false),
+        .left_shift = try optionalBool(fields, "left_shift", false),
+        .right_shift = try optionalBool(fields, "right_shift", false),
+        .left_control = try optionalBool(fields, "left_control", false),
+        .right_control = try optionalBool(fields, "right_control", false),
+    };
+}
+
+fn parseButtons(obj: std.json.ObjectMap) !event.PointerButtons {
+    const raw = obj.get("buttons") orelse return .{};
+    const fields = switch (raw) {
+        .object => |value| value,
+        else => return error.WrongType,
+    };
+    return .{
+        .left = try optionalBool(fields, "left", false),
+        .right = try optionalBool(fields, "right", false),
+        .middle = try optionalBool(fields, "middle", false),
+        .back = try optionalBool(fields, "back", false),
+        .forward = try optionalBool(fields, "forward", false),
+    };
 }
 
 /// Number field (int or float); a non-numeric value is `error.BadNumber`
@@ -287,10 +502,21 @@ const NodeView = struct {
     vis_rect: ?RectView = null,
     children: ?[]const u32 = null, // containers
     gap: ?LengthPercentageView = null, // column/row
-    label: ?[]const u8 = null, // label/button/slider
+    label: ?[]const u8 = null, // text-bearing nodes
     accessible_label: ?[]const u8 = null, // button semantic label
     visual_label: ?[]const u8 = null, // slider visible label override
-    value: ?f32 = null, // slider
+    value: ?f32 = null, // slider/progress
+    min: ?f32 = null, // progress
+    max: ?f32 = null, // progress
+    checked: ?bool = null, // checkbox/switch
+    selected: ?bool = null, // radio
+    choice: ?u32 = null, // radio
+    axis: ?[]const u8 = null, // separator
+    visibility: ?[]const u8 = null,
+    visible: ?bool = null,
+    revision: ?u64 = null,
+    semantic_role: ?[]const u8 = null,
+    semantic_label: ?[]const u8 = null,
 };
 
 const RectView = struct { x: f32, y: f32, w: f32, h: f32 };
@@ -304,6 +530,7 @@ fn writeNode(
 ) !void {
     const is_container = switch (node.kind) {
         .column, .row => true,
+        .element => node.children.items.len != 0 or node.kind.element.late_scope != .none,
         else => false,
     };
     const child_ids: ?[]u32 = if (is_container) child_ids: {
@@ -322,6 +549,7 @@ fn writeNode(
         rectView(widget.visualBorderRect(tree, node.id))
     else
         null;
+    const visible = widget.isVisible(tree, node.id);
     const view: NodeView = .{
         .id = node.id.index(),
         .kind = @tagName(node.kind),
@@ -330,26 +558,67 @@ fn writeNode(
         .abs_rect = abs_rect,
         .vis_rect = vis_rect,
         .children = child_ids,
+        .visibility = if (node.style.visibility == .hidden) "hidden" else null,
+        .visible = if (visible) null else false,
+        .revision = if (node.kind == .element) node.kind.element.revision else null,
+        .semantic_role = if (node.kind == .element and visible)
+            if (node.kind.element.semantic) |semantic| @tagName(semantic.role) else null
+        else
+            null,
+        .semantic_label = if (node.kind == .element and visible)
+            if (node.kind.element.semantic) |semantic| semantic.label else null
+        else
+            null,
         .gap = switch (node.kind) {
             .column, .row => lengthPercentageView(node.style.gap),
             else => null,
         },
-        .label = switch (node.kind) {
+        .label = if (visible) switch (node.kind) {
             .label => |l| l.text,
             .button => |b| b.label,
             .slider => |s| s.label,
+            .checkbox => |c| c.label,
+            .switch_control => |s| s.label,
+            .radio => |r| r.label,
+            .progress => |p| p.label,
             else => null,
-        },
-        .accessible_label = switch (node.kind) {
+        } else null,
+        .accessible_label = if (visible) switch (node.kind) {
             .button => |b| b.accessible_label,
             else => null,
-        },
-        .visual_label = switch (node.kind) {
+        } else null,
+        .visual_label = if (visible) switch (node.kind) {
             .slider => |s| s.visual_label,
             else => null,
-        },
+        } else null,
         .value = switch (node.kind) {
             .slider => |s| s.value.*,
+            .progress => |p| p.value,
+            else => null,
+        },
+        .min = switch (node.kind) {
+            .progress => |p| p.min,
+            else => null,
+        },
+        .max = switch (node.kind) {
+            .progress => |p| p.max,
+            else => null,
+        },
+        .checked = switch (node.kind) {
+            .checkbox => |c| c.value.*,
+            .switch_control => |s| s.value.*,
+            else => null,
+        },
+        .selected = switch (node.kind) {
+            .radio => |r| r.selected.* == r.option,
+            else => null,
+        },
+        .choice = switch (node.kind) {
+            .radio => |r| r.option,
+            else => null,
+        },
+        .axis = switch (node.kind) {
+            .separator => |s| @tagName(s.axis),
             else => null,
         },
     };
@@ -374,16 +643,28 @@ fn lengthPercentageView(value: widget.LengthPercentage) LengthPercentageView {
 /// treeToJson (which already carries every rect) this is the full headless
 /// verification path: layout → inspect → assert, deterministically.
 ///
-/// Map glyphs: containers '.' fill, buttons '#' fill, label/button text is
-/// drawn as its characters at the layout positions, sliders '-' with the
-/// thumb 'O' at the value fraction, spacer nothing, hover '@' border.
+/// Map glyphs: containers '.' fill, buttons '#' fill, checkbox '[x]'/'[ ]',
+/// radio '(*)'/'(o)', switches show a movable 'O' thumb, progress uses '='
+/// over '-', separators use horizontal/vertical lines, text is drawn at its
+/// layout position, spacer draws nothing, and hover uses '@' on the border.
 /// Scale: map chars per layout pixel (2px per char both axes).
 const map_px = 2;
+fn asciiContentRect(
+    tree: *const WidgetTree,
+    id: FrameNodeId,
+    min_x: f32,
+    min_y: f32,
+) Rect {
+    var rect = widget.visualContentRect(tree, id);
+    rect.x -= min_x;
+    rect.y -= min_y;
+    return rect;
+}
 
 /// Render the layout as an ASCII map, `hover` gets an '@' border. The
 /// returned slice is allocator-owned (caller frees). Bounds = the union of
 /// all node visual border rects, so scroll offsets are reflected in the map.
-pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover: ?Id) ![]u8 {
+pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover: ?FrameNodeId) ![]u8 {
     // Bounds from the union of all VISUAL border rects. Visual origins
     // resolve relative boxes and subtract ancestor scroll offsets.
     var min_x: f32 = std.math.inf(f32);
@@ -391,6 +672,7 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
     var max_x: f32 = -std.math.inf(f32);
     var max_y: f32 = -std.math.inf(f32);
     for (tree.nodes.items) |*n| {
+        if (!widget.isVisible(tree, n.id)) continue;
         const r = widget.visualBorderRect(tree, n.id);
         if (r.w <= 0 or r.h <= 0) continue;
         min_x = @min(min_x, r.x);
@@ -408,8 +690,11 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
 
     const put = struct {
         fn f(g: []u8, c: usize, x: f32, y: f32, ch: u8) void {
-            const cx: usize = @intFromFloat(@floor(x / map_px));
-            const cy: usize = @intFromFloat(@floor(y / map_px));
+            const cell_x = @floor(x / map_px);
+            const cell_y = @floor(y / map_px);
+            if (cell_x < 0 or cell_y < 0) return;
+            const cx: usize = @intFromFloat(cell_x);
+            const cy: usize = @intFromFloat(cell_y);
             if (cx >= c) return;
             const line = cy * (c + 1);
             if (line + cx >= g.len - 1) return;
@@ -422,6 +707,7 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
     while (i > 0) {
         i -= 1;
         const n = &tree.nodes.items[i];
+        if (!widget.isVisible(tree, n.id)) continue;
         const visual = widget.visualBorderRect(tree, n.id);
         var r = visual;
         r.x -= min_x;
@@ -443,15 +729,124 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
                     var x: f32 = r.x;
                     while (x < r.x + r.w) : (x += map_px) put(grid, cols, x, y, '#');
                 }
-                drawText(grid, cols, n.kind.button.label, r);
+                // A button paints NO text of its own: the scene emits a
+                // caption only through the label child DrawCtx generates
+                // (see visualText), so drawing the kind's visual label here
+                // duplicated the caption one baseline lower. A directly
+                // assembled button has no such child, so it keeps the
+                // fallback; an empty visual label draws nothing either way.
+                if (n.children.items.len == 0) {
+                    drawText(grid, cols, widget.buttonVisualLabel(n.kind), r, 0);
+                }
             },
-            .label => |l| drawText(grid, cols, l.text, r),
+            .label => |l| drawText(grid, cols, l.text, r, 0),
             .slider => |s| {
                 const y: f32 = r.y + r.h / 2;
                 var x: f32 = r.x;
                 while (x < r.x + r.w) : (x += map_px) put(grid, cols, x, y, '-');
-                const frac = std.math.clamp((s.value.* - s.min) / (s.max - s.min), 0, 1);
+                const frac = progressFraction(s.value.*, s.min, s.max);
                 put(grid, cols, r.x + frac * r.w, y, 'O');
+            },
+            .checkbox => |c| {
+                const content = asciiContentRect(tree, n.id, min_x, min_y);
+                if (content.w <= 0 or content.h <= 0) continue;
+                const size = @min(
+                    widget.control_indicator_size,
+                    @min(content.w, content.h),
+                );
+                const x = content.x;
+                const y = content.y + (content.h - size) / 2;
+                put(grid, cols, x, y + size / 2, '[');
+                put(grid, cols, x + @max(0, size - map_px), y + size / 2, ']');
+                if (c.value.*) put(grid, cols, x + size / 2, y + size / 2, 'x');
+                drawText(grid, cols, c.label, content, controlLabelOffset(n.kind));
+            },
+            .switch_control => |s| {
+                const content = asciiContentRect(tree, n.id, min_x, min_y);
+                if (content.w <= 0 or content.h <= 0) continue;
+                const track_width = @min(widget.switch_track_width, content.w);
+                const size = @min(
+                    widget.control_indicator_size,
+                    @min(content.w, content.h),
+                );
+                const y = content.y + content.h / 2;
+                var x = content.x;
+                while (x < content.x + track_width) : (x += map_px) put(grid, cols, x, y, '-');
+                const thumb_x = content.x + (if (s.value.*)
+                    @max(0, track_width - size / 2)
+                else
+                    @min(size / 2, track_width));
+                put(grid, cols, thumb_x, y, 'O');
+                drawText(grid, cols, s.label, content, controlLabelOffset(n.kind));
+            },
+            .radio => |radio| {
+                const content = asciiContentRect(tree, n.id, min_x, min_y);
+                if (content.w <= 0 or content.h <= 0) continue;
+                const size = @min(
+                    widget.control_indicator_size,
+                    @min(content.w, content.h),
+                );
+                const x = content.x;
+                const y = content.y + content.h / 2;
+                put(grid, cols, x, y, '(');
+                put(grid, cols, x + @max(0, size - map_px), y, ')');
+                put(grid, cols, x + size / 2, y, if (radio.selected.* == radio.option) '*' else 'o');
+                drawText(grid, cols, radio.label, content, controlLabelOffset(n.kind));
+            },
+            .progress => |p| {
+                const content = asciiContentRect(tree, n.id, min_x, min_y);
+                if (content.w <= 0 or content.h <= 0) continue;
+                const caption_h = @max(0, content.h - 14);
+                if (p.label.len > 0 and caption_h > 0) {
+                    drawText(grid, cols, p.label, .{
+                        .x = content.x,
+                        .y = content.y,
+                        .w = content.w,
+                        .h = caption_h,
+                    }, 0);
+                }
+                const y = content.y + @max(0, content.h - 4);
+                var x = content.x;
+                while (x < content.x + content.w) : (x += map_px) put(grid, cols, x, y, '-');
+                const fraction = progressFraction(p.value, p.min, p.max);
+                x = content.x;
+                while (x < content.x + fraction * content.w) : (x += map_px) put(grid, cols, x, y, '=');
+            },
+            .separator => |s| {
+                const content = asciiContentRect(tree, n.id, min_x, min_y);
+                if (content.w <= 0 or content.h <= 0) continue;
+                switch (s.axis) {
+                    .horizontal => {
+                        const y = content.y + content.h / 2;
+                        var x = content.x;
+                        while (x < content.x + content.w) : (x += map_px) put(grid, cols, x, y, '-');
+                    },
+                    .vertical => {
+                        const x = content.x + content.w / 2;
+                        var y = content.y;
+                        while (y < content.y + content.h) : (y += map_px) put(grid, cols, x, y, '|');
+                    },
+                }
+            },
+            .element => |frame| {
+                const content = asciiContentRect(tree, n.id, min_x, min_y);
+                for (frame.paint_records.items) |record| {
+                    // ASCII is a box-extent inspection view, not a path rasterizer.
+                    const bounds = switch (record) {
+                        .rect => |spec| spec.bounds,
+                        .path => |spec| spec.bounds,
+                        .image => |spec| spec.bounds,
+                    };
+                    const start_x = @max(content.x, content.x + bounds.x);
+                    const start_y = @max(content.y, content.y + bounds.y);
+                    const end_x = @min(content.x + content.w, content.x + bounds.x + bounds.w);
+                    const end_y = @min(content.y + content.h, content.y + bounds.y + bounds.h);
+                    var y = start_y;
+                    while (y < end_y) : (y += map_px) {
+                        var x = start_x;
+                        while (x < end_x) : (x += map_px) put(grid, cols, x, y, '*');
+                    }
+                }
             },
             .spacer => {},
         }
@@ -461,6 +856,7 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
     if (hover) |hid| {
         for (tree.nodes.items) |*n| {
             if (n.id != hid) continue;
+            if (!widget.isVisible(tree, n.id)) break;
             const visual = widget.visualBorderRect(tree, n.id);
             var r = visual;
             r.x -= min_x;
@@ -488,15 +884,22 @@ pub fn renderAscii(allocator: std.mem.Allocator, tree: *const WidgetTree, hover:
 }
 
 /// Draw label text at the layout position: byte i at x+6+i*10 (the
-/// fallback advance estimate), baseline at y + h*0.75 — matching the
-/// demo's emitText placement for the map's purpose (rects are the ground
-/// truth). Text is intentionally indexed as UTF-8 bytes, as the fallback
-/// measure callback is.
-fn drawText(grid: []u8, cols: usize, text: []const u8, r: Rect) void {
+/// fallback advance estimate), baseline at y + h*0.75. `leading_inset`
+/// leaves room for a control's indicator before its caption.
+fn drawText(
+    grid: []u8,
+    cols: usize,
+    text: []const u8,
+    r: Rect,
+    leading_inset: f32,
+) void {
     const put = struct {
         fn f(g: []u8, c: usize, x: f32, y: f32, ch: u8) void {
-            const cx: usize = @intFromFloat(@floor(x / map_px));
-            const cy: usize = @intFromFloat(@floor(y / map_px));
+            const cell_x = @floor(x / map_px);
+            const cell_y = @floor(y / map_px);
+            if (cell_x < 0 or cell_y < 0) return;
+            const cx: usize = @intFromFloat(cell_x);
+            const cy: usize = @intFromFloat(cell_y);
             if (cx >= c) return;
             const line = cy * (c + 1);
             if (line + cx >= g.len - 1) return;
@@ -506,12 +909,26 @@ fn drawText(grid: []u8, cols: usize, text: []const u8, r: Rect) void {
     const baseline = r.y + r.h * 0.75;
     for (text, 0..) |ch, k| {
         const k_f: f32 = @floatFromInt(@min(k, 1 << 24));
-        put(grid, cols, r.x + 6 + k_f * 10, baseline, ch);
+        put(grid, cols, r.x + leading_inset + 6 + k_f * 10, baseline, ch);
     }
 }
 
+fn controlLabelOffset(kind: widget.WidgetKind) f32 {
+    return widget.textInsets(kind).leading;
+}
+
+fn progressFraction(value: f32, min: f32, max: f32) f32 {
+    const range = max - min;
+    if (!std.math.isFinite(value) or !std.math.isFinite(min) or
+        !std.math.isFinite(max) or !std.math.isFinite(range) or range <= 0)
+    {
+        return 0;
+    }
+    return std.math.clamp((value - min) / range, 0, 1);
+}
+
 /// Const-safe node lookup (widget.zig's node() needs a mutable tree).
-fn findNodeConst(tree: *const WidgetTree, id: Id) ?*const WidgetNode {
+fn findNodeConst(tree: *const WidgetTree, id: FrameNodeId) ?*const WidgetNode {
     for (tree.nodes.items) |*n| {
         if (n.id == id) return n;
     }
@@ -525,6 +942,10 @@ fn visualText(node: *const WidgetNode) ?[]const u8 {
         // DrawCtx emits visible text through the generated label child.
         .button => null,
         .slider => widget.sliderVisualLabel(node.kind),
+        .checkbox => |c| c.label,
+        .switch_control => |s| s.label,
+        .radio => |r| r.label,
+        .progress => |p| p.label,
         else => null,
     };
 }
@@ -622,8 +1043,8 @@ pub fn layoutFingerprint(allocator: std.mem.Allocator, tree: *const WidgetTree) 
 /// True when the node or any ancestor is layered (z > 0): a layered node
 /// paints over siblings by design (the GPU z-sort decides the order), so
 /// its overlaps are intentional, not collisions.
-fn isLayered(tree: *const WidgetTree, id: Id) bool {
-    var cur: ?Id = id;
+fn isLayered(tree: *const WidgetTree, id: FrameNodeId) bool {
+    var cur: ?FrameNodeId = id;
     while (cur) |cid| {
         const n = tree.nodeConst(cid) orelse return false;
         if (n.paint.layer != 0) return true;
@@ -632,7 +1053,7 @@ fn isLayered(tree: *const WidgetTree, id: Id) bool {
     return false;
 }
 
-fn isAncestor(tree: *const WidgetTree, ancestor: Id, descendant: Id) layout.LayoutError!bool {
+fn isAncestor(tree: *const WidgetTree, ancestor: FrameNodeId, descendant: FrameNodeId) layout.LayoutError!bool {
     var current_id = descendant;
     while (current_id != .root) {
         const current = tree.nodeConst(current_id) orelse return error.InvalidStyle;
@@ -642,7 +1063,12 @@ fn isAncestor(tree: *const WidgetTree, ancestor: Id, descendant: Id) layout.Layo
     return false;
 }
 
-pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measure: ?MeasureFn, surface: ?Size) ![]u8 {
+pub fn verifyLayout(
+    allocator: std.mem.Allocator,
+    tree: *const WidgetTree,
+    measure: ?MeasureSource,
+    surface: ?Size,
+) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     const w = &out.writer;
@@ -745,21 +1171,31 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
         if (measure) |m| {
             const text = visualText(n);
             if (text) |t| {
-                if (t.len == 0) continue;
-                const ms = m(t, .{
-                    .known_dimensions = .{ .width = null, .height = null },
-                    .available_space = .{ .width = .max_content, .height = .max_content },
-                    .font_size = n.font_size,
-                    .font_id = n.font_id,
-                });
+                const insets = widget.textInsets(n.kind);
+                const ms = if (t.len == 0)
+                    Size{ .width = 0, .height = 0 }
+                else blk: {
+                    const measured = try m.callback(m.context, t, .{
+                        .known_dimensions = .{ .width = null, .height = null },
+                        .available_space = .{ .width = .max_content, .height = .max_content },
+                        .text = n.text_request,
+                        .writing_mode = n.writing_mode,
+                    });
+                    break :blk Size{ .width = measured.width, .height = measured.height };
+                };
                 // The canonical dispatcher measures content only; add the
-                // node's actual border and padding below.
-                const insets = widget.sidesSum(box_edges.border);
+                // node's actual border, padding and control indicator below.
+                const box_insets = widget.sidesSum(box_edges.border);
                 const pads = widget.sidesSum(box_edges.padding);
-                const need_w = switch (n.kind) {
-                    .button => ms.width + insets.w + pads.w,
-                    .slider => @max(100, ms.width + insets.w + pads.w),
-                    else => ms.width,
+                const need_w = ms.width + insets.horizontal() + box_insets.w + pads.w;
+                const need_h = switch (n.kind) {
+                    .checkbox, .switch_control, .radio => @max(
+                        widget.control_indicator_size,
+                        ms.height,
+                    ) + insets.vertical() + box_insets.h + pads.h,
+                    .progress => (if (t.len == 0) @as(f32, 8) else ms.height + 14) +
+                        box_insets.h + pads.h,
+                    else => ms.height + insets.vertical() + box_insets.h + pads.h,
                 };
                 // A positive cap plus clipped rendering intentionally permits
                 // measured text to exceed the rect; geometry checks stay
@@ -771,7 +1207,7 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
                     })
                 else
                     false;
-                if (!text_width_is_bounded and r.w + 0.001 < need_w) {
+                if (t.len != 0 and !text_width_is_bounded and r.w + 0.001 < need_w) {
                     try add(
                         "text overflow: id {d} '{s}' needs {d:.1} wide, rect {d:.1}",
                         w,
@@ -779,12 +1215,12 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
                         .{ n.id.index(), t, need_w, r.w },
                     );
                 }
-                if (r.h + 0.001 < ms.height) {
+                if (t.len != 0 and r.h + 0.001 < need_h) {
                     try add(
                         "text overflow: id {d} '{s}' needs {d:.1} tall, rect {d:.1}",
                         w,
                         &problems,
-                        .{ n.id.index(), t, ms.height, r.h },
+                        .{ n.id.index(), t, need_h, r.h },
                     );
                 }
             }
@@ -853,7 +1289,7 @@ pub fn verifyLayout(allocator: std.mem.Allocator, tree: *const WidgetTree, measu
     // squished-title class — two labels' text colliding even when their
     // rects do not.
     if (measure) |_| {
-        const TextBox = struct { id: Id, rect: Rect };
+        const TextBox = struct { id: FrameNodeId, rect: Rect };
         var boxes: std.ArrayList(TextBox) = .empty;
         defer boxes.deinit(allocator);
         for (nodes) |*n| {
@@ -913,7 +1349,7 @@ test "treeToJson: label text with quotes and backslashes round-trips" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: Id = @enumFromInt(2);
+    const col: FrameNodeId = @enumFromInt(2);
     const label_text = "say \"hi\" \\ yo\nnext\tline";
     try tree.nodes.append(std.testing.allocator, .{
         .id = @enumFromInt(1),
@@ -957,8 +1393,8 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     defer tree.deinit();
 
     var vol: f32 = 0.5;
-    const row_id: Id = @enumFromInt(3);
-    const col_id: Id = @enumFromInt(4);
+    const row_id: FrameNodeId = @enumFromInt(3);
+    const col_id: FrameNodeId = @enumFromInt(4);
 
     // Post-order: children before their containers.
     try tree.nodes.append(std.testing.allocator, .{
@@ -1037,6 +1473,67 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     try std.testing.expectEqual(@as(i64, 3), col_children[0].integer);
     try std.testing.expect(col_node.get("label") == null);
 }
+test "treeToJson: native controls expose their state and value fields" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    var checked = true;
+    var switched = false;
+    var selected: ?u32 = 42;
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .checkbox = .{ .label = "enabled", .value = &checked } },
+        .parent = .root,
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(2),
+        .kind = .{ .switch_control = .{ .label = "dark mode", .value = &switched } },
+        .parent = .root,
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(3),
+        .kind = .{ .radio = .{ .label = "large", .selected = &selected, .option = 42 } },
+        .parent = .root,
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(4),
+        .kind = .{ .progress = .{ .label = "download", .value = 13, .min = 2, .max = 12 } },
+        .parent = .root,
+    });
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(5),
+        .kind = .{ .separator = .{ .axis = .vertical } },
+        .parent = .root,
+    });
+
+    const json = try treeToJson(std.testing.allocator, &tree);
+    defer std.testing.allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const nodes = parsed.value.array.items;
+    try std.testing.expectEqual(@as(usize, 5), nodes.len);
+
+    const checkbox = nodes[0].object;
+    try std.testing.expectEqualStrings("checkbox", try objString(checkbox, "kind"));
+    try std.testing.expect((try objField(checkbox, "checked")).bool);
+    try std.testing.expect(checkbox.get("value") == null);
+    const switch_control = nodes[1].object;
+    try std.testing.expectEqualStrings("switch_control", try objString(switch_control, "kind"));
+    try std.testing.expect(!(try objField(switch_control, "checked")).bool);
+
+    const radio = nodes[2].object;
+    try std.testing.expect((try objField(radio, "selected")).bool);
+    try std.testing.expectEqual(@as(i64, 42), try objInteger(radio, "choice"));
+
+    const progress = nodes[3].object;
+    try std.testing.expectApproxEqAbs(@as(f64, 13), try objNumber(progress, "value"), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), try objNumber(progress, "min"), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 12), try objNumber(progress, "max"), 1e-6);
+
+    const separator = nodes[4].object;
+    try std.testing.expectEqualStrings("vertical", try objString(separator, "axis"));
+}
+
 test "treeToJson: percentage gap retains its canonical tag" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -1063,9 +1560,9 @@ test "treeToJsonWith: more than 32 child ids serialize in append order" {
     defer tree.deinit();
 
     const child_count: usize = 33;
-    const parent: Id = @enumFromInt(@as(u32, @intCast(child_count + 1)));
+    const parent: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_count + 1)));
     for (0..child_count) |child_index| {
-        const child: Id = @enumFromInt(@as(u32, @intCast(child_index + 1)));
+        const child: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_index + 1)));
         try tree.nodes.append(std.testing.allocator, .{
             .id = child,
             .kind = .{ .spacer = .{} },
@@ -1078,7 +1575,7 @@ test "treeToJsonWith: more than 32 child ids serialize in append order" {
         .parent = .root,
     });
     for (0..child_count) |child_index| {
-        const child: Id = @enumFromInt(@as(u32, @intCast(child_index + 1)));
+        const child: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_index + 1)));
         try tree.appendChild(parent, child);
     }
 
@@ -1111,30 +1608,36 @@ test "treeToJson: empty tree serializes as []" {
     try std.testing.expectEqual(@as(usize, 0), parsed.value.array.items.len);
 }
 
-test "eventFromJson: every event shape parses and round-trips its fields" {
+test "parseEvent owns input and preserves native event payloads" {
     const testing = std.testing;
 
-    const frame = try eventFromJson(testing.allocator, "{\"type\":\"frame\",\"tick\":42,\"time_ms\":1234}");
-    try testing.expectEqual(@as(u32, 42), frame.frame.tick);
-    try testing.expectEqual(@as(u64, 1234), frame.frame.time_ms);
+    var frame = try parseEvent(testing.allocator, "{\"type\":\"frame\",\"tick\":42,\"time_ms\":1234}");
+    defer frame.deinit();
+    try testing.expectEqual(@as(u32, 42), frame.event.frame.tick);
+    try testing.expectEqual(@as(u64, 1234), frame.event.frame.time_ms);
 
-    const resize = try eventFromJson(testing.allocator, "{\"type\":\"resize\",\"width\":900,\"height\":700}");
-    try testing.expectEqual(@as(f32, 900), resize.resize.width);
-    try testing.expectEqual(@as(f32, 700), resize.resize.height);
+    var resize = try parseEvent(testing.allocator, "{\"type\":\"resize\",\"width\":900,\"height\":700}");
+    defer resize.deinit();
+    try testing.expectEqual(@as(f32, 900), resize.event.resize.width);
+    try testing.expectEqual(@as(f32, 700), resize.event.resize.height);
 
-    const move = try eventFromJson(testing.allocator, "{\"type\":\"mouse_move\",\"x\":12.5,\"y\":30.0}");
-    try testing.expectEqual(@as(f32, 12.5), move.mouse_move.x);
-    try testing.expectEqual(@as(f32, 30), move.mouse_move.y);
+    var move = try parseEvent(testing.allocator, "{\"type\":\"mouse_move\",\"x\":12.5,\"y\":30.0}");
+    defer move.deinit();
+    try testing.expectEqual(@as(f32, 12.5), move.event.mouse_move.x);
+    try testing.expectEqual(@as(f32, 30), move.event.mouse_move.y);
 
-    const leave = try eventFromJson(testing.allocator, "{\"type\":\"mouse_leave\"}");
-    try testing.expect(leave == .mouse_leave);
+    var leave = try parseEvent(testing.allocator, "{\"type\":\"mouse_leave\"}");
+    defer leave.deinit();
+    try testing.expect(leave.event == .mouse_leave);
 
-    const down = try eventFromJson(testing.allocator, "{\"type\":\"mouse_down\",\"button\":\"left\",\"x\":1,\"y\":2}");
-    try testing.expectEqual(MouseButton.left, down.mouse_down.button);
-    const up = try eventFromJson(testing.allocator, "{\"type\":\"mouse_up\",\"button\":\"right\",\"x\":3,\"y\":4}");
-    try testing.expectEqual(MouseButton.right, up.mouse_up.button);
+    var down = try parseEvent(testing.allocator, "{\"type\":\"mouse_down\",\"button\":\"left\",\"x\":1,\"y\":2}");
+    defer down.deinit();
+    try testing.expectEqual(MouseButton.left, down.event.mouse_down.button);
+    var up = try parseEvent(testing.allocator, "{\"type\":\"mouse_up\",\"button\":\"right\",\"x\":3,\"y\":4}");
+    defer up.deinit();
+    try testing.expectEqual(MouseButton.right, up.event.mouse_up.button);
 
-    try testing.expectError(error.UnknownEvent, eventFromJson(testing.allocator, "{\"type\":\"nope\"}"));
+    try testing.expectError(error.UnknownEvent, parseEvent(testing.allocator, "{\"type\":\"nope\"}"));
 }
 
 test "renderAscii: label text, button fill, slider thumb, hover border" {
@@ -1142,9 +1645,9 @@ test "renderAscii: label text, button fill, slider thumb, hover border" {
     defer tree.deinit();
 
     var vol: f32 = 0.5;
-    const label_id: Id = @enumFromInt(1);
-    const button_id: Id = @enumFromInt(2);
-    const slider_id: Id = @enumFromInt(3);
+    const label_id: FrameNodeId = @enumFromInt(1);
+    const button_id: FrameNodeId = @enumFromInt(2);
+    const slider_id: FrameNodeId = @enumFromInt(3);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = label_id,
@@ -1184,6 +1687,156 @@ test "renderAscii: label text, button fill, slider thumb, hover border" {
     try std.testing.expect(at > 0);
 }
 
+test "renderAscii: visible button caption never exposes its semantic label" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    try tree.nodes.append(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .kind = .{ .button = .{ .label = "SECRET", .visual_label = "VIEW" } },
+        .parent = .root,
+        .rect = .{ .x = 0, .y = 0, .w = 100, .h = 24 },
+    });
+
+    const visible = try renderAscii(std.testing.allocator, &tree, null);
+    defer std.testing.allocator.free(visible);
+    try std.testing.expect(std.mem.indexOfScalar(u8, visible, 'V') != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, visible, 'S') == null);
+
+    tree.nodes.items[0].kind.button.visual_label = "";
+    const hidden = try renderAscii(std.testing.allocator, &tree, null);
+    defer std.testing.allocator.free(hidden);
+    try std.testing.expect(std.mem.indexOfScalar(u8, hidden, '#') != null);
+    for (hidden) |character| {
+        try std.testing.expect(!std.ascii.isAlphabetic(character));
+    }
+    const json = try treeToJson(std.testing.allocator, &tree);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "SECRET") != null);
+}
+
+/// Two authored caption shapes through the real button path: a semantic
+/// label with a visible override, and a semantic label whose visible text
+/// is suppressed.
+const CaptionButtons = struct {
+    const Self = CaptionButtons;
+
+    pub fn draw(self: *Self, ctx: *DrawCtx) !void {
+        _ = self;
+        _ = try ctx.column(.{ .gap = 8 });
+        defer ctx.pop();
+        _ = try ctx.button(.{
+            .key = .{ .static = "shown" },
+            .label = "SEMANTIC_OVERRIDE",
+            .visual_label = "VIEWONLY",
+        });
+        _ = try ctx.button(.{
+            .key = .{ .static = "hidden" },
+            .label = "SEMANTIC_HIDDEN",
+            .visual_label = "",
+        });
+    }
+};
+
+test "renderAscii: a button caption paints once, never its semantic name" {
+    const App = @import("app.zig").App;
+    const Session = @import("session.zig").Session;
+    var session = try Session.init(std.testing.allocator);
+    defer session.deinit() catch unreachable;
+    var app = try App.init(std.testing.allocator, &session);
+    defer app.deinit();
+    app.serialize_json = true;
+    var view: CaptionButtons = .{};
+    try app.mountRoot(CaptionButtons, &view);
+
+    const out = try app.frame(1, .{ .width = 240, .height = 120 });
+    defer if (out.json) |bytes| std.testing.allocator.free(bytes);
+    const json = out.json orelse return error.MissingFrameJson;
+
+    const map = try renderAscii(std.testing.allocator, out.tree, null);
+    defer std.testing.allocator.free(map);
+
+    // Every alphabetic glyph the map holds, in order, is the visible
+    // override of the first button and nothing else. A second copy, either
+    // semantic name or the suppressed button's caption each add glyphs here,
+    // and a caption that stopped painting removes them all.
+    var glyphs: [64]u8 = undefined;
+    var count: usize = 0;
+    for (map) |character| {
+        if (!std.ascii.isAlphabetic(character)) continue;
+        if (count == glyphs.len) return error.TooManyGlyphs;
+        glyphs[count] = character;
+        count += 1;
+    }
+    try std.testing.expectEqualStrings("VIEWONLY", glyphs[0..count]);
+
+    // The semantic names stay machine-readable in the same frame.
+    try std.testing.expect(std.mem.indexOf(u8, json, "SEMANTIC_OVERRIDE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "SEMANTIC_HIDDEN") != null);
+}
+
+test "renderAscii: controls show checked, selected, progress, and axis marks" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+    var checked = true;
+    var switched = false;
+    var selected: ?u32 = 3;
+    const nodes = [_]WidgetNode{
+        .{
+            .id = @enumFromInt(1),
+            .kind = .{ .checkbox = .{ .label = "check", .value = &checked } },
+            .parent = .root,
+            .rect = .{ .x = 0, .y = 0, .w = 90, .h = 24 },
+        },
+        .{
+            .id = @enumFromInt(2),
+            .kind = .{ .switch_control = .{ .label = "switch", .value = &switched } },
+            .parent = .root,
+            .rect = .{ .x = 0, .y = 30, .w = 90, .h = 24 },
+        },
+        .{
+            .id = @enumFromInt(3),
+            .kind = .{ .radio = .{ .label = "radio", .selected = &selected, .option = 3 } },
+            .parent = .root,
+            .rect = .{ .x = 0, .y = 60, .w = 90, .h = 24 },
+        },
+        .{
+            .id = @enumFromInt(4),
+            .kind = .{ .progress = .{ .label = "load", .value = 15, .min = 0, .max = 10 } },
+            .parent = .root,
+            .rect = .{ .x = 0, .y = 90, .w = 90, .h = 40 },
+        },
+        .{
+            .id = @enumFromInt(5),
+            .kind = .{ .separator = .{ .axis = .horizontal } },
+            .parent = .root,
+            .rect = .{ .x = 0, .y = 140, .w = 90, .h = 1 },
+        },
+        .{
+            .id = @enumFromInt(6),
+            .kind = .{ .separator = .{ .axis = .vertical } },
+            .parent = .root,
+            .rect = .{ .x = 100, .y = 0, .w = 1, .h = 100 },
+        },
+    };
+    for (nodes) |node| try tree.nodes.append(std.testing.allocator, node);
+
+    const map = try renderAscii(std.testing.allocator, &tree, null);
+    defer std.testing.allocator.free(map);
+    try std.testing.expect(std.mem.indexOfScalar(u8, map, 'x') != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, map, 'O') != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, map, '*') != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, map, '=') != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, map, '-') != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, map, '|') != null);
+}
+
+test "progressFraction clamps both bounds and handles an empty range" {
+    try std.testing.expectEqual(@as(f32, 0), progressFraction(-1, 0, 10));
+    try std.testing.expectEqual(@as(f32, 1), progressFraction(15, 0, 10));
+    try std.testing.expectEqual(@as(f32, 0.5), progressFraction(4, 2, 6));
+    try std.testing.expectEqual(@as(f32, 0), progressFraction(4, 4, 4));
+}
+
 test "renderAscii: empty tree yields an empty map" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
@@ -1197,9 +1850,9 @@ test "verifyLayout: clean tree reports OK" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: Id = @enumFromInt(10);
-    const a: Id = @enumFromInt(11);
-    const b: Id = @enumFromInt(12);
+    const col: FrameNodeId = @enumFromInt(10);
+    const a: FrameNodeId = @enumFromInt(11);
+    const b: FrameNodeId = @enumFromInt(12);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = a,
@@ -1230,10 +1883,10 @@ test "verifyLayout: overlap, escape, and out-of-range value are reported" {
     defer tree.deinit();
 
     var vol: f32 = 5; // out of [0, 1]
-    const col: Id = @enumFromInt(20);
-    const a: Id = @enumFromInt(21);
-    const b: Id = @enumFromInt(22);
-    const s: Id = @enumFromInt(23);
+    const col: FrameNodeId = @enumFromInt(20);
+    const a: FrameNodeId = @enumFromInt(21);
+    const b: FrameNodeId = @enumFromInt(22);
+    const s: FrameNodeId = @enumFromInt(23);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = a,
@@ -1302,11 +1955,17 @@ test "layoutFingerprint: deterministic geometry and typed edges" {
     try std.testing.expectEqualStrings(fp, fp2);
 }
 
-const fakeMeasure = struct {
-    fn f(_: []const u8, _: layout.MeasureInput) Size {
-        return .{ .width = 40, .height = 24 };
-    }
-}.f;
+const fake_measure: MeasureSource = .{
+    .callback = struct {
+        fn f(
+            _: ?*anyopaque,
+            _: []const u8,
+            _: layout.MeasureInput,
+        ) layout.LayoutError!layout.TextMeasurement {
+            return .{ .width = 40, .height = 24 };
+        }
+    }.f,
+};
 
 test "verifyLayout: bounded ellipsis and clip text do not report overflow" {
     var tree = WidgetTree.init(std.testing.allocator);
@@ -1329,7 +1988,7 @@ test "verifyLayout: bounded ellipsis and clip text do not report overflow" {
         .text_max_width = 20,
     });
 
-    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
+    const report = try verifyLayout(std.testing.allocator, &tree, fake_measure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expectEqualStrings("OK\n", report);
 }
@@ -1354,7 +2013,7 @@ test "verifyLayout: overlapping text boxes are reported, adjacent are not" {
         .rect = .{ .x = 20, .y = 0, .w = 52, .h = 24 }, // boxes collide
     });
 
-    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
+    const report = try verifyLayout(std.testing.allocator, &tree, fake_measure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "text overlap") != null);
 }
@@ -1378,7 +2037,7 @@ test "verifyLayout: text boxes that merely touch are not an overlap" {
         .rect = .{ .x = 52, .y = 0, .w = 52, .h = 24 },
     });
 
-    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
+    const report = try verifyLayout(std.testing.allocator, &tree, fake_measure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.startsWith(u8, report, "OK"));
 }
@@ -1412,8 +2071,8 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const parent: Id = @enumFromInt(1);
-    const child: Id = @enumFromInt(2);
+    const parent: FrameNodeId = @enumFromInt(1);
+    const child: FrameNodeId = @enumFromInt(2);
     try tree.nodes.append(std.testing.allocator, .{
         .id = child,
         .kind = .{ .label = .{ .text = "nested" } },
@@ -1488,8 +2147,8 @@ test "renderAscii: nested node renders at its absolute position" {
 
     // Root column with padding; button nested at a relative offset. Its
     // absolute origin = col (0,0) + padding (8,8) + rect (5,5) = (13,13).
-    const col: Id = @enumFromInt(1);
-    const btn: Id = @enumFromInt(2);
+    const col: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @enumFromInt(2);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -1532,8 +2191,8 @@ test "verifyLayout: nested tree with padding and border verifies OK" {
 
     // Column with border+padding; button fills the content box exactly
     // (content w = 100-4-2-8-6 = 80, h = 60-1-3-8-7 = 41).
-    const col: Id = @enumFromInt(1);
-    const btn: Id = @enumFromInt(2);
+    const col: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @enumFromInt(2);
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -1572,8 +2231,8 @@ test "verifyLayout: child outside the parent's content box is flagged" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: Id = @enumFromInt(1);
-    const child: Id = @enumFromInt(2);
+    const col: FrameNodeId = @enumFromInt(1);
+    const child: FrameNodeId = @enumFromInt(2);
     // Child sits inside the border box (x+w = 95 <= 100) but past the
     // content box (content w = 100-8-8 = 84): the content box constrains.
     try tree.nodes.append(std.testing.allocator, .{
@@ -1633,8 +2292,8 @@ test "verifyLayout: negative width and height are reported" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const negative_width: Id = @enumFromInt(1);
-    const negative_height: Id = @enumFromInt(2);
+    const negative_width: FrameNodeId = @enumFromInt(1);
+    const negative_height: FrameNodeId = @enumFromInt(2);
     try tree.nodes.append(std.testing.allocator, .{
         .id = negative_width,
         .kind = .{ .spacer = .{} },
@@ -1655,67 +2314,98 @@ test "verifyLayout: negative width and height are reported" {
     try std.testing.expect(!std.mem.startsWith(u8, report, "OK"));
 }
 
-test "eventFromJson: mouse wheel preserves position and signed deltas" {
-    const event = try eventFromJson(
+test "parseEvent preserves wheel position, deltas, phase and natural flag" {
+    var parsed = try parseEvent(
         std.testing.allocator,
-        "{\"type\":\"mouse_wheel\",\"x\":12.5,\"y\":30,\"delta_x\":-2,\"delta_y\":3.25}",
+        "{\"type\":\"mouse_wheel\",\"x\":12.5,\"y\":30,\"delta_x\":-2,\"delta_y\":3.25," ++
+            "\"unit\":\"pixel\",\"phase\":\"momentum\",\"natural\":true}",
     );
-    const wheel = switch (event) {
-        .mouse_wheel => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
+    defer parsed.deinit();
+    const wheel = parsed.event.mouse_wheel;
+    try std.testing.expectEqual(event.ScrollUnit.pixel, wheel.unit);
+    try std.testing.expectEqual(event.ScrollPhase.momentum, wheel.phase);
+    try std.testing.expect(wheel.natural);
     try std.testing.expectEqual(@as(f32, 12.5), wheel.x);
     try std.testing.expectEqual(@as(f32, 30), wheel.y);
     try std.testing.expectEqual(@as(f32, -2), wheel.delta_x);
     try std.testing.expectEqual(@as(f32, 3.25), wheel.delta_y);
 }
 
-test "eventFromJson: malformed lines return errors, never panic" {
+test "parseEvent retains IME text and device-qualified touch IDs after line release" {
+    const gpa = std.testing.allocator;
+    const line = try gpa.dupe(
+        u8,
+        "{\"type\":\"composition\",\"phase\":\"update\",\"text\":\"caf\\u00e9\"," ++
+            "\"selection_start\":1,\"selection_end\":3}",
+    );
+    var composition = parseEvent(gpa, line) catch |err| {
+        gpa.free(line);
+        return err;
+    };
+    gpa.free(line);
+    defer composition.deinit();
+    try std.testing.expectEqualStrings("café", composition.event.composition.text);
+    try std.testing.expectEqual(@as(usize, 3), composition.event.composition.selection_end);
+
+    var touch = try parseEvent(
+        gpa,
+        "{\"type\":\"touch_start\",\"device_id\":18446744073709551615,\"finger_id\":17," ++
+            "\"x\":12,\"y\":24,\"pressure\":0.5}",
+    );
+    defer touch.deinit();
+    try std.testing.expectEqual(
+        (@as(u128, std.math.maxInt(u64)) << 64) | 17,
+        touch.event.touch_start.id,
+    );
+    try std.testing.expectEqual(@as(f32, 0.5), touch.event.touch_start.pressure);
+}
+
+test "parseEvent rejects malformed input without a panic or leaked arena" {
     const testing = std.testing;
 
     // Non-object line (array).
-    try testing.expectError(error.WrongType, eventFromJson(testing.allocator, "[1,2]"));
+    try testing.expectError(error.WrongType, parseEvent(testing.allocator, "[1,2]"));
     // Non-object line (string).
-    try testing.expectError(error.WrongType, eventFromJson(testing.allocator, "\"nope\""));
+    try testing.expectError(error.WrongType, parseEvent(testing.allocator, "\"nope\""));
     // Missing type field.
     try testing.expectError(
         error.MissingField,
-        eventFromJson(testing.allocator, "{\"tick\":1}"),
+        parseEvent(testing.allocator, "{\"tick\":1}"),
     );
     // Float tick where an integer is required.
     try testing.expectError(
         error.WrongType,
-        eventFromJson(testing.allocator, "{\"type\":\"frame\",\"tick\":1.5,\"time_ms\":0}"),
+        parseEvent(testing.allocator, "{\"type\":\"frame\",\"tick\":1.5,\"time_ms\":0}"),
     );
     // Negative tick is out of range for u32.
     try testing.expectError(
         error.BadNumber,
-        eventFromJson(testing.allocator, "{\"type\":\"frame\",\"tick\":-1,\"time_ms\":0}"),
+        parseEvent(testing.allocator, "{\"type\":\"frame\",\"tick\":-1,\"time_ms\":0}"),
     );
     // Missing required field (x).
     try testing.expectError(
         error.MissingField,
-        eventFromJson(testing.allocator, "{\"type\":\"mouse_move\",\"y\":1}"),
+        parseEvent(testing.allocator, "{\"type\":\"mouse_move\",\"y\":1}"),
     );
     // Non-numeric where a number is required.
     try testing.expectError(
         error.BadNumber,
-        eventFromJson(testing.allocator, "{\"type\":\"mouse_move\",\"x\":\"abc\",\"y\":1}"),
+        parseEvent(testing.allocator, "{\"type\":\"mouse_move\",\"x\":\"abc\",\"y\":1}"),
     );
     // Unknown event type.
     try testing.expectError(
         error.UnknownEvent,
-        eventFromJson(testing.allocator, "{\"type\":\"nope\"}"),
+        parseEvent(testing.allocator, "{\"type\":\"nope\"}"),
     );
     // Unknown key name.
     try testing.expectError(
         error.UnknownKey,
-        eventFromJson(testing.allocator, "{\"type\":\"key_down\",\"key\":\"f5\"}"),
+        parseEvent(testing.allocator, "{\"type\":\"key_down\",\"key\":\"f5\"}"),
     );
     // Missing key on a key event.
     try testing.expectError(
         error.MissingField,
-        eventFromJson(testing.allocator, "{\"type\":\"key_down\"}"),
+        parseEvent(testing.allocator, "{\"type\":\"key_down\"}"),
     );
 }
 
@@ -1735,7 +2425,7 @@ test "verifyLayout: text-overlap pass handles more than 64 text nodes" {
         });
     }
 
-    const report = try verifyLayout(std.testing.allocator, &tree, fakeMeasure, null);
+    const report = try verifyLayout(std.testing.allocator, &tree, fake_measure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.startsWith(u8, report, "OK"));
 }
@@ -1904,7 +2594,7 @@ test "renderAscii: hover on a sub-2px node draws no border and does not panic" {
     // h = 1 < map_px (2): the hover border's inner edge offset
     // (r.y + r.h - map_px) would be negative and @intFromFloat would
     // panic; the guard must skip the border entirely.
-    const tiny: Id = @enumFromInt(1);
+    const tiny: FrameNodeId = @enumFromInt(1);
     try tree.nodes.append(std.testing.allocator, .{
         .id = tiny,
         .kind = .{ .label = .{ .text = "x" } },
@@ -1930,11 +2620,11 @@ test "verifyLayout: DrawCtx ellipsized button verifies its label child once" {
         .text_overflow = .ellipsis,
     });
 
-    const measure = struct {
-        fn f(text: []const u8, _: layout.MeasureInput) widget.Size {
-            return .{ .width = @floatFromInt(text.len * 10), .height = 20 };
+    const measure: layout.MeasureSource = .{ .callback = struct {
+        fn f(_: ?*anyopaque, content: []const u8, _: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
+            return .{ .width = @floatFromInt(content.len * 10), .height = 20 };
         }
-    }.f;
+    }.f };
     const surface: Size = .{ .width = 20, .height = 40 };
     try layout.layoutTree(&tree, .{
         .allocator = arena.allocator(),
@@ -1960,7 +2650,7 @@ test "verifyLayout: DrawCtx ellipsized button verifies its label child once" {
         "A very long button label",
         tree.node(button).?.kind.button.label,
     );
-    try std.testing.expectEqual(button, input.hitButton(&tree, .{ 10, 10 }).?);
+    try std.testing.expectEqual(button, input.hitActionable(&tree, .{ 10, 10 }).?);
 }
 
 test "verifyLayout: slider text fit uses visual_label" {
@@ -1981,11 +2671,11 @@ test "verifyLayout: slider text fit uses visual_label" {
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 20 },
     });
 
-    const measure = struct {
-        fn f(text: []const u8, _: layout.MeasureInput) Size {
-            return .{ .width = @floatFromInt(text.len * 10), .height = 20 };
+    const measure: layout.MeasureSource = .{ .callback = struct {
+        fn f(_: ?*anyopaque, content: []const u8, _: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
+            return .{ .width = @floatFromInt(content.len * 10), .height = 20 };
         }
-    }.f;
+    }.f };
     const report = try verifyLayout(std.testing.allocator, &tree, measure, null);
     defer std.testing.allocator.free(report);
     try std.testing.expectEqualStrings("OK\n", report);

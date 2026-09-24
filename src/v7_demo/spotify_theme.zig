@@ -2,8 +2,13 @@
 
 const nogui = @import("nogui");
 const DrawCtx = nogui.DrawCtx;
-pub const srgbToOklab = @import("text.zig").srgbToOklab;
-pub const Id = nogui.Id;
+pub const FrameNodeId = nogui.FrameNodeId;
+
+const artwork_shadow = [_]nogui.paint.Shadow{.{
+    .color = .{ .srgb = .{ .r = 0, .g = 0, .b = 0, .a = 0.32 } },
+    .offset = .{ .x = 0, .y = 2 },
+    .blur = 4,
+}};
 
 /// Outer breathing room between the application surface and its chrome.
 pub const app_inset: f32 = 8;
@@ -146,21 +151,37 @@ pub fn compactArtworkMark(seed: u8) []const u8 {
     };
 }
 
+/// Draws one square artwork tile, gradient-painted and emblem-marked.
+///
+/// The drop shadow is attached only above `playlist_artwork_size`, where the
+/// tile is large enough for the blur to read as depth instead of noise. An
+/// outset shadow grows its quad by `blur` and shifts it by `offset`, so this
+/// one reaches 4 px sideways and 6 px below the tile. It carries the nearest
+/// enclosing clip, so a caller that clips tighter than that outset keeps the
+/// shadow inside its own bounds; the gradient never leaves the tile because
+/// it fills the tile's own rounded border box.
 pub fn drawArtworkTile(
     ctx: *DrawCtx,
     size: f32,
     seed: u8,
     texture_index: ?u32,
-) !Id {
+) !FrameNodeId {
     const index: usize = @as(usize, seed) % artwork_gradients.len;
     const colors = artwork_gradients[index];
     const radius: f32 = if (size <= track_artwork_size) 2.0 else 6.0;
+    const first: nogui.paint.Srgb = .{ .r = colors[0][0], .g = colors[0][1], .b = colors[0][2], .a = colors[0][3] };
+    const second: nogui.paint.Srgb = .{ .r = colors[1][0], .g = colors[1][1], .b = colors[1][2], .a = colors[1][3] };
+    const artwork_fill: ?nogui.paint.Fill = if (texture_index == null) .{ .gradient = .{
+        .first = .{ .color = .{ .srgb = first }, .position = 0 },
+        .second = .{ .color = .{ .srgb = second }, .position = 1 },
+    } } else null;
+    const shadows: []const nogui.paint.Shadow = if (size <= playlist_artwork_size) &.{} else &artwork_shadow;
     const tile = try ctx.column(.{
         .flex_basis = size,
         .min_width = size,
         .box_sizing = .border_box,
         .fill = colors[0],
-        .gradient = srgbToOklab(colors[1]),
+        .paint_fill = artwork_fill,
         .texture = texture_index,
         .radius = .{ .top = radius, .right = radius, .bottom = radius, .left = radius },
         .padding = .{
@@ -169,7 +190,7 @@ pub fn drawArtworkTile(
             .bottom = size * 0.18,
             .left = size * 0.18,
         },
-        .shadow = @as(f32, if (size <= playlist_artwork_size) 0 else 4),
+        .shadows = shadows,
     });
     defer ctx.pop();
 

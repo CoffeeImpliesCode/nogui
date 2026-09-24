@@ -1,0 +1,67 @@
+Complete a short daemon -> module write instead of dropping the remainder.
+
+output_send_data() used safe_write(), which is a single write(2) wrapped in
+an EINTR retry.  A short write therefore returned a positive value, passed
+the "ret == -1" broken pipe test and was logged as a successful command,
+while the SSIP stream had silently lost bytes and was left desynchronised.
+include/safe_io.h and every other caller of safe_write() are untouched; this
+replaces only the one call in the one function that every daemon -> module
+write passes through, and reports honestly how many bytes the kernel took.
+
+Order matters: apply this patch before
+tools/patches/speech-dispatcher-module-metadata.patch, which extends the
+same seam.
+
+Every context line in both hunks is a real, non-blank source line, so no
+whitespace normalisation can silently break them.
+
+--- a/src/server/output.c
++++ b/src/server/output.c
+@@ -418,4 +418,40 @@
++/*
++ * Write every requested byte to fd, or report honestly how many moved.
++ *
++ * A short write on the daemon -> module pipe desynchronises SSIP while the
++ * old code logged success, so a short count is never success here: the loop
++ * continues over the remaining bytes.  EINTR is retried without consuming
++ * the count, a zero return means the pipe stopped taking bytes rather than
++ * a reason to spin, and a mid-way failure reports the prefix that moved.
++ */
++static int output_write_all(int fd, const char *buf, size_t count,
++			    size_t *written_out)
++{
++	size_t sent = 0;
++	ssize_t w;
++
++	while (sent < count) {
++		w = write(fd, buf + sent, count - sent);
++		if (w < 0) {
++			if (errno == EINTR)
++				continue;
++			*written_out = sent;
++			return -1;
++		}
++		if (w == 0) {
++			errno = EIO;
++			*written_out = sent;
++			return -1;
++		}
++		sent += (size_t) w;
++	}
++	*written_out = sent;
++	return 0;
++}
++
+ int output_send_data(const char *cmd, OutputModule * output, int wfr)
+ {
+ 	int ret;
+ 	GString *response;
++	size_t nbytes;
++	size_t written = 0;
+@@ -434,4 +470,5 @@
+-	ret = safe_write(output->pipe_in[1], cmd, strlen(cmd));
++	nbytes = strlen(cmd);
++	ret = output_write_all(output->pipe_in[1], cmd, nbytes, &written);
+ 	if (ret == -1) {
+ 		MSG(2, "Error: Broken pipe to module while sending data.");
+ 		if (wfr) {

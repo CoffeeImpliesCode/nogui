@@ -1,8 +1,9 @@
 //! Specifies the direct-tree contract for the modular flex layout engine.
 
 const std = @import("std");
-const Id = @import("../id.zig").Id;
+const FrameNodeId = @import("../id.zig").FrameNodeId;
 const style = @import("../style.zig");
+const text = @import("../text.zig");
 const widget = @import("../widget.zig");
 const layout = @import("root.zig");
 const flex = @import("flex.zig");
@@ -13,7 +14,7 @@ const Style = style.Style;
 const WidgetKind = widget.WidgetKind;
 const WidgetTree = widget.WidgetTree;
 
-fn appendNode(tree: *WidgetTree, id: Id, parent: Id, node_style: Style) !void {
+fn appendNode(tree: *WidgetTree, id: FrameNodeId, parent: FrameNodeId, node_style: Style) !void {
     const kind: WidgetKind = switch (node_style.display) {
         .flex => .{ .row = .{} },
         .block, .flow_root, .grid => .{ .column = .{} },
@@ -50,7 +51,7 @@ fn growingItem(basis: f32, height: f32) Style {
 
 fn layoutContainer(
     tree: *WidgetTree,
-    container_id: Id,
+    container_id: FrameNodeId,
     available: widget.Size,
 ) !void {
     try flex.layoutContainer(tree, container_id, .{
@@ -68,7 +69,7 @@ fn expectRect(expected: Rect, actual: Rect) !void {
     try std.testing.expectApproxEqAbs(expected.h, actual.h, tolerance);
 }
 
-fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
+fn expectRelative(tree: *const WidgetTree, id: FrameNodeId, expected: Rect) !void {
     const actual = tree.nodeConst(id) orelse return error.TestUnexpectedResult;
     try expectRect(expected, actual.rect);
 }
@@ -76,16 +77,20 @@ fn expectRelative(tree: *const WidgetTree, id: Id, expected: Rect) !void {
 const CountedLeafMeasure = struct {
     var calls: usize = 0;
 
-    fn measure(_: []const u8, _: layout.MeasureInput) widget.Size {
+    fn measure(_: ?*anyopaque, _: []const u8, _: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
         calls += 1;
         return .{ .width = 10, .height = 10 };
     }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
 };
 
 const FixedLabelMeasure = struct {
-    fn measure(_: []const u8, _: layout.MeasureInput) widget.Size {
+    fn measure(_: ?*anyopaque, _: []const u8, _: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
         return .{ .width = 40, .height = 10 };
     }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
 };
 
 const CrossAvailabilityProbe = struct {
@@ -105,7 +110,7 @@ const CrossAvailabilityProbe = struct {
         definite_height = null;
     }
 
-    fn measure(_: []const u8, input: layout.MeasureInput) widget.Size {
+    fn measure(_: ?*anyopaque, _: []const u8, input: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
         calls += 1;
         return switch (input.available_space.height) {
             .definite => |height| blk: {
@@ -123,6 +128,8 @@ const CrossAvailabilityProbe = struct {
             },
         };
     }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
 };
 
 const AutomaticMinimumKnownProbe = struct {
@@ -144,7 +151,7 @@ const AutomaticMinimumKnownProbe = struct {
         min_content_cross_height = null;
     }
 
-    fn measure(_: []const u8, input: layout.MeasureInput) widget.Size {
+    fn measure(_: ?*anyopaque, _: []const u8, input: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
         calls += 1;
         const width_mode = switch (input.available_space.width) {
             .definite => WidthMode.definite,
@@ -161,6 +168,8 @@ const AutomaticMinimumKnownProbe = struct {
         else
             .{ .width = 40, .height = 20 };
     }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
 };
 
 fn unsupportedMeasureNode(
@@ -192,7 +201,7 @@ const AutomaticMinimumAutoMarginProbe = struct {
         min_content_available_height = null;
     }
 
-    fn measure(_: []const u8, input: layout.MeasureInput) widget.Size {
+    fn measure(_: ?*anyopaque, _: []const u8, input: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
         const min_content = switch (input.available_space.width) {
             .min_content => true,
             .definite, .max_content => false,
@@ -210,6 +219,8 @@ const AutomaticMinimumAutoMarginProbe = struct {
             .height = input.known_dimensions.height orelse 10,
         };
     }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
 };
 
 test "fixed row distributes space around and evenly" {
@@ -225,9 +236,9 @@ test "fixed row distributes space around and evenly" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const first_id: Id = @enumFromInt(1);
-        const second_id: Id = @enumFromInt(2);
-        const container_id: Id = @enumFromInt(3);
+        const first_id: FrameNodeId = @enumFromInt(1);
+        const second_id: FrameNodeId = @enumFromInt(2);
+        const container_id: FrameNodeId = @enumFromInt(3);
 
         try appendNode(&tree, first_id, container_id, fixedItem(20, 10));
         try appendNode(&tree, second_id, container_id, fixedItem(20, 10));
@@ -264,10 +275,10 @@ test "grow redistribution honors minimum and maximum clamps" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const capped_id: Id = @enumFromInt(1);
-    const floored_id: Id = @enumFromInt(2);
-    const flexible_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const capped_id: FrameNodeId = @enumFromInt(1);
+    const floored_id: FrameNodeId = @enumFromInt(2);
+    const flexible_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     var capped = growingItem(20, 10);
     capped.max_size.width = .{ .length = 30 };
@@ -302,10 +313,10 @@ test "wrapped RTL row reverse applies align content between lines" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, first_id, container_id, fixedItem(40, 20));
     try appendNode(&tree, second_id, container_id, fixedItem(40, 20));
@@ -338,10 +349,10 @@ test "nested wrapping row uses its definite width for auto cross size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const nested_id: Id = @enumFromInt(3);
-    const parent_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const nested_id: FrameNodeId = @enumFromInt(3);
+    const parent_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, first_id, nested_id, fixedItem(60, 10));
     try appendNode(&tree, second_id, nested_id, fixedItem(60, 10));
@@ -380,10 +391,10 @@ test "nested wrapping row uses max width for auto cross size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const nested_id: Id = @enumFromInt(3);
-    const parent_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const nested_id: FrameNodeId = @enumFromInt(3);
+    const parent_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, first_id, nested_id, fixedItem(60, 10));
     try appendNode(&tree, second_id, nested_id, fixedItem(60, 10));
@@ -426,9 +437,9 @@ test "automatic horizontal margin consumes free space before justify" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     var first = fixedItem(20, 10);
     first.margin_inset = .{
@@ -464,10 +475,10 @@ test "border and padding preserve relative geometry and exclude absolute child" 
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const absolute_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const absolute_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     var absolute = fixedItem(10, 8);
     absolute.position = .absolute;
@@ -532,7 +543,7 @@ test "non-finite available size returns InvalidStyle" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const container_id: Id = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(1);
         try appendNode(&tree, container_id, .root, .{
             .display = .flex,
             .direction = .row,
@@ -559,8 +570,8 @@ test "absolute auto insets use row justify center" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(60, 40);
     absolute.position = .absolute;
@@ -593,8 +604,8 @@ test "absolute auto insets use row cross-axis alignment" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(60, 40);
     absolute.position = .absolute;
@@ -628,8 +639,8 @@ test "indefinite flex percentages collapse while definite percentages resolve" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var child = fixedItem(0, 0);
         child.size = .{
@@ -662,8 +673,8 @@ test "indefinite flex percentages collapse while definite percentages resolve" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var child = fixedItem(0, 0);
         child.size = .{
@@ -694,8 +705,8 @@ test "absolute aspect ratio reflows after max-width clamp" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = absolute_id,
@@ -741,8 +752,8 @@ test "row aspect ratio transfers main maximum into cross maximum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -784,8 +795,8 @@ test "row aspect ratio caps automatic minimum above box floor" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -849,8 +860,8 @@ test "automatic flex minimum follows overflow visibility" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         try tree.appendNode(.{
             .id = child_id,
@@ -893,8 +904,8 @@ test "automatic flex minimum is capped by preferred width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -932,8 +943,8 @@ test "automatic flex minimum is capped by max width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -975,8 +986,8 @@ test "absolute auto insets resolve auto margins to zero" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(20, 20);
     absolute.position = .absolute;
@@ -1024,8 +1035,8 @@ test "clip overflow keeps the visible automatic flex minimum" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         try tree.appendNode(.{
             .id = child_id,
@@ -1068,9 +1079,9 @@ test "vertical scrollbar gutter reduces row flex space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, container_id, growingItem(0, 20));
     try appendNode(&tree, second_id, container_id, growingItem(0, 20));
@@ -1105,8 +1116,8 @@ test "horizontal scrollbar gutter reduces stretched cross size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, container_id, .{
         .display = .block,
@@ -1137,6 +1148,114 @@ test "horizontal scrollbar gutter reduces stretched cross size" {
     try expectRect(.{ .x = 0, .y = 0, .w = 10, .h = 85 }, widget.absoluteRect(&tree, child_id));
 }
 
+test "a stretched nested flex container lays its items out at the final cross size" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const sibling_id: FrameNodeId = @enumFromInt(1);
+    const inner_id: FrameNodeId = @enumFromInt(2);
+    const panel_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
+
+    // The panel's cross size is auto, so its own hypothetical cross size is
+    // the five points of padding it wraps around its item. Stretch hands it
+    // the sixty-high line instead, and a layout pass taken before placement
+    // would leave its item nothing to fill.
+    try appendNode(&tree, sibling_id, container_id, fixedItem(20, 60));
+    try appendNode(&tree, inner_id, panel_id, .{
+        .display = .block,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 20 },
+            .height = .auto,
+        },
+    });
+    try appendNode(&tree, panel_id, container_id, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .stretch,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 40 },
+            .height = .auto,
+        },
+        .padding_inset = .{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 5 },
+            .bottom = .{ .length = 5 },
+            .left = .{ .length = 5 },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .stretch,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 60 },
+        },
+    });
+    try tree.appendChild(container_id, sibling_id);
+    try tree.appendChild(container_id, panel_id);
+    try tree.appendChild(panel_id, inner_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 60 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 60 });
+    try expectRelative(&tree, sibling_id, .{ .x = 0, .y = 0, .w = 20, .h = 60 });
+    try expectRelative(&tree, panel_id, .{ .x = 20, .y = 0, .w = 40, .h = 60 });
+    // Thirty by fifty is the panel's content box once it carries the stretched
+    // sixty, so its own stretched item fills all fifty.
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 0, .w = 20, .h = 50 });
+}
+
+test "a stretched nested block container lays its children out at the final cross size" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const inner_id: FrameNodeId = @enumFromInt(1);
+    const panel_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
+
+    // The panel measures twenty high, so a layout pass taken before placement
+    // would center its item on nothing at all. The center makes the panel's
+    // own cross size observable in its item's position.
+    try appendNode(&tree, inner_id, panel_id, fixedItem(20, 20));
+    try appendNode(&tree, panel_id, container_id, .{
+        .display = .block,
+        .align_content = .center,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 40 },
+            .height = .auto,
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .stretch,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 60 },
+        },
+    });
+    try tree.appendChild(container_id, panel_id);
+    try tree.appendChild(panel_id, inner_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 60 },
+    });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 60 });
+    try expectRelative(&tree, panel_id, .{ .x = 0, .y = 0, .w = 40, .h = 60 });
+    // Sixty less the twenty the item occupies leaves forty to split, so the
+    // centered item starts half of that down the panel.
+    try expectRelative(&tree, inner_id, .{ .x = 0, .y = 20, .w = 20, .h = 20 });
+}
+
 test "non-scroll overflow modes do not reserve a gutter" {
     const overflow_modes = [_]style.Overflow{ .hidden, .visible, .clip, .auto };
 
@@ -1144,8 +1263,8 @@ test "non-scroll overflow modes do not reserve a gutter" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         try appendNode(&tree, child_id, container_id, growingItem(0, 20));
         try appendNode(&tree, container_id, .root, .{
@@ -1177,8 +1296,8 @@ test "content-box vertical scrollbar gutter reduces flex content width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, container_id, .{
         .display = .block,
@@ -1215,8 +1334,8 @@ test "auto border-box intrinsic size adds scrollbar gutters" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -1262,8 +1381,8 @@ test "explicit intrinsic widths add vertical scrollbar gutter" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         try tree.appendNode(.{
             .id = child_id,
@@ -1304,10 +1423,10 @@ test "grow factors below one leave proportional free space unallocated" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     var first = growingItem(40, 10);
     first.grow = 0.2;
@@ -1356,10 +1475,10 @@ test "wrapped cross overflow preserves signed positional alignment" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const first_id: Id = @enumFromInt(1);
-        const second_id: Id = @enumFromInt(2);
-        const third_id: Id = @enumFromInt(3);
-        const container_id: Id = @enumFromInt(4);
+        const first_id: FrameNodeId = @enumFromInt(1);
+        const second_id: FrameNodeId = @enumFromInt(2);
+        const third_id: FrameNodeId = @enumFromInt(3);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         try appendNode(&tree, first_id, container_id, fixedItem(20, 20));
         try appendNode(&tree, second_id, container_id, fixedItem(20, 20));
@@ -1413,8 +1532,8 @@ test "column main overflow preserves signed justify offsets" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var child = fixedItem(10, 100);
         child.shrink = 0;
@@ -1460,8 +1579,8 @@ test "cross-axis overflow preserves signed item alignment" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var child = fixedItem(10, 70);
         child.margin_inset = .{
@@ -1509,8 +1628,8 @@ test "negative main free space distinguishes safe and unsafe center" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var child = fixedItem(100, 10);
         child.shrink = 0;
@@ -1553,10 +1672,10 @@ test "negative wrapped cross free space distinguishes safe and unsafe center" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const first_id: Id = @enumFromInt(1);
-        const second_id: Id = @enumFromInt(2);
-        const third_id: Id = @enumFromInt(3);
-        const container_id: Id = @enumFromInt(4);
+        const first_id: FrameNodeId = @enumFromInt(1);
+        const second_id: FrameNodeId = @enumFromInt(2);
+        const third_id: FrameNodeId = @enumFromInt(3);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         try appendNode(&tree, first_id, container_id, fixedItem(20, 20));
         try appendNode(&tree, second_id, container_id, fixedItem(20, 20));
@@ -1615,8 +1734,8 @@ test "oversized cross item distinguishes safe and unsafe alignment" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const child_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var child = fixedItem(10, 70);
         child.align_self = scenario.align_self;
@@ -1676,11 +1795,11 @@ test "positive free space makes all center safety variants equivalent" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const first_id: Id = @enumFromInt(1);
-        const second_id: Id = @enumFromInt(2);
-        const third_id: Id = @enumFromInt(3);
-        const fourth_id: Id = @enumFromInt(4);
-        const container_id: Id = @enumFromInt(5);
+        const first_id: FrameNodeId = @enumFromInt(1);
+        const second_id: FrameNodeId = @enumFromInt(2);
+        const third_id: FrameNodeId = @enumFromInt(3);
+        const fourth_id: FrameNodeId = @enumFromInt(4);
+        const container_id: FrameNodeId = @enumFromInt(5);
 
         var third = fixedItem(40, 10);
         third.align_self = scenario.align_self;
@@ -1720,9 +1839,9 @@ test "fractional grow clamp preserves initial free-space scale" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     var first = growingItem(0, 10);
     first.grow = 0.2;
@@ -1769,9 +1888,9 @@ test "initial minimum freeze preserves initial free-space scale" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     var first = growingItem(0, 10);
     first.grow = 0.2;
@@ -1818,10 +1937,10 @@ test "grow violation selection freezes only the dominant minimum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const third_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const third_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     var first = growingItem(0, 10);
     first.grow = 0.2;
@@ -1874,9 +1993,9 @@ test "fractional shrink factors preserve raw negative free space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     var first = growingItem(50, 10);
     first.grow = 0;
@@ -1924,9 +2043,9 @@ test "baseline aligns direct row items by their synthesized baselines" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const container_id: Id = @enumFromInt(3);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
 
     try appendNode(&tree, first_id, container_id, fixedItem(50, 50));
     try appendNode(&tree, second_id, container_id, fixedItem(50, 20));
@@ -1954,12 +2073,12 @@ test "baseline propagates through nested flex columns" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const inner_first_id: Id = @enumFromInt(2);
-    const inner_second_id: Id = @enumFromInt(3);
-    const inner_id: Id = @enumFromInt(4);
-    const wrapper_id: Id = @enumFromInt(5);
-    const container_id: Id = @enumFromInt(6);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const inner_first_id: FrameNodeId = @enumFromInt(2);
+    const inner_second_id: FrameNodeId = @enumFromInt(3);
+    const inner_id: FrameNodeId = @enumFromInt(4);
+    const wrapper_id: FrameNodeId = @enumFromInt(5);
+    const container_id: FrameNodeId = @enumFromInt(6);
 
     try appendNode(&tree, first_id, container_id, fixedItem(50, 60));
     try appendNode(&tree, inner_first_id, inner_id, .{
@@ -2021,17 +2140,288 @@ test "baseline propagates through nested flex columns" {
     try expectRelative(&tree, inner_second_id, .{ .x = 0, .y = 30, .w = 50, .h = 40 });
 }
 
+/// A provider whose shaped first line supplies the baseline. The synthetic
+/// 0.8-of-size rule can never produce 6, so every expectation below that
+/// mentions it separates a real baseline from the fallback.
+const ShapedBaselineMeasure = struct {
+    fn measure(_: ?*anyopaque, _: []const u8, _: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
+        return .{ .width = 40, .height = 40, .first_baseline = 6 };
+    }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
+};
+
+test "a measured caption baseline wins over the synthetic size rule" {
+    // A resolved text record is frame-arena owned, so the tree and its layout
+    // run on one exactly as a real frame does.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
+    // The size rule alone would answer 32 for this caption and 12.8 for the
+    // unstyled one, so the two would not share a line.
+    const large: text.TextInput = .{ .style = .{ .font_fields = .{ .size = 40 } } };
+    var first_value = false;
+    var second_value = false;
+
+    try tree.appendNode(.{
+        .id = first_id,
+        .kind = .{ .checkbox = .{ .label = "A", .value = &first_value } },
+        .parent = container_id,
+        .style = fixedItem(60, 20),
+        .text_input = &large,
+    });
+    try tree.appendNode(.{
+        .id = second_id,
+        .kind = .{ .checkbox = .{ .label = "B", .value = &second_value } },
+        .parent = container_id,
+        .style = fixedItem(60, 20),
+    });
+    try tree.appendNode(.{
+        .id = container_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .baseline,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = .{ .width = 100, .height = 100 },
+        .measure = ShapedBaselineMeasure.source,
+    });
+
+    // Both captions sit on the measured baseline of 6.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 60, .h = 20 });
+    try expectRelative(&tree, second_id, .{ .x = 60, .y = 0, .w = 60, .h = 20 });
+}
+
+test "a measured caption baseline propagates through a nested flex column" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const sibling_id: FrameNodeId = @enumFromInt(1);
+    const caption_id: FrameNodeId = @enumFromInt(2);
+    const wrapper_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
+
+    try appendNode(&tree, sibling_id, container_id, fixedItem(50, 60));
+    try tree.appendNode(.{
+        .id = caption_id,
+        .kind = .{ .label = .{ .text = "A" } },
+        .parent = wrapper_id,
+        .style = fixedItem(50, 30),
+    });
+    try appendNode(&tree, wrapper_id, container_id, .{
+        .display = .flex,
+        .direction = .column,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 50 },
+            .height = .{ .length = 80 },
+        },
+    });
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .baseline,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(wrapper_id, caption_id);
+    try tree.appendChild(container_id, sibling_id);
+    try tree.appendChild(container_id, wrapper_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = ShapedBaselineMeasure.source,
+    });
+
+    // The caption's own baseline of 6 is what the column donates, so the
+    // 60-high sibling's baseline of 60 lifts the column to 60 - 6.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, sibling_id, .{ .x = 0, .y = 0, .w = 50, .h = 60 });
+    try expectRelative(&tree, wrapper_id, .{ .x = 50, .y = 54, .w = 50, .h = 80 });
+    try expectRelative(&tree, caption_id, .{ .x = 0, .y = 0, .w = 50, .h = 30 });
+}
+
+/// A provider whose shaped first line answers a DIFFERENT baseline per
+/// caption, so an item that donates the other item's baseline cannot pass
+/// and the synthetic 0.8-of-size rule can produce neither answer.
+const PerCaptionBaselineMeasure = struct {
+    fn measure(_: ?*anyopaque, content: []const u8, _: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
+        return .{
+            .width = 40,
+            .height = 40,
+            .first_baseline = if (std.mem.eql(u8, content, "A")) 6 else 30,
+        };
+    }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
+};
+
+test "a measured label baseline wins over the border-box bottom for direct row items" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
+
+    // The two border-box bottoms are 60 and 20, so a fallback that reads the
+    // box bottom answers 60 and 20. The provider's own first lines answer
+    // 2 + 3 + 6 and 30 instead, and the first item's border and padding are
+    // what make its top inset observable.
+    var first = fixedItem(40, 60);
+    first.border_inset.top = .{ .length = 2 };
+    first.padding_inset.top = .{ .length = 3 };
+
+    try tree.appendNode(.{
+        .id = first_id,
+        .kind = .{ .label = .{ .text = "A" } },
+        .parent = container_id,
+        .style = first,
+    });
+    try tree.appendNode(.{
+        .id = second_id,
+        .kind = .{ .label = .{ .text = "B" } },
+        .parent = container_id,
+        .style = fixedItem(40, 20),
+    });
+    try tree.appendNode(.{
+        .id = container_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .baseline,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = std.testing.allocator,
+        .available = .{ .width = 100, .height = 100 },
+        .measure = PerCaptionBaselineMeasure.source,
+    });
+
+    // The shared line baseline is the second item's 30, so the first item
+    // starts 30 - (2 + 3 + 6) = 19 below the line and the second one starts
+    // flush with it.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 19, .w = 40, .h = 60 });
+    try expectRelative(&tree, second_id, .{ .x = 40, .y = 0, .w = 40, .h = 20 });
+}
+
+/// A provider that reports no baseline at all, so the caller must fall back
+/// to the historical 0.8-of-size rule.
+const BaselinelessMeasure = struct {
+    fn measure(_: ?*anyopaque, _: []const u8, _: layout.MeasureInput) layout.LayoutError!layout.TextMeasurement {
+        return .{ .width = 40, .height = 40 };
+    }
+
+    const source: layout.MeasureSource = .{ .callback = measure };
+};
+
+test "a provider without a baseline keeps the size rule for direct label items" {
+    // A resolved text record is frame-arena owned, so the tree and its layout
+    // run on one exactly as a real frame does.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const container_id: FrameNodeId = @enumFromInt(3);
+    // The size rule answers 40 * 0.8 = 32 and 10 * 0.8 = 8, while the two
+    // border-box bottoms are 60 and 20, so neither reading agrees.
+    const large: text.TextInput = .{ .style = .{ .font_fields = .{ .size = 40 } } };
+    const small: text.TextInput = .{ .style = .{ .font_fields = .{ .size = 10 } } };
+
+    try tree.appendNode(.{
+        .id = first_id,
+        .kind = .{ .label = .{ .text = "A" } },
+        .parent = container_id,
+        .style = fixedItem(40, 60),
+        .text_input = &large,
+    });
+    try tree.appendNode(.{
+        .id = second_id,
+        .kind = .{ .label = .{ .text = "B" } },
+        .parent = container_id,
+        .style = fixedItem(40, 20),
+        .text_input = &small,
+    });
+    try tree.appendNode(.{
+        .id = container_id,
+        .kind = .{ .row = .{} },
+        .parent = .root,
+        .style = .{
+            .display = .flex,
+            .direction = .row,
+            .@"align" = .baseline,
+            .box_sizing = .border_box,
+            .size = .{
+                .width = .{ .length = 100 },
+                .height = .{ .length = 100 },
+            },
+        },
+    });
+    try tree.appendChild(container_id, first_id);
+    try tree.appendChild(container_id, second_id);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = .{ .width = 100, .height = 100 },
+        .measure = BaselinelessMeasure.source,
+    });
+
+    // The shared line baseline is 32, so the first item sits on it and the
+    // second starts 32 - 8 = 24 below the line.
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, first_id, .{ .x = 0, .y = 0, .w = 40, .h = 60 });
+    try expectRelative(&tree, second_id, .{ .x = 40, .y = 24, .w = 40, .h = 20 });
+}
+
 test "wrapped baseline lines include their maximum ascent and descent" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_child_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
-    const third_child_id: Id = @enumFromInt(4);
-    const third_id: Id = @enumFromInt(5);
-    const fourth_id: Id = @enumFromInt(6);
-    const container_id: Id = @enumFromInt(7);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_child_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
+    const third_child_id: FrameNodeId = @enumFromInt(4);
+    const third_id: FrameNodeId = @enumFromInt(5);
+    const fourth_id: FrameNodeId = @enumFromInt(6);
+    const container_id: FrameNodeId = @enumFromInt(7);
 
     try appendNode(&tree, first_id, container_id, fixedItem(50, 50));
     try appendNode(&tree, second_child_id, second_id, fixedItem(50, 10));
@@ -2092,8 +2482,8 @@ test "deep nested baseline measurement stays linear" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const leaf_id: Id = @enumFromInt(1);
-        const root_id: Id = @enumFromInt(@as(u32, @intCast(depth + 1)));
+        const leaf_id: FrameNodeId = @enumFromInt(1);
+        const root_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(depth + 1)));
         try tree.appendNode(.{
             .id = leaf_id,
             .kind = .{ .label = .{ .text = "counted" } },
@@ -2107,8 +2497,8 @@ test "deep nested baseline measurement stays linear" {
 
         var level: usize = 0;
         while (level < depth) : (level += 1) {
-            const id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
-            const parent: Id = if (level + 1 == depth)
+            const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(level + 2)));
+            const parent: FrameNodeId = if (level + 1 == depth)
                 .root
             else
                 @enumFromInt(@as(u32, @intCast(level + 3)));
@@ -2122,7 +2512,7 @@ test "deep nested baseline measurement stays linear" {
         var child_id = leaf_id;
         level = 0;
         while (level < depth) : (level += 1) {
-            const parent_id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
+            const parent_id: FrameNodeId = @enumFromInt(@as(u32, @intCast(level + 2)));
             try tree.appendChild(parent_id, child_id);
             child_id = parent_id;
         }
@@ -2130,13 +2520,13 @@ test "deep nested baseline measurement stays linear" {
         try flex.layoutContainer(&tree, root_id, .{
             .allocator = std.testing.allocator,
             .available = .{ .width = 100, .height = 100 },
-            .measure = CountedLeafMeasure.measure,
+            .measure = CountedLeafMeasure.source,
         });
 
         try expectRelative(&tree, root_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
         level = 0;
         while (level < depth) : (level += 1) {
-            const id: Id = @enumFromInt(@as(u32, @intCast(level + 2)));
+            const id: FrameNodeId = @enumFromInt(@as(u32, @intCast(level + 2)));
             try expectRelative(&tree, id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
         }
         try expectRelative(&tree, leaf_id, .{ .x = 0, .y = 0, .w = 10, .h = 10 });
@@ -2148,11 +2538,11 @@ test "column reverse baseline propagates from first source child" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const sibling_id: Id = @enumFromInt(1);
-    const first_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
-    const column_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const sibling_id: FrameNodeId = @enumFromInt(1);
+    const first_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
+    const column_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, sibling_id, container_id, fixedItem(50, 70));
     try appendNode(&tree, first_id, column_id, fixedItem(50, 30));
@@ -2195,10 +2585,10 @@ test "wrap reverse baseline uses physical margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_child_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_child_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     var first = fixedItem(20, 20);
     first.margin_inset = .{
@@ -2254,10 +2644,10 @@ test "block flex item baseline falls back to its border-box bottom" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const sibling_id: Id = @enumFromInt(1);
-    const block_child_id: Id = @enumFromInt(2);
-    const block_id: Id = @enumFromInt(3);
-    const container_id: Id = @enumFromInt(4);
+    const sibling_id: FrameNodeId = @enumFromInt(1);
+    const block_child_id: FrameNodeId = @enumFromInt(2);
+    const block_id: FrameNodeId = @enumFromInt(3);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     try appendNode(&tree, sibling_id, container_id, fixedItem(50, 50));
     try appendNode(&tree, block_child_id, block_id, fixedItem(50, 10));
@@ -2292,11 +2682,11 @@ test "wrapped flex baseline includes align-content line offset" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const nested_id: Id = @enumFromInt(3);
-    const sibling_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const nested_id: FrameNodeId = @enumFromInt(3);
+    const sibling_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, first_id, nested_id, fixedItem(100, 20));
     try appendNode(&tree, second_id, nested_id, fixedItem(100, 20));
@@ -2341,11 +2731,11 @@ test "post-flexing column baseline propagates the grown first child" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const sibling_id: Id = @enumFromInt(1);
-    const first_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
-    const nested_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const sibling_id: FrameNodeId = @enumFromInt(1);
+    const first_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
+    const nested_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, sibling_id, container_id, fixedItem(50, 80));
     var first = fixedItem(50, 0);
@@ -2390,11 +2780,11 @@ test "wrap reverse column baseline uses the cross-start-most line" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const sibling_id: Id = @enumFromInt(1);
-    const first_id: Id = @enumFromInt(2);
-    const second_id: Id = @enumFromInt(3);
-    const nested_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const sibling_id: FrameNodeId = @enumFromInt(1);
+    const first_id: FrameNodeId = @enumFromInt(2);
+    const second_id: FrameNodeId = @enumFromInt(3);
+    const nested_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, sibling_id, container_id, fixedItem(20, 20));
     try appendNode(&tree, first_id, nested_id, fixedItem(10, 20));
@@ -2439,8 +2829,8 @@ test "paired insets size auto axis on absolute child" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(10, 0);
     absolute.position = .absolute;
@@ -2474,8 +2864,8 @@ test "percentage insets resolve against containing padding box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(10, 10);
     absolute.position = .absolute;
@@ -2518,8 +2908,8 @@ test "row reverse static position uses physical alignment" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const absolute_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const absolute_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var absolute = fixedItem(20, 20);
         absolute.position = .absolute;
@@ -2561,8 +2951,8 @@ test "wrap reverse static cross alignment uses physical start" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const absolute_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const absolute_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var absolute = fixedItem(20, 20);
         absolute.position = .absolute;
@@ -2599,8 +2989,8 @@ test "absolute child auto margins distribute within available inset space" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(20, 20);
     absolute.position = .absolute;
@@ -2639,8 +3029,8 @@ test "absolute child auto margins include opposing insets" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(20, 20);
     absolute.position = .absolute;
@@ -2678,8 +3068,8 @@ test "single absolute auto margin includes both opposing insets" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(20, 20);
     absolute.position = .absolute;
@@ -2718,8 +3108,8 @@ test "zero-area absolute child does not contribute scroll extent" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(20, 0);
     absolute.position = .absolute;
@@ -2758,8 +3148,8 @@ test "paired horizontal insets respect absolute max width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(0, 20);
     absolute.position = .absolute;
@@ -2794,8 +3184,8 @@ test "paired absolute insets defer auto height to aspect ratio" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(0, 0);
     absolute.position = .absolute;
@@ -2825,13 +3215,90 @@ test "paired absolute insets defer auto height to aspect ratio" {
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
     try expectRelative(&tree, absolute_id, .{ .x = 10, .y = 10, .w = 80, .h = 40 });
 }
+test "flex absolute aspect ratio derives height from definite width" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
+
+    var absolute = fixedItem(0, 0);
+    absolute.position = .absolute;
+    absolute.size = .{
+        .width = .{ .length = 80 },
+        .height = .auto,
+    };
+    absolute.aspect_ratio = 2;
+    absolute.inset = .{
+        .top = .{ .length = 10 },
+        .right = .{ .length = 10 },
+        .bottom = .{ .length = 10 },
+        .left = .{ .length = 10 },
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = 10, .y = 10, .w = 80, .h = 40 });
+}
+
+test "flex absolute aspect ratio derives width from definite height" {
+    var tree = WidgetTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
+
+    var absolute = fixedItem(0, 0);
+    absolute.position = .absolute;
+    absolute.size = .{
+        .width = .auto,
+        .height = .{ .length = 40 },
+    };
+    absolute.aspect_ratio = 3;
+    absolute.inset = .{
+        .top = .{ .length = 10 },
+        .right = .{ .length = 10 },
+        .bottom = .{ .length = 10 },
+        .left = .{ .length = 10 },
+    };
+    try appendNode(&tree, absolute_id, container_id, absolute);
+    try appendNode(&tree, container_id, .root, .{
+        .display = .flex,
+        .direction = .row,
+        .@"align" = .start,
+        .box_sizing = .border_box,
+        .size = .{
+            .width = .{ .length = 100 },
+            .height = .{ .length = 100 },
+        },
+    });
+    try tree.appendChild(container_id, absolute_id);
+
+    try layoutContainer(&tree, container_id, .{ .width = 100, .height = 100 });
+
+    try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
+    try expectRelative(&tree, absolute_id, .{ .x = 10, .y = 10, .w = 120, .h = 40 });
+}
 
 test "padding box inset writes a content frame relative rectangle" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(20, 20);
     absolute.position = .absolute;
@@ -2882,8 +3349,8 @@ test "absolute static center uses the flex content box" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(20, 20);
     absolute.position = .absolute;
@@ -2923,8 +3390,8 @@ test "absolute safe end remains end during main axis overflow" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const absolute_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const absolute_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var absolute = fixedItem(200, 20);
     absolute.position = .absolute;
@@ -2958,8 +3425,8 @@ test "row cross axis self start ignores inline direction mismatch" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var child = fixedItem(20, 20);
     child.writing_direction = .rtl;
@@ -3012,12 +3479,12 @@ test "percentage column gap distributes flexible row in both directions" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_ids = [_]Id{
+        const child_ids = [_]FrameNodeId{
             @enumFromInt(1),
             @enumFromInt(2),
             @enumFromInt(3),
         };
-        const container_id: Id = @enumFromInt(4);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         var child_style = growingItem(0, 100);
         child_style.writing_direction = scenario.writing_direction;
@@ -3097,12 +3564,12 @@ test "cyclic percentage gap uses intrinsic width before final flexing" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_ids = [_]Id{
+        const child_ids = [_]FrameNodeId{
             @enumFromInt(1),
             @enumFromInt(2),
             @enumFromInt(3),
         };
-        const container_id: Id = @enumFromInt(4);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         var child_style = fixedItem(20, 40);
         child_style.shrink = scenario.shrink;
@@ -3179,7 +3646,7 @@ test "percentage row gap is zero while wrapped cross size is indefinite" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_ids = [_]Id{
+        const child_ids = [_]FrameNodeId{
             @enumFromInt(1),
             @enumFromInt(2),
             @enumFromInt(3),
@@ -3190,7 +3657,7 @@ test "percentage row gap is zero while wrapped cross size is indefinite" {
             @enumFromInt(8),
             @enumFromInt(9),
         };
-        const container_id: Id = @enumFromInt(10);
+        const container_id: FrameNodeId = @enumFromInt(10);
 
         var child_style = fixedItem(20, 20);
         child_style.writing_direction = scenario.writing_direction;
@@ -3282,12 +3749,12 @@ test "percentage column gap uses the final content box after padding" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_ids = [_]Id{
+        const child_ids = [_]FrameNodeId{
             @enumFromInt(1),
             @enumFromInt(2),
             @enumFromInt(3),
         };
-        const container_id: Id = @enumFromInt(4);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         var child_style = growingItem(0, 0);
         child_style.size.height = .auto;
@@ -3356,12 +3823,12 @@ test "normal gap maps to typed zero spacing in both directions" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_ids = [_]Id{
+        const child_ids = [_]FrameNodeId{
             @enumFromInt(1),
             @enumFromInt(2),
             @enumFromInt(3),
         };
-        const container_id: Id = @enumFromInt(4);
+        const container_id: FrameNodeId = @enumFromInt(4);
 
         var child_style = fixedItem(20, 20);
         child_style.writing_direction = scenario.writing_direction;
@@ -3398,12 +3865,12 @@ test "cyclic percentage gap keeps intrinsic line grouping after final resolution
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_ids = [_]Id{
+    const child_ids = [_]FrameNodeId{
         @enumFromInt(1),
         @enumFromInt(2),
         @enumFromInt(3),
     };
-    const container_id: Id = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(4);
 
     var child_style = fixedItem(30, 20);
     child_style.shrink = 0;
@@ -3448,8 +3915,8 @@ test "wrapped single line keeps hypothetical cross size before align content" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try appendNode(&tree, child_id, container_id, fixedItem(50, 10));
     try appendNode(&tree, container_id, .root, .{
@@ -3477,8 +3944,8 @@ test "cross minimum transfers through aspect ratio before flex freeze" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var child = fixedItem(0, 0);
     child.min_size.height = .{ .length = 40 };
@@ -3509,8 +3976,8 @@ test "transferred cross minimum is hypothetical only during flex shrink" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var child = fixedItem(0, 0);
     child.flex_basis = .{ .length = 100 };
@@ -3542,8 +4009,8 @@ test "cross padding floor does not transfer through aspect ratio" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     var child = fixedItem(0, 0);
     child.flex_basis = .{ .length = 0 };
@@ -3581,11 +4048,11 @@ test "nested percentage waits for shrink to fit cross size to become definite" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: Id = @enumFromInt(1);
-    const second_id: Id = @enumFromInt(2);
-    const percentage_id: Id = @enumFromInt(3);
-    const wrapper_id: Id = @enumFromInt(4);
-    const container_id: Id = @enumFromInt(5);
+    const first_id: FrameNodeId = @enumFromInt(1);
+    const second_id: FrameNodeId = @enumFromInt(2);
+    const percentage_id: FrameNodeId = @enumFromInt(3);
+    const wrapper_id: FrameNodeId = @enumFromInt(4);
+    const container_id: FrameNodeId = @enumFromInt(5);
 
     try appendNode(&tree, first_id, percentage_id, fixedItem(50, 50));
     try appendNode(&tree, second_id, percentage_id, fixedItem(50, 50));
@@ -3647,8 +4114,8 @@ test "row reverse absolute static main distinguishes default flex start from CSS
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const absolute_id: Id = @enumFromInt(1);
-        const container_id: Id = @enumFromInt(2);
+        const absolute_id: FrameNodeId = @enumFromInt(1);
+        const container_id: FrameNodeId = @enumFromInt(2);
 
         var absolute = fixedItem(20, 20);
         absolute.position = .absolute;
@@ -3691,9 +4158,9 @@ test "flex lengths subtract gaps after outer hypothetical min and max freezes" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const capped_id: Id = @enumFromInt(1);
-        const flexible_id: Id = @enumFromInt(2);
-        const container_id: Id = @enumFromInt(3);
+        const capped_id: FrameNodeId = @enumFromInt(1);
+        const flexible_id: FrameNodeId = @enumFromInt(2);
+        const container_id: FrameNodeId = @enumFromInt(3);
 
         var capped = growingItem(20, 10);
         capped.max_size.width = .{ .length = 30 };
@@ -3733,9 +4200,9 @@ test "flex lengths subtract gaps after outer hypothetical min and max freezes" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const padded_id: Id = @enumFromInt(1);
-        const plain_id: Id = @enumFromInt(2);
-        const container_id: Id = @enumFromInt(3);
+        const padded_id: FrameNodeId = @enumFromInt(1);
+        const plain_id: FrameNodeId = @enumFromInt(2);
+        const container_id: FrameNodeId = @enumFromInt(3);
 
         var padded = fixedItem(80, 10);
         padded.padding_inset = .{
@@ -3773,8 +4240,8 @@ test "border-box cross floor does not raise aspect-derived auto main minimum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -3811,7 +4278,7 @@ test "border-box cross floor does not raise aspect-derived auto main minimum" {
     try flex.layoutContainer(&tree, container_id, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = 100, .height = 100 },
-        .measure = FixedLabelMeasure.measure,
+        .measure = FixedLabelMeasure.source,
     });
 
     try expectRelative(&tree, container_id, .{ .x = 0, .y = 0, .w = 100, .h = 100 });
@@ -3824,8 +4291,8 @@ test "non-stretch auto cross receives definite parent availability" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -3856,7 +4323,7 @@ test "non-stretch auto cross receives definite parent availability" {
     try flex.layoutContainer(&tree, container_id, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = 100, .height = 100 },
-        .measure = CrossAvailabilityProbe.measure,
+        .measure = CrossAvailabilityProbe.source,
     });
 
     try std.testing.expect(CrossAvailabilityProbe.calls > 0);
@@ -3879,8 +4346,8 @@ test "automatic minimum ignores aspect-derived main known dimension" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -3916,7 +4383,7 @@ test "automatic minimum ignores aspect-derived main known dimension" {
     try flex.layoutContainer(&tree, container_id, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = 20, .height = 100 },
-        .measure = AutomaticMinimumKnownProbe.measure,
+        .measure = AutomaticMinimumKnownProbe.source,
     });
 
     try std.testing.expect(AutomaticMinimumKnownProbe.calls > 0);
@@ -3938,8 +4405,8 @@ test "automatic minimum does not stretch across auto margins" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
 
     try tree.appendNode(.{
         .id = child_id,
@@ -3975,7 +4442,7 @@ test "automatic minimum does not stretch across auto margins" {
     try flex.layoutContainer(&tree, container_id, .{
         .allocator = std.testing.allocator,
         .available = .{ .width = 20, .height = 100 },
-        .measure = AutomaticMinimumAutoMarginProbe.measure,
+        .measure = AutomaticMinimumAutoMarginProbe.source,
     });
 
     try std.testing.expect(AutomaticMinimumAutoMarginProbe.min_content_calls > 0);
@@ -3992,8 +4459,8 @@ test "Flex measurement propagates allocation failure" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: Id = @enumFromInt(1);
-    const container_id: Id = @enumFromInt(2);
+    const child_id: FrameNodeId = @enumFromInt(1);
+    const container_id: FrameNodeId = @enumFromInt(2);
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = "probe" } },
