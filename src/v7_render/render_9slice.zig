@@ -373,6 +373,7 @@ pub const Batch9Slice = struct {
         cmd.drawIndexedIndirectMulti(
             push,
             self.idx_buf,
+            .u32,
             self.indirect_buf,
             @sizeOf(noapi.DrawIndexedIndirectCommand),
             self.count_buf,

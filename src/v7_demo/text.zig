@@ -16,6 +16,7 @@ const noapi = @import("noapi");
 const renderer = @import("v7_render");
 const SceneRect = renderer.SceneRect;
 const nogui = @import("nogui");
+const CounterSink = nogui.CounterSink;
 pub const WidgetSize = nogui.widget.Size;
 pub const MeasureInput = nogui.layout.MeasureInput;
 
@@ -338,9 +339,11 @@ fn separatorAdvance(measurer: anytype, text: []const u8, segment: TextSegment) f
     return measureRange(measurer, text, segment.end, segment.next);
 }
 
-fn nextTextSegment(text: []const u8, start: usize) TextSegment {
+fn nextTextSegment(text: []const u8, start: usize, counter_sink: *const CounterSink) TextSegment {
     var index = start;
     while (index < text.len) : (index += 1) {
+        counter_sink.add(.segment_bytes_scanned, 1);
+        counter_sink.add(.hard_line_bytes_scanned, 1);
         if (std.mem.startsWith(u8, text[index..], zero_width_space)) {
             const next = index + zero_width_space.len;
             return .{ .end = index, .next = next, .break_kind = .soft };
@@ -364,9 +367,10 @@ fn nextTextSegment(text: []const u8, start: usize) TextSegment {
     return .{ .end = text.len, .next = text.len, .break_kind = .end };
 }
 
-fn segmentHasContent(text: []const u8) bool {
+fn segmentHasContent(text: []const u8, counter_sink: *const CounterSink) bool {
     var index: usize = 0;
     while (index < text.len) {
+        counter_sink.add(.segment_content_rescan_bytes, 1);
         if (std.mem.startsWith(u8, text[index..], zero_width_space)) {
             index += zero_width_space.len;
         } else {
@@ -376,7 +380,11 @@ fn segmentHasContent(text: []const u8) bool {
     return false;
 }
 
-fn intrinsicMetrics(measurer: anytype, text: []const u8) IntrinsicMetrics {
+fn intrinsicMetrics(
+    measurer: anytype,
+    text: []const u8,
+    counter_sink: *const CounterSink,
+) IntrinsicMetrics {
     resetMeasurer(measurer);
     var minimum_width: f32 = 0;
     var maximum_width: f32 = 0;
@@ -385,8 +393,11 @@ fn intrinsicMetrics(measurer: anytype, text: []const u8) IntrinsicMetrics {
     var line_has_content = false;
 
     while (true) {
-        const segment = nextTextSegment(text, segment_start);
-        const has_content = segmentHasContent(text[segment_start..segment.end]);
+        const segment = nextTextSegment(text, segment_start, counter_sink);
+        const has_content = segmentHasContent(
+            text[segment_start..segment.end],
+            counter_sink,
+        );
         if (has_content) {
             const segment_width = measureRange(measurer, text, segment_start, segment.end);
             minimum_width = @max(minimum_width, segment_width);
@@ -430,6 +441,7 @@ const PendingSegment = struct {
 const LineRangeIterator = struct {
     text: []const u8,
     limit: f32,
+    counter_sink: *const CounterSink,
     segment_start: usize = 0,
     line_start: usize = 0,
     line_end: usize = 0,
@@ -438,8 +450,12 @@ const LineRangeIterator = struct {
     line_has_content: bool = false,
     finished: bool = false,
 
-    fn init(text: []const u8, limit: f32) LineRangeIterator {
-        return .{ .text = text, .limit = limit };
+    fn init(
+        text: []const u8,
+        limit: f32,
+        counter_sink: *const CounterSink,
+    ) LineRangeIterator {
+        return .{ .text = text, .limit = limit, .counter_sink = counter_sink };
     }
 
     fn next(self: *LineRangeIterator, measurer: anytype) ?LineRange {
@@ -450,11 +466,12 @@ const LineRangeIterator = struct {
                 self.pending = null;
                 break :from_pending pending;
             } else fresh: {
-                const segment = nextTextSegment(self.text, self.segment_start);
+                const segment = nextTextSegment(self.text, self.segment_start, self.counter_sink);
                 break :fresh .{
                     .segment = segment,
                     .has_content = segmentHasContent(
                         self.text[self.segment_start..segment.end],
+                        self.counter_sink,
                     ),
                     .width = measureRange(
                         measurer,
@@ -517,9 +534,14 @@ const LineRangeIterator = struct {
     }
 };
 
-fn wrappedLineCount(measurer: anytype, text: []const u8, limit: f32) usize {
+fn wrappedLineCount(
+    measurer: anytype,
+    text: []const u8,
+    limit: f32,
+    counter_sink: *const CounterSink,
+) usize {
     resetMeasurer(measurer);
-    var ranges = LineRangeIterator.init(text, limit);
+    var ranges = LineRangeIterator.init(text, limit, counter_sink);
     var line_count: usize = 0;
     while (ranges.next(measurer)) |_| {
         line_count += 1;
@@ -527,8 +549,13 @@ fn wrappedLineCount(measurer: anytype, text: []const u8, limit: f32) usize {
     return line_count;
 }
 
-fn measureFlow(measurer: anytype, text: []const u8, mode: WidthMode) FlowMetrics {
-    const intrinsic = intrinsicMetrics(measurer, text);
+fn measureFlow(
+    measurer: anytype,
+    text: []const u8,
+    mode: WidthMode,
+    counter_sink: *const CounterSink,
+) FlowMetrics {
+    const intrinsic = intrinsicMetrics(measurer, text, counter_sink);
     const inline_width = switch (mode) {
         .min_content => intrinsic.min_width,
         .max_content => intrinsic.max_width,
@@ -545,10 +572,16 @@ fn measureFlow(measurer: anytype, text: []const u8, mode: WidthMode) FlowMetrics
     };
     return .{
         .width = inline_width,
-        .line_count = wrappedLineCount(measurer, text, inline_width),
+        .line_count = wrappedLineCount(measurer, text, inline_width, counter_sink),
     };
 }
-fn measureByLinePolicy(measurer: anytype, text: []const u8, input: MeasureInput) FlowMetrics {
+
+fn measureByLinePolicy(
+    measurer: anytype,
+    text: []const u8,
+    input: MeasureInput,
+    counter_sink: *const CounterSink,
+) FlowMetrics {
     if (input.line_policy == .single_line) {
         resetMeasurer(measurer);
         return .{
@@ -556,7 +589,7 @@ fn measureByLinePolicy(measurer: anytype, text: []const u8, input: MeasureInput)
             .line_count = 1,
         };
     }
-    return measureFlow(measurer, text, widthMode(input));
+    return measureFlow(measurer, text, widthMode(input), counter_sink);
 }
 
 fn widthMode(input: MeasureInput) WidthMode {
@@ -595,8 +628,12 @@ fn scaleCountToF32(count: usize, unit: f32) f32 {
     return @floatCast(scaled);
 }
 
-fn fallbackMeasure(text: []const u8, input: MeasureInput) WidgetSize {
-    const flow = measureByLinePolicy(FallbackAdvance{}, text, input);
+fn fallbackMeasure(
+    text: []const u8,
+    input: MeasureInput,
+    counter_sink: *const CounterSink,
+) WidgetSize {
+    const flow = measureByLinePolicy(FallbackAdvance{}, text, input, counter_sink);
     return applyKnownDimensions(.{
         .width = flow.width,
         .height = scaleCountToF32(flow.line_count, fallback_line_height),
@@ -657,6 +694,7 @@ pub const TextEngine = struct {
     /// the clock before stamping the run. Near u32 overflow, live entries
     /// are rebased into dense oldest-to-newest ranks without allocation.
     run_clock: u32 = 0,
+    counter_sink: CounterSink = CounterSink.init(null),
 
     /// How many glyph material slots are live (slots 1..next_slot-1 from
     /// the bottom of the buffer). window.zig allocates its per-frame
@@ -665,6 +703,13 @@ pub const TextEngine = struct {
     /// in-flight glyph material.
     pub fn glyphSlotCount(self: *TextEngine) u32 {
         return self.next_slot;
+    }
+
+    pub fn setCounterSink(self: *TextEngine, counters: ?*nogui.Counters) void {
+        self.counter_sink = CounterSink.init(counters);
+    }
+    pub fn counterSink(self: *const TextEngine) *const CounterSink {
+        return &self.counter_sink;
     }
 
     /// Init FreeType, load the embedded Inter font at font_size_px, wrap it
@@ -826,12 +871,12 @@ pub const TextEngine = struct {
     /// substitutes .notdef, which the gid-0 skip drops) — the old tolerant
     /// iterator is gone.
     fn shapeRun(self: *TextEngine, font: *FontState, text: []const u8) !hb.Buffer {
-        _ = self;
         var buf = try hb.Buffer.create();
         errdefer buf.destroy();
         buf.addUTF8(text);
         buf.setDirection(.ltr);
         buf.setScript(.latin);
+        self.counter_sink.add(.harfbuzz_shapes, 1);
         hb.shape(font.hb_font, buf, null);
         return buf;
     }
@@ -916,10 +961,13 @@ pub const TextEngine = struct {
     }
 
     fn shapeForMeasure(self: *TextEngine, font: *FontState, text: []const u8) ShapedAdvance {
+        const zone = tracy.Zone.begin(.{ .name = "shapeForMeasure", .src = @src() });
+        defer zone.end();
         self.measure_buffer.reset();
         self.measure_buffer.addUTF8(text);
         self.measure_buffer.setDirection(.ltr);
         self.measure_buffer.setScript(.latin);
+        self.counter_sink.add(.harfbuzz_shapes, 1);
         hb.shape(font.hb_font, self.measure_buffer, null);
         return ShapedAdvance.init(text, &self.measure_buffer);
     }
@@ -928,13 +976,14 @@ pub const TextEngine = struct {
     pub fn measureText(self: *TextEngine, text: []const u8, input: MeasureInput) WidgetSize {
         const zone = tracy.Zone.begin(.{ .name = "measureText", .src = @src() });
         defer zone.end();
+        self.counter_sink.add(.measure_requests, 1);
 
         const size = fontPixelSize(input.font_size, font_size_px) orelse
-            return fallbackMeasure(text, input);
+            return fallbackMeasure(text, input, &self.counter_sink);
         const font = self.fontFor(input.font_id, size) catch
-            return fallbackMeasure(text, input);
+            return fallbackMeasure(text, input, &self.counter_sink);
         var shaped = self.shapeForMeasure(font, text);
-        const flow = measureByLinePolicy(&shaped, text, input);
+        const flow = measureByLinePolicy(&shaped, text, input, &self.counter_sink);
         return applyKnownDimensions(.{
             .width = flow.width,
             .height = scaleCountToF32(flow.line_count, font.ascent - font.descent),
@@ -946,6 +995,7 @@ pub const TextEngine = struct {
     fn glyphIndex(self: *const TextEngine, font_id: u8, size: u32, gid: u32) ?usize {
         if (gid == 0) return null;
         for (self.entries.items, 0..) |entry, index| {
+            self.counter_sink.add(.glyph_entry_comparisons, 1);
             if (entry.font_id == font_id and entry.size == size and entry.gid == gid) return index;
         }
         return null;
@@ -1038,6 +1088,17 @@ pub const TextEngine = struct {
         return entry_index;
     }
 
+    fn ensureSceneCapacity(self: *TextEngine, out: *std.ArrayList(SceneRect), additional: usize) !void {
+        if (additional > out.capacity - out.items.len) {
+            self.counter_sink.add(.slice_rect_growth_events, 1);
+            self.counter_sink.add(
+                .slice_rect_growth_copy_bytes,
+                @as(u64, @intCast(out.items.len)) * @sizeOf(SceneRect),
+            );
+        }
+        try out.ensureTotalCapacity(self.gpa, out.items.len + additional);
+    }
+
     /// Shape `text` (kerning/ligatures included), ensure the glyphs exist
     /// (lazy), then append one SceneRect per glyph to `out`. This preserves
     /// the historical unbounded emission API for existing callers.
@@ -1095,7 +1156,7 @@ pub const TextEngine = struct {
             break :blk shaped_run.width > @max(0, width);
         } else false;
         if (!truncate) {
-            try out.ensureTotalCapacity(self.gpa, out.items.len + shaped_run.glyphs.len);
+            try self.ensureSceneCapacity(out, shaped_run.glyphs.len);
             _ = try self.emitRun(
                 font,
                 shaped_run,
@@ -1122,7 +1183,7 @@ pub const TextEngine = struct {
         const prefix_limit = width - suffix.width;
         const prefix_count = fitGlyphCount(run, prefix_limit);
 
-        try out.ensureTotalCapacity(self.gpa, out.items.len + prefix_count + suffix.glyphs.len);
+        try self.ensureSceneCapacity(out, prefix_count + suffix.glyphs.len);
         const cursor = try self.emitRun(
             font,
             run,
@@ -1167,14 +1228,14 @@ pub const TextEngine = struct {
 
         const font = try self.fontFor(font_id, size);
         var shaped = self.shapeForMeasure(font, text);
-        const flow = measureFlow(&shaped, text, .{ .definite = width });
+        const flow = measureFlow(&shaped, text, .{ .definite = width }, &self.counter_sink);
         resetMeasurer(&shaped);
 
         const line_height = font.ascent - font.descent;
         const block_height = scaleCountToF32(flow.line_count, line_height);
         const vertical_inset = if (height > block_height) (height - block_height) / 2 else 0;
         const run_x = snapRunOrigin(x);
-        var ranges = LineRangeIterator.init(text, flow.width);
+        var ranges = LineRangeIterator.init(text, flow.width, &self.counter_sink);
         var line_index: usize = 0;
         while (ranges.next(&shaped)) |range| {
             const baseline = @round(
@@ -1211,12 +1272,13 @@ pub const TextEngine = struct {
         self.flow_buffer.addUTF8(text);
         self.flow_buffer.setDirection(.ltr);
         self.flow_buffer.setScript(.latin);
+        self.counter_sink.add(.harfbuzz_shapes, 1);
         hb.shape(font.hb_font, self.flow_buffer, null);
 
         const infos = self.flow_buffer.getGlyphInfos();
         const positions = self.flow_buffer.getGlyphPositions() orelse &.{};
         const glyph_count = @min(infos.len, positions.len);
-        try out.ensureTotalCapacity(self.gpa, out.items.len + glyph_count);
+        try self.ensureSceneCapacity(out, glyph_count);
         var cursor: f32 = 0;
         for (0..glyph_count) |index| {
             const position = positions[index];
@@ -1641,7 +1703,8 @@ const CountingAdvanceMeasurer = struct {
 
 fn expectLineRanges(text: []const u8, limit: f32, expected: []const LineRange) !void {
     var measurer: CountingAdvanceMeasurer = .{};
-    var ranges = LineRangeIterator.init(text, limit);
+    var counter_sink = CounterSink.init(null);
+    var ranges = LineRangeIterator.init(text, limit, &counter_sink);
     resetMeasurer(&measurer);
 
     for (expected) |expected_range| {
@@ -1688,6 +1751,27 @@ test "run cache: clock wrap rebases generations before eviction" {
     try testing.expectEqual(key_a, victim_key);
 }
 
+test "text segmentation counters record scans and rescans" {
+    var counters: nogui.Counters = .{};
+    var sink = CounterSink.init(&counters);
+    _ = nextTextSegment("alpha\n", 0, &sink);
+    var snapshot = try counters.snapshot();
+    if (comptime nogui.options.perf_counters) {
+        try std.testing.expect(snapshot.value(.hard_line_bytes_scanned) > 0);
+        try std.testing.expect(snapshot.value(.segment_bytes_scanned) > 0);
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.hard_line_bytes_scanned));
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.segment_bytes_scanned));
+    }
+    _ = segmentHasContent("\xE2\x80\x8B", &sink);
+    snapshot = try counters.snapshot();
+    if (comptime nogui.options.perf_counters) {
+        try std.testing.expect(snapshot.value(.segment_content_rescan_bytes) > 0);
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), snapshot.value(.segment_content_rescan_bytes));
+    }
+}
+
 test "line ranges: soft breaks retain measured separators" {
     const text = "alpha beta gamma";
     try expectLineRanges(text, 10, &.{
@@ -1707,14 +1791,16 @@ test "line ranges: hard breaks preserve empty and trailing lines" {
 }
 test "measureFlow: max-content preserves hard lines without soft wrapping" {
     var measurer: CountingAdvanceMeasurer = .{};
-    const flow = measureFlow(&measurer, "alpha beta\ngamma delta", .max_content);
+    var counter_sink = CounterSink.init(null);
+    const flow = measureFlow(&measurer, "alpha beta\ngamma delta", .max_content, &counter_sink);
 
     try testing.expectEqual(@as(f32, 11), flow.width);
     try testing.expectEqual(@as(usize, 2), flow.line_count);
 }
 test "measureFlow: leading separators do not reserve painted width" {
     var measurer: CountingAdvanceMeasurer = .{};
-    const flow = measureFlow(&measurer, "  alpha\n\tbeta", .max_content);
+    var counter_sink = CounterSink.init(null);
+    const flow = measureFlow(&measurer, "  alpha\n\tbeta", .max_content, &counter_sink);
 
     try testing.expectEqual(@as(f32, 5), flow.width);
     try testing.expectEqual(@as(usize, 2), flow.line_count);
@@ -1728,7 +1814,8 @@ test "single-line policy ignores hard-break glyph advances" {
         .font_id = 0,
         .line_policy = .single_line,
     };
-    const flow = measureByLinePolicy(FallbackAdvance{}, "a\nbb", input);
+    var counter_sink = CounterSink.init(null);
+    const flow = measureByLinePolicy(FallbackAdvance{}, "a\nbb", input, &counter_sink);
 
     try testing.expectEqual(@as(f32, 3 * fallback_scalar_advance), flow.width);
     try testing.expectEqual(@as(usize, 1), flow.line_count);
@@ -1754,7 +1841,8 @@ test "wrappedLineCount: many segments use linear measurement work" {
         segments_per_line * segment.len + (segments_per_line - 1) * separator_size,
     );
     var measurer: CountingAdvanceMeasurer = .{};
-    const line_count = wrappedLineCount(&measurer, &text, line_width);
+    var counter_sink = CounterSink.init(null);
+    const line_count = wrappedLineCount(&measurer, &text, line_width, &counter_sink);
 
     try testing.expectEqual(segment_count / segments_per_line, line_count);
     try testing.expect(measurer.input_bytes_total <= text.len * 4);

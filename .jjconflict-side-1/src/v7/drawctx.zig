@@ -1,0 +1,1853 @@
+//! DrawCtx — the per-frame UI surface.
+//!
+//! DrawCtx owns the cursor into a `WidgetTree` and the `component_id` that
+//! binds event handlers to their owning component. State lives in
+//! components; the UI is rebuilt every frame: a fresh tree + DrawCtx, a
+//! draw pass, then `layout.layoutTree` dispatches canonical layout.
+//!
+//! Node order in the flat array is **post-order**: a container node is
+//! appended after all of its descendants. The canonical layout dispatcher
+//! validates this order and sizes descendants before their containers, so
+//! this order is load-bearing. DrawCtx keeps it by appending children as
+//! they are created and, on `pop()`, moving the just-closed container to the
+//! end of the array — everything after it is one of its descendants, by the
+//! cursor invariant.
+//!
+//! Per-frame storage: every node is allocated from `arena` (the frame
+//! arena). The tree must be re-created per frame — never reuse a
+//! `WidgetTree` across an arena reset: `reset(.retain_capacity)` frees any
+//! ArrayList buffer that grew past its first arena chunk (Zig 0.16
+//! footgun), which would leave a reused tree pointing at freed memory.
+//!
+//! Per the prototype spec (notes/v7-prototype-spec.md §4).
+const std = @import("std");
+const widget = @import("widget.zig");
+
+const Id = @import("id.zig").Id;
+const ComponentKey = @import("key.zig").ComponentKey;
+const ComponentId = @import("key.zig").ComponentId;
+const style = @import("style.zig");
+const Style = style.Style;
+const StyleOverride = style.StyleOverride;
+const PaintStyle = style.PaintStyle;
+const PaintStyleOverride = style.PaintStyleOverride;
+const ComponentDefaults = style.ComponentDefaults;
+const Sides = style.Sides;
+const BoxSizing = style.BoxSizing;
+const Justify = style.Justify;
+const Align = style.Align;
+const FlexWrap = style.FlexWrap;
+const AlignContent = style.AlignContent;
+const FlexDirection = style.FlexDirection;
+const AlignSelf = style.AlignSelf;
+const layout = @import("layout/root.zig");
+const hitButton = @import("input.zig").hitButton;
+const StateKey = @import("state.zig").Key;
+const stateHash = @import("state.zig").hashName;
+const StateDir = @import("state.zig").StateDir;
+const Component = @import("component.zig").Component;
+const IdentityRegistry = @import("component.zig").ComponentRegistry;
+const GpuEndpoint = @import("runtime.zig").GpuEndpoint;
+pub const ComponentRegistry = struct {
+    map: *std.AutoHashMapUnmanaged(Id, Component),
+    gpa: std.mem.Allocator,
+};
+const WidgetKind = @import("widget.zig").WidgetKind;
+const WidgetTree = @import("widget.zig").WidgetTree;
+const ScrollAxis = @import("widget.zig").ScrollAxis;
+const ScrollState = @import("widget.zig").ScrollState;
+const TextOverflow = @import("widget.zig").TextOverflow;
+const SharedColumns = @import("widget.zig").SharedColumns;
+const ColumnTrack = @import("widget.zig").ColumnTrack;
+const callback = @import("callback.zig");
+
+fn asDimensionSize(x: anytype) style.DimensionSize {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") {
+        return .{ .width = .auto, .height = .auto };
+    }
+    return .{
+        .width = if (@hasField(T, "width")) style.dimensionFrom(x.width) else .auto,
+        .height = if (@hasField(T, "height")) style.dimensionFrom(x.height) else .auto,
+    };
+}
+
+fn asLengthPercentageAutoSize(x: anytype) style.DimensionSize {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") {
+        return .{ .width = .auto, .height = .auto };
+    }
+    return .{
+        .width = if (@hasField(T, "width")) style.dimensionFrom(x.width) else .auto,
+        .height = if (@hasField(T, "height")) style.dimensionFrom(x.height) else .auto,
+    };
+}
+
+fn asInsets(x: anytype) style.Insets {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") return .{
+        .top = .auto,
+        .right = .auto,
+        .bottom = .auto,
+        .left = .auto,
+    };
+    return .{
+        .top = if (@hasField(T, "top")) style.lengthPercentageAutoFrom(x.top) else .auto,
+        .right = if (@hasField(T, "right")) style.lengthPercentageAutoFrom(x.right) else .auto,
+        .bottom = if (@hasField(T, "bottom")) style.lengthPercentageAutoFrom(x.bottom) else .auto,
+        .left = if (@hasField(T, "left")) style.lengthPercentageAutoFrom(x.left) else .auto,
+    };
+}
+
+fn asMarginInsets(x: anytype) style.Insets {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") {
+        const value = style.lengthPercentageAutoFrom(x);
+        return .{ .top = value, .right = value, .bottom = value, .left = value };
+    }
+    return .{
+        .top = if (@hasField(T, "top")) style.lengthPercentageAutoFrom(x.top) else .{ .length = 0 },
+        .right = if (@hasField(T, "right")) style.lengthPercentageAutoFrom(x.right) else .{ .length = 0 },
+        .bottom = if (@hasField(T, "bottom")) style.lengthPercentageAutoFrom(x.bottom) else .{ .length = 0 },
+        .left = if (@hasField(T, "left")) style.lengthPercentageAutoFrom(x.left) else .{ .length = 0 },
+    };
+}
+fn asLengthPercentageRect(x: anytype) style.LengthPercentageRect {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") {
+        const value = style.lengthPercentageFrom(x);
+        return .{ .top = value, .right = value, .bottom = value, .left = value };
+    }
+    return .{
+        .top = if (@hasField(T, "top")) style.lengthPercentageFrom(x.top) else .{ .length = 0 },
+        .right = if (@hasField(T, "right")) style.lengthPercentageFrom(x.right) else .{ .length = 0 },
+        .bottom = if (@hasField(T, "bottom")) style.lengthPercentageFrom(x.bottom) else .{ .length = 0 },
+        .left = if (@hasField(T, "left")) style.lengthPercentageFrom(x.left) else .{ .length = 0 },
+    };
+}
+
+fn asGridPlacement(value: anytype) style.GridPlacement {
+    const T = @TypeOf(value);
+    if (T == style.GridPlacement) return value;
+    return switch (@typeInfo(T)) {
+        .@"struct" => {
+            if (@hasField(T, "line")) return .{ .line = value.line };
+            if (@hasField(T, "span")) return .{ .span = value.span };
+            return .auto;
+        },
+        .enum_literal => .auto,
+        else => @compileError("expected grid placement"),
+    };
+}
+
+fn asOverflowAxes(x: anytype) style.OverflowAxes {
+    const T = @TypeOf(x);
+    if (@typeInfo(T) != .@"struct") return .{ .width = .visible, .height = .visible };
+    return .{
+        .width = if (@hasField(T, "width")) @as(style.Overflow, x.width) else .visible,
+        .height = if (@hasField(T, "height")) @as(style.Overflow, x.height) else .visible,
+    };
+}
+
+fn asFixedLength(value: anytype) ?f32 {
+    return switch (style.lengthPercentageAutoFrom(value)) {
+        .auto, .percent => null,
+        .length => |length| length,
+    };
+}
+
+fn asDimensionOverride(value: anytype) style.DimensionOverride {
+    if (@TypeOf(value) == style.DimensionOverride) return value;
+    return .{ .value = style.dimensionFrom(value) };
+}
+
+/// Resolve typed layout and paint values from an anonymous widget options
+/// value. Missing fields stay unspecified and therefore retain defaults.
+fn styleFromOpts(opts: anytype, defaults: ?Style, direction: style.FlexDirection) Style {
+    var local: StyleOverride = .{};
+    const T = @TypeOf(opts);
+    if (@hasField(T, "display")) local.display = @as(style.Display, opts.display);
+    if (@hasField(T, "position")) local.position = @as(style.Position, opts.position);
+    if (@hasField(T, "writing_direction")) {
+        local.writing_direction = @as(style.Direction, opts.writing_direction);
+    }
+    if (@hasField(T, "float")) local.float = @as(style.Float, opts.float);
+    if (@hasField(T, "clear")) local.clear = @as(style.Clear, opts.clear);
+    if (@hasField(T, "direction")) local.direction = @as(style.FlexDirection, opts.direction);
+    if (@hasField(T, "flex_wrap")) local.flex_wrap = @as(FlexWrap, opts.flex_wrap);
+    if (@hasField(T, "align_content")) {
+        local.align_content = @as(AlignContent, opts.align_content);
+    }
+    if (@hasField(T, "align_self")) local.align_self = @as(AlignSelf, opts.align_self);
+    if (@hasField(T, "justify")) local.justify = @as(Justify, opts.justify);
+    if (@hasField(T, "align")) local.@"align" = @as(Align, opts.@"align");
+    if (@hasField(T, "text_align")) local.text_align = @as(style.TextAlign, opts.text_align);
+    if (@hasField(T, "gap")) local.gap = style.lengthPercentageFrom(opts.gap);
+    if (@hasField(T, "column_gap")) local.column_gap = style.lengthPercentageFrom(opts.column_gap);
+    if (@hasField(T, "row_gap")) local.row_gap = style.lengthPercentageFrom(opts.row_gap);
+    if (@hasField(T, "grid_template_columns")) {
+        local.grid_template_columns = opts.grid_template_columns;
+    }
+    if (@hasField(T, "grid_template_rows")) {
+        local.grid_template_rows = opts.grid_template_rows;
+    }
+    if (@hasField(T, "grid_auto_columns")) local.grid_auto_columns = opts.grid_auto_columns;
+    if (@hasField(T, "grid_auto_rows")) local.grid_auto_rows = opts.grid_auto_rows;
+    if (@hasField(T, "grid_auto_flow")) local.grid_auto_flow = @as(style.GridAutoFlow, opts.grid_auto_flow);
+    if (@hasField(T, "grid_justify_content")) {
+        local.grid_justify_content = @as(Justify, opts.grid_justify_content);
+    }
+    if (@hasField(T, "grid_align_content")) {
+        local.grid_align_content = @as(AlignContent, opts.grid_align_content);
+    }
+    if (@hasField(T, "grid_justify_items")) local.grid_justify_items = @as(Align, opts.grid_justify_items);
+    if (@hasField(T, "grid_align_items")) local.grid_align_items = @as(Align, opts.grid_align_items);
+    if (@hasField(T, "grid_justify_self")) local.grid_justify_self = @as(AlignSelf, opts.grid_justify_self);
+    if (@hasField(T, "grid_align_self")) local.grid_align_self = @as(AlignSelf, opts.grid_align_self);
+    if (@hasField(T, "grid_column")) {
+        local.grid_column = .{
+            .start = asGridPlacement(opts.grid_column.start),
+            .end = asGridPlacement(opts.grid_column.end),
+        };
+    }
+    if (@hasField(T, "grid_row")) {
+        local.grid_row = .{
+            .start = asGridPlacement(opts.grid_row.start),
+            .end = asGridPlacement(opts.grid_row.end),
+        };
+    }
+    if (@hasField(T, "grow")) local.grow = opts.grow;
+    if (@hasField(T, "shrink")) local.shrink = opts.shrink;
+    if (@hasField(T, "flex_basis")) local.flex_basis = asDimensionOverride(opts.flex_basis);
+    if (@hasField(T, "size")) local.size = .{ .value = asDimensionSize(opts.size) };
+    if (@hasField(T, "min_size")) {
+        local.min_size = .{ .value = asLengthPercentageAutoSize(opts.min_size) };
+    }
+    if (@hasField(T, "max_size")) {
+        local.max_size = .{ .value = asLengthPercentageAutoSize(opts.max_size) };
+    }
+    if (@hasField(T, "width")) local.width = asDimensionOverride(opts.width);
+    if (@hasField(T, "height")) local.height = asDimensionOverride(opts.height);
+    if (@hasField(T, "min_width")) local.min_width = asDimensionOverride(opts.min_width);
+    if (@hasField(T, "min_height")) local.min_height = asDimensionOverride(opts.min_height);
+    if (@hasField(T, "max_width")) local.max_width = asDimensionOverride(opts.max_width);
+    if (@hasField(T, "max_height")) local.max_height = asDimensionOverride(opts.max_height);
+    if (@hasField(T, "inset")) local.inset = .{ .value = asInsets(opts.inset) };
+    if (@hasField(T, "aspect_ratio")) local.aspect_ratio = .{ .value = opts.aspect_ratio };
+    if (@hasField(T, "overflow")) local.overflow = .{ .value = asOverflowAxes(opts.overflow) };
+    if (@hasField(T, "scrollbar_width")) local.scrollbar_width = opts.scrollbar_width;
+    if (@hasField(T, "margin")) local.margin_inset = asMarginInsets(opts.margin);
+    if (@hasField(T, "border")) local.border_inset = asLengthPercentageRect(opts.border);
+    if (@hasField(T, "padding")) local.padding_inset = asLengthPercentageRect(opts.padding);
+    if (@hasField(T, "margin_inset")) local.margin_inset = asInsets(opts.margin_inset);
+    if (@hasField(T, "border_inset")) local.border_inset = asLengthPercentageRect(opts.border_inset);
+    if (@hasField(T, "padding_inset")) local.padding_inset = asLengthPercentageRect(opts.padding_inset);
+    if (@hasField(T, "box_sizing")) local.box_sizing = @as(BoxSizing, opts.box_sizing);
+    return Style.resolve(defaults orelse .{ .direction = direction }, local);
+}
+
+fn paintStyleFromOpts(opts: anytype, defaults: ?PaintStyle) PaintStyle {
+    var local: PaintStyleOverride = .{};
+    const T = @TypeOf(opts);
+    if (@hasField(T, "border_color")) local.border_color = asColor(opts.border_color);
+    if (@hasField(T, "radius")) local.radius = asPaintSides(opts.radius);
+    if (@hasField(T, "shadow")) local.shadow = opts.shadow;
+    if (@hasField(T, "transparent")) local.transparent = opts.transparent;
+    if (@hasField(T, "clip")) local.clip = opts.clip;
+    if (@hasField(T, "layer")) local.layer = opts.layer;
+    if (@hasField(T, "texture")) local.texture = .{ .value = opts.texture };
+    if (@hasField(T, "gradient")) local.gradient = asColor(opts.gradient);
+    if (@hasField(T, "fill")) local.fill = asColor(opts.fill);
+    return PaintStyle.resolve(defaults orelse .{}, local);
+}
+
+/// `create()` inserts every returned id before any caller can use it. A
+/// missing node is therefore an internal tree invariant violation, not an
+/// optional API case; report it explicitly instead of using a bare unwrap.
+fn nodeAfterCreate(self: *DrawCtx, id: Id) *widget.WidgetNode {
+    return self.tree.node(id) orelse @panic("DrawCtx: created node is missing");
+}
+
+/// Set the generated button label's canonical flex bounds.
+fn setButtonLabelSizing(self: *DrawCtx, id: Id, opts: anytype) void {
+    const node = nodeAfterCreate(self, id);
+    const T = @TypeOf(opts);
+    if (@hasField(T, "shrink")) node.style.shrink = opts.shrink;
+    if (@hasField(T, "min_size")) {
+        node.style.min_size.width = asDimensionSize(opts.min_size).width;
+    }
+    if (@hasField(T, "min_width")) {
+        node.style.min_size.width = style.dimensionFrom(opts.min_width);
+    }
+}
+
+/// Seed a direct row child from its parent's shared column track. Explicit
+/// child Style values take precedence; tracks fill only automatic dimensions.
+fn seedSharedColumnStyle(self: *DrawCtx, id: Id) void {
+    const child = nodeAfterCreate(self, id);
+    if (child.parent == .root) return;
+    const parent = self.tree.node(child.parent) orelse return;
+    if (parent.kind != .row) return;
+    const columns = parent.shared_columns orelse return;
+    if (parent.children.items.len == 0) return;
+    const child_index = parent.children.items.len - 1;
+    if (child_index >= columns.tracks.len) return;
+    const track = columns.tracks[child_index];
+    if (child.style.grow == 0) child.style.grow = track.grow;
+    if (child.style.shrink == 1) child.style.shrink = track.shrink;
+    if (std.meta.activeTag(child.style.flex_basis) == .auto) {
+        child.style.flex_basis = track.flex_basis;
+    }
+    if (std.meta.activeTag(child.style.min_size.width) == .auto) {
+        child.style.min_size.width = track.min_width;
+    }
+}
+
+fn setScrollOptions(self: *DrawCtx, id: Id, opts: anytype) void {
+    const T = @TypeOf(opts);
+    if (!@hasField(T, "scroll_state")) return;
+    const node = nodeAfterCreate(self, id);
+    node.paint.clip = true;
+    node.scroll = .{
+        .state = opts.scroll_state,
+        .axis = if (@hasField(T, "scroll_axis"))
+            @as(ScrollAxis, opts.scroll_axis)
+        else
+            .vertical,
+    };
+}
+
+fn setTextOptions(self: *DrawCtx, id: Id, opts: anytype) void {
+    const node = nodeAfterCreate(self, id);
+    const T = @TypeOf(opts);
+    if (@hasField(T, "text_overflow")) {
+        node.text_overflow = @as(TextOverflow, opts.text_overflow);
+    }
+    if (@hasField(T, "max_width")) {
+        if (asFixedLength(opts.max_width)) |max_width| node.text_max_width = max_width;
+    }
+}
+
+fn asPaintSide(value: anytype) f32 {
+    return switch (style.lengthPercentageAutoFrom(value)) {
+        .auto, .percent => 0,
+        .length => |length| length,
+    };
+}
+
+fn asPaintSides(x: anytype) Sides {
+    const T = @TypeOf(x);
+    return .{
+        .top = if (@hasField(T, "top")) asPaintSide(x.top) else 0,
+        .right = if (@hasField(T, "right")) asPaintSide(x.right) else 0,
+        .bottom = if (@hasField(T, "bottom")) asPaintSide(x.bottom) else 0,
+        .left = if (@hasField(T, "left")) asPaintSide(x.left) else 0,
+    };
+}
+
+fn asColor(x: anytype) [4]f32 {
+    return .{ x[0], x[1], x[2], x[3] };
+}
+
+pub const DrawCtx = struct {
+    tree: *WidgetTree,
+    /// The current frame arena's allocator. Components build per-frame
+    /// strings here (std.fmt.allocPrint(ctx.arena, ...)) instead of keeping
+    /// scratch buffers: the allocation lives as long as the arena, and the
+    /// double-buffered arenas keep the previous frame's text readable.
+    arena: std.mem.Allocator,
+    /// The host surface for this frame. Null keeps direct-draw contexts
+    /// independent of an App and lets callers select the layout surface.
+    surface: ?widget.Size = null,
+    /// The App's component registry + its gpa: component() registers nested
+    /// components here so their buttons dispatch (dispatchClick looks the
+    /// owner up in this map). Null in single-frame tests — components still
+    /// draw, their buttons just never dispatch.
+    registry: ?ComponentRegistry = null,
+    /// Last frame's state directory (pointers into the OTHER arena, still
+    /// alive while this frame builds) — the "stored version" for state().
+    state_prev: ?*const StateDir = null,
+    /// This frame's state directory (arena-allocated by App).
+    state_cur: ?*StateDir = null,
+    parent_stack: [64]Id = .{.root} ** 64,
+    depth: u32 = 0,
+    /// Defaults contributed by the component currently being drawn. A child
+    /// scope replaces this value for its entire draw and is restored on return.
+    component_defaults: ComponentDefaults = .{},
+    /// Stable identity used for component-local state and registry lookup.
+    component_identity: ComponentId = .root,
+    /// Generation of the frame currently being drawn.
+    frame_generation: u64 = 0,
+    /// App-owned stable component metadata map.
+    identity_map: ?*IdentityRegistry = null,
+    /// Attached GPU endpoint used to mount newly discovered components.
+    gpu_endpoint: ?*GpuEndpoint = null,
+    /// Frame-local widget owner used for event dispatch.
+    component_id: Id = .root,
+    /// Nesting depth of pushClip()/popClip() calls. The clip rects
+    /// themselves live in the tree's per-frame list (WidgetTree.
+    /// clip_rects); this only balances the stack.
+    clip_depth: u32 = 0,
+    /// Create a node under the cursor. Container kinds do NOT descend here.
+    /// Its typed Style and PaintStyle are resolved from the options; its
+    /// `.rect` is the RELATIVE border box filled later by the layout dispatcher.
+    /// Font size from a widget's opts (0 = the host default).
+    fn optsFontSize(opts: anytype) f32 {
+        if (@hasField(@TypeOf(opts), "font_size")) return opts.font_size;
+        return 0;
+    }
+    /// Duplicate text options into the frame arena. Options commonly carry a
+    /// plain slice (`.visual_label = "Volume"`), but accepting an optional
+    /// slice too keeps the payload's nullable contract natural for callers.
+    fn dupeOptionalText(self: *DrawCtx, value: anytype) !?[]const u8 {
+        switch (@typeInfo(@TypeOf(value))) {
+            .optional => {
+                if (value) |text| return try self.arena.dupe(u8, text);
+                return null;
+            },
+            else => return try self.arena.dupe(u8, value),
+        }
+    }
+
+    fn optsFontId(opts: anytype) u8 {
+        if (@hasField(@TypeOf(opts), "font_id")) return opts.font_id;
+        return 0;
+    }
+
+    pub fn create(
+        self: *DrawCtx,
+        kind: WidgetKind,
+        resolved_style: Style,
+        resolved_paint: PaintStyle,
+        font_size: f32,
+        font_id: u8,
+    ) !Id {
+        const id: Id = @enumFromInt(self.tree.next_id);
+        self.tree.next_id += 1;
+
+        const parent = self.parent_stack[self.depth];
+        const node: widget.WidgetNode = .{
+            .id = id,
+            .kind = kind,
+            .parent = parent,
+            .style = resolved_style,
+            .paint = resolved_paint,
+            .font_size = font_size,
+            .font_id = font_id,
+        };
+        try self.tree.appendNode(node);
+        if (parent != .root) {
+            try self.tree.appendChild(parent, id);
+            seedSharedColumnStyle(self, id);
+        }
+        return id;
+    }
+
+    /// Container: create + descend. The cursor becomes the new container.
+    /// `gap` comes from `opts.gap` when present, else 0; `justify` and
+    /// typed Style's padding/border define where the canonical dispatcher
+    /// places children.
+    pub fn column(self: *DrawCtx, opts: anytype) !Id {
+        const resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
+        const id = try self.create(
+            .{ .column = .{} },
+            resolved_style,
+            paintStyleFromOpts(opts, self.component_defaults.paint),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        setScrollOptions(self, id, opts);
+        self.descend(id);
+        return id;
+    }
+    /// Container: create + descend (row variant). See `column`.
+    pub fn row(self: *DrawCtx, opts: anytype) !Id {
+        const resolved_style = styleFromOpts(opts, self.component_defaults.style, .row);
+        const id = try self.create(
+            .{ .row = .{} },
+            resolved_style,
+            paintStyleFromOpts(opts, self.component_defaults.paint),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        if (@hasField(@TypeOf(opts), "columns")) {
+            nodeAfterCreate(self, id).shared_columns = opts.columns;
+        }
+        setScrollOptions(self, id, opts);
+        self.descend(id);
+        return id;
+    }
+    /// Grid container: it uses the same tree container kind as column, but
+    /// dispatches to the bounded grid algorithm through Style.display.
+    pub fn grid(self: *DrawCtx, opts: anytype) !Id {
+        var resolved_style = styleFromOpts(opts, self.component_defaults.style, .column);
+        resolved_style.display = .grid;
+        const T = @TypeOf(opts);
+        if (!@hasField(T, "grid_justify_content") and
+            @hasField(T, "justify") and
+            resolved_style.grid_justify_content == .normal)
+        {
+            resolved_style.grid_justify_content = resolved_style.justify;
+        }
+        if (!@hasField(T, "grid_align_content") and @hasField(T, "align_content"))
+            resolved_style.grid_align_content = resolved_style.align_content;
+        if (!@hasField(T, "grid_justify_items") and @hasField(T, "align"))
+            resolved_style.grid_justify_items = resolved_style.@"align";
+        if (!@hasField(T, "grid_align_items") and @hasField(T, "align"))
+            resolved_style.grid_align_items = resolved_style.@"align";
+        const id = try self.create(
+            .{ .column = .{} },
+            resolved_style,
+            paintStyleFromOpts(opts, self.component_defaults.paint),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        setScrollOptions(self, id, opts);
+        self.descend(id);
+        return id;
+    }
+
+    /// Leave the current container, restoring the cursor to the enclosing
+    /// parent. Also restores the post-order invariant: the container was
+    /// appended before its children, so move it past them, to the end.
+    pub fn pop(self: *DrawCtx) void {
+        std.debug.assert(self.depth > 0);
+        const id = self.parent_stack[self.depth];
+        self.depth -= 1;
+
+        const index = self.tree.nodeIndex(id);
+        std.debug.assert(index != null);
+        self.tree.moveNodeToEnd(index.?);
+    }
+
+    /// A static text leaf. The text is DUPLICATED into the frame arena:
+    /// components may hand over scratch buffers that get rewritten next
+    /// frame (e.g. bufPrint results) — the tree must own a stable copy so
+    /// the double-buffered previous frame keeps its original text for
+    /// id-keyed dirty diffing.
+    pub fn label(self: *DrawCtx, opts: anytype) !Id {
+        const text = try self.arena.dupe(u8, opts.text);
+        var kind: WidgetKind = .{ .label = .{ .text = text } };
+        if (@hasField(@TypeOf(opts), "color")) kind.label.color = asColor(opts.color);
+        const id = try self.create(
+            kind,
+            styleFromOpts(opts, self.component_defaults.style, .column),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        setTextOptions(self, id, opts);
+        return id;
+    }
+
+    /// A clickable button. `owner` binds the click to the component that
+    /// created it (`component_id`); `on_click` is wrapped into a type-erased
+    /// callback when `opts.on_click` is present. Label text is duplicated
+    /// into the frame arena (see label()).
+    ///
+    /// The label is a CHILD label node, centered by the button's typed layout
+    /// style — the text pipeline (measure + emission + color) is shared with
+    /// plain labels, one path instead of a second kind arm in the
+    /// renderer. The kind's `label` field still carries the text (the
+    /// click-injection + hit-testing scan it).
+    pub fn button(self: *DrawCtx, opts: anytype) !Id {
+        var on_click: ?*const fn (*anyopaque) void = null;
+        var user_callback: ?callback.UserCallback = null;
+        const T = @TypeOf(opts);
+        if (@hasField(T, "on_click")) on_click = callback.wrap(opts.on_click);
+        if (@hasField(T, "on_click_with_data")) user_callback = opts.on_click_with_data;
+        if (@hasField(T, "user_callback")) user_callback = opts.user_callback;
+
+        const label_copy = try self.arena.dupe(u8, opts.label);
+        var visual_label: ?[]const u8 = null;
+        if (@hasField(T, "visual_label")) {
+            visual_label = try self.dupeOptionalText(opts.visual_label);
+        }
+        var accessible_label: ?[]const u8 = null;
+        if (@hasField(T, "accessible_label")) {
+            accessible_label = try self.dupeOptionalText(opts.accessible_label);
+        }
+        var kind: WidgetKind = .{ .button = .{
+            .label = label_copy,
+            .visual_label = visual_label,
+            .accessible_label = accessible_label,
+            .on_click = on_click,
+            .owner = self.component_id,
+            .user_callback = user_callback,
+        } };
+        if (@hasField(T, "icon")) kind.button.icon = opts.icon;
+        if (@hasField(T, "color")) kind.button.color = asColor(opts.color);
+
+        const font_size = optsFontSize(opts);
+        const font_id = optsFontId(opts);
+        const id = try self.create(
+            kind,
+            styleFromOpts(opts, self.component_defaults.style, .row),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
+            font_size,
+            font_id,
+        );
+        setTextOptions(self, id, opts);
+
+        // Buttons center generated labels unless the caller overrides either
+        // layout axis independently.
+        const node = nodeAfterCreate(self, id);
+        if (self.component_defaults.style == null) {
+            node.style.justify = .center;
+            node.style.@"align" = .center;
+        }
+        if (@hasField(T, "justify")) node.style.justify = @as(Justify, opts.justify);
+        if (@hasField(T, "align")) node.style.@"align" = @as(Align, opts.@"align");
+
+        const visible_label = widget.buttonVisualLabel(kind);
+        if (visible_label.len != 0) {
+            self.descend(id);
+            const label_id = try self.label(.{
+                .text = visible_label,
+                .color = kind.button.color,
+                .font_size = font_size,
+                .font_id = font_id,
+            });
+            setButtonLabelSizing(self, label_id, opts);
+            setTextOptions(self, label_id, opts);
+            if (@hasField(T, "text_overflow")) {
+                const overflow: TextOverflow = opts.text_overflow;
+                if (overflow == .ellipsis or overflow == .clip) {
+                    if (@hasField(T, "max_width")) {
+                        if (asFixedLength(opts.max_width)) |max_width| {
+                            if (max_width > 0) {
+                                // A bounded button label may shrink to its parent's
+                                // final content box instead of its natural width.
+                                nodeAfterCreate(self, label_id).style.min_size.width = .{
+                                    .length = 0,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+            self.pop();
+        }
+        return id;
+    }
+
+    /// A slider bound to a live f32. Label text is duplicated into the
+    /// frame arena (see label()).
+    pub fn slider(self: *DrawCtx, opts: anytype) !Id {
+        const T = @TypeOf(opts);
+        const label_copy = try self.arena.dupe(u8, opts.label);
+        var visual_label: ?[]const u8 = null;
+        if (@hasField(T, "visual_label")) {
+            visual_label = try self.dupeOptionalText(opts.visual_label);
+        }
+        var kind: WidgetKind = .{ .slider = .{
+            .label = label_copy,
+            .visual_label = visual_label,
+            .value = opts.value,
+            .min = opts.min,
+            .max = opts.max,
+        } };
+        if (@hasField(T, "color")) kind.slider.color = asColor(opts.color);
+        const id = try self.create(
+            kind,
+            styleFromOpts(opts, self.component_defaults.style, .column),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        return id;
+    }
+    /// An empty spacer of the given size (`opts.size`, default 0). Style
+    /// and PaintStyle options are retained even though the size rules layout.
+    pub fn spacer(self: *DrawCtx, opts: anytype) !Id {
+        var size: f32 = 0;
+        if (@hasField(@TypeOf(opts), "size")) size = opts.size;
+        const id = try self.create(
+            .{ .spacer = .{ .size = size } },
+            styleFromOpts(opts, self.component_defaults.style, .column),
+            paintStyleFromOpts(opts, self.component_defaults.paint),
+            optsFontSize(opts),
+            optsFontId(opts),
+        );
+        return id;
+    }
+
+    /// Push a clip rect onto the frame's clip-rect list and return its
+    /// stable id. A full GPU clip buffer is an explicit error; rendering
+    /// without the requested clip would expose content outside its bounds.
+    /// The `.clip` PaintStyle option wires the declarative path
+    /// automatically. This programmatic API serves widgets that know their
+    /// rect at draw time, such as scroll containers. popClip() balances the
+    /// push. The list is append-only for the frame.
+    pub fn pushClip(self: *DrawCtx, x: f32, y: f32, w: f32, h: f32) !u32 {
+        const id = try self.tree.pushClipRect(.{ .x = x, .y = y, .w = w, .h = h });
+        self.clip_depth += 1;
+        return id;
+    }
+
+    /// Balance a pushClip(): restores the clip nesting depth. Rects are
+    /// never removed from the list (ids must stay stable), so pop only
+    /// tracks the stack.
+    pub fn popClip(self: *DrawCtx) void {
+        std.debug.assert(self.clip_depth > 0);
+        self.clip_depth -= 1;
+    }
+
+    /// Nest a sub-component with a stable key. The key is combined with the
+    /// current component identity, so sibling identities are deterministic
+    pub fn component(
+        self: *DrawCtx,
+        comptime T: type,
+        options: struct { key: ComponentKey },
+        ptr: *T,
+    ) !void {
+        const child_identity = ComponentId.child(self.component_identity, options.key);
+        const child_component = Component.make(T, ptr);
+        if (self.identity_map) |identity_map| {
+            const entry = try identity_map.map.getOrPut(identity_map.gpa, child_identity);
+            if (entry.found_existing and entry.value_ptr.last_seen_frame == self.frame_generation) {
+                return error.DuplicateComponentIdentity;
+            }
+            entry.value_ptr.component = child_component;
+            entry.value_ptr.last_seen_frame = self.frame_generation;
+            if (!entry.found_existing) {
+                entry.value_ptr.gpu_initialized = false;
+            }
+            if (self.gpu_endpoint) |endpoint| {
+                if (!entry.value_ptr.gpu_initialized) {
+                    if (child_component.vtable.init_gpu) |init_gpu| {
+                        try init_gpu(child_component.ptr, endpoint);
+                    }
+                    entry.value_ptr.gpu_initialized = true;
+                }
+            }
+        }
+
+        const saved_identity = self.component_identity;
+        const saved_owner = self.component_id;
+        const saved_defaults = self.component_defaults;
+        defer {
+            self.component_identity = saved_identity;
+            self.component_id = saved_owner;
+            self.component_defaults = saved_defaults;
+        }
+        self.component_identity = child_identity;
+        self.component_id = @enumFromInt(self.tree.next_id);
+        self.tree.next_id += 1;
+        if (self.registry) |reg| {
+            try reg.map.put(reg.gpa, self.component_id, child_component);
+        }
+        self.component_defaults = child_component.defaults();
+        try child_component.vtable.draw(ptr, self);
+    }
+
+    /// useState-like inter-frame transient state, component-local: `name`
+    /// is scoped to the current stable component identity, so sibling
+    /// insertion and widget-node renumbering do not move the stored value.
+    /// Returns a pointer to a FRESH T in the frame arena, valid until reset.
+    pub fn state(self: *DrawCtx, comptime T: type, name: []const u8, init: T) !*T {
+        const key: StateKey = .{
+            .component = self.component_identity,
+            .name_hash = stateHash(name),
+        };
+        const cur = self.state_cur orelse {
+            // No state mode (single-frame tests): a plain init copy.
+            const p = try self.arena.create(T);
+            p.* = init;
+            return p;
+        };
+        const value = try cur.getOrCreate(T, self.arena, self.state_prev, key, name, init);
+        return value;
+    }
+
+    /// Cursor descends into a container: it becomes the parent for nodes
+    /// created until the matching `pop()`.
+    fn descend(self: *DrawCtx, id: Id) void {
+        self.depth += 1;
+        self.parent_stack[self.depth] = id;
+    }
+};
+
+test "DrawCtx: two-level cursor nesting wires parents and children" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const col = try ctx.column(.{});
+    const inner_label = try ctx.label(.{ .text = "a" });
+    const inner_button = try ctx.button(.{ .label = "B" });
+    ctx.pop();
+    const outer_label = try ctx.label(.{ .text = "b" });
+
+    // Parents: the column's children point at it; the label after pop() is
+    // back at the root.
+    try std.testing.expectEqual(col, tree.node(inner_label).?.parent);
+    try std.testing.expectEqual(col, tree.node(inner_button).?.parent);
+    try std.testing.expectEqual(Id.root, tree.node(outer_label).?.parent);
+
+    // Children adjacency, in creation order. The button's label is the
+    // BUTTON's child, not the column's.
+    const col_node = tree.node(col) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), col_node.children.items.len);
+    try std.testing.expectEqual(inner_label, col_node.children.items[0]);
+    try std.testing.expectEqual(inner_button, col_node.children.items[1]);
+
+    // The button's child is its label (a label node with the button's text).
+    const btn_node = tree.node(inner_button) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), btn_node.children.items.len);
+    const btn_label_id = btn_node.children.items[0];
+    const btn_label = tree.node(btn_label_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(inner_button, btn_label.parent);
+    try std.testing.expectEqualStrings("B", btn_label.kind.label.text);
+
+    // Post-order: children first, then their container, then the root label.
+    // The button's pop moved it past its child label, so the child precedes
+    // it.
+    try std.testing.expectEqual(inner_label, tree.nodes.items[0].id);
+    try std.testing.expectEqual(btn_label_id, tree.nodes.items[1].id);
+    try std.testing.expectEqual(inner_button, tree.nodes.items[2].id);
+    try std.testing.expectEqual(col, tree.nodes.items[3].id);
+    try std.testing.expectEqual(outer_label, tree.nodes.items[4].id);
+}
+
+test "DrawCtx: more than 64 nested containers preserve cursor and tree order" {
+    // Exercise the public nesting cursor past its fixed stack limit, then
+    // prove that closing every container restores both tree order and scope.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const container_count: usize = 65;
+    var container_ids: [container_count]Id = undefined;
+    for (&container_ids) |*container_id| {
+        container_id.* = try ctx.column(.{});
+    }
+    const deepest_label = try ctx.label(.{ .text = "deepest" });
+    for (0..container_count) |_| ctx.pop();
+    const root_label = try ctx.label(.{ .text = "root" });
+
+    for (container_ids, 0..) |container_id, index| {
+        const container_node =
+            tree.node(container_id) orelse return error.TestUnexpectedResult;
+        const expected_parent = if (index == 0) Id.root else container_ids[index - 1];
+        try std.testing.expectEqual(expected_parent, container_node.parent);
+    }
+    const deepest_node =
+        tree.node(deepest_label) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(container_ids[container_count - 1], deepest_node.parent);
+    const root_node = tree.node(root_label) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Id.root, root_node.parent);
+
+    try std.testing.expectEqual(deepest_label, tree.nodes.items[0].id);
+    try std.testing.expectEqual(container_ids[0], tree.nodes.items[container_count].id);
+    try std.testing.expectEqual(root_label, tree.nodes.items[container_count + 1].id);
+}
+
+test "DrawCtx: column wires 33 children in creation order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const column = try ctx.column(.{});
+    var child_ids: [33]Id = undefined;
+    for (&child_ids) |*child_id| {
+        child_id.* = try ctx.label(.{ .text = "child" });
+    }
+    ctx.pop();
+
+    const parent = tree.node(column) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, child_ids.len), parent.children.items.len);
+    try std.testing.expectEqualSlices(Id, &child_ids, parent.children.items);
+}
+
+test "DrawCtx: pop() restores the cursor" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const col = try ctx.column(.{});
+    const inner = try ctx.label(.{ .text = "inner" });
+    ctx.pop();
+
+    // New nodes after pop() land under .root, not under the column.
+    const after = try ctx.label(.{ .text = "outer" });
+    try std.testing.expectEqual(Id.root, tree.node(after).?.parent);
+
+    // The column's children are unaffected by pop().
+    const col_node = tree.node(col) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), col_node.children.items.len);
+    try std.testing.expectEqual(inner, col_node.children.items[0]);
+}
+
+test "DrawCtx: button owner binds to component_id, incl. inside component()" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    // At the root the owner is .root (the implicit root component).
+    const root_button = try ctx.button(.{ .label = "root" });
+    try std.testing.expectEqual(Id.root, tree.node(root_button).?.kind.button.owner);
+
+    const Child = struct {
+        const Self = @This();
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            _ = self;
+            _ = try c.button(.{ .label = "child" });
+        }
+    };
+    var child: Child = .{};
+    try ctx.component(Child, .{ .key = .{ .static = "child" } }, &child);
+
+    // The component took the next id (3 — 2 was the root button's child
+    // label); the inner button (id 4) is owned by the child component,
+    // and component_id was restored afterwards.
+    const inner: Id = @enumFromInt(4);
+    try std.testing.expectEqual(@as(Id, @enumFromInt(3)), tree.node(inner).?.kind.button.owner);
+    try std.testing.expectEqual(Id.root, ctx.component_id);
+
+    // A later button is owned by the root component again.
+    const later = try ctx.button(.{ .label = "later" });
+    try std.testing.expectEqual(Id.root, tree.node(later).?.kind.button.owner);
+}
+
+test "DrawCtx: component() draws into the current cursor" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Child = struct {
+        const Self = @This();
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            _ = self;
+            _ = try c.label(.{ .text = "in-child" });
+        }
+    };
+    var child: Child = .{};
+
+    // Drawn at root level: the child's node is root-level.
+    // component() reserves id 1 for the child component, so its label is 2.
+    try ctx.component(Child, .{ .key = .{ .static = "child" } }, &child);
+    const root_label: Id = @enumFromInt(2);
+    try std.testing.expectEqual(Id.root, tree.node(root_label).?.parent);
+
+    // Drawn inside a column: the child's node lands under the column.
+    var arena2 = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena2.deinit();
+    var tree2 = WidgetTree.init(arena2.allocator());
+    defer tree2.deinit();
+    var ctx2: DrawCtx = .{ .tree = &tree2, .arena = arena2.allocator() };
+
+    const col = try ctx2.column(.{});
+    try ctx2.component(Child, .{ .key = .{ .static = "child" } }, &child);
+    ctx2.pop();
+
+    // ids: column = 1, component = 2, child label = 3.
+    const nested: Id = @enumFromInt(3);
+    try std.testing.expectEqual(col, tree2.node(nested).?.parent);
+    const col_node = tree2.node(col) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), col_node.children.items.len);
+    try std.testing.expectEqual(nested, col_node.children.items[0]);
+}
+
+test "DrawCtx: component defaults apply before local overrides and restore" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Styled = struct {
+        const Self = @This();
+        pub const default_style: Style = .{
+            .direction = .row,
+            .gap = .{ .length = 12 },
+        };
+        pub const default_paint: PaintStyle = .{
+            .fill = .{ 1, 0, 0, 1 },
+            .layer = 7,
+        };
+        first: Id = .root,
+        second: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.first = try c.label(.{ .text = "default" });
+            self.second = try c.label(.{
+                .text = "local",
+                .gap = 3,
+                .fill = .{ 0, 1, 0, 1 },
+            });
+        }
+    };
+
+    var styled: Styled = .{};
+    try ctx.component(Styled, .{ .key = .{ .static = "styled" } }, &styled);
+    const first = tree.node(styled.first) orelse return error.TestUnexpectedResult;
+    const second = tree.node(styled.second) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(FlexDirection.row, first.style.direction);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 12 }),
+        first.style.gap,
+    ));
+    try std.testing.expectEqual([4]f32{ 1, 0, 0, 1 }, first.paint.fill);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 3 }),
+        second.style.gap,
+    ));
+    try std.testing.expectEqual([4]f32{ 0, 1, 0, 1 }, second.paint.fill);
+
+    const after = try ctx.label(.{ .text = "after" });
+    try std.testing.expectEqual(FlexDirection.column, tree.node(after).?.style.direction);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 0 }),
+        tree.node(after).?.style.gap,
+    ));
+    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, tree.node(after).?.paint.fill);
+    try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
+    try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);
+}
+
+test "DrawCtx: component default scope restores after draw error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Failing = struct {
+        const Self = @This();
+        pub const default_style: Style = .{ .gap = .{ .length = 8 } };
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            _ = self;
+            _ = c;
+            return error.TestComponentFailure;
+        }
+    };
+
+    var failing: Failing = .{};
+    try std.testing.expectError(
+        error.TestComponentFailure,
+        ctx.component(Failing, .{ .key = .{ .static = "failing" } }, &failing),
+    );
+    try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
+    const after = try ctx.label(.{ .text = "after-error" });
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 0 }),
+        tree.node(after).?.style.gap,
+    ));
+}
+
+test "DrawCtx: nested component defaults replace and isolate parent scope" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Bare = struct {
+        const Self = @This();
+        label_id: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.label_id = try c.label(.{ .text = "bare" });
+        }
+    };
+    const Child = struct {
+        const Self = @This();
+        pub const default_style: Style = .{
+            .direction = .column,
+            .gap = .{ .length = 5 },
+        };
+        pub const default_paint: PaintStyle = .{ .fill = .{ 0, 0, 1, 1 } };
+        bare: *Bare,
+        label_id: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.label_id = try c.label(.{ .text = "child" });
+            try c.component(Bare, .{ .key = .{ .static = "bare" } }, self.bare);
+        }
+    };
+    const Parent = struct {
+        const Self = @This();
+        pub const default_style: Style = .{
+            .direction = .row,
+            .gap = .{ .length = 20 },
+        };
+        pub const default_paint: PaintStyle = .{ .fill = .{ 1, 0, 0, 1 } };
+        child: *Child,
+        before_id: Id = .root,
+        after_id: Id = .root,
+
+        pub fn draw(self: *Self, c: *DrawCtx) anyerror!void {
+            self.before_id = try c.label(.{ .text = "before" });
+            try c.component(Child, .{ .key = .{ .static = "child" } }, self.child);
+            self.after_id = try c.label(.{ .text = "after" });
+        }
+    };
+
+    var bare: Bare = .{};
+    var child: Child = .{ .bare = &bare };
+    var parent: Parent = .{ .child = &child };
+    try ctx.component(Parent, .{ .key = .{ .static = "parent" } }, &parent);
+
+    const before = tree.node(parent.before_id) orelse return error.TestUnexpectedResult;
+    const child_label = tree.node(child.label_id) orelse return error.TestUnexpectedResult;
+    const bare_label = tree.node(bare.label_id) orelse return error.TestUnexpectedResult;
+    const after = tree.node(parent.after_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(FlexDirection.row, before.style.direction);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 20 }),
+        before.style.gap,
+    ));
+    try std.testing.expectEqual(FlexDirection.column, child_label.style.direction);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 5 }),
+        child_label.style.gap,
+    ));
+    try std.testing.expectEqual([4]f32{ 0, 0, 1, 1 }, child_label.paint.fill);
+    try std.testing.expectEqual(FlexDirection.column, bare_label.style.direction);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 0 }),
+        bare_label.style.gap,
+    ));
+    try std.testing.expectEqual([4]f32{ 0, 0, 0, 0 }, bare_label.paint.fill);
+    try std.testing.expectEqual(FlexDirection.row, after.style.direction);
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 20 }),
+        after.style.gap,
+    ));
+    try std.testing.expectEqual([4]f32{ 1, 0, 0, 1 }, after.paint.fill);
+    try std.testing.expectEqual(@as(?Style, null), ctx.component_defaults.style);
+    try std.testing.expectEqual(@as(?PaintStyle, null), ctx.component_defaults.paint);
+}
+
+test "DrawCtx: justify and align flow into the node's Style" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const jcol = try ctx.column(.{ .justify = .space_between });
+    ctx.pop();
+    const acol = try ctx.column(.{ .@"align" = .center });
+    ctx.pop();
+    const plain = try ctx.column(.{});
+    ctx.pop();
+
+    try std.testing.expectEqual(Justify.space_between, tree.node(jcol).?.style.justify);
+    try std.testing.expectEqual(Align.center, tree.node(acol).?.style.@"align");
+    // Defaults stay when the opts omit the fields.
+    try std.testing.expectEqual(Justify.normal, tree.node(plain).?.style.justify);
+    try std.testing.expectEqual(Align.stretch, tree.node(plain).?.style.@"align");
+}
+
+test "DrawCtx: text align flows into the node's Style" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const centered = try ctx.column(.{ .text_align = .center });
+    ctx.pop();
+    const plain = try ctx.column(.{});
+    ctx.pop();
+
+    try std.testing.expectEqual(
+        style.TextAlign.center,
+        tree.node(centered).?.style.text_align,
+    );
+    try std.testing.expectEqual(style.TextAlign.start, tree.node(plain).?.style.text_align);
+}
+test "DrawCtx: button label honors justify and align overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const button = try ctx.button(.{
+        .label = "start",
+        .justify = .start,
+        .@"align" = .end,
+    });
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
+    const label_id = button_node.children.items[0];
+
+    try std.testing.expectEqual(Justify.start, button_node.style.justify);
+    try std.testing.expectEqual(Align.end, button_node.style.@"align");
+    try std.testing.expectEqualStrings("start", tree.node(label_id).?.kind.label.text);
+
+    try layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = .{ .width = 120, .height = 40 },
+        .measure = null,
+    });
+    try std.testing.expectEqual(@as(f32, 0), tree.node(label_id).?.rect.x);
+}
+test "DrawCtx: semantic and visual labels are copied, empty override stays explicit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    var button_text = [_]u8{ 'B', 'u', 't', 't', 'o', 'n' };
+    var semantic_text = [_]u8{ 'S', 'e', 'm' };
+    var slider_text = [_]u8{ 'S', 'l', 'i', 'd', 'e', 'r' };
+    var visual_text = [_]u8{ 'V', 'i', 's' };
+    var value: f32 = 0.5;
+
+    const button = try ctx.button(.{
+        .label = button_text[0..],
+        .accessible_label = semantic_text[0..],
+    });
+    const slider = try ctx.slider(.{
+        .label = slider_text[0..],
+        .visual_label = visual_text[0..],
+        .value = &value,
+        .min = 0,
+        .max = 1,
+    });
+    const hidden = try ctx.slider(.{
+        .label = "semantic only",
+        .visual_label = "",
+        .value = &value,
+        .min = 0,
+        .max = 1,
+    });
+
+    @memset(&button_text, 'x');
+    @memset(&semantic_text, 'x');
+    @memset(&slider_text, 'x');
+    @memset(&visual_text, 'x');
+
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
+    const button_kind = button_node.kind.button;
+    try std.testing.expectEqualStrings("Button", button_kind.label);
+    try std.testing.expectEqualStrings("Sem", button_kind.accessible_label.?);
+    const slider_node = tree.node(slider) orelse return error.TestUnexpectedResult;
+    const slider_kind = slider_node.kind.slider;
+    try std.testing.expectEqualStrings("Slider", slider_kind.label);
+    try std.testing.expectEqualStrings("Vis", slider_kind.visual_label.?);
+    try std.testing.expectEqualStrings("", tree.node(hidden).?.kind.slider.visual_label.?);
+}
+
+test "DrawCtx: icon-only button stays interactive without a label child" {
+    // Layout an icon-only button, then verify that its semantic and renderer
+    // metadata stay on the hit-testable button instead of a generated leaf.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const Counter = struct {
+        const Self = @This();
+
+        fn click(self: *Self) void {
+            _ = self;
+        }
+    };
+    const button = try ctx.button(.{
+        .label = "Play",
+        .accessible_label = "Play",
+        .icon = @as(widget.IconId, .play),
+        .on_click = Counter.click,
+        .flex_basis = 24,
+        .min_width = 24,
+        .shrink = 0,
+    });
+
+    try layout.layoutTree(&tree, .{
+        .allocator = arena.allocator(),
+        .available = .{ .width = 80, .height = 40 },
+        .measure = null,
+    });
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
+    const button_kind = button_node.kind.button;
+    try std.testing.expectEqual(@as(usize, 0), button_node.children.items.len);
+    try std.testing.expectEqualStrings("Play", button_kind.accessible_label.?);
+    try std.testing.expectEqual(widget.IconId.play, button_kind.icon.?);
+    try std.testing.expect(button_kind.on_click != null);
+    try std.testing.expect(button_node.rect.w > 0);
+    try std.testing.expect(button_node.rect.h > 0);
+
+    const bounds = widget.visualBorderRect(&tree, button);
+    const hit = hitButton(&tree, .{ bounds.x + bounds.w / 2, bounds.y + bounds.h / 2 });
+    try std.testing.expectEqual(button, hit.?);
+}
+
+test "DrawCtx: container gap is stored in Style, defaults to zero" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const gapped_col = try ctx.column(.{ .gap = 4 });
+    ctx.pop();
+    const plain_col = try ctx.column(.{});
+    ctx.pop();
+    const gapped_row = try ctx.row(.{ .gap = 7 });
+    ctx.pop();
+    const plain_row = try ctx.row(.{});
+    ctx.pop();
+
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 4 },
+        tree.node(gapped_col).?.style.gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 0 },
+        tree.node(plain_col).?.style.gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 7 },
+        tree.node(gapped_row).?.style.gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 0 },
+        tree.node(plain_row).?.style.gap,
+    );
+}
+
+test "DrawCtx: button on_click is wrapped via callback.wrap when provided" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    // No on_click in opts -> null callback.
+    const plain = try ctx.button(.{ .label = "no handler" });
+    try std.testing.expectEqual(@as(?*const fn (*anyopaque) void, null), tree.node(plain).?.kind.button.on_click);
+
+    // With on_click -> a type-erased callback that reaches the receiver.
+    const Counter = struct {
+        const Self = @This();
+
+        n: u32 = 0,
+
+        fn click(self: *Self) void {
+            self.n += 1;
+        }
+    };
+    var counter: Counter = .{};
+    const wired = try ctx.button(.{ .label = "go", .on_click = Counter.click });
+    const wired_node = tree.node(wired) orelse return error.TestUnexpectedResult;
+    const cb = wired_node.kind.button.on_click orelse return error.TestUnexpectedResult;
+    cb(@ptrCast(&counter));
+    try std.testing.expectEqual(@as(u32, 1), counter.n);
+}
+
+test "DrawCtx: shared columns seed canonical child flex sizing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const tracks = [_]ColumnTrack{
+        .{
+            .grow = 2,
+            .shrink = 0.5,
+            .flex_basis = .{ .length = 40 },
+            .min_width = .{ .length = 12 },
+        },
+        .{
+            .grow = 3,
+            .shrink = 0.25,
+            .flex_basis = .{ .length = 60 },
+            .min_width = .{ .length = 20 },
+        },
+    };
+    const columns: SharedColumns = .{ .tracks = &tracks };
+    const row = try ctx.row(.{ .columns = &columns });
+    const first = try ctx.label(.{ .text = "first" });
+    const second = try ctx.label(.{
+        .text = "second",
+        .grow = 9,
+        .shrink = 0.75,
+        .flex_basis = 90,
+        .min_width = 30,
+    });
+    const button = try ctx.button(.{ .label = "button" });
+    ctx.pop();
+
+    try std.testing.expectEqual(row, tree.node(first).?.parent);
+    try std.testing.expectEqual(row, tree.node(second).?.parent);
+    try std.testing.expectEqual(row, tree.node(button).?.parent);
+    try std.testing.expectEqual(@as(f32, 2), tree.node(first).?.style.grow);
+    try std.testing.expectEqual(@as(f32, 0.5), tree.node(first).?.style.shrink);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 40 },
+        tree.node(first).?.style.flex_basis,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 12 },
+        tree.node(first).?.style.min_size.width,
+    );
+    try std.testing.expectEqual(@as(f32, 9), tree.node(second).?.style.grow);
+    try std.testing.expectEqual(@as(f32, 0.75), tree.node(second).?.style.shrink);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 90 },
+        tree.node(second).?.style.flex_basis,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 30 },
+        tree.node(second).?.style.min_size.width,
+    );
+    // The button is the third child, so it is outside the two-track layout.
+    try std.testing.expectEqual(@as(f32, 0), tree.node(button).?.style.grow);
+    try std.testing.expectEqual(@as(f32, 1), tree.node(button).?.style.shrink);
+    try std.testing.expectEqual(style.Dimension.auto, tree.node(button).?.style.flex_basis);
+    try std.testing.expectEqual(style.Dimension.auto, tree.node(button).?.style.min_size.width);
+}
+
+test "DrawCtx: button label does not consume shared column track" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const tracks = [_]ColumnTrack{
+        .{ .grow = 1, .flex_basis = .{ .length = 25 } },
+        .{ .grow = 4, .flex_basis = .{ .length = 75 } },
+    };
+    const columns: SharedColumns = .{ .tracks = &tracks };
+    const row = try ctx.row(.{ .columns = &columns });
+    const button = try ctx.button(.{ .label = "button" });
+    const sibling = try ctx.label(.{ .text = "sibling" });
+    ctx.pop();
+
+    const button_node = tree.node(button) orelse return error.TestUnexpectedResult;
+    const button_label = tree.node(button_node.children.items[0]) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f32, 1), button_node.style.grow);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 25 },
+        button_node.style.flex_basis,
+    );
+    try std.testing.expectEqual(@as(f32, 0), button_label.style.grow);
+    try std.testing.expectEqual(style.Dimension.auto, button_label.style.flex_basis);
+    try std.testing.expectEqual(@as(f32, 4), tree.node(sibling).?.style.grow);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 75 },
+        tree.node(sibling).?.style.flex_basis,
+    );
+    try std.testing.expectEqual(row, button_node.parent);
+}
+
+test "DrawCtx: scroll options wire state, axis, and clipping" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    var column_state: ScrollState = .{};
+    var row_state: ScrollState = .{};
+
+    const column = try ctx.column(.{
+        .scroll_state = &column_state,
+        .scroll_axis = .vertical,
+    });
+    ctx.pop();
+    const row = try ctx.row(.{
+        .scroll_state = &row_state,
+        .scroll_axis = .both,
+    });
+    ctx.pop();
+
+    try std.testing.expect(tree.node(column).?.paint.clip);
+    try std.testing.expect(tree.node(row).?.paint.clip);
+    try std.testing.expectEqual(&column_state, tree.node(column).?.scroll.?.state);
+    try std.testing.expectEqual(ScrollAxis.vertical, tree.node(column).?.scroll.?.axis);
+    try std.testing.expectEqual(&row_state, tree.node(row).?.scroll.?.state);
+    try std.testing.expectEqual(ScrollAxis.both, tree.node(row).?.scroll.?.axis);
+}
+
+test "DrawCtx: typed Style and PaintStyle fields flow from opts" {
+    // DrawCtx text is arena-owned (duplicated label strings), so tests use
+    // a real arena — the testing allocator would leak every duplicate.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const id = try ctx.label(.{
+        .text = "typed",
+        .margin = .{ .top = 1, .right = 2, .bottom = 3, .left = 4 },
+        .padding = .{ .top = 5, .right = 6, .bottom = 7, .left = 8 },
+        .border = .{ .top = 9, .right = 10, .bottom = 11, .left = 12 },
+        .border_color = .{ 0.1, 0.2, 0.3, 0.4 },
+        .radius = .{ .top = 13, .right = 14, .bottom = 15, .left = 16 },
+        .box_sizing = .border_box,
+    });
+
+    try std.testing.expectEqual(
+        style.Insets{
+            .top = .{ .length = 1 },
+            .right = .{ .length = 2 },
+            .bottom = .{ .length = 3 },
+            .left = .{ .length = 4 },
+        },
+        tree.node(id).?.style.margin_inset,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentageRect{
+            .top = .{ .length = 5 },
+            .right = .{ .length = 6 },
+            .bottom = .{ .length = 7 },
+            .left = .{ .length = 8 },
+        },
+        tree.node(id).?.style.padding_inset,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentageRect{
+            .top = .{ .length = 9 },
+            .right = .{ .length = 10 },
+            .bottom = .{ .length = 11 },
+            .left = .{ .length = 12 },
+        },
+        tree.node(id).?.style.border_inset,
+    );
+    try std.testing.expectEqual(BoxSizing.border_box, tree.node(id).?.style.box_sizing);
+    try std.testing.expectEqual(
+        [4]f32{ 0.1, 0.2, 0.3, 0.4 },
+        tree.node(id).?.paint.border_color,
+    );
+    try std.testing.expectEqual(
+        Sides{ .top = 13, .right = 14, .bottom = 15, .left = 16 },
+        tree.node(id).?.paint.radius,
+    );
+
+    const col = try ctx.column(.{ .padding = .{ .top = 8, .left = 8 } });
+    ctx.pop();
+    const row = try ctx.row(.{ .border = .{ .top = 2 } });
+    ctx.pop();
+    try std.testing.expectEqual(
+        style.LengthPercentageRect{
+            .top = .{ .length = 8 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 8 },
+        },
+        tree.node(col).?.style.padding_inset,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentageRect{
+            .top = .{ .length = 2 },
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+        tree.node(row).?.style.border_inset,
+    );
+}
+
+test "DrawCtx: absent typed fields retain defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    const default_style: Style = .{};
+
+    const plain_label = try ctx.label(.{ .text = "plain" });
+    const plain_button = try ctx.button(.{ .label = "B" });
+    var slider_value: f32 = 0.5;
+    const plain_slider = try ctx.slider(.{ .label = "S", .value = &slider_value, .min = 0, .max = 1 });
+    const plain_spacer = try ctx.spacer(.{});
+    const plain_col = try ctx.column(.{ .gap = 4 });
+    ctx.pop();
+
+    for ([_]Id{ plain_label, plain_button, plain_slider, plain_spacer }) |id| {
+        const node = tree.node(id) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(default_style.margin_inset, node.style.margin_inset);
+        try std.testing.expectEqual(default_style.border_inset, node.style.border_inset);
+        try std.testing.expectEqual(default_style.padding_inset, node.style.padding_inset);
+        try std.testing.expectEqual(PaintStyle{}, node.paint);
+    }
+    try std.testing.expectEqual(default_style.margin_inset, tree.node(plain_col).?.style.margin_inset);
+    try std.testing.expectEqual(default_style.border_inset, tree.node(plain_col).?.style.border_inset);
+    try std.testing.expectEqual(default_style.padding_inset, tree.node(plain_col).?.style.padding_inset);
+    try std.testing.expectEqual(PaintStyle{}, tree.node(plain_col).?.paint);
+}
+
+test "DrawCtx: typed PaintStyle layer option" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const layered_col = try ctx.column(.{ .layer = 3 });
+    ctx.pop();
+    const layered_label = try ctx.label(.{ .text = "layer", .layer = 1 });
+    try std.testing.expectEqual(@as(u32, 3), tree.node(layered_col).?.paint.layer);
+    try std.testing.expectEqual(@as(u32, 1), tree.node(layered_label).?.paint.layer);
+
+    const plain_col = try ctx.column(.{});
+    ctx.pop();
+    try std.testing.expectEqual(@as(u32, 0), tree.node(plain_col).?.paint.layer);
+}
+
+test "DrawCtx: typed PaintStyle clip option; pushClip appends to the tree clip list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const card = try ctx.column(.{ .clip = true });
+    ctx.pop();
+    try std.testing.expect(tree.node(card).?.paint.clip);
+
+    const id0 = try ctx.pushClip(10, 20, 30, 40);
+    const id1 = try ctx.pushClip(50, 60, 70, 80);
+    ctx.popClip();
+    ctx.popClip();
+    try std.testing.expectEqual(@as(u32, 0), id0);
+    try std.testing.expectEqual(@as(u32, 1), id1);
+    try std.testing.expectEqual(@as(u32, 2), tree.clip_count);
+    try std.testing.expectEqual(@as(f32, 30), tree.clip_rects[0].w);
+    try std.testing.expectEqual(@as(f32, 80), tree.clip_rects[1].h);
+}
+test "DrawCtx: canonical flex basis and parent-axis minimums" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    const id = try ctx.label(.{ .text = "typed", .flex_basis = 30, .min_height = 12 });
+    const node = tree.node(id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 30 },
+        node.style.flex_basis,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 12 },
+        node.style.min_size.height,
+    );
+    try std.testing.expectEqual(style.Dimension.auto, node.style.min_size.width);
+}
+
+test "DrawCtx: canonical dimensions convert optional and fixed values" {
+    const optional_number: ?u16 = 9;
+    const optional_fixed: ?style.Dimension = style.Dimension.fixed(18);
+
+    const resolved = styleFromOpts(.{
+        .flex_basis = optional_number,
+        .min_width = optional_fixed,
+        .min_height = style.Dimension.percentage(0.5),
+    }, null, .row);
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 9 },
+        resolved.flex_basis,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 18 },
+        resolved.min_size.width,
+    );
+    try std.testing.expectEqual(
+        style.Dimension{ .percent = 0.5 },
+        resolved.min_size.height,
+    );
+
+    const min_content = styleFromOpts(.{
+        .min_width = @as(style.Dimension, .min_content),
+    }, null, .row);
+    try std.testing.expectEqual(style.Dimension.min_content, min_content.min_size.width);
+}
+
+test "DrawCtx: direct min height retains fixed and percentage dimensions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const fixed_id = try ctx.label(.{
+        .text = "fixed",
+        .min_height = style.Dimension.fixed(18),
+    });
+    const fixed = tree.node(fixed_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        style.Dimension{ .length = 18 },
+        fixed.style.min_size.height,
+    );
+    try std.testing.expectEqual(style.Dimension.auto, fixed.style.min_size.width);
+
+    const percent_id = try ctx.label(.{
+        .text = "percent",
+        .min_height = style.Dimension.percentage(0.5),
+    });
+    const percent = tree.node(percent_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        style.Dimension{ .percent = 0.5 },
+        percent.style.min_size.height,
+    );
+}
+
+test "DrawCtx: constructor translates display and position into Style" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const id = try ctx.column(.{ .display = .block, .position = .absolute });
+    ctx.pop();
+
+    try std.testing.expectEqual(style.Display.block, tree.node(id).?.style.display);
+    try std.testing.expectEqual(style.Position.absolute, tree.node(id).?.style.position);
+}
+
+test "DrawCtx: canonical flex options translate into typed Style" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const id = try ctx.row(.{
+        .direction = .row_reverse,
+        .flex_wrap = .wrap_reverse,
+        .align_content = .space_around,
+        .align_self = .end,
+        .margin_inset = .{
+            .top = .auto,
+            .right = .{ .length = 0 },
+            .bottom = .{ .length = 0 },
+            .left = .{ .length = 0 },
+        },
+    });
+    ctx.pop();
+
+    const node = tree.node(id) orelse return error.TestUnexpectedResult;
+    const resolved = node.style;
+    try std.testing.expectEqual(style.FlexDirection.row_reverse, resolved.direction);
+    try std.testing.expectEqual(style.FlexWrap.wrap_reverse, resolved.flex_wrap);
+    try std.testing.expectEqual(style.AlignContent.space_around, resolved.align_content);
+    try std.testing.expectEqual(style.AlignSelf.end, resolved.align_self);
+    try std.testing.expect(std.meta.eql(@as(style.LengthPercentageAuto, .auto), resolved.margin_inset.top));
+}
+
+test "DrawCtx: grid constructor translates tracks placement and canonical gaps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+    const tracks = [_]style.GridTrack{ .{ .fixed = 32 }, .{ .fr = 1 } };
+
+    const id = try ctx.grid(.{
+        .grid_template_columns = tracks[0..],
+        .column_gap = 4,
+        .row_gap = 8,
+        .grid_auto_flow = .column,
+        .grid_column = .{
+            .start = .{ .line = 1 },
+            .end = .{ .span = 2 },
+        },
+    });
+    ctx.pop();
+    const node = tree.node(id) orelse return error.TestUnexpectedResult;
+    const resolved = node.style;
+    try std.testing.expectEqual(style.Display.grid, resolved.display);
+    try std.testing.expectEqual(@as(usize, 2), resolved.grid_template_columns.len);
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 4 },
+        resolved.column_gap,
+    );
+    try std.testing.expectEqual(
+        style.LengthPercentage{ .length = 8 },
+        resolved.row_gap,
+    );
+    try std.testing.expectEqual(style.GridAutoFlow.column, resolved.grid_auto_flow);
+}
+
+test "DrawCtx numeric canonical gap options become typed lengths" {
+    const resolved = styleFromOpts(.{
+        .gap = 12,
+        .column_gap = 13,
+        .row_gap = 14,
+    }, null, .column);
+
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 12 }),
+        resolved.gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 13 }),
+        resolved.column_gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 14 }),
+        resolved.row_gap,
+    ));
+}
+
+test "DrawCtx typed percentage gap survives override and resolution" {
+    const resolved = styleFromOpts(.{
+        .gap = style.LengthPercentage{ .percent = 0.1 },
+    }, null, .column);
+
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .percent = 0.1 }),
+        resolved.gap,
+    ));
+}
+
+test "DrawCtx container gaps remain typed for percentage options" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tree = WidgetTree.init(arena.allocator());
+    defer tree.deinit();
+    var ctx: DrawCtx = .{ .tree = &tree, .arena = arena.allocator() };
+
+    const fixed = try ctx.column(.{ .gap = 12 });
+    ctx.pop();
+    const percentage = try ctx.column(.{
+        .gap = style.LengthPercentage{ .percent = 0.1 },
+    });
+    ctx.pop();
+
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .length = 12 }),
+        tree.node(fixed).?.style.gap,
+    ));
+    try std.testing.expect(std.meta.eql(
+        @as(style.LengthPercentage, .{ .percent = 0.1 }),
+        tree.node(percentage).?.style.gap,
+    ));
+}

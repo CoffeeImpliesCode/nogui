@@ -15,6 +15,29 @@ test "runs the complete pinned fixture corpus" {
     try std.testing.expectEqual(@as(usize, 5504), result.passed);
     try std.testing.expectEqual(@as(usize, 0), result.failed);
     try std.testing.expectEqual(@as(usize, 20), result.unsupported);
+    const unsupported_ids = [_][]const u8{
+        "flex/intrinsic_sizing_main_size_column.html",
+        "flex/intrinsic_sizing_main_size_column_nested.html",
+        "flex/intrinsic_sizing_main_size_column_wrap.html",
+        "grid/grid_aspect_ratio_fill_child_max_height.html",
+        "grid/grid_relayout_vertical_text.html",
+    };
+    const variants = [_][]const u8{
+        "border_box_ltr",
+        "content_box_ltr",
+        "border_box_rtl",
+        "content_box_rtl",
+    };
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (unsupported_ids) |id| for (variants) |variant| {
+        hasher.update(id);
+        hasher.update("\t");
+        hasher.update(variant);
+        hasher.update("\n");
+    };
+    var expected: [32]u8 = undefined;
+    hasher.final(&expected);
+    try std.testing.expectEqual(expected, result.unsupported_sha256);
 }
 
 test "runs one pinned fixture variant" {
