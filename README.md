@@ -4,6 +4,16 @@
 
 The v7 implementation is the canonical library. The project does not yet promise a stable API, a release-quality platform layer, or a performance qualification.
 
+
+## Acceptance status
+
+What this repository proves today, and what it does not, is recorded in
+[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md). Read it before claiming parity
+with any reference implementation: the house gate is green, but macOS,
+Windows and mobile runtime acceptance needs SDKs and devices this project has
+never had, and the acceptance harnesses for those runs do not travel with the
+source.
+
 ## Prior stocktake
 
 These results predate the 2026-09-25 `noapi` and widget changes. The full performance matrix and Zwanzig analysis were not repeated. Later short diagnostics appear below.
