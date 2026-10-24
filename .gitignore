@@ -14,8 +14,17 @@ graphify-out/
 *.json
 !testdata/layout-golden.json
 !vendor/noapi-provenance.json
-!docs/perf/text-shaping-cache-diagnostic.json
+!testdata/taffy-v0.13.0/**/*.json
 
 coverage-*.zcov
 __pycache__/
 *.py[cod]
+.ruff_cache/
+node_modules/
+target/
+result
+result-*
+*.o
+*.log
+core
+core.*
