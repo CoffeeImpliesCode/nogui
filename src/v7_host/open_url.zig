@@ -228,7 +228,7 @@ pub const UrlDispatcher = struct {
 
         // The desktop portal is the sandboxed path; use it when it answers and
         // say so, rather than silently falling through to a second launch.
-        if (comptime builtin.os.tag == .linux and !builtin.abi.isAndroid()) {
+        if (comptime builtin.target.os.tag == .linux and !builtin.target.abi.isAndroid()) {
             if (portal.isSessionBusAvailable()) {
                 const decision = portal.openUri(self.allocator, url, "") catch |err| switch (err) {
                     error.NoSessionBus, error.PortalUnavailable => return .unsupported,
@@ -238,7 +238,7 @@ pub const UrlDispatcher = struct {
             }
         }
 
-        const url_z = try self.allocator.dupeZ(u8, url);
+        const url_z = try self.allocator.dupeSentinel(u8, url, 0);
         defer self.allocator.free(url_z);
         return if (c.SDL_OpenURL(url_z.ptr)) .opened else .failed;
     }
@@ -412,7 +412,7 @@ test "url dispatcher routes to scheme handler and delivers once" {
         calls: usize = 0,
         // Only the first `last_len` bytes are live, so zeroing the tail is
         // enough for a handler that never ran.
-        last_url: [64]u8 = [_]u8{0} ** 64,
+        last_url: [64]u8 = @splat(0),
         last_len: usize = 0,
 
         fn handle(ctx: ?*anyopaque, url: []const u8) void {
@@ -501,7 +501,7 @@ test "api-w18 a scheme handler registered twice replaces the active one" {
         calls: usize = 0,
         // Only the first `url_len` bytes are live, so zeroing the tail is
         // enough for a handler that never ran.
-        url: [64]u8 = [_]u8{0} ** 64,
+        url: [64]u8 = @splat(0),
         url_len: usize = 0,
 
         fn handle(ctx: ?*anyopaque, url: []const u8) void {
@@ -557,7 +557,7 @@ test "drop phase tracker sequences begin position offer and complete" {
         events: usize = 0,
         // Only the first `events` slots are live, so `.begin` is just a
         // placeholder for the phases that never arrived.
-        phases: [8]DropPhase = [_]DropPhase{.begin} ** 8,
+        phases: [8]DropPhase = @splat(.begin),
 
         fn onDrop(ctx: ?*anyopaque, event: DropPhaseEvent) void {
             const self: *Self = @ptrCast(@alignCast(ctx.?));

@@ -226,7 +226,7 @@ fn emitResolved(
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -899,7 +899,7 @@ fn waitForSdlPress(
                     if (event.window_id == id and event.down) {
                         return .{
                             .window_id = id,
-                            .button = @intFromEnum(event.button),
+                            .button = @backingInt(event.button),
                             .timestamp_ns = event.common.timestamp,
                         };
                     }
@@ -1821,7 +1821,7 @@ fn probeReactiveRole(
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

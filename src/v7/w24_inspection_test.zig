@@ -18,10 +18,10 @@ test "api-w24 overlay priority selects the routed target and reports the raw tre
     defer tree.deinit();
 
     const root_node: FrameNodeId = .root;
-    const bg_btn_node: FrameNodeId = @enumFromInt(1);
-    const anchor_node: FrameNodeId = @enumFromInt(2);
-    const lower_popup_node: FrameNodeId = @enumFromInt(3);
-    const higher_popup_node: FrameNodeId = @enumFromInt(4);
+    const bg_btn_node: FrameNodeId = @fromBackingInt(@intCast(1));
+    const anchor_node: FrameNodeId = @fromBackingInt(@intCast(2));
+    const lower_popup_node: FrameNodeId = @fromBackingInt(@intCast(3));
+    const higher_popup_node: FrameNodeId = @fromBackingInt(@intCast(4));
 
     const bg_btn_id: WidgetId = .{ .owner = 10, .slot = 1, .generation = 1 };
     const anchor_id: WidgetId = .{ .owner = 10, .slot = 2, .generation = 1 };
@@ -174,7 +174,7 @@ test "api-w24: stale handle detection fails on destroyed, recycled, or removed w
     var tree1 = widget.WidgetTree.init(gpa);
     defer tree1.deinit();
     try tree1.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = target_id,
         .kind = .{ .button = .{ .label = "Target Gen 1" } },
         .parent = .root,
@@ -201,7 +201,7 @@ test "api-w24: stale handle detection fails on destroyed, recycled, or removed w
     var tree2 = widget.WidgetTree.init(gpa);
     defer tree2.deinit();
     try tree2.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = recycled_id,
         .kind = .{ .button = .{ .label = "Recycled Gen 2" } },
         .parent = .root,
@@ -227,7 +227,7 @@ test "api-w24: stale handle detection fails on destroyed, recycled, or removed w
     var tree3 = widget.WidgetTree.init(gpa);
     defer tree3.deinit();
     try tree3.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = .{ .owner = 7, .slot = 99, .generation = 1 },
         .kind = .{ .label = .{ .text = "Other" } },
         .parent = .root,
@@ -264,21 +264,21 @@ test "api-w24: reordered elements preserve stable identity and update bounds" {
     var tree1 = widget.WidgetTree.init(gpa);
     defer tree1.deinit();
     try tree1.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = id_a,
         .kind = .{ .button = .{ .label = "A" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 50, .h = 20 },
     });
     try tree1.nodes.append(gpa, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = id_b,
         .kind = .{ .button = .{ .label = "B" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 40, .w = 50, .h = 20 },
     });
     try tree1.nodes.append(gpa, .{
-        .id = @enumFromInt(3),
+        .id = @fromBackingInt(@intCast(3)),
         .widget_id = id_c,
         .kind = .{ .button = .{ .label = "C" } },
         .parent = .root,
@@ -300,21 +300,21 @@ test "api-w24: reordered elements preserve stable identity and update bounds" {
     var tree2 = widget.WidgetTree.init(gpa);
     defer tree2.deinit();
     try tree2.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = id_c,
         .kind = .{ .button = .{ .label = "C" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 10, .w = 50, .h = 20 },
     });
     try tree2.nodes.append(gpa, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = id_a,
         .kind = .{ .button = .{ .label = "A" } },
         .parent = .root,
         .rect = .{ .x = 10, .y = 40, .w = 50, .h = 20 },
     });
     try tree2.nodes.append(gpa, .{
-        .id = @enumFromInt(3),
+        .id = @fromBackingInt(@intCast(3)),
         .widget_id = id_b,
         .kind = .{ .button = .{ .label = "B" } },
         .parent = .root,
@@ -428,7 +428,7 @@ test "api-w24: frame snapshot captures bounds, clipping, focus, capture, and sem
     var cb_val: bool = true;
 
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = btn_id,
         .kind = .{ .button = .{
             .label = "Submit",
@@ -439,7 +439,7 @@ test "api-w24: frame snapshot captures bounds, clipping, focus, capture, and sem
     });
 
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = slider_id,
         .kind = .{ .slider = .{
             .label = "Volume",
@@ -452,7 +452,7 @@ test "api-w24: frame snapshot captures bounds, clipping, focus, capture, and sem
     });
 
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(3),
+        .id = @fromBackingInt(@intCast(3)),
         .widget_id = cb_id,
         .kind = .{ .checkbox = .{
             .label = "Accept Terms",
@@ -644,7 +644,7 @@ test "api-w24: snapshot JSON escapes adversarial label bytes" {
     const wid: WidgetId = .{ .owner = 4, .slot = 1, .generation = 1 };
     const label = "Say \"hi\"\\\n";
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = wid,
         .kind = .{ .button = .{
             .label = label,
@@ -681,10 +681,10 @@ test "api-w24: a routed pick names the same node as the engine across a clipped 
     var tree = widget.WidgetTree.init(gpa);
     defer tree.deinit();
 
-    const inner: FrameNodeId = @enumFromInt(1);
-    const clipped: FrameNodeId = @enumFromInt(2);
-    const plain: FrameNodeId = @enumFromInt(3);
-    const hidden: FrameNodeId = @enumFromInt(4);
+    const inner: FrameNodeId = @fromBackingInt(@intCast(1));
+    const clipped: FrameNodeId = @fromBackingInt(@intCast(2));
+    const plain: FrameNodeId = @fromBackingInt(@intCast(3));
+    const hidden: FrameNodeId = @fromBackingInt(@intCast(4));
 
     try tree.nodes.append(gpa, .{
         .id = inner,
@@ -786,14 +786,14 @@ test "api-w24: a stale handle never resolves to a live node in its slot" {
     var tree = widget.WidgetTree.init(gpa);
     defer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = .{ .owner = owner, .slot = slot, .generation = 2 },
         .kind = .{ .button = .{ .label = "second" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 10, .h = 10 },
     });
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = .{ .owner = owner, .slot = slot, .generation = 1 },
         .kind = .{ .button = .{ .label = "first" } },
         .parent = .root,
@@ -807,7 +807,7 @@ test "api-w24: a stale handle never resolves to a live node in its slot" {
     });
     defer snap.deinit();
 
-    const live = snap.findByFrameNodeId(@enumFromInt(1)).?;
+    const live = snap.findByFrameNodeId(@fromBackingInt(@intCast(1))).?;
     try std.testing.expectEqual(@as(u32, 2), live.handle.generation);
     // The live handle resolves to the node it was taken from, not to the
     // other node that shares its slot. The node appended first is snapshot
@@ -879,9 +879,9 @@ test "api-w24 retained overlay picks preserve inherited clipping after live plac
     const gpa = std.testing.allocator;
     var tree = widget.WidgetTree.init(gpa);
     defer tree.deinit();
-    const scroller: FrameNodeId = @enumFromInt(4);
-    const anchor: FrameNodeId = @enumFromInt(1);
-    const popup: FrameNodeId = @enumFromInt(2);
+    const scroller: FrameNodeId = @fromBackingInt(@intCast(4));
+    const anchor: FrameNodeId = @fromBackingInt(@intCast(1));
+    const popup: FrameNodeId = @fromBackingInt(@intCast(2));
     const anchor_id: WidgetId = .{ .owner = 9, .slot = 1, .generation = 1 };
     const popup_id: WidgetId = .{ .owner = 9, .slot = 2, .generation = 1 };
     try tree.appendNode(.{
@@ -944,8 +944,8 @@ test "api-w24 retained overlay picks preserve inherited clipping after live plac
 test "api-w24: a published tree keeps its own overlay metadata after the next frame commits" {
     const gpa = std.testing.allocator;
     const viewport: widget.Rect = .{ .w = 200, .h = 200 };
-    const anchor_node: FrameNodeId = @enumFromInt(1);
-    const popup_node: FrameNodeId = @enumFromInt(2);
+    const anchor_node: FrameNodeId = @fromBackingInt(@intCast(1));
+    const popup_node: FrameNodeId = @fromBackingInt(@intCast(2));
     const anchor_id: WidgetId = .{ .owner = 5, .slot = 1, .generation = 1 };
     const popup_id: WidgetId = .{ .owner = 5, .slot = 2, .generation = 1 };
 

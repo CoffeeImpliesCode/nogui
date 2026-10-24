@@ -27,14 +27,14 @@ pub fn isSessionBusAvailable() bool {
 fn fileUri(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, path, "file://")) return allocator.dupe(u8, path);
     if (std.fs.path.isAbsolute(path)) {
-        return std.fmt.allocPrint(allocator, "file://{s}", .{path});
+        return allocator.print("file://{s}", .{path});
     }
     // SDL allocates the working directory. `join` copies it into `allocator`.
     const cwd_z = try sdl3.filesystem.getCurrentDirectory();
     defer sdl3.free(cwd_z);
     const absolute = try std.fs.path.join(allocator, &.{ cwd_z, path });
     defer allocator.free(absolute);
-    return std.fmt.allocPrint(allocator, "file://{s}", .{absolute});
+    return allocator.print("file://{s}", .{absolute});
 }
 
 /// Why a `file://` URI does not name a local path.
@@ -225,7 +225,7 @@ fn uriSchemeIs(uri: []const u8, scheme: []const u8) bool {
 /// directory is opened as a directory, so a path naming something else is
 /// refused instead of opened as one. The descriptor belongs to the caller.
 fn openPortalTarget(allocator: std.mem.Allocator, path: []const u8, directory: bool) !std.posix.fd_t {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const rc = linux.open(path_z.ptr, if (directory) .{

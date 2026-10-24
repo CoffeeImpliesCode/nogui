@@ -81,7 +81,7 @@ pub const Manager = struct {
     current: ?WidgetId = null,
     policy: Policy = .{},
     /// Fixed capacity bounds work and allocation across a frame boundary.
-    captures: [16]?Capture = .{null} ** 16,
+    captures: [16]?Capture = @splat(null),
 
     pub const CaptureError = error{CaptureCapacityExceeded};
 

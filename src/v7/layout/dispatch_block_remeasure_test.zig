@@ -70,12 +70,12 @@ test "block float slot remeasures auto flex subtree at final width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: FrameNodeId = @enumFromInt(1);
-    const first_id: FrameNodeId = @enumFromInt(2);
-    const second_id: FrameNodeId = @enumFromInt(3);
-    const inner_id: FrameNodeId = @enumFromInt(4);
-    const mixed_id: FrameNodeId = @enumFromInt(5);
-    const root_id: FrameNodeId = @enumFromInt(6);
+    const float_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const inner_id: FrameNodeId = @fromBackingInt(@intCast(4));
+    const mixed_id: FrameNodeId = @fromBackingInt(@intCast(5));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(6));
 
     try appendNode(&tree, first_id, inner_id, fixedStyle(.block, 30, 10), .{ .spacer = .{} });
     try appendNode(&tree, second_id, inner_id, fixedStyle(.block, 30, 10), .{ .spacer = .{} });

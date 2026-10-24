@@ -197,7 +197,7 @@ pub const FrameDescriptor = struct {
     stride: u32,
     presentation_timestamp_ns: i96 = 0,
     duration_ns: ?u64 = null,
-    planes: [4]PlaneDescriptor = [_]PlaneDescriptor{.{}} ** 4,
+    planes: [4]PlaneDescriptor = @splat(.{}),
     plane_count: u8 = 1,
     /// Base of the packed buffer, or of plane 0 for a planar format.
     /// Null when the payload is reached another way; callers that need the

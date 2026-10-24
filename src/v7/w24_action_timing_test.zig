@@ -117,13 +117,13 @@ fn makeTree(gpa: std.mem.Allocator) !WidgetTree {
     var tree = WidgetTree.init(gpa);
     errdefer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = child_widget,
-        .parent = @enumFromInt(1),
+        .parent = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "child" } },
     });
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = parent_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "parent" } },

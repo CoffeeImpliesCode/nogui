@@ -398,7 +398,7 @@ pub const requested_formats = [_]u32{
 pub const FormatParam = struct {
     // `put` writes every byte that `len` covers before `slice` hands them to
     // the wire, so the zeroed tail beyond `len` is never sent.
-    bytes: [format_param_bytes]u8 align(pod_align) = [_]u8{0} ** format_param_bytes,
+    bytes: [format_param_bytes]u8 align(pod_align) = @splat(0),
     len: usize = 0,
 
     fn align8(n: usize) usize {
@@ -604,8 +604,9 @@ pub const Api = struct {
         // a symbol that cannot be resolved returns before the loop starts, so
         // no field is ever read while it still holds `undefined`.
         var api: Api = undefined;
-        inline for (std.meta.fields(Api), 0..) |field, index| {
-            @field(api, field.name) = try symbol(field.type, lib, symbols[index]);
+        const api_info = @typeInfo(Api).@"struct";
+        inline for (api_info.field_names, api_info.field_types, 0..) |field_name, field_type, index| {
+            @field(api, field_name) = try symbol(field_type, lib, symbols[index]);
         }
 
         api.pw_init(null, null);
@@ -618,13 +619,13 @@ pub const Api = struct {
 // a build error here rather than a null entry point in a table that still
 // looks complete to every caller.
 comptime {
-    const api_fields = std.meta.fields(Api);
-    if (Api.symbols.len != api_fields.len)
+    const api_info = @typeInfo(Api).@"struct";
+    if (Api.symbols.len != api_info.field_names.len)
         @compileError("every Api entry point resolves from its own symbol");
-    for (api_fields, Api.symbols) |field, name| {
-        if (!std.mem.eql(u8, field.name, name))
+    for (api_info.field_names, api_info.field_attrs, Api.symbols) |field_name, field_attrs, name| {
+        if (!std.mem.eql(u8, field_name, name))
             @compileError("Api symbols must name the fields in field order");
-        if (field.default_value_ptr != null)
+        if (field_attrs.default_value_ptr != null)
             @compileError("an Api field with a default would let a partial table be built by omission");
     }
 }
@@ -1408,7 +1409,7 @@ const Fake = struct {
     events: ?*const StreamEvents = null,
     listener_data: ?*anyopaque = null,
 
-    pixels: [128]u8 = [_]u8{0x5a} ** 128,
+    pixels: [128]u8 = @splat(0x5a),
     chunk: Chunk = .{ .offset = 0, .size = 128, .stride = 16, .flags = 0 },
     /// The one descriptor the stand-in buffer points at. `init` fills it with
     /// this fake's own pixel bytes, so the buffer names real memory.
@@ -1444,26 +1445,26 @@ const Fake = struct {
     /// The format pod the connect call carried, recorded as the bytes a reader
     /// at that address would see. The alignment is the one the object walk
     /// inside the pod needs, not the alignment of a byte array.
-    connect_param: [512]u8 align(@alignOf(u64)) = [_]u8{0} ** 512,
+    connect_param: [512]u8 align(@alignOf(u64)) = @splat(0),
     connect_param_len: usize = 0,
 
     /// Stand-ins for the properties the real library hands out. The stream
     /// takes them over at `pw_stream_new` and frees them with the stream, and
     /// frees them itself when that call fails, so the counters below separate
     /// a release that belongs to the library from one that frees it twice.
-    property_bytes: [property_slot_count]u8 = [_]u8{0} ** property_slot_count,
+    property_bytes: [property_slot_count]u8 = @splat(0),
 
     /// The binding keys the client wrote, kept as the bytes a reader at these
     /// addresses would see. A daemon resolves a stream to a node from these two
     /// keys and from nothing else, so a test that cannot read them back cannot
     /// say which node the stream asked for. An empty slot means the key was
     /// never written, which is a different answer from a wrong value.
-    node_target: [64]u8 = [_]u8{0} ** 64,
+    node_target: [64]u8 = @splat(0),
     node_target_len: usize = 0,
-    target_object: [128]u8 = [_]u8{0} ** 128,
+    target_object: [128]u8 = @splat(0),
     target_object_len: usize = 0,
-    property_live: [property_slot_count]bool = [_]bool{false} ** property_slot_count,
-    property_owned: [property_slot_count]bool = [_]bool{false} ** property_slot_count,
+    property_live: [property_slot_count]bool = @splat(false),
+    property_owned: [property_slot_count]bool = @splat(false),
     properties_allocated: usize = 0,
     freed_by_client: usize = 0,
     freed_by_library: usize = 0,

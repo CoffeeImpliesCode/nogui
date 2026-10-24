@@ -323,14 +323,14 @@ pub const Api = struct {
             .@"fn" => |value| value,
             else => return error.WaylandClientIncomplete,
         };
-        const want_tag = std.meta.activeTag(std.builtin.CallingConvention.c);
-        if (std.meta.activeTag(proto.calling_convention) != want_tag) {
+        const want_tag = std.meta.activeTag(std.lang.CallingConvention.c);
+        if (std.meta.activeTag(proto.attrs.@"callconv") != want_tag) {
             return error.WaylandClientIncomplete;
         }
         if (proto.is_generic) return error.WaylandClientIncomplete;
         if (proto.return_type == null) return error.WaylandClientIncomplete;
-        inline for (proto.params) |param| {
-            if (param.type == null) return error.WaylandClientIncomplete;
+        inline for (proto.param_types) |param_type| {
+            if (param_type == null) return error.WaylandClientIncomplete;
         }
         const raw = object.loadFunction(name) catch return error.WaylandClientIncomplete;
         return @ptrCast(@alignCast(raw));

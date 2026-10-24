@@ -23,7 +23,7 @@ const CountView = struct {
     prefix: []const u8,
 
     pub fn draw(self: *CountView, count: *const Count, ctx: *nogui.DrawCtx) !void {
-        const text = try std.fmt.allocPrint(ctx.arena, "{s}: {d}", .{ self.prefix, count.value });
+        const text = try ctx.arena.print("{s}: {d}", .{ self.prefix, count.value });
         _ = try ctx.label(.{ .text = text });
     }
 };
@@ -1277,7 +1277,7 @@ test "api-w07 a popup needs a parent, blocks its parent's close, and reports the
 
 fn displayInfo(id: u32, primary: bool, width: u32, height: u32, scale: f32) display.Info {
     return .{
-        .id = @enumFromInt(id),
+        .id = @fromBackingInt(@intCast(id)),
         .primary = primary,
         .full_bounds = .{
             .position = .{ .x = 0, .y = 0 },
@@ -1458,7 +1458,7 @@ test "api-w07 a window's scale baseline is the last reading a CONSUMER was given
     // That last one is why the display route could report no scale delta of
     // its own, and why the window route was the only place left to tell the
     // transition to anybody.
-    const output: contracts.DisplayId = @enumFromInt(3);
+    const output: contracts.DisplayId = @fromBackingInt(@intCast(3));
     const at_one: ScaleReading = .{
         .display = output,
         .display_scale = 1.0,
@@ -1497,7 +1497,7 @@ test "api-w07 a window's scale baseline is the last reading a CONSUMER was given
     // A window another output draws is a different device scale, whatever the
     // numbers happen to say.
     try std.testing.expect(notice.measure(.{
-        .display = @enumFromInt(4),
+        .display = @fromBackingInt(@intCast(4)),
         .display_scale = 1.0,
         .size = .{ .width = 900, .height = 620 },
         .pixels = .{ .width = 1800, .height = 1240 },
@@ -1506,7 +1506,7 @@ test "api-w07 a window's scale baseline is the last reading a CONSUMER was given
     // scale change. It is still the reading the next event is measured
     // against, which is what leaves a collapse to `divergence` instead.
     try std.testing.expect(!notice.measure(.{
-        .display = @enumFromInt(4),
+        .display = @fromBackingInt(@intCast(4)),
         .display_scale = 1.0,
         .size = .{ .width = 0, .height = 0 },
         .pixels = .{ .width = 0, .height = 0 },
@@ -1589,7 +1589,7 @@ test "api-w07 requested and observed state diverge only where the platform repor
     const seen: contracts.ObservedState = .{
         .size = .{ .width = 400, .height = 300 },
         .pixels = .{ .width = 400, .height = 300 },
-        .display = @enumFromInt(0),
+        .display = @fromBackingInt(@intCast(0)),
         .display_scale = 1,
         .position = .{ .x = 10, .y = 20 },
         .visible = true,
@@ -1776,7 +1776,7 @@ const held_dialog_vtable: dialogs.DialogProvider.VTable = .{
 const DialogOrder = struct {
     /// `d` is the dialog outcome, `c` the window's own closed report. Only
     /// the first `count` marks are live.
-    marks: [8]u8 = [_]u8{'.'} ** 8,
+    marks: [8]u8 = @splat('.'),
     count: usize = 0,
     outcome: ?dialogs.FileOutcome = null,
 
@@ -1856,14 +1856,14 @@ test "api-w07 a closing parent answers its own dialog before the window is torn 
 const DropRecord = struct {
     /// Only the first `count` phases are live; `begin` stands in for phases
     /// that never arrived.
-    phases: [8]open_url.DropPhase = [_]open_url.DropPhase{.begin} ** 8,
+    phases: [8]open_url.DropPhase = @splat(.begin),
     count: usize = 0,
     handle: ?contracts.WindowHandle = null,
     position: ?[2]f32 = null,
     offer: ?open_url.DropOffer = null,
     launches: usize = 0,
     /// Only the first `launch_len` bytes are live.
-    launch_value: [64]u8 = [_]u8{0} ** 64,
+    launch_value: [64]u8 = @splat(0),
     launch_len: usize = 0,
 
     fn onEvent(ctx: *anyopaque, _: *Application, event: Application.Event) anyerror!void {

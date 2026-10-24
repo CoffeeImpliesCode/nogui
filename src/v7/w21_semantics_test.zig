@@ -564,9 +564,9 @@ fn annotateNotes(draft: *semantics.Draft) void {
     draft.text = .{
         .value = "second field",
         .selection = .{ .anchor = 6, .focus = 6 },
-        .character_lengths = &([_]u8{1} ** 12),
-        .character_positions = &([_]f32{0} ** 12),
-        .character_widths = &([_]f32{7} ** 12),
+        .character_lengths = &@as([12]u8, @splat(1)),
+        .character_positions = &@as([12]f32, @splat(0)),
+        .character_widths = &@as([12]f32, @splat(7)),
     };
 }
 
@@ -585,9 +585,9 @@ fn annotateReadOnly(root: *Root, draft: *semantics.Draft) void {
     draft.text = .{
         .value = "fixed value",
         .selection = .{ .anchor = 2, .focus = 2 },
-        .character_lengths = &([_]u8{1} ** 11),
-        .character_positions = &([_]f32{0} ** 11),
-        .character_widths = &([_]f32{6} ** 11),
+        .character_lengths = &@as([11]u8, @splat(1)),
+        .character_positions = &@as([11]f32, @splat(0)),
+        .character_widths = &@as([11]f32, @splat(6)),
     };
     if (!root.force_readonly_actions) return;
     var actions: semantics.ActionSet = .{};
@@ -1555,8 +1555,8 @@ test "api-w21 an edit too large for its bound leaves the model exactly as it was
     const field = try findByName(snapshot, "Library");
     const dispatcher = fixture.dispatcher();
     // Enough to take the field from eight bytes to exactly its own bound.
-    const filler: []const u8 = "a" ** 56;
-    const full: []const u8 = "a" ** 64;
+    const filler: []const u8 = &@as([56]u8, @splat('a'));
+    const full: []const u8 = &@as([64]u8, @splat('a'));
 
     // The caller's own composition buffer is the tighter of the two bounds:
     // eight bytes fit it exactly and nine do not fit at all.
@@ -1615,8 +1615,8 @@ test "api-w21 a whole value the model cannot hold is refused before the setter" 
     const dispatcher = fixture.dispatcher();
     const scratch = fixture.scratch();
     // The field's own bound, and one byte past it.
-    const full: []const u8 = "a" ** 64;
-    const over: []const u8 = "a" ** 65;
+    const full: []const u8 = &@as([64]u8, @splat('a'));
+    const over: []const u8 = &@as([65]u8, @splat('a'));
 
     // Exactly the model's own bound is a value it takes.
     try expectWidget(snapshot.dispatch(.{

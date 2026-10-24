@@ -296,7 +296,7 @@ pub const Measurement = struct {
 
 /// Drive the scenario the way a host would, and print the result.
 pub fn main() !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

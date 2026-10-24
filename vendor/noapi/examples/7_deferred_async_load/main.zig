@@ -231,10 +231,11 @@ pub fn main(init: std.process.Init) !void {
                         selected_texture_type = (selected_texture_type + 1) % 4;
                         const names = [_][*:0]const u8{ "Albedo", "Normal", "Metallic/Roughness", "Shaded" };
                         var buf: [128]u8 = undefined;
-                        const title = std.fmt.bufPrintZ(
+                        const title = std.mem.printSentinel(
                             &buf,
                             "Deferred Shading — {s}",
                             .{names[selected_texture_type]},
+                            0,
                         ) catch "Deferred Shading";
                         app.sdl_win.setTitle(title) catch |err| std.log.warn("setTitle failed: {}", .{err});
                     }

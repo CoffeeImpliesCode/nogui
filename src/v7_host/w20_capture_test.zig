@@ -34,7 +34,7 @@ const TestOwner = struct {
 const Counters = struct {
     live: usize = 0,
     released: usize = 0,
-    storage: [512]u8 = [_]u8{0} ** 512,
+    storage: [512]u8 = @splat(0),
     next_slot: usize = 0,
 
     /// The byte size one fake frame occupies in `storage`.
@@ -906,9 +906,9 @@ test "api-w20 source and mode sets carry the portal wire values" {
     try std.testing.expect(!levels.supports(.until_revoked));
 
     // The portal spells the cursor and persistence levels as plain integers.
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(capture.CursorMode.embedded));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(capture.CursorMode.metadata));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(capture.PersistenceMode.until_revoked));
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(capture.CursorMode.embedded));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(capture.CursorMode.metadata));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(capture.PersistenceMode.until_revoked));
 }
 
 test "api-w20 only active states may still change and terminal states may not" {
@@ -1161,7 +1161,7 @@ test "api-w20 a frame without pixels reports no payload" {
 const TestPod = struct {
     // `put` writes every byte that `len` covers before the reader takes the
     // pod, so the zeroed tail beyond `len` is never part of the message.
-    bytes: [256]u8 = [_]u8{0} ** 256,
+    bytes: [256]u8 = @splat(0),
     len: usize = 0,
 
     fn put(self: *TestPod, value: u32) void {
@@ -1526,30 +1526,30 @@ test "api-w20 the entry-point table cannot be built half resolved" {
     // make one partial is a field that was declared and never resolved. Every
     // field therefore names a symbol of its own, in field order, and the two
     // lists are checked against each other when this file is compiled.
-    const fields = std.meta.fields(pipewire.Api);
-    try std.testing.expectEqual(fields.len, pipewire.Api.symbols.len);
-    // `StructField` values are comptime data, so the walk over them is
+    const api_info = @typeInfo(pipewire.Api).@"struct";
+    try std.testing.expectEqual(api_info.field_names.len, pipewire.Api.symbols.len);
+    // Field types are comptime data, so the walk over them is
     // unrolled rather than indexed at runtime.
-    inline for (fields, pipewire.Api.symbols) |field, name| {
-        try std.testing.expectEqualStrings(field.name, name);
+    inline for (api_info.field_names, api_info.field_types, api_info.field_attrs, pipewire.Api.symbols) |field_name, field_type, field_attrs, name| {
+        try std.testing.expectEqualStrings(field_name, name);
         // A field with a default would let a table be built by omission, and
         // that omission is exactly the partial table nothing may observe.
-        try std.testing.expect(field.default_value_ptr == null);
+        try std.testing.expect(field_attrs.default_value_ptr == null);
         // Every entry point is a C function pointer, so a resolved field has
         // no other shape a half filled table could be carrying. A function
         // pointer is two type unions deep, so each one is read through its
         // active variant: the outer one is the pointer, and the calling
         // convention lives on the function it points at. A field that is
         // neither is refused here instead of passing a check it cannot make.
-        const convention: std.builtin.CallingConvention = switch (@typeInfo(field.type)) {
+        const convention: std.lang.CallingConvention = switch (@typeInfo(field_type)) {
             .pointer => |pointer| switch (@typeInfo(pointer.child)) {
-                .@"fn" => |fun| fun.calling_convention,
+                .@"fn" => |fun| fun.attrs.@"callconv",
                 else => @compileError("an Api field points at something that is not callable"),
             },
-            .@"fn" => |fun| fun.calling_convention,
+            .@"fn" => |fun| fun.attrs.@"callconv",
             else => @compileError("an Api field is neither a function nor a pointer to one"),
         };
-        try std.testing.expectEqual(std.builtin.CallingConvention.c, convention);
+        try std.testing.expectEqual(std.lang.CallingConvention.c, convention);
     }
 }
 

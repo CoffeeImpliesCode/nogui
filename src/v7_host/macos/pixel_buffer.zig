@@ -297,7 +297,7 @@ pub fn describe(gpa: std.mem.Allocator, buffer: *anyopaque, mode: CopyMode) Erro
     const plane_count: usize = @intCast(layout.plane_count);
     if (plane_count == 0 or plane_count > layout.planes.len) return .geometry_invalid;
 
-    var planes: [4]PlaneDescriptor = [_]PlaneDescriptor{.{}} ** 4;
+    var planes: [4]PlaneDescriptor = @splat(.{});
     for (0..plane_count) |index| {
         const plane = layout.planes[index];
         if (plane.data == null or plane.stride == 0 or plane.width == 0) return .geometry_invalid;

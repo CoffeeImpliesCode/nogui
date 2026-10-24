@@ -4,12 +4,7 @@
 //! Run with: zig build glyph
 
 const std = @import("std");
-const c = @cImport({
-    @cDefine("FT2_BUILD_LIBRARY", "1");
-    @cInclude("freetype/freetype.h");
-    @cInclude("freetype/ftoutln.h");
-    @cInclude("freetype/ftglyph.h");
-});
+const c = @import("nogui_freetype_c");
 
 const QuadCurve = struct { p0x: f32, p0y: f32, p1x: f32, p1y: f32, p2x: f32, p2y: f32 };
 

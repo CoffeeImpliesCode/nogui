@@ -78,10 +78,10 @@ test "fixed block root forces auto-height flex width and keeps natural height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const measured_id: FrameNodeId = @enumFromInt(1);
-    const fixed_id: FrameNodeId = @enumFromInt(2);
-    const flex_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const measured_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const fixed_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
 
     try appendNode(
         &tree,
@@ -127,10 +127,10 @@ test "auto-height block preserves intrinsic main size of wrapped column flex" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const flex_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     try appendNode(&tree, first_id, flex_id, fixedStyle(.block, 20, 20), .{ .spacer = .{} });
     try appendNode(&tree, second_id, flex_id, fixedStyle(.block, 20, 20), .{ .spacer = .{} });
     var flex_style = autoStyle(.flex);
@@ -158,9 +158,9 @@ test "mixed natural measurement allows width percentage with intrinsic height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try appendNode(&tree, leaf_id, flex_id, fixedStyle(.block, 10, 10), .{ .spacer = .{} });
     var flex_style = autoStyle(.flex);
     flex_style.direction = .row;
@@ -182,10 +182,10 @@ test "fixed flex root uses auto grid tracks and gap as natural size" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const grid_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
 
@@ -217,10 +217,10 @@ test "fixed grid root gives wrapped flex a natural auto height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const flex_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     const columns = [_]style.GridTrack{.{ .fixed = 100 }};
     const rows = [_]style.GridTrack{.auto};
 
@@ -254,9 +254,9 @@ test "cross-layout block natural size honors minimum and maximum constraints" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const block_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const block_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try appendNode(&tree, leaf_id, block_id, fixedStyle(.block, 50, 20), .{ .spacer = .{} });
     var block_style = autoStyle(.flow_root);
@@ -280,12 +280,12 @@ test "hidden auto mixed subtree remains zero" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
-    const grid_id: FrameNodeId = @enumFromInt(3);
-    const hidden_id: FrameNodeId = @enumFromInt(4);
-    const visible_id: FrameNodeId = @enumFromInt(5);
-    const root_id: FrameNodeId = @enumFromInt(6);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const hidden_id: FrameNodeId = @fromBackingInt(@intCast(4));
+    const visible_id: FrameNodeId = @fromBackingInt(@intCast(5));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(6));
 
     try appendNode(&tree, leaf_id, flex_id, fixedStyle(.block, 10, 10), .{ .spacer = .{} });
     try appendNode(&tree, flex_id, grid_id, autoStyle(.flex), .{ .row = .{} });

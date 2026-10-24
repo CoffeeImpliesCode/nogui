@@ -236,7 +236,7 @@ const Case = enum {
 
     fn parse(text: []const u8) ?Case {
         for (names, 0..) |name, index| {
-            if (std.mem.eql(u8, name, text)) return @enumFromInt(index);
+            if (std.mem.eql(u8, name, text)) return @fromBackingInt(@intCast(index));
         }
         return null;
     }
@@ -282,7 +282,7 @@ const anchor_hidden_visibility: nogui.style.Visibility = .hidden;
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -1280,7 +1280,7 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Options {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -1392,7 +1392,7 @@ fn run(
         try runner.runCase(Case.parse(name).?);
     } else {
         for (Case.names, 0..) |_, index| {
-            try runner.runCase(@enumFromInt(index));
+            try runner.runCase(@fromBackingInt(@intCast(index)));
         }
     }
 }
@@ -1500,7 +1500,7 @@ const Runner = struct {
             _ = pixels;
             try self.checks.claim(label, false);
             try self.report.emit("       case {s} published instead of being refused\n", .{
-                Case.names[@intFromEnum(case)],
+                Case.names[@backingInt(case)],
             });
             return;
         } else |err| {
@@ -1573,7 +1573,7 @@ const Runner = struct {
         const path = try std.fmt.allocPrint(
             self.gpa,
             "{s}/{s}-{s}.ppm",
-            .{ dir, self.options.prefix, Case.names[@intFromEnum(case)] },
+            .{ dir, self.options.prefix, Case.names[@backingInt(case)] },
         );
         defer self.gpa.free(path);
         try frame_mod.writePpm(self.gpa, self.io, path, pixels, device_extent);
@@ -1584,7 +1584,7 @@ const Runner = struct {
 
     fn runCase(self: *Runner, case: Case) !void {
         const before = self.checks.passed + self.checks.failed;
-        try self.report.emit("CASE {s}\n", .{Case.names[@intFromEnum(case)]});
+        try self.report.emit("CASE {s}\n", .{Case.names[@backingInt(case)]});
         switch (case) {
             .a_priority_low_first => try self.caseOrder(
                 case,
@@ -1609,7 +1609,7 @@ const Runner = struct {
             .j_dormant_overlay => try self.caseDormant(),
         }
         const made = self.checks.passed + self.checks.failed - before;
-        try self.report.emit("CASE {s} done, {d} claims\n", .{ Case.names[@intFromEnum(case)], made });
+        try self.report.emit("CASE {s} done, {d} claims\n", .{ Case.names[@backingInt(case)], made });
     }
 
     /// The shared body of A and B: two same-size popups on the same rect, one of

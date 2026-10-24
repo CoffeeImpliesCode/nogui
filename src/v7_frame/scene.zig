@@ -1320,8 +1320,8 @@ test "resolveShowcaseBox preserves malformed-map fallback and missing-ID default
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id: FrameNodeId = @enumFromInt(1);
-    const unrelated_id: FrameNodeId = @enumFromInt(2);
+    const id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const unrelated_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const expected_rect: Rect = .{ .x = 5, .y = 7, .w = 30, .h = 20 };
     try tree.appendNode(.{
         .id = id,
@@ -1354,7 +1354,7 @@ test "resolveShowcaseBox preserves malformed-map fallback and missing-ID default
     try tree.id_index.put(tree.allocator, unrelated_id, 0);
     try std.testing.expectError(error.InvalidStyle, resolveShowcaseBox(&tree, id));
 
-    const missing = try resolveShowcaseBox(&tree, @enumFromInt(99));
+    const missing = try resolveShowcaseBox(&tree, @fromBackingInt(@intCast(99)));
     try std.testing.expectEqual(
         ShowcaseBox{
             .rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },

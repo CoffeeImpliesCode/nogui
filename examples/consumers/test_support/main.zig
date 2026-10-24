@@ -109,8 +109,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "api-w26 nogui_test drives a deterministic script twice" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch @panic("leak");
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch @panic("leak");
     const gpa = gpa_state.allocator();
 
     const left = try Context.create(gpa, seed);

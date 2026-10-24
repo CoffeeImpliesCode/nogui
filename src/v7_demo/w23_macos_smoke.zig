@@ -208,7 +208,7 @@ const max_frame_attempts: u32 = 8;
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
     checks: u32 = 0,
     failures: u32 = 0,
 
@@ -317,7 +317,7 @@ const Insertion = struct {
 /// One bounded copy of the model's state, so a readback compares VALUES
 /// instead of holding a Session borrow across a native call.
 const Snapshot = struct {
-    buffer: [512]u8 = [_]u8{0} ** 512,
+    buffer: [512]u8 = @splat(0),
     len: usize = 0,
     selection: Selection = .{},
     marked: ?Utf16Range = null,
@@ -2828,8 +2828,8 @@ fn runNative(run: *Run) !void {
 // Main.
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer if (gpa_state.deinit() == .leak) @panic("W23 macOS smoke leaked");
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer if (gpa_state.deinit() != 0) @panic("W23 macOS smoke leaked");
     const gpa = gpa_state.allocator();
 
     var io_impl: Io.Threaded = .init(gpa, .{});

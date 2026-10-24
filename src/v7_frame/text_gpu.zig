@@ -103,7 +103,7 @@ const FontState = struct {
     weight: u16,
     ascent: f32,
     descent: f32,
-    empty_glyphs: std.DynamicBitSetUnmanaged,
+    empty_glyphs: std.bit_set.Dynamic,
     /// One stable entry index per glyph id; absent entries use the sentinel.
     entry_indices: []u32,
 
@@ -121,7 +121,7 @@ const FontState = struct {
     fn init(gpa: std.mem.Allocator, options: InitOptions) !FontState {
         const glyph_count = std.math.cast(usize, options.face.*.num_glyphs) orelse
             return error.FreeTypeFaceFailed;
-        var empty_glyphs = try std.DynamicBitSetUnmanaged.initEmpty(gpa, glyph_count);
+        var empty_glyphs = try std.bit_set.Dynamic.initEmpty(gpa, glyph_count);
         errdefer empty_glyphs.deinit(gpa);
         const entry_indices = try gpa.alloc(u32, glyph_count);
         errdefer gpa.free(entry_indices);
@@ -206,7 +206,7 @@ pub const TextEngine = struct {
     glyph_margin: [2]f32 = .{ 2, 2 },
     /// Per-size font states (FT face + hb font + metrics); the default
     /// size is created at init, others lazily on first use.
-    fonts: [max_font_sizes]?FontState = .{null} ** max_font_sizes,
+    fonts: [max_font_sizes]?FontState = @splat(null),
     // Parallel arrays, one element per rasterized glyph:
     // sweepers[i] owns the GPU curve buffer backing entries[i].
     sweepers: std.ArrayList(renderer.GlyphSweeper) = .empty, // per glyph
@@ -337,7 +337,7 @@ pub const TextEngine = struct {
             .material_bda = materials.gpu,
             .service = service,
             .fonts = blk: {
-                var states: [max_font_sizes]?FontState = .{null} ** max_font_sizes;
+                var states: [max_font_sizes]?FontState = @splat(null);
                 states[0] = font_state;
                 break :blk states;
             },
@@ -2030,7 +2030,7 @@ const EmptyGlyphCpuFixture = struct {
         engine.gpa = gpa;
         engine.pixel_scale = .{ .x = 1, .y = 1 };
         engine.glyph_margin = .{ 2, 2 };
-        engine.fonts = .{null} ** max_font_sizes;
+        engine.fonts = @splat(null);
         engine.sweepers = .empty;
         engine.entries = .empty;
         engine.scratch = std.heap.ArenaAllocator.init(gpa);

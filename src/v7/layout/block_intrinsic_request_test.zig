@@ -69,9 +69,9 @@ test "auto intrinsic block height leaves flex percentage height indefinite" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.appendNode(.{
         .id = leaf_id,
@@ -143,9 +143,9 @@ test "definite Block availability does not define an auto percentage axis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.appendNode(.{
         .id = leaf_id,
@@ -219,7 +219,7 @@ test "content-sized block root does not reconstruct an unknown axis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -273,7 +273,7 @@ test "inherent block root known border overrides style" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -322,7 +322,7 @@ test "content-sized block root floors known border by edges and gutter" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -381,8 +381,8 @@ test "block root sizing override does not leak to descendants" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = "probe" } },
@@ -441,7 +441,7 @@ test "block natural measurement returns OutOfMemory when scratch allocation fail
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },

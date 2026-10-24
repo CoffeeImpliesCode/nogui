@@ -754,7 +754,7 @@ test "api-w23 macos an insertion no slot can hold is refused and counted" {
     // A slot holds `insert_text_limit` bytes. Longer text is refused whole,
     // because truncating it would hand the host an insertion replacing a range
     // the palette never named.
-    const too_long = "y" ** (insert_text_limit + 1);
+    const too_long = &@as([insert_text_limit + 1]u8, @splat('y'));
     Responder.onInsert(@ptrCast(&responder), too_long.ptr, too_long.len, 0, 0);
     try std.testing.expectEqual(@as(u16, 0), responder.insertion_count);
     try std.testing.expectEqual(@as(u32, 1), responder.droppedInsertions());

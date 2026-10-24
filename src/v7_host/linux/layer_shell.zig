@@ -88,7 +88,7 @@ pub const InputRegionMode = enum(u8) {
 
 pub const InputRegion = struct {
     mode: InputRegionMode = .inherit,
-    rects: [8]InputRect = [_]InputRect{.{ .x = 0, .y = 0, .width = 0, .height = 0 }} ** 8,
+    rects: [8]InputRect = @splat(.{ .x = 0, .y = 0, .width = 0, .height = 0 }),
     count: u32 = 0,
 
     /// Take no input, so the surface is transparent to the pointer.

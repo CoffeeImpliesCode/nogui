@@ -1204,7 +1204,7 @@ fn buildReport(
     report.published_nodes = snapshot.count();
     const identity = semantics.nodeId(consumer.field_id, .self_node);
     const entry = snapshot.node(identity) orelse return error.MissingSemanticField;
-    report.semantic_role = @intFromEnum(entry.role);
+    report.semantic_role = @backingInt(entry.role);
     report.semantic_name_len = @min(entry.name.len, report.semantic_name.len);
     @memcpy(report.semantic_name[0..report.semantic_name_len], entry.name[0..report.semantic_name_len]);
     const text = entry.text orelse return error.MissingSemanticText;
@@ -2510,7 +2510,7 @@ fn emitRecord(gpa: std.mem.Allocator, io: std.Io, report: *const FieldReport, mo
     try out.appendSlice(gpa, ",\"last_grapheme_end_x\":");
     try appendNumber(&out, gpa, report.last_grapheme_end_x);
     try out.appendSlice(gpa, ",\"semantic\":{\"role\":");
-    try appendJsonText(&out, gpa, @tagName(@as(semantics.Role, @enumFromInt(report.semantic_role))));
+    try appendJsonText(&out, gpa, @tagName(@as(semantics.Role, @fromBackingInt(@intCast(report.semantic_role)))));
     try out.appendSlice(gpa, ",\"name\":");
     try appendJsonText(&out, gpa, report.semanticNameSlice());
     try out.appendSlice(gpa, ",\"value\":");
@@ -2758,8 +2758,8 @@ fn expectDocumentedTrace(report: *const FieldReport) !void {
 }
 
 test "api-w25 the real-font window-free field runs the documented script and publishes shaped geometry" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const report = try runHeadless(gpa_state.allocator());
 
     // The sequence is not vacuous: "ab" plus one committed 'd', one composition
@@ -2813,7 +2813,7 @@ test "api-w25 the real-font window-free field runs the documented script and pub
 
     // Semantics describe the live field: an addressable text input whose
     // published value and selection match the model.
-    try std.testing.expectEqual(@as(u8, @intFromEnum(semantics.Role.text_input)), report.semantic_role);
+    try std.testing.expectEqual(@as(u8, @backingInt(semantics.Role.text_input)), report.semantic_role);
     try std.testing.expectEqualStrings("abd\xe3\x81\x84", report.semanticValueSlice());
     // Shift+Home leaves the anchor at the UTF-8 end and the moving focus at 0.
     try std.testing.expectEqual(@as(usize, 6), report.semantic_anchor);
@@ -2827,8 +2827,8 @@ test "api-w25 the real-font window-free field runs the documented script and pub
 }
 
 test "api-w12 a routed paste replaces a selected multibyte range exactly once" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     // The window-free route and the sequence it runs, so the endpoint this test
@@ -2917,8 +2917,8 @@ test "api-w12 a routed paste replaces a selected multibyte range exactly once" {
 }
 
 test "api-w12 a candidate readback that disagrees with the shaped caret is rejected" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -2969,8 +2969,8 @@ test "api-w12 a candidate readback that disagrees with the shaped caret is rejec
 }
 
 test "api-w12 example field types once, pastes back and cancels on blur" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -3016,8 +3016,8 @@ test "api-w12 example field types once, pastes back and cancels on blur" {
 }
 
 test "api-w12 App routes committed text to its focused model and blocks button defaults" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -3074,8 +3074,8 @@ fn readUnits(consumer: *Consumer) !Selection {
 }
 
 test "api-w12 Home and End move by line, never by one character" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -3113,8 +3113,8 @@ test "api-w12 Home and End move by line, never by one character" {
 }
 
 test "api-w25 line and word motion resolve against the layout's own lines and graphemes" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -3178,8 +3178,8 @@ test "api-w25 line and word motion resolve against the layout's own lines and gr
 }
 
 test "api-w25 a stale layout is dropped and the caret follows the real glyphs" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -3221,8 +3221,8 @@ test "api-w25 a stale layout is dropped and the caret follows the real glyphs" {
 }
 
 test "api-w25 a combining mark and a non-BMP codepoint are one grapheme each" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -3276,8 +3276,8 @@ test "api-w25 a combining mark and a non-BMP codepoint are one grapheme each" {
 }
 
 test "api-w25 a selected range is replaced exactly once across multibyte units" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);
@@ -3336,8 +3336,8 @@ const HitOnce = struct {
 };
 
 test "api-w25 the hit test walks the shaped grapheme boxes, not a column count" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var pinned = try TestFont.init(gpa);

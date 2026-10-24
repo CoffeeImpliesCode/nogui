@@ -107,7 +107,7 @@ pub const TigerApp = struct {
                 {
                     _ = try ctx.row(.{});
                     defer ctx.pop();
-                    svg_box_id = @intFromEnum(try ctx.column(.{
+                    svg_box_id = @backingInt(try ctx.column(.{
                         .flex_basis = tiger_scene_box_size,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
@@ -189,7 +189,7 @@ pub const TestStrokesApp = struct {
                 {
                     _ = try ctx.row(.{});
                     defer ctx.pop();
-                    svg_box_id = @intFromEnum(try ctx.column(.{
+                    svg_box_id = @backingInt(try ctx.column(.{
                         .flex_basis = stroke_scene_box_size,
                         .box_sizing = .border_box,
                         .border = .{ .top = 1, .right = 1, .bottom = 1, .left = 1 },
@@ -1106,7 +1106,7 @@ pub const TodoApp = struct {
                 {
                     _ = try ctx.row(.{ .direction = .row });
                     defer ctx.pop();
-                    svg_box_id = @intFromEnum(try ctx.column(.{
+                    svg_box_id = @backingInt(try ctx.column(.{
                         .flex_basis = 190, // fixed width — the same height as the mandelbrot's box
                         .gap = 0,
                         .box_sizing = .border_box,

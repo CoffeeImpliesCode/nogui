@@ -7,7 +7,7 @@ pub const Format = enum {
     image_png,
     metadata_json,
 
-    pub const count = @typeInfo(Format).@"enum".fields.len;
+    pub const count = @typeInfo(Format).@"enum".field_names.len;
 
     /// Primary standard MIME type string with null terminator.
     pub fn mime(self: Format) [:0]const u8 {
@@ -78,9 +78,9 @@ pub const Item = struct {
     pub fn init(allocator: std.mem.Allocator, entries: []const Entry) Error!Item {
         if (entries.len == 0) return error.EmptyItem;
 
-        var seen = [_]bool{false} ** Format.count;
+        var seen: [Format.count]bool = @splat(false);
         for (entries) |entry| {
-            const idx = @intFromEnum(entry.format);
+            const idx = @backingInt(entry.format);
             if (seen[idx]) return error.DuplicateFormat;
             seen[idx] = true;
 
@@ -106,7 +106,7 @@ pub const Item = struct {
             }
         }
 
-        var slots = [_]?[]const u8{null} ** Format.count;
+        var slots: [Format.count]?[]const u8 = @splat(null);
         errdefer {
             for (&slots) |*slot| {
                 if (slot.*) |b| {
@@ -118,7 +118,7 @@ pub const Item = struct {
 
         for (entries) |entry| {
             const duped = try allocator.dupe(u8, entry.bytes);
-            slots[@intFromEnum(entry.format)] = duped;
+            slots[@backingInt(entry.format)] = duped;
         }
 
         return .{
@@ -143,17 +143,17 @@ pub const Item = struct {
     /// Retrieve the payload for a format, or null if absent.
     /// Distinguishes an absent format (null) from an empty payload (len == 0).
     pub fn get(self: *const Item, format: Format) ?[]const u8 {
-        return self.slots[@intFromEnum(format)];
+        return self.slots[@backingInt(format)];
     }
 
     /// Query whether this format is present in the item.
     pub fn has(self: *const Item, format: Format) bool {
-        return self.slots[@intFromEnum(format)] != null;
+        return self.slots[@backingInt(format)] != null;
     }
 
     /// Create an independent deep copy of this item.
     pub fn clone(self: *const Item, allocator: std.mem.Allocator) !Item {
-        var slots = [_]?[]const u8{null} ** Format.count;
+        var slots: [Format.count]?[]const u8 = @splat(null);
         errdefer {
             for (&slots) |*slot| {
                 if (slot.*) |b| {
@@ -231,7 +231,7 @@ pub const Offer = struct {
 
         var mime_count: usize = 0;
         for (0..Format.count) |i| {
-            const fmt: Format = @enumFromInt(i);
+            const fmt: Format = @fromBackingInt(@intCast(i));
             if (item.has(fmt)) {
                 mime_count += 1;
                 // Offer text/plain alias for text_utf8
@@ -244,7 +244,7 @@ pub const Offer = struct {
 
         var idx: usize = 0;
         for (0..Format.count) |i| {
-            const fmt: Format = @enumFromInt(i);
+            const fmt: Format = @fromBackingInt(@intCast(i));
             if (item.has(fmt)) {
                 mimes[idx] = fmt.mime().ptr;
                 idx += 1;

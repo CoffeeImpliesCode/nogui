@@ -91,7 +91,7 @@ const Namespace = enum(u32) {
     /// The tag one row of this menu carries.
     fn tag(self: Namespace, index: usize) Error!c_int {
         if (index > row_mask) return error.BadArgument;
-        const encoded = (@as(u32, @intFromEnum(self)) << namespace_bits) | @as(u32, @intCast(index));
+        const encoded = (@as(u32, @backingInt(self)) << namespace_bits) | @as(u32, @intCast(index));
         return @intCast(encoded);
     }
 
@@ -99,7 +99,7 @@ const Namespace = enum(u32) {
     /// belongs to another menu or to no menu at all.
     fn row(self: Namespace, reported: c_int) ?usize {
         const encoded: u32 = @bitCast(reported);
-        if (encoded >> namespace_bits != @intFromEnum(self)) return null;
+        if (encoded >> namespace_bits != @backingInt(self)) return null;
         return @intCast(encoded & row_mask);
     }
 };
@@ -201,7 +201,7 @@ const Table = struct {
         const label = (try self.scratch.nul(entries.title)) orelse return error.BadArgument;
         try self.nodes.append(self.gpa, .{
             .parent = parent,
-            .kind = @intFromEnum(Kind.menu),
+            .kind = @backingInt(Kind.menu),
             .action_kind = -1,
             .action_index = -1,
             .system_action = -1,
@@ -223,7 +223,7 @@ const Table = struct {
             .separator => {
                 try self.nodes.append(self.gpa, .{
                     .parent = parent,
-                    .kind = @intFromEnum(Kind.separator),
+                    .kind = @backingInt(Kind.separator),
                     .action_kind = -1,
                     .action_index = -1,
                     .system_action = -1,
@@ -245,7 +245,7 @@ const Table = struct {
                 const menu_index: c_int = @intCast(index);
                 try self.nodes.append(self.gpa, .{
                     .parent = parent,
-                    .kind = @intFromEnum(Kind.menu),
+                    .kind = @backingInt(Kind.menu),
                     .action_kind = -1,
                     .action_index = -1,
                     .system_action = -1,
@@ -266,10 +266,10 @@ const Table = struct {
             (try self.scratch.nul(text)) orelse return error.BadArgument
         else
             null;
-        const system_action: c_int = if (entry.system_action) |action| @intFromEnum(action) else -1;
+        const system_action: c_int = if (entry.system_action) |action| @backingInt(action) else -1;
         try self.nodes.append(self.gpa, .{
             .parent = parent,
-            .kind = @intFromEnum(Kind.item),
+            .kind = @backingInt(Kind.item),
             // A system action is carried on the node itself; a registry action
             // is carried by the row's routing tag, which is what the host
             // resolves.
@@ -294,7 +294,7 @@ const Table = struct {
     fn recent(self: *Table) Error!void {
         try self.nodes.append(self.gpa, .{
             .parent = -1,
-            .kind = @intFromEnum(Kind.recent),
+            .kind = @backingInt(Kind.recent),
             .action_kind = -1,
             .action_index = -1,
             .system_action = -1,

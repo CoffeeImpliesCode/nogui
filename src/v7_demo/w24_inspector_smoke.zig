@@ -99,7 +99,7 @@ const window_height: u32 = 520;
 /// function-pointer type instead of touching production exports.
 const OnFrameFn = @typeInfo(@FieldType(Application.Hooks, "on_frame")).optional.child;
 const managed_window_ptr =
-    @typeInfo(@typeInfo(OnFrameFn).pointer.child).@"fn".params[2].type.?;
+    @typeInfo(@typeInfo(OnFrameFn).pointer.child).@"fn".param_types[2].?;
 
 /// Fixed capacities for the three bounded collectors. Chosen small on purpose:
 /// the run must show retention saturating, not merely filling.
@@ -983,7 +983,7 @@ const Dispatch = nogui.action.Action(void, "smoke.dispatch");
 
 const Reporter = struct {
     io: Io,
-    buffer: [8192]u8 = [_]u8{0} ** 8192,
+    buffer: [8192]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -2035,7 +2035,7 @@ const Cleanup = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -2383,7 +2383,7 @@ pub fn main(init: std.process.Init) !void {
     var hit_frame_text: [96]u8 = undefined;
     try report.emit("pick-1 input hitTest: {s}\n", .{
         if (hit_frame) |f|
-            std.fmt.bufPrint(&hit_frame_text, "frame_node={d}", .{@intFromEnum(f)}) catch "<overflow>"
+            std.fmt.bufPrint(&hit_frame_text, "frame_node={d}", .{@backingInt(f)}) catch "<overflow>"
         else
             "<none>",
     });
@@ -2404,15 +2404,15 @@ pub fn main(init: std.process.Init) !void {
         picked.frame_number,
     });
     const pick_agrees_frame = hit_frame != null and
-        @intFromEnum(hit_frame.?) == @intFromEnum(resolved1.frame_node_id);
+        @backingInt(hit_frame.?) == @backingInt(resolved1.frame_node_id);
     const pick_agrees_stable = hit_stable != null and hit_stable.?.eql(resolved1.id);
     try report.emit("pick-1 agreement: pick_node==input_hitTest={} pick_id==input_hitStable={}\n", .{
         pick_agrees_frame,
         pick_agrees_stable,
     });
     try report.emit("pick-1 routed: node={?d} tree_node={?d}\n", .{
-        if (pick1.node) |n| @as(u32, @intFromEnum(n)) else null,
-        if (pick1.tree_node) |n| @as(u32, @intFromEnum(n)) else null,
+        if (pick1.node) |n| @as(u32, @backingInt(n)) else null,
+        if (pick1.tree_node) |n| @as(u32, @backingInt(n)) else null,
     });
     try report.emit("pick-1 selection: selected_handle_set={} resolveSelection_label=\"{s}\"\n", .{
         inspector.selected() != null,
@@ -2877,10 +2877,10 @@ pub fn main(init: std.process.Init) !void {
         cover.point[1],
         sheet_cover.matched(),
         finalReadText(target.presents(), sheet_cover.finalMatched()),
-        if (cover_pick.node) |n| @as(u32, @intFromEnum(n)) else null,
-        if (cover_overlay) |n| @as(u32, @intFromEnum(n)) else null,
-        if (cover_input) |n| @as(u32, @intFromEnum(n)) else null,
-        if (cover_pick.tree_node) |n| @as(u32, @intFromEnum(n)) else null,
+        if (cover_pick.node) |n| @as(u32, @backingInt(n)) else null,
+        if (cover_overlay) |n| @as(u32, @backingInt(n)) else null,
+        if (cover_input) |n| @as(u32, @backingInt(n)) else null,
+        if (cover_pick.tree_node) |n| @as(u32, @backingInt(n)) else null,
         cover_pick.node != null and cover_overlay != null and
             cover_pick.node.? == cover_overlay.?,
         cover_pick.tree_node != null and cover_input != null and
@@ -2908,10 +2908,10 @@ pub fn main(init: std.process.Init) !void {
         agree.point[1],
         sheet_agree.matched(),
         finalReadText(target.presents(), sheet_agree.finalMatched()),
-        if (agree_pick.node) |n| @as(u32, @intFromEnum(n)) else null,
-        if (agree_overlay) |n| @as(u32, @intFromEnum(n)) else null,
-        if (agree_input) |n| @as(u32, @intFromEnum(n)) else null,
-        if (agree_pick.tree_node) |n| @as(u32, @intFromEnum(n)) else null,
+        if (agree_pick.node) |n| @as(u32, @backingInt(n)) else null,
+        if (agree_overlay) |n| @as(u32, @backingInt(n)) else null,
+        if (agree_input) |n| @as(u32, @backingInt(n)) else null,
+        if (agree_pick.tree_node) |n| @as(u32, @backingInt(n)) else null,
         agree_input != null and smoke.overlay.isOverlayNode(tree_now, agree_input.?),
         if (agree_stable) |id| widgetIdText(id, &agree_stable_text) else "<none>",
         agree_stable != null and smoke.sheet_id != null and agree_stable.?.eql(smoke.sheet_id.?),
@@ -3077,8 +3077,8 @@ pub fn main(init: std.process.Init) !void {
         after_removal.frame_number,
         view.sheet_draws,
         removal_records.len,
-        if (removal_pick.node) |n| @as(u32, @intFromEnum(n)) else null,
-        if (removal_pick.tree_node) |n| @as(u32, @intFromEnum(n)) else null,
+        if (removal_pick.node) |n| @as(u32, @backingInt(n)) else null,
+        if (removal_pick.tree_node) |n| @as(u32, @backingInt(n)) else null,
         resolveOutcome(removal_result_2),
         cleared.matched(),
         finalReadText(target.presents(), cleared.finalMatched()),
@@ -3182,8 +3182,8 @@ pub fn main(init: std.process.Init) !void {
         "hit_node={?d} pick_agrees={} stable_is_child={}\n", .{
         inside_point[0],
         inside_point[1],
-        if (inside_pick.node) |n| @as(u32, @intFromEnum(n)) else null,
-        if (inside_hit) |n| @as(u32, @intFromEnum(n)) else null,
+        if (inside_pick.node) |n| @as(u32, @backingInt(n)) else null,
+        if (inside_hit) |n| @as(u32, @backingInt(n)) else null,
         inside_pick.node != null and inside_hit != null and inside_pick.node.? == inside_hit.?,
         inside_stable != null and inside_stable.?.eql(clip_child_id),
     });
@@ -3192,8 +3192,8 @@ pub fn main(init: std.process.Init) !void {
         outside_point[0],
         outside_point[1],
         inside(child.visual_bounds, outside_point),
-        if (outside_pick.node) |n| @as(u32, @intFromEnum(n)) else null,
-        if (outside_hit) |n| @as(u32, @intFromEnum(n)) else null,
+        if (outside_pick.node) |n| @as(u32, @backingInt(n)) else null,
+        if (outside_hit) |n| @as(u32, @backingInt(n)) else null,
         outside_pick.node == @as(?FrameNodeId, child.frame_node_id),
         outside_hit == @as(?FrameNodeId, child.frame_node_id),
     });

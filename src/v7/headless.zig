@@ -1349,10 +1349,10 @@ test "treeToJson: label text with quotes and backslashes round-trips" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: FrameNodeId = @enumFromInt(2);
+    const col: FrameNodeId = @fromBackingInt(@intCast(2));
     const label_text = "say \"hi\" \\ yo\nnext\tline";
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = label_text } },
         .parent = col,
     });
@@ -1362,7 +1362,7 @@ test "treeToJson: label text with quotes and backslashes round-trips" {
         .parent = .root,
     });
     // Wire the container's children after the appends (post-order).
-    try tree.appendChild(col, @enumFromInt(1));
+    try tree.appendChild(col, @fromBackingInt(@intCast(1)));
 
     const json = try treeToJson(std.testing.allocator, &tree);
     defer std.testing.allocator.free(json);
@@ -1393,17 +1393,17 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
     defer tree.deinit();
 
     var vol: f32 = 0.5;
-    const row_id: FrameNodeId = @enumFromInt(3);
-    const col_id: FrameNodeId = @enumFromInt(4);
+    const row_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const col_id: FrameNodeId = @fromBackingInt(@intCast(4));
 
     // Post-order: children before their containers.
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .slider = .{ .label = "vol", .value = &vol, .min = 0, .max = 1 } },
         .parent = row_id,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .button = .{ .label = "go" } },
         .parent = row_id,
     });
@@ -1419,8 +1419,8 @@ test "treeToJson: kind-specific fields appear only for their kinds" {
         .parent = .root,
         .style = .{ .gap = .{ .length = 5 } },
     });
-    try tree.appendChild(row_id, @enumFromInt(1));
-    try tree.appendChild(row_id, @enumFromInt(2));
+    try tree.appendChild(row_id, @fromBackingInt(@intCast(1)));
+    try tree.appendChild(row_id, @fromBackingInt(@intCast(2)));
     try tree.appendChild(col_id, row_id);
 
     const json = try treeToJson(std.testing.allocator, &tree);
@@ -1481,27 +1481,27 @@ test "treeToJson: native controls expose their state and value fields" {
     var switched = false;
     var selected: ?u32 = 42;
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .checkbox = .{ .label = "enabled", .value = &checked } },
         .parent = .root,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .switch_control = .{ .label = "dark mode", .value = &switched } },
         .parent = .root,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(3),
+        .id = @fromBackingInt(@intCast(3)),
         .kind = .{ .radio = .{ .label = "large", .selected = &selected, .option = 42 } },
         .parent = .root,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(4),
+        .id = @fromBackingInt(@intCast(4)),
         .kind = .{ .progress = .{ .label = "download", .value = 13, .min = 2, .max = 12 } },
         .parent = .root,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(5),
+        .id = @fromBackingInt(@intCast(5)),
         .kind = .{ .separator = .{ .axis = .vertical } },
         .parent = .root,
     });
@@ -1539,7 +1539,7 @@ test "treeToJson: percentage gap retains its canonical tag" {
     defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .column = .{} },
         .parent = .root,
         .style = .{ .gap = .{ .percent = 0.25 } },
@@ -1560,9 +1560,9 @@ test "treeToJsonWith: more than 32 child ids serialize in append order" {
     defer tree.deinit();
 
     const child_count: usize = 33;
-    const parent: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_count + 1)));
+    const parent: FrameNodeId = @fromBackingInt(@intCast(@as(u32, @intCast(child_count + 1))));
     for (0..child_count) |child_index| {
-        const child: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_index + 1)));
+        const child: FrameNodeId = @fromBackingInt(@intCast(@as(u32, @intCast(child_index + 1))));
         try tree.nodes.append(std.testing.allocator, .{
             .id = child,
             .kind = .{ .spacer = .{} },
@@ -1575,7 +1575,7 @@ test "treeToJsonWith: more than 32 child ids serialize in append order" {
         .parent = .root,
     });
     for (0..child_count) |child_index| {
-        const child: FrameNodeId = @enumFromInt(@as(u32, @intCast(child_index + 1)));
+        const child: FrameNodeId = @fromBackingInt(@intCast(@as(u32, @intCast(child_index + 1))));
         try tree.appendChild(parent, child);
     }
 
@@ -1645,9 +1645,9 @@ test "renderAscii: label text, button fill, slider thumb, hover border" {
     defer tree.deinit();
 
     var vol: f32 = 0.5;
-    const label_id: FrameNodeId = @enumFromInt(1);
-    const button_id: FrameNodeId = @enumFromInt(2);
-    const slider_id: FrameNodeId = @enumFromInt(3);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const button_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const slider_id: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = label_id,
@@ -1691,7 +1691,7 @@ test "renderAscii: visible button caption never exposes its semantic label" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .button = .{ .label = "SECRET", .visual_label = "VIEW" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 24 },
@@ -1782,37 +1782,37 @@ test "renderAscii: controls show checked, selected, progress, and axis marks" {
     var selected: ?u32 = 3;
     const nodes = [_]WidgetNode{
         .{
-            .id = @enumFromInt(1),
+            .id = @fromBackingInt(@intCast(1)),
             .kind = .{ .checkbox = .{ .label = "check", .value = &checked } },
             .parent = .root,
             .rect = .{ .x = 0, .y = 0, .w = 90, .h = 24 },
         },
         .{
-            .id = @enumFromInt(2),
+            .id = @fromBackingInt(@intCast(2)),
             .kind = .{ .switch_control = .{ .label = "switch", .value = &switched } },
             .parent = .root,
             .rect = .{ .x = 0, .y = 30, .w = 90, .h = 24 },
         },
         .{
-            .id = @enumFromInt(3),
+            .id = @fromBackingInt(@intCast(3)),
             .kind = .{ .radio = .{ .label = "radio", .selected = &selected, .option = 3 } },
             .parent = .root,
             .rect = .{ .x = 0, .y = 60, .w = 90, .h = 24 },
         },
         .{
-            .id = @enumFromInt(4),
+            .id = @fromBackingInt(@intCast(4)),
             .kind = .{ .progress = .{ .label = "load", .value = 15, .min = 0, .max = 10 } },
             .parent = .root,
             .rect = .{ .x = 0, .y = 90, .w = 90, .h = 40 },
         },
         .{
-            .id = @enumFromInt(5),
+            .id = @fromBackingInt(@intCast(5)),
             .kind = .{ .separator = .{ .axis = .horizontal } },
             .parent = .root,
             .rect = .{ .x = 0, .y = 140, .w = 90, .h = 1 },
         },
         .{
-            .id = @enumFromInt(6),
+            .id = @fromBackingInt(@intCast(6)),
             .kind = .{ .separator = .{ .axis = .vertical } },
             .parent = .root,
             .rect = .{ .x = 100, .y = 0, .w = 1, .h = 100 },
@@ -1850,9 +1850,9 @@ test "verifyLayout: clean tree reports OK" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: FrameNodeId = @enumFromInt(10);
-    const a: FrameNodeId = @enumFromInt(11);
-    const b: FrameNodeId = @enumFromInt(12);
+    const col: FrameNodeId = @fromBackingInt(@intCast(10));
+    const a: FrameNodeId = @fromBackingInt(@intCast(11));
+    const b: FrameNodeId = @fromBackingInt(@intCast(12));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = a,
@@ -1883,10 +1883,10 @@ test "verifyLayout: overlap, escape, and out-of-range value are reported" {
     defer tree.deinit();
 
     var vol: f32 = 5; // out of [0, 1]
-    const col: FrameNodeId = @enumFromInt(20);
-    const a: FrameNodeId = @enumFromInt(21);
-    const b: FrameNodeId = @enumFromInt(22);
-    const s: FrameNodeId = @enumFromInt(23);
+    const col: FrameNodeId = @fromBackingInt(@intCast(20));
+    const a: FrameNodeId = @fromBackingInt(@intCast(21));
+    const b: FrameNodeId = @fromBackingInt(@intCast(22));
+    const s: FrameNodeId = @fromBackingInt(@intCast(23));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = a,
@@ -1929,13 +1929,13 @@ test "layoutFingerprint: deterministic geometry and typed edges" {
     defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "dynamic counter: 7" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 148.25, .h = 24 },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .button = .{ .label = "go" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 30, .w = 56, .h = 32 },
@@ -1972,7 +1972,7 @@ test "verifyLayout: bounded ellipsis and clip text do not report overflow" {
     defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "ellipsized" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 24 },
@@ -1980,7 +1980,7 @@ test "verifyLayout: bounded ellipsis and clip text do not report overflow" {
         .text_max_width = 20,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .label = .{ .text = "clipped" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 30, .w = 20, .h = 24 },
@@ -2001,13 +2001,13 @@ test "verifyLayout: overlapping text boxes are reported, adjacent are not" {
     // box spans [0, 52], B at x 20 spans [20, 72] — the interior overlap
     // is real even though both texts are short.
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "aaaa" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 52, .h = 24 },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .label = .{ .text = "bbbb" } },
         .parent = .root,
         .rect = .{ .x = 20, .y = 0, .w = 52, .h = 24 }, // boxes collide
@@ -2025,13 +2025,13 @@ test "verifyLayout: text boxes that merely touch are not an overlap" {
     // A's text box ends at x 52; B starts at x 52 — touching edges are
     // not an interior intersection.
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "aaaa" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 52, .h = 24 },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .label = .{ .text = "bbbb" } },
         .parent = .root,
         .rect = .{ .x = 52, .y = 0, .w = 52, .h = 24 },
@@ -2048,7 +2048,7 @@ test "treeToJson: rect values round-trip exactly" {
 
     const rect: Rect = .{ .x = 12.5, .y = -3.25, .w = 100, .h = 200.75 };
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = rect,
@@ -2071,8 +2071,8 @@ test "treeToJsonWith: absolute and visual geometry are optional diagnostics" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const parent: FrameNodeId = @enumFromInt(1);
-    const child: FrameNodeId = @enumFromInt(2);
+    const parent: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = child,
         .kind = .{ .label = .{ .text = "nested" } },
@@ -2147,8 +2147,8 @@ test "renderAscii: nested node renders at its absolute position" {
 
     // Root column with padding; button nested at a relative offset. Its
     // absolute origin = col (0,0) + padding (8,8) + rect (5,5) = (13,13).
-    const col: FrameNodeId = @enumFromInt(1);
-    const btn: FrameNodeId = @enumFromInt(2);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
+    const btn: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -2191,8 +2191,8 @@ test "verifyLayout: nested tree with padding and border verifies OK" {
 
     // Column with border+padding; button fills the content box exactly
     // (content w = 100-4-2-8-6 = 80, h = 60-1-3-8-7 = 41).
-    const col: FrameNodeId = @enumFromInt(1);
-    const btn: FrameNodeId = @enumFromInt(2);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
+    const btn: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -2231,8 +2231,8 @@ test "verifyLayout: child outside the parent's content box is flagged" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: FrameNodeId = @enumFromInt(1);
-    const child: FrameNodeId = @enumFromInt(2);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child: FrameNodeId = @fromBackingInt(@intCast(2));
     // Child sits inside the border box (x+w = 95 <= 100) but past the
     // content box (content w = 100-8-8 = 84): the content box constrains.
     try tree.nodes.append(std.testing.allocator, .{
@@ -2268,7 +2268,7 @@ test "verifyLayout: negative box sides are reported" {
     defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "x" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 20, .h = 20 },
@@ -2292,8 +2292,8 @@ test "verifyLayout: negative width and height are reported" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const negative_width: FrameNodeId = @enumFromInt(1);
-    const negative_height: FrameNodeId = @enumFromInt(2);
+    const negative_width: FrameNodeId = @fromBackingInt(@intCast(1));
+    const negative_height: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = negative_width,
         .kind = .{ .spacer = .{} },
@@ -2418,7 +2418,7 @@ test "verifyLayout: text-overlap pass handles more than 64 text nodes" {
     for (0..70) |i| {
         const y_f: f32 = @floatFromInt(@min(i * 30, 1 << 24));
         try tree.nodes.append(std.testing.allocator, .{
-            .id = @enumFromInt(@as(u32, @intCast(i + 1))),
+            .id = @fromBackingInt(@intCast(@as(u32, @intCast(i + 1)))),
             .kind = .{ .label = .{ .text = "x" } },
             .parent = .root,
             .rect = .{ .x = 0, .y = y_f, .w = 50, .h = 24 },
@@ -2437,20 +2437,20 @@ test "verifyLayout: root-level sibling overlap and surface bounds are flagged" {
     // Two overlapping root-level labels (previously never checked — the
     // root pseudo-container has no node to iterate children of).
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 40, .h = 20 },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .label = .{ .text = "b" } },
         .parent = .root,
         .rect = .{ .x = 20, .y = 0, .w = 40, .h = 20 }, // overlaps node 1
     });
     // A root-level node extending past the 300-wide surface.
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(3),
+        .id = @fromBackingInt(@intCast(3)),
         .kind = .{ .label = .{ .text = "c" } },
         .parent = .root,
         .rect = .{ .x = 250, .y = 0, .w = 200, .h = 20 }, // 450 > 300
@@ -2472,13 +2472,13 @@ test "layoutFingerprint: identical rects with different typed edges differ" {
     // Same ids, kinds, and rects — only the typed padding differs. The
     // fingerprint must include both each edge's tag and its numeric value.
     try tree_a.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
     });
     try tree_b.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
@@ -2512,7 +2512,7 @@ test "layoutFingerprint: typed edge tags remain distinct" {
     defer tree_percent.deinit();
 
     try tree_length.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
@@ -2526,7 +2526,7 @@ test "layoutFingerprint: typed edge tags remain distinct" {
         },
     });
     try tree_percent.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
@@ -2565,14 +2565,14 @@ test "layoutFingerprint: paint-only fields (layer) are excluded" {
     // comparison must ignore it: two frames with the same geometry but
     // different layer keys hash identically.
     try tree_a.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
         .paint = .{ .layer = 0 },
     });
     try tree_b.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "a" } },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 40 },
@@ -2594,7 +2594,7 @@ test "renderAscii: hover on a sub-2px node draws no border and does not panic" {
     // h = 1 < map_px (2): the hover border's inner edge offset
     // (r.y + r.h - map_px) would be negative and @intFromFloat would
     // panic; the guard must skip the border entirely.
-    const tiny: FrameNodeId = @enumFromInt(1);
+    const tiny: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.nodes.append(std.testing.allocator, .{
         .id = tiny,
         .kind = .{ .label = .{ .text = "x" } },
@@ -2659,7 +2659,7 @@ test "verifyLayout: slider text fit uses visual_label" {
 
     var value: f32 = 0.5;
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .slider = .{
             .label = "semantic label that is much too long",
             .visual_label = "x",

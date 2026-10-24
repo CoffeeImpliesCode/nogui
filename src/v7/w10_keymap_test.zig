@@ -313,7 +313,7 @@ test "api-w10 bounded pending storage bypasses large text without truncating it"
         record.sink(),
     );
     _ = map.keyDown(logical("g"), document, false, record.sink());
-    const long_text = [_]u8{'p'} ** (keymap.max_input_bytes + 1);
+    const long_text: [keymap.max_input_bytes + 1]u8 = @splat('p');
     // This sink counts lengths without storing an oversized payload.
     const Counter = struct {
         const Self = @This();
@@ -352,7 +352,7 @@ test "api-w10 configuration errors do not silently ignore options" {
         error.EmptySequence,
         map.add(.{ .context = "document", .sequence = &.{}, .action = "x" }, record.sink()),
     );
-    const too_many = [_]Stroke{g} ** (keymap.max_steps + 1);
+    const too_many: [keymap.max_steps + 1]Stroke = @splat(g);
     try std.testing.expectError(
         error.TooManySteps,
         map.add(.{ .context = "document", .sequence = &too_many, .action = "x" }, record.sink()),

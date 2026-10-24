@@ -198,7 +198,7 @@ test "make: vtable.draw dispatches with the correct receiver and ctx" {
         const Self = @This();
         text: []const u8,
 
-        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = try ctx.label(.{ .text = self.text });
         }
     };
@@ -227,7 +227,7 @@ test "make: vtable.draw dispatches with the correct receiver and ctx" {
 test "make: on_routed_event and deinit are null when the type omits them" {
     const Comp = struct {
         const Self = @This();
-        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
@@ -264,7 +264,7 @@ test "make: typed default adapters are present only for declared values" {
         pub const default_style: Style = .{ .direction = .row, .gap = .{ .length = 11 } };
         pub const default_paint: PaintStyle = .{ .layer = 4 };
 
-        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
@@ -272,7 +272,7 @@ test "make: typed default adapters are present only for declared values" {
     const WithoutDefaults = struct {
         const Self = @This();
 
-        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
@@ -312,11 +312,11 @@ test "make: deinit adapter passes the receiver and allocator" {
         const Self = @This();
         tracker: *Tracker,
 
-        fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
+        pub fn draw(self: *Self, ctx: *DrawCtx) anyerror!void {
             _ = self;
             _ = ctx;
         }
-        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.tracker.freed = true;
             self.tracker.received_allocator = allocator;
             self.* = undefined;

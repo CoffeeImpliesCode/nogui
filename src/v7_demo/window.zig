@@ -194,7 +194,7 @@ fn sceneDocumentBox(comptime T: type) f32 {
         ui.tiger_scene_box_size;
 }
 
-const icon_count = @typeInfo(IconId).@"enum".fields.len;
+const icon_count = @typeInfo(IconId).@"enum".field_names.len;
 
 /// The icon box in logical window units. Every icon document uses a
 /// 16-unit viewBox, so one square quad at this size samples the whole
@@ -475,7 +475,7 @@ const IconCache = struct {
     /// The icon's bindless heap index, valid after a `prepare` that
     /// returned true.
     fn index(self: *const IconCache, icon: IconId) u32 {
-        return self.textures[@intFromEnum(icon)].index;
+        return self.textures[@backingInt(icon)].index;
     }
 };
 
@@ -513,7 +513,7 @@ fn sceneOptions(
             .index = iconIndex,
         },
         .icon_logical_size = icon_logical_size,
-        .showcase_box = if (ui.svg_box_id) |raw| @as(FrameNodeId, @enumFromInt(raw)) else null,
+        .showcase_box = if (ui.svg_box_id) |raw| @as(FrameNodeId, @fromBackingInt(@intCast(raw))) else null,
     };
 }
 

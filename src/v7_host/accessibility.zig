@@ -47,9 +47,7 @@ const system_bell = @import("system_bell.zig");
 
 pub const semantics = nogui.semantics;
 const contract = nogui.window_contract;
-pub const c = @cImport({
-    @cInclude("nogui_accesskit_bridge.h");
-});
+pub const c = @import("nogui_accesskit_c");
 
 pub const NodeId = semantics.NodeId;
 /// Borrowed C-ABI tree used by native target adapters.
@@ -896,7 +894,7 @@ pub const Adapter = struct {
     /// caller may free it as soon as this returns.
     pub fn enqueueRequest(self: *Adapter, request: NativeRequest) bool {
         if (request.data == .text_range and
-            (request.action != @intFromEnum(semantics.Action.replace_selected_text) or
+            (request.action != @backingInt(semantics.Action.replace_selected_text) or
                 !textRangeAddresses(request.id, request)))
         {
             return self.refuse();
@@ -1417,7 +1415,7 @@ pub const Adapter = struct {
 
         try pushOne(c.nogui_accesskit_node, reserved, gpa, &self.tree.nodes, .{
             .id = node.id,
-            .role = @intFromEnum(node.role),
+            .role = @backingInt(node.role),
             .flags = flagsOf(node),
             .actions = actionMask(node.actions, node.states.read_only),
             .bounds = .{
@@ -1523,7 +1521,7 @@ pub const Adapter = struct {
             states.busy,
             states.live_region,
         }) |flag| hasher.update(std.mem.asBytes(&@as(u8, @intFromBool(flag))));
-        hasher.update(std.mem.asBytes(&@as(u8, @intFromEnum(states.checked))));
+        hasher.update(std.mem.asBytes(&@as(u8, @backingInt(states.checked))));
         hasher.update(std.mem.asBytes(&@as(u16, @bitCast(node.actions))));
         hashIds(&hasher, node.children);
         hashIds(&hasher, node.relations.controls);
@@ -1657,7 +1655,7 @@ fn flagsOf(node: semantics.Node) u32 {
 fn actionMask(actions: semantics.ActionSet, read_only: bool) u32 {
     var mask: u32 = 0;
     inline for (std.meta.tags(semantics.Action)) |action| {
-        if (actions.has(action)) mask |= @as(u32, 1) << @intCast(@intFromEnum(action));
+        if (actions.has(action)) mask |= @as(u32, 1) << @intCast(@backingInt(action));
     }
     if (read_only) mask &= ~mutatingActions();
     return mask;
@@ -1678,10 +1676,10 @@ fn actionMask(actions: semantics.ActionSet, read_only: bool) u32 {
 /// request whose `1u << action` bit the node does not carry, so what this
 /// function withholds is exactly what the platform can never be asked for.
 pub fn mutatingActions() u32 {
-    return (1 << @intFromEnum(semantics.Action.set_value)) |
-        (1 << @intFromEnum(semantics.Action.increment)) |
-        (1 << @intFromEnum(semantics.Action.decrement)) |
-        (1 << @intFromEnum(semantics.Action.replace_selected_text));
+    return (1 << @backingInt(semantics.Action.set_value)) |
+        (1 << @backingInt(semantics.Action.increment)) |
+        (1 << @backingInt(semantics.Action.decrement)) |
+        (1 << @backingInt(semantics.Action.replace_selected_text));
 }
 
 /// Whether this node's named actions reach the platform.
@@ -2475,17 +2473,17 @@ test "api-w21 a read-only node publishes no action that would change its value" 
     };
 
     const writes: u32 = mutatingActions();
-    const click: u32 = 1 << @intFromEnum(semantics.Action.click);
-    const caret: u32 = 1 << @intFromEnum(semantics.Action.set_text_selection);
+    const click: u32 = 1 << @backingInt(semantics.Action.click);
+    const caret: u32 = 1 << @backingInt(semantics.Action.set_text_selection);
     // The bits each node's OWN action set carries, named apart from the strip.
     // A slider publishes the three numeric writes and no text replacement; a
     // field publishes the whole-value door and a replacement and no step. So
     // `writes` is the strip, not any one node's mask, and an expectation that
     // reads it as the mask asks for a bit the node never published.
-    const set_value: u32 = 1 << @intFromEnum(semantics.Action.set_value);
-    const replace: u32 = 1 << @intFromEnum(semantics.Action.replace_selected_text);
-    const steps: u32 = (1 << @intFromEnum(semantics.Action.increment)) |
-        (1 << @intFromEnum(semantics.Action.decrement));
+    const set_value: u32 = 1 << @backingInt(semantics.Action.set_value);
+    const replace: u32 = 1 << @backingInt(semantics.Action.replace_selected_text);
+    const steps: u32 = (1 << @backingInt(semantics.Action.increment)) |
+        (1 << @backingInt(semantics.Action.decrement));
     try std.testing.expectEqual(writes, set_value | steps | replace);
 
     // The rule in both directions, over an action set that carries everything:

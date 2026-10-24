@@ -114,13 +114,13 @@ pub fn main(init: std.process.Init) !void {
         .{
             .location = 0,
             .binding = 0,
-            .format = @intFromEnum(vk.Format.r32g32_sfloat),
+            .format = @backingInt(vk.Format.r32g32_sfloat),
             .offset = @offsetOf(Vertex, "pos"),
         },
         .{
             .location = 1,
             .binding = 0,
-            .format = @intFromEnum(vk.Format.r32g32_sfloat),
+            .format = @backingInt(vk.Format.r32g32_sfloat),
             .offset = @offsetOf(Vertex, "uv"),
         },
     };

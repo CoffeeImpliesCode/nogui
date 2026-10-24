@@ -197,7 +197,7 @@ test "MeasurementCache distinguishes sizing constraints and parent display" {
 }
 
 fn appendRoot(tree: *WidgetTree, node_style: Style) !*const widget.WidgetNode {
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },
@@ -389,19 +389,19 @@ test "cached visible text shapes a label and keeps a control's caption insets" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },
         .parent = .root,
     });
-    const label_id: FrameNodeId = @enumFromInt(2);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = label_id,
         .kind = .{ .label = .{ .text = "abcd" } },
         .parent = root_id,
     });
-    const progress_id: FrameNodeId = @enumFromInt(3);
+    const progress_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = progress_id,
         .kind = .{ .progress = .{ .label = "OK", .value = 0, .min = 0, .max = 1 } },

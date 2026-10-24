@@ -946,7 +946,7 @@ test "api-w14 cpu upload reads padded rows through the frame stride" {
 test "api-w14 cpu upload rejects a yuv frame whose planes overrun the buffer" {
     // 4x2 YUV 4:2:0 needs 8 Y bytes, 2 U bytes and 2 V bytes; the buffer stops
     // before the V plane is complete.
-    const buffer = [_]u8{0} ** 10;
+    const buffer: [10]u8 = @splat(0);
     const frame: FrameDescriptor = .{
         .width = 4,
         .height = 2,

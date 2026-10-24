@@ -132,8 +132,8 @@ test "hitTest: point inside a leaf inside a container returns the leaf" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const column_id: FrameNodeId = @enumFromInt(1);
-    const label_id: FrameNodeId = @enumFromInt(2);
+    const column_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     // Post-order: children before containers.
     try tree.nodes.append(std.testing.allocator, .{
@@ -158,8 +158,8 @@ test "hitTest: point in container but outside all children hits the container" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const column_id: FrameNodeId = @enumFromInt(1);
-    const label_id: FrameNodeId = @enumFromInt(2);
+    const column_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = label_id,
@@ -183,8 +183,8 @@ test "hitTest: point outside everything returns null" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const column_id: FrameNodeId = @enumFromInt(1);
-    const label_id: FrameNodeId = @enumFromInt(2);
+    const column_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = label_id,
@@ -209,7 +209,7 @@ test "hitActionable: returns button id over a button, null over a label" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const button_id: FrameNodeId = @enumFromInt(1);
+    const button_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.nodes.append(std.testing.allocator, .{
         .id = button_id,
         .kind = .{ .button = .{ .label = "Go" } },
@@ -223,7 +223,7 @@ test "hitActionable: returns button id over a button, null over a label" {
     var tree2 = WidgetTree.init(std.testing.allocator);
     defer tree2.deinit();
 
-    const label_id: FrameNodeId = @enumFromInt(2);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree2.nodes.append(std.testing.allocator, .{
         .id = label_id,
         .kind = .{ .label = .{ .text = "plain" } },
@@ -238,8 +238,8 @@ test "hitActionable: button inside a column hits the button, not the column" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const button_id: FrameNodeId = @enumFromInt(1);
-    const column_id: FrameNodeId = @enumFromInt(2);
+    const button_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const column_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = button_id,
@@ -265,7 +265,7 @@ test "hitTest: rect edges inclusive at x/y, exclusive at x+w/y+h" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id: FrameNodeId = @enumFromInt(1);
+    const id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.nodes.append(std.testing.allocator, .{
         .id = id,
         .kind = .{ .label = .{ .text = "box" } },
@@ -286,8 +286,8 @@ test "hitTest: resolves absolute rect through parent padding + border" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const column_id: FrameNodeId = @enumFromInt(1);
-    const label_id: FrameNodeId = @enumFromInt(2);
+    const column_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     // Post-order: child label first, then its container. The column sits at
     // the surface origin with padding left/top 8 and border left/top
@@ -335,7 +335,7 @@ test "hitTest: zero-size rect never hits" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id: FrameNodeId = @enumFromInt(1);
+    const id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.nodes.append(std.testing.allocator, .{
         .id = id,
         .kind = .{ .spacer = .{} },
@@ -351,8 +351,8 @@ test "hitTest: clipped child outside parent clip returns null" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const parent_id: FrameNodeId = @enumFromInt(1);
-    const child_id: FrameNodeId = @enumFromInt(2);
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = child_id,
         .kind = .{ .label = .{ .text = "child" } },
@@ -377,8 +377,8 @@ test "hitActionable: clipped child outside parent clip returns null" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const parent_id: FrameNodeId = @enumFromInt(1);
-    const button_id: FrameNodeId = @enumFromInt(2);
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const button_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = button_id,
         .kind = .{ .button = .{ .label = "child" } },
@@ -404,8 +404,8 @@ test "hit tests: style overflow modes reject descendants outside parent" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const parent_id: FrameNodeId = @enumFromInt(1);
-        const button_id: FrameNodeId = @enumFromInt(2);
+        const parent_id: FrameNodeId = @fromBackingInt(@intCast(1));
+        const button_id: FrameNodeId = @fromBackingInt(@intCast(2));
         try tree.nodes.append(std.testing.allocator, .{
             .id = button_id,
             .kind = .{ .button = .{ .label = "overflowed" } },
@@ -434,8 +434,8 @@ test "hit tests: style overflow modes reject descendants outside parent" {
 }
 
 test "hit tests: mixed overflow axes clip independently" {
-    const parent_id: FrameNodeId = @enumFromInt(1);
-    const button_id: FrameNodeId = @enumFromInt(2);
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const button_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const cases = [_]struct {
         overflow: style.OverflowAxes,
         horizontal_hit: ?FrameNodeId,
@@ -495,10 +495,10 @@ test "hitActionable: returns every bound control but excludes zero-area controls
     var checked = false;
     var enabled = false;
     var selected: ?u32 = null;
-    const checkbox_id: FrameNodeId = @enumFromInt(51);
-    const switch_id: FrameNodeId = @enumFromInt(52);
-    const radio_id: FrameNodeId = @enumFromInt(53);
-    const zero_id: FrameNodeId = @enumFromInt(54);
+    const checkbox_id: FrameNodeId = @fromBackingInt(@intCast(51));
+    const switch_id: FrameNodeId = @fromBackingInt(@intCast(52));
+    const radio_id: FrameNodeId = @fromBackingInt(@intCast(53));
+    const zero_id: FrameNodeId = @fromBackingInt(@intCast(54));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = checkbox_id,
@@ -536,8 +536,8 @@ test "hitActionable: a clipped bound control cannot be hit outside its ancestor"
     defer tree.deinit();
 
     var checked = false;
-    const parent_id: FrameNodeId = @enumFromInt(61);
-    const checkbox_id: FrameNodeId = @enumFromInt(62);
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(61));
+    const checkbox_id: FrameNodeId = @fromBackingInt(@intCast(62));
     try tree.nodes.append(std.testing.allocator, .{
         .id = checkbox_id,
         .kind = .{ .checkbox = .{ .label = "clipped", .value = &checked } },
@@ -560,9 +560,9 @@ test "api-w02 nested border padding and scroll hit targets at three pixel scales
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const outer: FrameNodeId = @enumFromInt(1);
-    const middle: FrameNodeId = @enumFromInt(2);
-    const button: FrameNodeId = @enumFromInt(3);
+    const outer: FrameNodeId = @fromBackingInt(@intCast(1));
+    const middle: FrameNodeId = @fromBackingInt(@intCast(2));
+    const button: FrameNodeId = @fromBackingInt(@intCast(3));
     var outer_scroll: widget.ScrollState = .{ .offset = .{ 1.5, 2.5 } };
     var middle_scroll: widget.ScrollState = .{ .offset = .{ 2, 1 } };
     try tree.appendNode(.{

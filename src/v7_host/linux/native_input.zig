@@ -566,7 +566,7 @@ pub const GrabStatus = enum(u8) {
 
     pub fn fromWire(status: u8) GrabStatus {
         return switch (status) {
-            0...4 => @enumFromInt(status),
+            0...4 => @fromBackingInt(@intCast(status)),
             else => .unrecognised,
         };
     }

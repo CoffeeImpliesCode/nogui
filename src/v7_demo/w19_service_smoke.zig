@@ -174,7 +174,7 @@ const Options = struct {
 const Reporter = struct {
     io: Io,
     output: Io.File = .stdout(),
-    buffer: [1024]u8 = [_]u8{0} ** 1024,
+    buffer: [1024]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         // The buffer is reused for every line, so formatting into it is a
@@ -269,7 +269,7 @@ const Delivery = struct {
     id: notifications.NotificationId = 0,
     origin: Origin = .pump,
     kind: DeliveryKind = .provider_lost,
-    action_key: [max_action_key]u8 = [_]u8{0} ** max_action_key,
+    action_key: [max_action_key]u8 = @splat(0),
     action_len: usize = 0,
     close_reason: notifications.CloseReason = .undefined,
 };
@@ -279,7 +279,7 @@ const Delivery = struct {
 const Recorder = struct {
     alive: bool = true,
     origin: Origin = .pump,
-    deliveries: [max_deliveries]Delivery = [_]Delivery{.{}} ** max_deliveries,
+    deliveries: [max_deliveries]Delivery = @splat(.{}),
     count: usize = 0,
     dropped: usize = 0,
 
@@ -2054,7 +2054,7 @@ fn checkNamespaceForm(options: Options) !?[]const u8 {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

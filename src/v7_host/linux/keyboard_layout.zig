@@ -58,9 +58,9 @@ pub const Identity = struct {
     status: Status = .no_native_access,
     /// The core keyboard's active XKB group, as `XkbGetState` reported it.
     group: u8 = 0,
-    name_buffer: [buffer_len]u8 = [_]u8{0} ** buffer_len,
+    name_buffer: [buffer_len]u8 = @splat(0),
     name_len: usize = 0,
-    identifier_buffer: [buffer_len]u8 = [_]u8{0} ** buffer_len,
+    identifier_buffer: [buffer_len]u8 = @splat(0),
     identifier_len: usize = 0,
 
     /// The `symbols` component name the server compiled, for example

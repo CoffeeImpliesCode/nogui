@@ -175,7 +175,7 @@ pub const OutputState = struct {
     pending_height: u32 = 0,
     scale: i32 = 1,
     /// The connector name, which arrived in `wl_output` version 4.
-    name: [64]u8 = [_]u8{0} ** 64,
+    name: [64]u8 = @splat(0),
     name_len: usize = 0,
     /// How many `done` events arrived.
     done_count: u32 = 0,
@@ -501,7 +501,7 @@ pub const LayerSurface = struct {
             @as(?*wayland.Proxy, null),
             surface,
             output,
-            @as(u32, @intFromEnum(options.layer)),
+            @as(u32, @backingInt(options.layer)),
             options.namespace.ptr,
         ) orelse {
             api.proxy_destroy(compositor);
@@ -681,7 +681,7 @@ pub const LayerSurface = struct {
             null,
             0,
             0,
-            @as(u32, @intFromEnum(want.keyboard_interactivity)),
+            @as(u32, @backingInt(want.keyboard_interactivity)),
         );
         try self.applyInputRegion(&want.input_region);
         live.flush(self.display);
@@ -883,7 +883,7 @@ pub const LayerSurface = struct {
             null,
             0,
             0,
-            @as(u32, @intFromEnum(interactivity)),
+            @as(u32, @backingInt(interactivity)),
         );
         live.flush(self.display);
     }

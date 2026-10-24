@@ -628,7 +628,7 @@ pub fn generateStableId(
         h = (h ^ pid.generation) *% 0x100000001b3;
     }
     h = (h ^ sibling_index) *% 0x100000001b3;
-    h = (h ^ @as(u64, @intFromEnum(std.meta.activeTag(node.kind)))) *% 0x100000001b3;
+    h = (h ^ @as(u64, @backingInt(std.meta.activeTag(node.kind)))) *% 0x100000001b3;
 
     var slot: u32 = @truncate(h);
     if (slot == 0) slot = 1;
@@ -701,7 +701,7 @@ pub const TaskRecord = struct {
     start_ns: u64,
     end_ns: u64,
     duration_ns: u64,
-    name: [32]u8 = .{0} ** 32,
+    name: [32]u8 = @splat(0),
     name_len: u8 = 0,
     window_id: ?u64 = null,
 
@@ -748,7 +748,7 @@ pub const TaskRecord = struct {
 
 /// Metrics recorded for one action dispatch.
 pub const ActionRecord = struct {
-    name: [48]u8 = .{0} ** 48,
+    name: [48]u8 = @splat(0),
     name_len: u8 = 0,
     target: ?WidgetId = null,
     start_ns: u64,

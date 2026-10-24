@@ -207,7 +207,7 @@ pub const Scenario = struct {
     /// The allocator this Scenario was built on. It owns the Scenario itself.
     gpa: std.mem.Allocator,
     /// Counts every allocation the Session, the App and the list State make.
-    /// It passes through to `gpa`, so the DebugAllocator leak check still runs.
+    /// It passes through to `gpa`, so the SafeAllocator leak check still runs.
     counter: AllocationCounter,
     session: *Session,
     app: *App,
@@ -520,7 +520,7 @@ fn followEnd(scenario: *Scenario) !void {
 
 /// Drive the scenario the way a host would, and print the result.
 pub fn main() !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -674,8 +674,8 @@ fn reportViewportSweep(gpa: std.mem.Allocator) !void {
 }
 
 test "api-w25 virtualized mixed-height feed bounds frame cost and holds its anchor" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     const scenario = try Scenario.init(.{ .gpa = gpa, .count = 2_000, .overdraw_items = 1 });

@@ -269,7 +269,7 @@ const semantics = accessibility.semantics;
 
 const OnFrameFn = @typeInfo(@FieldType(Application.Hooks, "on_frame")).optional.child;
 const managed_window_ptr =
-    @typeInfo(@typeInfo(OnFrameFn).pointer.child).@"fn".params[2].type.?;
+    @typeInfo(@typeInfo(OnFrameFn).pointer.child).@"fn".param_types[2].?;
 
 /// Long enough for a screen reader to start, attach, and read the tree.
 const default_hold_ms: u64 = 25_000;
@@ -516,7 +516,7 @@ const initial_text = "Grüße ✓";
 /// value rather than a string literal, so the literal is copied into the
 /// fixed-size buffer once here instead of at every use.
 const initial_text_buffer: [96]u8 = blk: {
-    var buffer = [_]u8{0} ** 96;
+    var buffer: [96]u8 = @splat(0);
     @memcpy(buffer[0..initial_text.len], initial_text);
     break :blk buffer;
 };
@@ -564,7 +564,7 @@ pub const PanelView = struct {
     text_len: usize = initial_text.len,
     /// One UTF-8 byte length per character, so the run is addressable and
     /// `set_text_selection` is offered. Only `char_lengths[0..characters]`.
-    char_lengths: [96]u8 = [_]u8{0} ** 96,
+    char_lengths: [96]u8 = @splat(0),
     /// Characters in the live value, which is what the platform addresses.
     characters: usize = 0,
     /// Caret in bytes, republished with the run's selection.
@@ -1803,7 +1803,7 @@ fn makeDispatcher(context: *anyopaque) semantics.Dispatcher {
 
 const Reporter = struct {
     io: Io,
-    buffer: [8192]u8 = [_]u8{0} ** 8192,
+    buffer: [8192]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -1881,7 +1881,7 @@ fn roleName(byte: u8) []const u8 {
 /// a role the app authored, so absence maps to the wire value that means
 /// "this core does not name it".
 fn publishedRole(adapter: *const accessibility.Adapter, id: semantics.NodeId) u8 {
-    return adapter.lastRole(id) orelse @intFromEnum(semantics.Role.unknown);
+    return adapter.lastRole(id) orelse @backingInt(semantics.Role.unknown);
 }
 
 /// The accessible name the adapter's own LABEL buffer holds for `id`, or null
@@ -1962,7 +1962,7 @@ const Harness = struct {
     /// built, not defaulted. `App.semantic_publication` borrows THIS address
     /// for the whole run, so the field must outlive every configured frame.
     publisher: semantics.Publisher,
-    scratch_bytes: [scratch_bytes]u8 = [_]u8{0} ** scratch_bytes,
+    scratch_bytes: [scratch_bytes]u8 = @splat(0),
     /// The logical size of the last frame the App built, which is the surface
     /// that frame published. The App hands the publisher its own surface;
     /// this keeps it for the reports and for the native census.
@@ -1988,11 +1988,11 @@ const Harness = struct {
     reported_state: accessibility.State = .unavailable,
     /// The formatted line for one published node. It is hashed before it is
     /// decided to be worth printing, so a steady tree is silent.
-    line: [line_bytes]u8 = [_]u8{0} ** line_bytes,
+    line: [line_bytes]u8 = @splat(0),
     /// Per published slot, the node identity and line hash last emitted for
     /// it. Indexed by the node's slot in the snapshot, which the publisher
     /// only reuses after the next `stage`.
-    seen: [node_slots]Seen = [_]Seen{.{}} ** node_slots,
+    seen: [node_slots]Seen = @splat(.{}),
     /// False once the App has been deinitialized. The window half must
     /// deinit it BEFORE the GPU device goes away, so ownership is tracked
     /// rather than assumed.
@@ -2022,7 +2022,7 @@ const Harness = struct {
         /// buffer. The view overwrites its buffer in place, so an alias here
         /// would compare the live bytes with themselves and no later text
         /// change would ever be reported.
-        text: [model_text_bytes]u8 = [_]u8{0} ** model_text_bytes,
+        text: [model_text_bytes]u8 = @splat(0),
         text_len: usize = 0,
         caret: usize = 0,
         rows: usize = 0,
@@ -2494,12 +2494,12 @@ const Shaper = struct {
     /// coordinate space AccessKit asks for, and one advance per character.
     /// `characters` is the live length of both, and it is the model's own
     /// character count.
-    positions: [text_slots]f32 = [_]f32{0} ** text_slots,
-    widths: [text_slots]f32 = [_]f32{0} ** text_slots,
+    positions: [text_slots]f32 = @splat(0),
+    widths: [text_slots]f32 = @splat(0),
     /// The byte offset each character starts at, in the model's own bytes.
     /// The platform addresses the run in characters, so a caret index has to
     /// become a byte offset somewhere, and this is that one place.
-    offsets: [text_slots]usize = [_]usize{0} ** text_slots,
+    offsets: [text_slots]usize = @splat(0),
     characters: usize = 0,
     /// Characters the layout has no position of its own for. A combining
     /// sequence is ONE grapheme and several characters, and the extra
@@ -2510,8 +2510,8 @@ const Shaper = struct {
     empty: bool = true,
 
     const Key = struct {
-        value: [text_slots]u8 = [_]u8{0} ** text_slots,
-        lengths: [text_slots]u8 = [_]u8{0} ** text_slots,
+        value: [text_slots]u8 = @splat(0),
+        lengths: [text_slots]u8 = @splat(0),
         box_x: f32 = 0,
         box_y: f32 = 0,
         box_w: f32 = 0,
@@ -2680,11 +2680,11 @@ const RunCache = struct {
     // SAFETY: `live` gates every read, and a slot's layout is written before
     // its `live` flag is set.
     layouts: [slots]TextLayout = undefined,
-    live: [slots]bool = [_]bool{false} ** slots,
-    keys: [slots]Key = [_]Key{.{}} ** slots,
+    live: [slots]bool = @splat(false),
+    keys: [slots]Key = @splat(.{}),
 
     const Key = struct {
-        value: [run_bytes]u8 = [_]u8{0} ** run_bytes,
+        value: [run_bytes]u8 = @splat(0),
         len: usize = 0,
         wrap: f32 = 0,
         color: [4]u32 = .{ 0, 0, 0, 0 },
@@ -2804,7 +2804,7 @@ const Painter = struct {
     // SAFETY: `row_name_len` bounds every read, and a name is copied in before
     // its length is stored.
     row_name: [row_slots][RunCache.run_bytes]u8 = undefined,
-    row_name_len: [row_slots]usize = [_]usize{0} ** row_slots,
+    row_name_len: [row_slots]usize = @splat(0),
 
     /// The caption's slot. Rows take the slots below it, so a row window can
     /// never displace the dialog's own text.
@@ -3610,7 +3610,7 @@ const Window = struct {
         const focus: usize = @min(@max(@min(view.characters, 3), 1), view.characters);
         _ = self.harness.adapter.enqueueRequest(.{
             .id = field.id,
-            .action = @intFromEnum(semantics.Action.set_text_selection),
+            .action = @backingInt(semantics.Action.set_text_selection),
             .data = .text_selection,
             .anchor_index = 1,
             .focus_index = focus,
@@ -3619,7 +3619,7 @@ const Window = struct {
         });
         _ = self.harness.adapter.enqueueRequest(.{
             .id = row.id,
-            .action = @intFromEnum(semantics.Action.click),
+            .action = @backingInt(semantics.Action.click),
         });
         try report.emit(
             "synthetic: injected (no AT-SPI client) set_text_selection 1..{d} " ++
@@ -3647,7 +3647,7 @@ const Window = struct {
         const modal = nodeNamed(snapshot, label_modal) orelse return;
         _ = self.harness.adapter.enqueueRequest(.{
             .id = modal.id,
-            .action = @intFromEnum(semantics.Action.click),
+            .action = @backingInt(semantics.Action.click),
         });
         try report.emit(
             "synthetic: injected (no AT-SPI client) a click on {d} \"{s}\"\n",
@@ -4074,7 +4074,7 @@ fn optIndex(writer: *std.Io.Writer, value: ?usize) ![]const u8 {
 const Checks = struct {
     passed: u32 = 0,
     failed: u32 = 0,
-    buffer: [512]u8 = [_]u8{0} ** 512,
+    buffer: [512]u8 = @splat(0),
 
     /// One line of evidence, formatted into the checker's own buffer. The
     /// returned slice is valid until the next call.
@@ -4289,7 +4289,7 @@ fn checkPublishedTree(
     for (wanted) |entry| {
         const got = publishedRole(h.adapter, entry.id);
         const in_tree = (snapshot.node(entry.id) orelse continue).role;
-        if (got != @intFromEnum(entry.role) or in_tree != entry.role) roles_ok = false;
+        if (got != @backingInt(entry.role) or in_tree != entry.role) roles_ok = false;
         _ = try report.emit("published: role id={d} core={s} bridge={s}\n", .{
             entry.id,
             @tagName(in_tree),
@@ -4413,7 +4413,7 @@ fn checkPublishedTree(
             report,
             "progress.announced_with_its_label",
             named and publishedRole(h.adapter, ids.progress) ==
-                @intFromEnum(semantics.Role.progress_indicator),
+                @backingInt(semantics.Role.progress_indicator),
             checks.note("name=\"{s}\" empty={} is_the_slider_name={} role={s}", .{
                 if (name) |published_name| published_name else "<absent>",
                 name == null or name.?.len == 0,
@@ -4543,13 +4543,13 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     try checks.expect(
         report,
         "role.published",
-        publishedRole(h.adapter, ids.activate) == @intFromEnum(semantics.Role.button) and
-            publishedRole(h.adapter, ids.check_box) == @intFromEnum(semantics.Role.check_box) and
-            publishedRole(h.adapter, ids.slider) == @intFromEnum(semantics.Role.slider) and
-            publishedRole(h.adapter, ids.field) == @intFromEnum(semantics.Role.text_input) and
-            publishedRole(h.adapter, ids.list) == @intFromEnum(semantics.Role.list_box) and
-            publishedRole(h.adapter, ids.run) == @intFromEnum(semantics.Role.text_run) and
-            publishedRole(h.adapter, ids.row) == @intFromEnum(semantics.Role.list_item),
+        publishedRole(h.adapter, ids.activate) == @backingInt(semantics.Role.button) and
+            publishedRole(h.adapter, ids.check_box) == @backingInt(semantics.Role.check_box) and
+            publishedRole(h.adapter, ids.slider) == @backingInt(semantics.Role.slider) and
+            publishedRole(h.adapter, ids.field) == @backingInt(semantics.Role.text_input) and
+            publishedRole(h.adapter, ids.list) == @backingInt(semantics.Role.list_box) and
+            publishedRole(h.adapter, ids.run) == @backingInt(semantics.Role.text_run) and
+            publishedRole(h.adapter, ids.row) == @backingInt(semantics.Role.list_item),
         checks.note("button={s} check={s} slider={s} field={s} list={s} row={s}", .{
             roleName(publishedRole(h.adapter, ids.activate)),
             roleName(publishedRole(h.adapter, ids.check_box)),
@@ -4568,8 +4568,8 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     try checks.expect(
         report,
         "role.radio_published",
-        publishedRole(h.adapter, ids.radio_a) == @intFromEnum(semantics.Role.radio_button) and
-            publishedRole(h.adapter, ids.radio_b) == @intFromEnum(semantics.Role.radio_button) and
+        publishedRole(h.adapter, ids.radio_a) == @backingInt(semantics.Role.radio_button) and
+            publishedRole(h.adapter, ids.radio_b) == @backingInt(semantics.Role.radio_button) and
             selectedRadioCount(first) == 1 and checkedRadioCount(first) == 1,
         checks.note("radio_a={s} radio_b={s} selected_options={d} checked_options={d} radio_choice={?}", .{
             roleName(publishedRole(h.adapter, ids.radio_a)),
@@ -4592,7 +4592,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
             report,
             "relation.radio_group",
             group.role == .radio_group and
-                publishedRole(h.adapter, ids.radio_group) == @intFromEnum(semantics.Role.radio_group) and
+                publishedRole(h.adapter, ids.radio_group) == @backingInt(semantics.Role.radio_group) and
                 option_a.relations.radio_group == ids.radio_group and
                 option_b.relations.radio_group == ids.radio_group and
                 option_a.parent == ids.radio_group and option_b.parent == ids.radio_group,
@@ -4654,7 +4654,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
             report,
             "progress.announced_with_its_label",
             named and publishedRole(h.adapter, ids.progress) ==
-                @intFromEnum(semantics.Role.progress_indicator),
+                @backingInt(semantics.Role.progress_indicator),
             checks.note("progress={d} name=\"{s}\" absent={} empty={} " ++
                 "is_the_slider_name={} role={s}", .{
                 ids.progress,
@@ -4672,7 +4672,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
             report,
             "progress.value_is_the_model_value",
             progress.role == .progress_indicator and
-                publishedRole(h.adapter, ids.progress) == @intFromEnum(semantics.Role.progress_indicator) and
+                publishedRole(h.adapter, ids.progress) == @backingInt(semantics.Role.progress_indicator) and
                 published != null and near(published.?, @as(f64, @floatCast(view.level))) and
                 actions != null and actions.? == 0 and
                 flags != null and (flags.? & state_read_only) != 0 and
@@ -4724,7 +4724,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
         const control_written: f64 = @floatCast(view.level_max);
         const control_queued = h.adapter.enqueueRequest(.{
             .id = ids.slider,
-            .action = @intFromEnum(semantics.Action.set_value),
+            .action = @backingInt(semantics.Action.set_value),
             .data = .numeric_value,
             .number = control_written,
         });
@@ -4745,7 +4745,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
         const dropped_after_control = h.adapter.droppedRequests();
         const refused_queued = h.adapter.enqueueRequest(.{
             .id = ids.progress,
-            .action = @intFromEnum(semantics.Action.set_value),
+            .action = @backingInt(semantics.Action.set_value),
             .data = .numeric_value,
             .number = control_written,
         });
@@ -4872,7 +4872,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     try checks.expect(
         report,
         "text.run_carries_the_characters",
-        publishedRole(h.adapter, ids.run) == @intFromEnum(semantics.Role.text_run) and
+        publishedRole(h.adapter, ids.run) == @backingInt(semantics.Role.text_run) and
             std.mem.eql(u8, run_value, view.text()) and
             run_lengths.len == view.characters and
             (h.adapter.lastTextSelectionOwner(ids.field) orelse 0) == ids.run,
@@ -4991,7 +4991,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const clicked_index = clicked.row.?.index;
     const row_queued = h.adapter.enqueueRequest(.{
         .id = clicked.id,
-        .action = @intFromEnum(semantics.Action.click),
+        .action = @backingInt(semantics.Action.click),
     });
     const row_applied = h.adapter.drain(first, &h.disp, h.scratch());
     try checks.expect(
@@ -5016,7 +5016,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const hits_before = view.button_hits;
     const click_queued = h.adapter.enqueueRequest(.{
         .id = ids.activate,
-        .action = @intFromEnum(semantics.Action.click),
+        .action = @backingInt(semantics.Action.click),
     });
     const click_applied = h.adapter.drain(first, &h.disp, h.scratch());
     try checks.expect(
@@ -5038,7 +5038,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const radio_before = view.radio_choice;
     const radio_queued = h.adapter.enqueueRequest(.{
         .id = ids.radio_b,
-        .action = @intFromEnum(semantics.Action.click),
+        .action = @backingInt(semantics.Action.click),
     });
     const radio_applied = h.adapter.drain(first, &h.disp, h.scratch());
     try checks.expect(
@@ -5094,7 +5094,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const focus_byte = accessibility.byteOffsetOf(field_run, 3);
     const selection_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 1,
         .focus_index = 3,
@@ -5125,7 +5125,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const caret_before = view.caret;
     const out_of_range_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = view.characters + 1,
         .focus_index = view.characters + 1,
@@ -5157,14 +5157,14 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const characters_before = view.characters;
     const caret_at_end_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = view.characters,
         .focus_index = view.characters,
     });
     const replace_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .value,
         .value = "X",
     });
@@ -5202,13 +5202,13 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const grown_writes = view.text_writes;
     const first_batch_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .value,
         .value = "€€",
     });
     const second_batch_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 1,
         .focus_index = 4,
@@ -5445,7 +5445,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const current_ids = try Ids.capture(current);
     const caret_queued = h.adapter.enqueueRequest(.{
         .id = current_ids.field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 0,
         .focus_index = 1,
@@ -5459,7 +5459,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const caret_mark = view.marked;
     const contents_queued = h.adapter.enqueueRequest(.{
         .id = current_ids.field,
-        .action = @intFromEnum(semantics.Action.set_value),
+        .action = @backingInt(semantics.Action.set_value),
         .data = .value,
         .value = "kaüße ✓€€かX",
     });
@@ -5517,7 +5517,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
         try checks.expect(
             report,
             "modal.flag_is_authored",
-            publishedRole(h.adapter, dialog.id) == @intFromEnum(semantics.Role.dialog) and
+            publishedRole(h.adapter, dialog.id) == @backingInt(semantics.Role.dialog) and
                 dialog_flags & state_modal != 0 and carriers == 1,
             checks.note("dialog={d} role={s} flags=0x{x} modal_bit=0x{x} carriers={d}", .{
                 dialog.id,
@@ -5545,7 +5545,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
             nodeNamed(fifth, label_list_remove) != null and
                 remove_flags & state_disabled != 0 and
                 remove_actions == 0 and
-                publishedRole(h.adapter, ids.list_remove) == @intFromEnum(semantics.Role.button),
+                publishedRole(h.adapter, ids.list_remove) == @backingInt(semantics.Role.button),
             checks.note("list_remove={d} flags=0x{x} disabled_bit=0x{x} actions=0x{x} role={s}", .{
                 ids.list_remove,
                 remove_flags,
@@ -5559,11 +5559,11 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
         const removes_before = view.rows_removed;
         const blocked_add_queued = h.adapter.enqueueRequest(.{
             .id = ids.list_add,
-            .action = @intFromEnum(semantics.Action.click),
+            .action = @backingInt(semantics.Action.click),
         });
         const blocked_remove_queued = h.adapter.enqueueRequest(.{
             .id = ids.list_remove,
-            .action = @intFromEnum(semantics.Action.click),
+            .action = @backingInt(semantics.Action.click),
         });
         const blocked = h.adapter.drain(fifth, &h.disp, h.scratch());
         try checks.expect(
@@ -5587,7 +5587,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
         const confirms_before = view.modal_confirms;
         const confirm_queued = h.adapter.enqueueRequest(.{
             .id = dialog.id,
-            .action = @intFromEnum(semantics.Action.click),
+            .action = @backingInt(semantics.Action.click),
         });
         const confirmed = h.adapter.drain(fifth, &h.disp, h.scratch());
         try checks.expect(
@@ -5668,7 +5668,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
 
         const unknown_queued = h.adapter.enqueueRequest(.{
             .id = 0xDEAD_BEEF,
-            .action = @intFromEnum(semantics.Action.click),
+            .action = @backingInt(semantics.Action.click),
         });
         const unknown = h.adapter.drain(after, &h.disp, h.scratch());
         const unmodelled_queued = h.adapter.enqueueRequest(.{
@@ -5706,7 +5706,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const whole_writes = view.text_writes;
     const whole_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.set_value),
+        .action = @backingInt(semantics.Action.set_value),
         .data = .value,
         .value = "Grüße ✓€",
     });
@@ -5832,12 +5832,12 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const alias_start = try requireSnapshot(h);
     const alias_closed_queued = h.adapter.enqueueRequest(.{
         .id = ids.modal,
-        .action = @intFromEnum(semantics.Action.click),
+        .action = @backingInt(semantics.Action.click),
     });
     const alias_closed = h.adapter.drain(alias_start, &h.disp, h.scratch());
     const alias_focused_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.focus),
+        .action = @backingInt(semantics.Action.focus),
     });
     const alias_focused = h.adapter.drain(alias_start, &h.disp, h.scratch());
     const alias_field_key = view.fieldWidgetId();
@@ -5985,7 +5985,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const positioned_snapshot = try requireSnapshot(h);
     const seeded_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.set_value),
+        .action = @backingInt(semantics.Action.set_value),
         .data = .value,
         .value = "Grüße ✓€€",
     });
@@ -6020,7 +6020,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     const positioned_writes = view.text_writes;
     const delete_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .value = "",
         .anchor_index = 2,
@@ -6030,7 +6030,7 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     });
     const insert_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .value = "𝔘",
         .anchor_index = 2,
@@ -6076,12 +6076,12 @@ fn runHeadless(h: *Harness, report: *Reporter) !void {
     // all. Storing the 96 bytes that DO fit would be a different value than
     // the one that was asked for, presented as if it were this.
     const overflow_writes = view.text_writes;
-    const oversized = "x" ** (model_text_bytes + 1);
+    const oversized: [model_text_bytes + 1]u8 = @splat('x');
     const overflow_queued = h.adapter.enqueueRequest(.{
         .id = ids.field,
-        .action = @intFromEnum(semantics.Action.set_value),
+        .action = @backingInt(semantics.Action.set_value),
         .data = .value,
-        .value = oversized,
+        .value = &oversized,
     });
     const overflowed = h.adapter.drain(positioned_snapshot, &h.disp, h.scratch());
     try checks.expect(
@@ -6483,7 +6483,7 @@ fn runNative(
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

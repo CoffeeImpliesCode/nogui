@@ -258,7 +258,7 @@ pub fn main(init: std.process.Init) !void {
         const buffer = readback.?;
         const pixels: [*]const f32 = @ptrCast(@alignCast(buffer.cpu));
         try writePpm(io, gpa, path, pixels, capture_size.width, capture_size.height);
-        const report = try std.fmt.allocPrint(gpa, "shot: {s} {d}x{d}\n", .{
+        const report = try gpa.print("shot: {s} {d}x{d}\n", .{
             path, capture_size.width, capture_size.height,
         });
         defer gpa.free(report);

@@ -763,23 +763,23 @@ fn launchSdlFile(
             // SDL reads these as C strings, so they must be NUL terminated and
             // must outlive the native callback.
             owned[index] = .{
-                .name = (try scratch.dupeZ(u8, filter.name)).ptr,
+                .name = (try scratch.dupeSentinel(u8, filter.name, 0)).ptr,
                 .pattern = (try sdlFilterPattern(scratch, filter)).ptr,
             };
         }
         filters = owned;
     }
     const location: ?[:0]const u8 = if (options.default_location) |value|
-        try scratch.dupeZ(u8, value)
+        try scratch.dupeSentinel(u8, value, 0)
     else
         null;
-    const title: ?[:0]const u8 = if (options.title) |value| try scratch.dupeZ(u8, value) else null;
+    const title: ?[:0]const u8 = if (options.title) |value| try scratch.dupeSentinel(u8, value, 0) else null;
     const accept: ?[:0]const u8 = if (options.accept_label) |value|
-        try scratch.dupeZ(u8, value)
+        try scratch.dupeSentinel(u8, value, 0)
     else
         null;
     const cancel: ?[:0]const u8 = if (options.cancel_label) |value|
-        try scratch.dupeZ(u8, value)
+        try scratch.dupeSentinel(u8, value, 0)
     else
         null;
 
@@ -840,8 +840,8 @@ fn showSdlMessage(
     defer scratch.deinit();
     const text = scratch.allocator();
 
-    const title = try text.dupeZ(u8, options.title);
-    const message = try text.dupeZ(u8, options.message);
+    const title = try text.dupeSentinel(u8, options.title, 0);
+    const message = try text.dupeSentinel(u8, options.message, 0);
     const count: usize = if (options.buttons.len == 0) 1 else options.buttons.len;
     const buttons = try text.alloc(sdl3.message_box.Button, count);
     if (options.buttons.len == 0) {
@@ -851,7 +851,7 @@ fn showSdlMessage(
                 .mark_default_with_escape_key = true,
             },
             .value = 0,
-            .text = (try text.dupeZ(u8, "OK")).ptr,
+            .text = (try text.dupeSentinel(u8, "OK", 0)).ptr,
         };
     } else {
         for (options.buttons, 0..) |button, index| {
@@ -861,7 +861,7 @@ fn showSdlMessage(
                     .mark_default_with_escape_key = button.is_escape,
                 },
                 .value = button.id,
-                .text = (try text.dupeZ(u8, button.text)).ptr,
+                .text = (try text.dupeSentinel(u8, button.text, 0)).ptr,
             };
         }
     }
@@ -991,7 +991,7 @@ fn portalFileDialog(
     options: FileOptions,
     callback: FileCallback,
 ) !void {
-    if (comptime builtin.os.tag != .linux or builtin.abi.isAndroid()) {
+    if (comptime builtin.target.os.tag != .linux or builtin.target.abi.isAndroid()) {
         callback.callback(callback.context, .unsupported);
         return;
     }
@@ -1109,7 +1109,7 @@ fn portalFilterPatterns(
             break;
         }
         try parts.append(arena, switch (filter.match) {
-            .extension => try std.fmt.allocPrint(arena, "*.{s}", .{part}),
+            .extension => try arena.print("*.{s}", .{part}),
             .glob => try arena.dupe(u8, part),
         });
     }
@@ -1143,7 +1143,7 @@ fn sdlFilterPattern(arena: std.mem.Allocator, filter: Filter) ![:0]const u8 {
             },
         }
     }
-    return arena.dupeZ(u8, out.items);
+    return arena.dupeSentinel(u8, out.items, 0);
 }
 
 /// The window identifier the portal expects, as
@@ -1157,10 +1157,10 @@ fn portalParentWindow(arena: std.mem.Allocator, id: sdl3.video.WindowId) ![]cons
     const window = try nativeWindow(id);
     const properties = window.getProperties() catch return "";
     if (properties.x11_window) |xid| {
-        return std.fmt.allocPrint(arena, "x11:{x}", .{@as(u64, @intCast(xid))});
+        return arena.print("x11:{x}", .{@as(u64, @intCast(xid))});
     }
     if (properties.wayland_xdg_toplevel_export_handle) |handle| {
-        if (handle.len != 0) return std.fmt.allocPrint(arena, "wayland:{s}", .{handle});
+        if (handle.len != 0) return arena.print("wayland:{s}", .{handle});
     }
     return "";
 }
@@ -1236,7 +1236,7 @@ pub fn revealPath(
 ) !RevealOutcome {
     if (!approval.confirmed) return error.ActionNotApproved;
     if (paths.len == 0) return error.EmptyPath;
-    if (comptime builtin.os.tag != .linux or builtin.abi.isAndroid()) return .unsupported;
+    if (comptime builtin.target.os.tag != .linux or builtin.target.abi.isAndroid()) return .unsupported;
     portal.showItems(allocator, paths) catch |err| switch (err) {
         error.NoSessionBus, error.PortalUnavailable => return .unsupported,
         else => return .failed,

@@ -525,16 +525,16 @@ pub const MeasurementCache = struct {
             known_border_width.bits,
             known_border_height.bits,
         };
-        const tags: u64 = @bitCast([_]u8{
+        const tags = std.mem.bytesToValue(u64, &[_]u8{
             @intFromBool(percentage_width.present),
             @intFromBool(percentage_height.present),
             @intFromBool(known_border_width.present),
             @intFromBool(known_border_height.present),
-            @intCast(@intFromEnum(request.width_mode)),
-            @intCast(@intFromEnum(request.height_mode)),
-            @intCast(@intFromEnum(request.sizing_mode)),
+            @intCast(@backingInt(request.width_mode)),
+            @intCast(@backingInt(request.height_mode)),
+            @intCast(@backingInt(request.sizing_mode)),
             if (parent_display) |display|
-                @as(u8, @intCast(@intFromEnum(display) + 1))
+                @as(u8, @intCast(@backingInt(display) + 1))
             else
                 0,
         });
@@ -552,7 +552,7 @@ pub const MeasurementCache = struct {
 
     fn requestHash(float_bits: *const [6]u32, tags: u64) u64 {
         // Array layout preserves the request byte order without depending on Key field placement.
-        const float_words: [3]u64 = @bitCast(float_bits.*);
+        const float_words = std.mem.bytesToValue([3]u64, std.mem.asBytes(float_bits));
         const request_words: [4]u64 = .{
             float_words[0],
             float_words[1],
@@ -636,8 +636,8 @@ pub const TextMeasurementCache = struct {
             (@as(u32, @intFromBool(known_height.present)) << 1) |
             (@as(u32, available_width.tag) << 2) |
             (@as(u32, available_height.tag) << 4) |
-            (@as(u32, @intFromEnum(input.writing_mode)) << 8) |
-            (@as(u32, @intFromEnum(input.line_policy)) << 16);
+            (@as(u32, @backingInt(input.writing_mode)) << 8) |
+            (@as(u32, @backingInt(input.line_policy)) << 16);
         return .{
             .node_index = node_index,
             // Tag-first words compare without padding or copying resident keys.

@@ -264,8 +264,8 @@ pub fn mobileActionMask(
     var mask = actions;
     if (read_only) mask &= ~mutatingActions();
     if (!bound and !platform_edits_virtual_text) {
-        const edits: u32 = (1 << @intFromEnum(semantics.Action.replace_selected_text)) |
-            (1 << @intFromEnum(semantics.Action.set_text_selection));
+        const edits: u32 = (1 << @backingInt(semantics.Action.replace_selected_text)) |
+            (1 << @backingInt(semantics.Action.set_text_selection));
         mask &= ~edits;
     }
     return mask;
@@ -280,10 +280,10 @@ pub fn mobileActionMask(
 /// a mutation — a caret, a click, a focus, a named action and a scroll change
 /// what the reader is looking at, not what the control holds.
 pub fn mutatingActions() u32 {
-    return (1 << @intFromEnum(semantics.Action.set_value)) |
-        (1 << @intFromEnum(semantics.Action.increment)) |
-        (1 << @intFromEnum(semantics.Action.decrement)) |
-        (1 << @intFromEnum(semantics.Action.replace_selected_text));
+    return (1 << @backingInt(semantics.Action.set_value)) |
+        (1 << @backingInt(semantics.Action.increment)) |
+        (1 << @backingInt(semantics.Action.decrement)) |
+        (1 << @backingInt(semantics.Action.replace_selected_text));
 }
 
 /// The window adapter. One instance per toplevel window.

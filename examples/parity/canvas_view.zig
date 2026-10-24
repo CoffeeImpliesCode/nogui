@@ -2047,7 +2047,7 @@ const ShaderFile = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -2100,8 +2100,8 @@ pub fn main(init: std.process.Init) !void {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 test "api-w25 custom element publishes prepaint geometry and its own paint records" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     const scenario = try Scenario.init(gpa);
@@ -2186,8 +2186,8 @@ test "api-w25 custom element publishes prepaint geometry and its own paint recor
 }
 
 test "api-w25 element paint records are validated, not silently accepted" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     // A negative width is not a paintable rectangle, and the sentinel texture
@@ -2226,8 +2226,8 @@ test "api-w25 element paint records are validated, not silently accepted" {
 }
 
 test "api-w25 embedded assets decode and rasterize to their authored pixels" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     // The real P6 decoder, on the real embedded bytes.

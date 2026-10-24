@@ -240,13 +240,13 @@ const AsyncSink = struct {
     last_operation: credentials.Operation = .read,
     // Both buffers are filled from the completion before their `*_len`
     // companion is read, and the zeroed tail past that length is never read.
-    last_query: [64]u8 = [_]u8{0} ** 64,
+    last_query: [64]u8 = @splat(0),
     last_query_len: usize = 0,
     read_tag: std.meta.Tag(credentials.ReadResult) = .canceled,
     read_error: credentials.ProviderError = .disconnected,
     write_tag: std.meta.Tag(credentials.WriteResult) = .canceled,
     delete_tag: std.meta.Tag(credentials.DeleteResult) = .canceled,
-    found_secret: [64]u8 = [_]u8{0} ** 64,
+    found_secret: [64]u8 = @splat(0),
     found_len: usize = 0,
 
     fn probe(context: *const anyopaque) bool {

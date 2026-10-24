@@ -55,7 +55,7 @@ pub const preferences = @import("preferences.zig");
 pub const available = native.available;
 
 /// The shim's own directory, which a build needs on the include path for
-/// `@cImport` and on the source list for `zig cc`.
+/// C translation and on the source list for `zig cc`.
 pub const shim_include = "macos/shim";
 pub const shim_source = "macos/shim/nogui_macos.m";
 

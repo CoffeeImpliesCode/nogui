@@ -62,7 +62,7 @@ test "root max-content request uses natural leaf border on both axes" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     const text = "max-content";
     try tree.appendNode(.{
         .id = root_id,
@@ -97,7 +97,7 @@ test "root definite width preserves width while height uses max-content" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     const text = "definite-width";
     const available_width: f32 = 73;
     try tree.appendNode(.{

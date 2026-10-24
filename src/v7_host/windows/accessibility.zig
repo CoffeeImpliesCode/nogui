@@ -58,12 +58,8 @@ const shared = @import("../accessibility.zig");
 
 /// The AccessKit C ABI, opened here rather than through a shim.
 ///
-/// The bridge's ABI lives in the canonical shared bridge header the whole host
-/// already links, so this is the same single `@cImport` the macOS adapter makes
-/// and no ABI is declared twice across the project.
-const bridge = @cImport({
-    @cInclude("nogui_accesskit_bridge.h");
-});
+/// Every host adapter uses the same translated canonical bridge header.
+const bridge = @import("nogui_accesskit_c");
 
 /// The shared adapter. Its semantics, its action queue, its offsets and its
 /// tree diffing are the ones every target uses, unchanged.

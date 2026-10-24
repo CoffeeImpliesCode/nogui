@@ -431,8 +431,8 @@ pub const Service = struct {
         var item = self.first;
         while (item) |candidate| : (item = candidate.next) {
             if (candidate.state != .queued) continue;
-            if (best == null or @intFromEnum(candidate.priority) <
-                @intFromEnum(best.?.priority)) best = candidate;
+            if (best == null or @backingInt(candidate.priority) <
+                @backingInt(best.?.priority)) best = candidate;
         }
         return best;
     }

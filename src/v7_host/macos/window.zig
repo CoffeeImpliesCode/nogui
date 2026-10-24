@@ -673,7 +673,7 @@ test "api-w23 macos document path copy is owned across the call that reads it" {
 
     // A path longer than the shim copies is refused here, before a buffer is
     // built for it.
-    try std.testing.expectError(Error.BadArgument, Document.OwnedPath.init("x" ** (native.max_text + 1)));
+    try std.testing.expectError(Error.BadArgument, Document.OwnedPath.init(&@as([native.max_text + 1]u8, @splat('x'))));
 }
 
 test "api-w23 macos a refused navigation names the fact the shim could not" {

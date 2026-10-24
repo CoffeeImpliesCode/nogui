@@ -8,10 +8,10 @@ const FrameNodeId = @import("id.zig").FrameNodeId;
 const WidgetId = @import("id.zig").WidgetId;
 const Component = @import("component.zig").Component;
 
-const outer: FrameNodeId = @enumFromInt(1);
-const inner: FrameNodeId = @enumFromInt(2);
-const first: FrameNodeId = @enumFromInt(3);
-const second: FrameNodeId = @enumFromInt(4);
+const outer: FrameNodeId = @fromBackingInt(@intCast(1));
+const inner: FrameNodeId = @fromBackingInt(@intCast(2));
+const first: FrameNodeId = @fromBackingInt(@intCast(3));
+const second: FrameNodeId = @fromBackingInt(@intCast(4));
 const first_key: WidgetId = .{ .owner = 4, .slot = 1, .generation = 1 };
 const second_key: WidgetId = .{ .owner = 4, .slot = 2, .generation = 1 };
 const recycled_key: WidgetId = .{ .owner = 4, .slot = 1, .generation = 2 };
@@ -298,7 +298,7 @@ test "api-w09 focus tab groups custom leaves and explicit blur" {
     state.blur(notices.observer());
     try std.testing.expect(state.current == null);
     try std.testing.expectEqual(focus.Reason.blur, notices.changes[notices.changed - 1].reason);
-    const custom: FrameNodeId = @enumFromInt(9);
+    const custom: FrameNodeId = @fromBackingInt(@intCast(9));
     const custom_key: WidgetId = .{ .owner = 4, .slot = 9, .generation = 1 };
     try tree.nodes.append(std.testing.allocator, .{
         .id = custom,
@@ -498,7 +498,7 @@ test "api-w09 wheel units and propagation stop preserve one default" {
 test "api-w09 unkeyed leaf hit resolves stable enabled owner" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
-    const leaf: FrameNodeId = @enumFromInt(10);
+    const leaf: FrameNodeId = @fromBackingInt(@intCast(10));
     try tree.nodes.append(std.testing.allocator, .{
         .id = leaf,
         .parent = first,

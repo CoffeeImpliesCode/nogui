@@ -5,16 +5,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sdl3 = @import("sdl3");
 
-pub const c = @cImport({
-    @cInclude("nogui_mobile.h");
-});
+pub const c = @import("nogui_mobile_c");
 
 pub const Platform = enum { ios, android, unavailable };
-pub const platform: Platform = if (builtin.os.tag == .ios)
+pub const platform: Platform = if (builtin.target.os.tag == .ios)
     .ios
-else if (builtin.os.tag == .linux and
-    (std.mem.eql(u8, @tagName(builtin.abi), "android") or
-        std.mem.eql(u8, @tagName(builtin.abi), "androideabi")))
+else if (builtin.target.os.tag == .linux and
+    (std.mem.eql(u8, @tagName(builtin.target.abi), "android") or
+        std.mem.eql(u8, @tagName(builtin.target.abi), "androideabi")))
     .android
 else
     .unavailable;

@@ -83,7 +83,7 @@ test "api-w24 a mounted inspector with snapshots off allocates nothing per frame
     var tree = nogui.WidgetTree.init(gpa);
     defer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = .{ .owner = 1, .slot = 1, .generation = 1 },
         .kind = .{ .label = .{ .text = "quiet" } },
         .parent = .root,
@@ -173,12 +173,13 @@ test "api-w24 the performance JSONL merges the three collectors in one order" {
     var kinds: [4][]const u8 = undefined;
     var stamps: [4]i64 = undefined;
     var seen: usize = 0;
+    var parsed_arena = std.heap.ArenaAllocator.init(gpa);
+    defer parsed_arena.deinit();
     var lines = std.mem.splitScalar(u8, out.written(), '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
-        defer parsed.deinit();
-        const record = parsed.value.object;
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, parsed_arena.allocator(), line, .{});
+        const record = parsed.object;
         kinds[seen] = if (record.get("type")) |kind| kind.string else "frame";
         const stamp = if (record.get("end_ns")) |end|
             end.integer

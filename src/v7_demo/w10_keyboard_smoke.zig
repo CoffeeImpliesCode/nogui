@@ -45,8 +45,8 @@ const window_height: u32 = 240;
 /// Two scancodes whose labels follow the layout. Both are printed as SDL
 /// reports them; neither is expected to be any particular character, because
 /// a US key table is exactly what this smoke must not carry.
-const scan_y: u32 = @intFromEnum(sdl3.Scancode.y);
-const scan_z: u32 = @intFromEnum(sdl3.Scancode.z);
+const scan_y: u32 = @backingInt(sdl3.Scancode.y);
+const scan_z: u32 = @backingInt(sdl3.Scancode.z);
 
 /// Pump step while waiting for the server's layout change.
 const pump_step_ns: u64 = 10 * std.time.ns_per_ms;
@@ -78,7 +78,7 @@ pub const Error = error{
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -112,7 +112,7 @@ const Options = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

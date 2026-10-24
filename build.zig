@@ -1,11 +1,13 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 const Product = enum { core, text, render, host, frame, all };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const release_safe = std.builtin.OptimizeMode.ReleaseSafe;
+    const translate_c = b.dependency("translate_c", .{});
+    const release_safe = std.lang.Optimize.safe;
     const product = b.option(Product, "product", "Build product: core, text, render, host, frame, or all") orelse .all;
 
     // zig-cov coverage (see zig-cov README): zig-gate --cov passes these
@@ -147,6 +149,27 @@ pub fn build(b: *std.Build) void {
     // through LD_LIBRARY_PATH instead of Zig's literal-soname ELF loader.
     if (host_mod) |module| module.link_libc = true;
     if (host_mod) |module| {
+        const accesskit_c: Translator = .init(translate_c, .{
+            .name = "nogui_accesskit",
+            .c_source_file = b.path("src/v7_host/accesskit_bridge/include/nogui_accesskit_bridge.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        module.addImport("nogui_accesskit_c", accesskit_c.mod);
+        const macos_c: Translator = .init(translate_c, .{
+            .name = "nogui_macos",
+            .c_source_file = b.path("src/v7_host/macos/shim/nogui_macos.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        module.addImport("nogui_macos_c", macos_c.mod);
+        const mobile_c: Translator = .init(translate_c, .{
+            .name = "nogui_mobile",
+            .c_source_file = b.path("src/v7_host/mobile/shim/nogui_mobile.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        module.addImport("nogui_mobile_c", mobile_c.mod);
         module.addIncludePath(b.path("src/v7_host/macos/shim"));
         module.addIncludePath(b.path("src/v7_host/mobile/shim"));
         module.addIncludePath(b.path("src/v7_host/windows/native"));
@@ -205,9 +228,7 @@ pub fn build(b: *std.Build) void {
     // render consumer never enters this block: no cargo, no header, no link.
     if (host_mod) |module| blk: {
         const bridge_options = b.addOptions();
-        // The header is pure C declarations, so @cImport translates it whether
-        // or not the static library is linked. The include path is therefore
-        // unconditional: without it the host does not compile at all.
+        // The C ABI remains available when the optional static library is omitted.
         module.addIncludePath(b.path("src/v7_host/accesskit_bridge/include"));
         const bridge_supported = target.result.os.tag == .macos or target.result.os.tag == .windows or
             (target.result.os.tag == .linux and !target.result.abi.isAndroid());
@@ -217,8 +238,9 @@ pub fn build(b: *std.Build) void {
         // subcommand. Keep the bare name whenever the realpath is not a cargo
         // of its own: the child resolves it through PATH with argv[0] intact,
         // and a genuinely renamed cargo never looks at argv[0] anyway.
+        // This configure-time probe selects bridge support when Cargo is absent.
         const cargo = if (accesskit_bridge and bridge_supported) probe: {
-            const found = b.findProgram(&.{"cargo"}, &.{}) catch break :probe @as(?[]const u8, null);
+            const found = b.findProgram(.{ .names = &.{"cargo"} }) orelse break :probe @as(?[]const u8, null);
             break :probe if (std.mem.eql(u8, std.fs.path.basename(found), "cargo")) found else "cargo";
         } else null;
         if (accesskit_bridge and bridge_supported and cargo == null) std.log.warn(
@@ -410,7 +432,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&context_tests.step);
     // ── Lint step (house linters on the ACTIVE tree) ──────
     const lint_step = b.step("lint", "Run ziglint (enforced rules) + zlint on active source");
-    const ziglint = b.findProgram(&.{"ziglint"}, &.{}) catch "ziglint";
+    const ziglint = "ziglint";
     const ziglint_cmd = b.addSystemCommand(&.{
         ziglint,
         "src/v7",
@@ -421,9 +443,9 @@ pub fn build(b: *std.Build) void {
         "src/v7_host",
     });
     lint_step.dependOn(&ziglint_cmd.step);
-    const zlint = b.findProgram(&.{"zlint"}, &.{}) catch "zlint";
-    const find = b.findProgram(&.{"find"}, &.{}) catch "find";
-    const grep = b.findProgram(&.{"grep"}, &.{}) catch "grep";
+    const zlint = "zlint";
+    const find = "find";
+    const grep = "grep";
     const lint_sources = b.addSystemCommand(&.{
         find,
         "src/v7",
@@ -597,6 +619,32 @@ pub fn build(b: *std.Build) void {
     const v7_render_mod = render_mod.?;
     const nogui_text_mod = text_mod.?;
     const nogui_host_mod = host_mod.?;
+    const ffmpeg_header = b.addWriteFiles().add("nogui_ffmpeg.h",
+        \\#include <errno.h>
+        \\#include <libavformat/avformat.h>
+        \\#include <libavcodec/avcodec.h>
+        \\#include <libavutil/avutil.h>
+        \\#include <libavutil/channel_layout.h>
+        \\#include <libavutil/dict.h>
+        \\#include <libavutil/imgutils.h>
+        \\#include <libavutil/samplefmt.h>
+        \\#include <libswresample/swresample.h>
+        \\#include <libswscale/swscale.h>
+        \\
+    );
+    const ffmpeg_c: Translator = .init(translate_c, .{
+        .name = "nogui_ffmpeg",
+        .c_source_file = ffmpeg_header,
+        .target = target,
+        .optimize = optimize,
+        .link_system_libs = &.{
+            .{ .name = "avformat" },
+            .{ .name = "avcodec" },
+            .{ .name = "avutil" },
+            .{ .name = "swresample" },
+            .{ .name = "swscale" },
+        },
+    });
     const parity_font_assets = b.addWriteFiles();
     _ = parity_font_assets.addCopyFile(b.path("src/InterVariable.ttf"), "InterVariable.ttf");
     const parity_font_shim = parity_font_assets.add("font_embed.zig",
@@ -636,7 +684,7 @@ pub fn build(b: *std.Build) void {
         });
         example_exe.root_module.addAnonymousImport("font_bytes", .{ .root_source_file = parity_font_shim });
         const example_run = b.addRunArtifact(example_exe);
-        if (b.args) |args| example_run.addArgs(args);
+        example_run.addPassthruArgs();
         const native_run = b.addRunArtifact(example_exe);
         parity_native_runs[example_index] = native_run;
         native_run.addArg("--native");
@@ -650,7 +698,7 @@ pub fn build(b: *std.Build) void {
         native_run.addFileArg(b.path("shaders/fullscreen_vert.spv"));
         native_run.addArg("--blit-oklab");
         native_run.addFileArg(b.path("shaders/blit_oklab.spv"));
-        if (b.args) |args| native_run.addArgs(args);
+        native_run.addPassthruArgs();
         b.step(
             b.fmt("run-parity-{s}-native", .{example.name}),
             b.fmt("Present the {s} consumer through the native host", .{example.name}),
@@ -697,7 +745,7 @@ pub fn build(b: *std.Build) void {
     });
     menu_overlay_example.root_module.addAnonymousImport("font_bytes", .{ .root_source_file = parity_font_shim });
     const menu_overlay_run = b.addRunArtifact(menu_overlay_example);
-    if (b.args) |args| menu_overlay_run.addArgs(args);
+    menu_overlay_run.addPassthruArgs();
     const menu_overlay_step = b.step("run-parity-menu-overlay", "Run the menu, overlay and drag example");
     menu_overlay_step.dependOn(&menu_overlay_run.step);
 
@@ -723,7 +771,7 @@ pub fn build(b: *std.Build) void {
     list_live_run.addFileArg(b.path("shaders/quad_vert.spv"));
     list_live_run.addFileArg(b.path("shaders/quad_frag.spv"));
     list_live_run.addFileArg(b.path("shaders/sort_comp.spv"));
-    if (b.args) |args| list_live_run.addArgs(args);
+    list_live_run.addPassthruArgs();
     const list_live_step = b.step(
         "run-parity-list-live",
         "Render and exercise the two windowless virtualized lists",
@@ -777,11 +825,11 @@ pub fn build(b: *std.Build) void {
         run_canvas.addFileArg(b.path("shaders/fullscreen_vert.spv"));
         run_canvas.addArg("--blit-oklab");
         run_canvas.addFileArg(b.path("shaders/blit_oklab.spv"));
-        if (b.args) |args| run_canvas.addArgs(args);
+        run_canvas.addPassthruArgs();
     }
     canvas_native_run.addArg("--native");
     canvas_structural_run.addArg("--structural");
-    if (b.args) |args| canvas_structural_run.addArgs(args);
+    canvas_structural_run.addPassthruArgs();
     b.step("run-parity-canvas-view", "Render the bound image/SVG canvas without a window").dependOn(&canvas_run.step);
     b.step("run-parity-canvas-view-native", "Present the bound image/SVG canvas through the native host").dependOn(&canvas_native_run.step);
     b.step("run-parity-canvas-view-structural", "Exercise canvas records without a device or pixels").dependOn(&canvas_structural_run.step);
@@ -857,7 +905,7 @@ pub fn build(b: *std.Build) void {
         run_pair.addFileArg(b.path("shaders/fullscreen_vert.spv"));
         run_pair.addArg("--blit-oklab");
         run_pair.addFileArg(b.path("shaders/blit_oklab.spv"));
-        if (b.args) |args| run_pair.addArgs(args);
+        run_pair.addPassthruArgs();
     }
     state_pair_native_run.addArg("--native");
     b.step("run-parity-state-pair", "Run the real-text windowless state comparison arm").dependOn(&state_pair_run.step);
@@ -908,7 +956,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     // ── v7 demo executable ────────────────────────────
     const v7_demo = b.addExecutable(.{
@@ -937,6 +985,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
     v7_demo.root_module.addOptions("v7_options", v7_options);
+    v7_demo.root_module.addImport("nogui_ffmpeg_c", ffmpeg_c.mod);
     v7_demo.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     v7_demo.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     v7_demo.root_module.linkSystemLibrary("avformat", .{});
@@ -950,7 +999,7 @@ pub fn build(b: *std.Build) void {
     const v7_run_step = b.step("v7", "Run the v7 demo");
     v7_run_step.dependOn(&v7_run_cmd.step);
     v7_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| v7_run_cmd.addArgs(args);
+    v7_run_cmd.addPassthruArgs();
 
     // Compile the demo shaders into Zig's cache, then update the runtime
     // SPIR-V only when an input changes. The v7, Spotify, and calculator
@@ -1012,7 +1061,7 @@ pub fn build(b: *std.Build) void {
     spotify_run_cmd.addArgs(&.{"--spotify"});
     spotify_run_cmd.step.dependOn(b.getInstallStep());
     spotify_run_cmd.step.dependOn(&shader_updates.step);
-    if (b.args) |args| spotify_run_cmd.addArgs(args);
+    spotify_run_cmd.addPassthruArgs();
     const spotify_run_step = b.step("spotify", "Run the Spotify UI stress scene");
     spotify_run_step.dependOn(&spotify_run_cmd.step);
 
@@ -1022,7 +1071,7 @@ pub fn build(b: *std.Build) void {
     calculator_run_cmd.addArgs(&.{"--calculator"});
     calculator_run_cmd.step.dependOn(b.getInstallStep());
     calculator_run_cmd.step.dependOn(&shader_updates.step);
-    if (b.args) |args| calculator_run_cmd.addArgs(args);
+    calculator_run_cmd.addPassthruArgs();
     const calculator_run_step = b.step("calculator", "Run the calculator demo");
     calculator_run_step.dependOn(&calculator_run_cmd.step);
 
@@ -1047,7 +1096,7 @@ pub fn build(b: *std.Build) void {
     w09_controls_smoke.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     const w09_controls_run = b.addRunArtifact(w09_controls_smoke);
     w09_controls_run.step.dependOn(&shader_updates.step);
-    if (b.args) |args| w09_controls_run.addArgs(args);
+    w09_controls_run.addPassthruArgs();
     const w09_controls_step = b.step("w09-controls-smoke", "Run the headless or native Todo control lifecycle smoke");
     w09_controls_step.dependOn(&w09_controls_run.step);
     check_step.dependOn(&w09_controls_smoke.step);
@@ -1082,7 +1131,7 @@ pub fn build(b: *std.Build) void {
     w07_smoke_run.step.dependOn(&shader_updates.step);
     const w07_smoke_step = b.step("w07-host-smoke", "Run the W07 two-window native host smoke");
     w07_smoke_step.dependOn(&w07_smoke_run.step);
-    if (b.args) |args| w07_smoke_run.addArgs(args);
+    w07_smoke_run.addPassthruArgs();
     check_step.dependOn(&w07_smoke.step);
 
     // ── W22 Wayland layer-shell smoke ─────────────
@@ -1110,7 +1159,7 @@ pub fn build(b: *std.Build) void {
         "Run the W22 real Wayland layer-shell smoke",
     );
     w22_layer_step.dependOn(&w22_layer_run.step);
-    if (b.args) |args| w22_layer_run.addArgs(args);
+    w22_layer_run.addPassthruArgs();
     // Compiled by the headless check, run only by its own step: the smoke
     // needs a live compositor.
     check_step.dependOn(&w22_layer_smoke.step);
@@ -1141,7 +1190,7 @@ pub fn build(b: *std.Build) void {
         "Run the windowless popup refusal (--native for a real buffer)",
     );
     w22_popup_step.dependOn(&w22_popup_run.step);
-    if (b.args) |args| w22_popup_run.addArgs(args);
+    w22_popup_run.addPassthruArgs();
     // Default: windowless refusal. --native requires a display server and GPU.
     check_step.dependOn(&w22_popup_smoke.step);
 
@@ -1164,7 +1213,7 @@ pub fn build(b: *std.Build) void {
         "Probe keyboard/cursor services (private X11 driver optional)",
     );
     w10_keyboard_step.dependOn(&w10_keyboard_run.step);
-    if (b.args) |args| w10_keyboard_run.addArgs(args);
+    w10_keyboard_run.addPassthruArgs();
     check_step.dependOn(&w10_keyboard_smoke.step);
 
     const w17_anim_smoke = b.addExecutable(.{
@@ -1187,7 +1236,7 @@ pub fn build(b: *std.Build) void {
     const w17_anim_run = b.addRunArtifact(w17_anim_smoke);
     const w17_anim_step = b.step("w17-anim-smoke", "Run the W17 authored-animation and reduced-motion host smoke");
     w17_anim_step.dependOn(&w17_anim_run.step);
-    if (b.args) |args| w17_anim_run.addArgs(args);
+    w17_anim_run.addPassthruArgs();
     check_step.dependOn(&w17_anim_smoke.step);
 
     const w14_asset_app = b.addExecutable(.{
@@ -1209,7 +1258,7 @@ pub fn build(b: *std.Build) void {
     w14_asset_run.step.dependOn(&shader_updates.step);
     const w14_asset_step = b.step("w14-asset-smoke", "Run the W14 asset and rendered-image smoke");
     w14_asset_step.dependOn(&w14_asset_run.step);
-    if (b.args) |args| w14_asset_run.addArgs(args);
+    w14_asset_run.addPassthruArgs();
     check_step.dependOn(&w14_asset_app.step);
 
     // ── W24 inspector interaction smoke ─────────────
@@ -1242,7 +1291,7 @@ pub fn build(b: *std.Build) void {
         "Run W18 refusal smoke; real dialogs need --authorize-dialog-round-trip and exact --dialog-scope",
     );
     w18_dialog_step.dependOn(&w18_dialog_run.step);
-    if (b.args) |args| w18_dialog_run.addArgs(args);
+    w18_dialog_run.addPassthruArgs();
     // Compiled by the headless check, run only by its own step. Clipboard and
     // real-dialog arms need their separate explicit approval flags.
     check_step.dependOn(&w18_dialog_smoke.step);
@@ -1269,7 +1318,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run = b.addRunArtifact(artifact);
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         b.step(smoke.name, smoke.description).dependOn(&run.step);
         check_step.dependOn(&artifact.step);
         const smoke_tests = b.addTest(.{
@@ -1296,7 +1345,7 @@ pub fn build(b: *std.Build) void {
     });
     w16_paint_smoke.step.dependOn(&shader_updates.step);
     const w16_paint_run = b.addRunArtifact(w16_paint_smoke);
-    if (b.args) |args| w16_paint_run.addArgs(args);
+    w16_paint_run.addPassthruArgs();
     b.step("w16-paint-smoke", "Check overlay paint bands with real GPU pixels").dependOn(&w16_paint_run.step);
     check_step.dependOn(&w16_paint_smoke.step);
 
@@ -1325,7 +1374,7 @@ pub fn build(b: *std.Build) void {
         "Run the W24 headless inspector interaction smoke",
     );
     w24_inspector_step.dependOn(&w24_inspector_run.step);
-    if (b.args) |args| w24_inspector_run.addArgs(args);
+    w24_inspector_run.addPassthruArgs();
     // The default run is headless. Native presentation requires --native.
     check_step.dependOn(&w24_inspector_smoke.step);
 
@@ -1356,6 +1405,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
     w24_perf_bench.root_module.addOptions("v7_options", v7_options);
+    w24_perf_bench.root_module.addImport("nogui_ffmpeg_c", ffmpeg_c.mod);
     w24_perf_bench.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     w24_perf_bench.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     w24_perf_bench.root_module.linkSystemLibrary("avformat", .{});
@@ -1369,7 +1419,7 @@ pub fn build(b: *std.Build) void {
         "Run the W24 performance-recorder paired benchmark",
     );
     w24_perf_step.dependOn(&w24_perf_run.step);
-    if (b.args) |args| w24_perf_run.addArgs(args);
+    w24_perf_run.addPassthruArgs();
     // Compiled by the headless check, run only by its own step: the
     // benchmark needs a live GPU and takes minutes by design.
     check_step.dependOn(&w24_perf_bench.step);
@@ -1412,7 +1462,7 @@ pub fn build(b: *std.Build) void {
         "Run the W21 headless semantic gate (--native for AT-SPI)",
     );
     w21_atspi_step.dependOn(&w21_atspi_run.step);
-    if (b.args) |args| w21_atspi_run.addArgs(args);
+    w21_atspi_run.addPassthruArgs();
     // The default is headless; native registry/screen-reader checks are opt-in.
     check_step.dependOn(&w21_atspi_smoke.step);
     const w23_diagnostics_smoke = b.addExecutable(.{
@@ -1461,7 +1511,7 @@ pub fn build(b: *std.Build) void {
         "Exercise SDL dummy text-input lifecycle with synthetic events",
     );
     w12_ime_step.dependOn(&w12_ime_run.step);
-    if (b.args) |args| w12_ime_run.addArgs(args);
+    w12_ime_run.addPassthruArgs();
     check_step.dependOn(&w12_ime_smoke.step);
 
     for ([_]struct { name: []const u8, source: []const u8, description: []const u8 }{
@@ -1510,7 +1560,7 @@ pub fn build(b: *std.Build) void {
         }
         const run = b.addRunArtifact(artifact);
         run.step.dependOn(&shader_updates.step);
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         const step = b.step(smoke.name, smoke.description);
         step.dependOn(&run.step);
         const compile_step = b.step(
@@ -1569,7 +1619,7 @@ pub fn build(b: *std.Build) void {
     const w13_canvas_run = b.addRunArtifact(w13_canvas_smoke);
     const w13_canvas_step = b.step("w13-canvas-smoke", "Run the windowless paint pixel specimen");
     w13_canvas_step.dependOn(&w13_canvas_run.step);
-    if (b.args) |args| w13_canvas_run.addArgs(args);
+    w13_canvas_run.addPassthruArgs();
     check_step.dependOn(&w13_canvas_smoke.step);
     const exe_tests = b.addTest(.{
         .filters = test_filters,
@@ -1593,6 +1643,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe_tests.root_module.addOptions("v7_options", v7_options);
+    exe_tests.root_module.addImport("nogui_ffmpeg_c", ffmpeg_c.mod);
     exe_tests.root_module.linkLibrary(freetype_dep.artifact("freetype"));
     exe_tests.root_module.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
     exe_tests.root_module.linkSystemLibrary("avformat", .{});

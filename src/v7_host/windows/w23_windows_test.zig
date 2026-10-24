@@ -217,7 +217,7 @@ fn doorTree(gpa: std.mem.Allocator) !nogui.WidgetTree {
     var tree = nogui.WidgetTree.init(gpa);
     errdefer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = door_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "child" } },

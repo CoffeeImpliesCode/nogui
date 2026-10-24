@@ -7,10 +7,10 @@ const Session = nogui.Session;
 const event = nogui.event;
 
 const Note = struct {
-    bytes: [32]u8 = [_]u8{0} ** 32,
+    bytes: [32]u8 = @splat(0),
     len: usize = 0,
     completed: u32 = 0,
-    order: [4]u32 = [_]u32{0} ** 4,
+    order: [4]u32 = @splat(0),
     order_len: usize = 0,
 };
 

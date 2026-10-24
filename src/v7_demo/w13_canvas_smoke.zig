@@ -197,7 +197,7 @@ const loose: f32 = 0.05;
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -1209,7 +1209,7 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Options {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

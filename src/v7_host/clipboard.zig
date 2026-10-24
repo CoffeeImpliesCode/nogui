@@ -60,7 +60,7 @@ pub fn setPrimaryText(allocator: std.mem.Allocator, text: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidText;
     if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidText;
 
-    const null_terminated = try allocator.dupeZ(u8, text);
+    const null_terminated = try allocator.dupeSentinel(u8, text, 0);
     defer allocator.free(null_terminated);
 
     if (!c.SDL_SetPrimarySelectionText(null_terminated.ptr)) {
@@ -96,7 +96,7 @@ const mime_aliases = [_][]const [:0]const u8{
 comptime {
     if (mime_aliases.len != Format.count) @compileError("one alias list per clipboard Format");
     for (mime_aliases, 0..) |aliases, i| {
-        const fmt: Format = @enumFromInt(i);
+        const fmt: Format = @fromBackingInt(@intCast(i));
         if (aliases.len == 0 or !std.mem.eql(u8, aliases[0], fmt.mime())) {
             @compileError("a Format's own MIME must lead its alias list");
         }
@@ -108,7 +108,7 @@ comptime {
 /// stays true for a format the clipboard advertises and will not serve, so it
 /// reports what is offered, not what can be read.
 pub fn hasData(format: Format) bool {
-    for (mime_aliases[@intFromEnum(format)]) |alias| {
+    for (mime_aliases[@backingInt(format)]) |alias| {
         if (c.SDL_HasClipboardData(alias.ptr)) return true;
     }
     return false;
@@ -135,7 +135,7 @@ fn readFormatBytes(
     format: Format,
     listed: [*c]const u8,
 ) !?[]u8 {
-    for (mime_aliases[@intFromEnum(format)], 0..) |alias, i| {
+    for (mime_aliases[@backingInt(format)], 0..) |alias, i| {
         // A listing that repeats a spelling is not asked for it twice.
         if (i != 0 and std.ascii.eqlIgnoreCase(alias, std.mem.span(listed))) continue;
         const mime: [*c]const u8 = if (i == 0) listed else alias.ptr;
@@ -233,7 +233,7 @@ pub fn readItem(allocator: std.mem.Allocator) !?Item {
     // A format is marked read only after its spellings have been tried,
     // because a listing can name one spelling the owner refuses and another
     // it serves. Marking a format on sight drops a format that is readable.
-    var attempted = [_]bool{false} ** Format.count;
+    var attempted: [Format.count]bool = @splat(false);
     var unreadable: ?Format = null;
     // Listed MIME types this build cannot carry in an Item.
     var unmodeled: usize = 0;
@@ -251,7 +251,7 @@ pub fn readItem(allocator: std.mem.Allocator) !?Item {
             unmodeled += 1;
             continue;
         };
-        const idx = @intFromEnum(fmt);
+        const idx = @backingInt(fmt);
         if (attempted[idx]) continue;
 
         const bytes = try readFormatBytes(allocator, fmt, mime_ptr);

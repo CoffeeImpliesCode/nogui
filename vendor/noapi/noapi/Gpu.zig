@@ -170,7 +170,7 @@ pub fn shaderCreate(self: *Gpu, spv: []const u32, stage: ShaderStage, entry: [:0
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     _ = name;
-    const handle = try self.backend.shaderCreate(spv, @intFromEnum(stage), entry);
+    const handle = try self.backend.shaderCreate(spv, @backingInt(stage), entry);
     return .{ .gpu = self, .handle = handle, .stage = stage };
 }
 
@@ -331,7 +331,7 @@ test "task4 submission wrapper accepts 64 and rejects 65 command buffers" {
     for (&command_buffers, 0..) |*command_buffer, index| {
         command_buffer.* = .{
             .gpu = undefined,
-            .handle = @enumFromInt(@as(u64, @intCast(index + 1))),
+            .handle = @fromBackingInt(@intCast(@as(u64, @intCast(index + 1)))),
         };
     }
 

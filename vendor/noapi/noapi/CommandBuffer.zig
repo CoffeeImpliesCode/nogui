@@ -105,7 +105,7 @@ pub fn drawIndexed(
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
-    self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, format);
+    self.gpu.backend.cmdBindIndexBuffer(self.handle, @fromBackingInt(@intCast(indices.vk_buffer)), 0, format);
     self.gpu.backend.cmdDrawIndexed(self.handle, index_count, instance_count, first_index, vertex_offset);
 }
 
@@ -120,10 +120,10 @@ pub fn drawIndexedIndirect(
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
-    self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, format);
+    self.gpu.backend.cmdBindIndexBuffer(self.handle, @fromBackingInt(@intCast(indices.vk_buffer)), 0, format);
     self.gpu.backend.cmdDrawIndexedIndirect(
         self.handle,
-        @enumFromInt(arguments.vk_buffer),
+        @fromBackingInt(@intCast(arguments.vk_buffer)),
         0,
         max_draws,
         @sizeOf(DrawIndexedIndirectCommand),
@@ -144,13 +144,13 @@ pub fn drawIndexedIndirectMulti(
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     self.gpu.backend.cmdPushConstantsGraphics(self.handle, data);
-    self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, format);
+    self.gpu.backend.cmdBindIndexBuffer(self.handle, @fromBackingInt(@intCast(indices.vk_buffer)), 0, format);
     self.gpu.backend.cmdDrawIndexedIndirectMulti(
         self.handle,
-        @enumFromInt(arguments.vk_buffer),
+        @fromBackingInt(@intCast(arguments.vk_buffer)),
         0,
         stride,
-        @enumFromInt(count_buffer.vk_buffer),
+        @fromBackingInt(@intCast(count_buffer.vk_buffer)),
         count_offset,
         max_draws,
     );
@@ -165,17 +165,17 @@ pub fn dispatchIndirect(self: *CommandBuffer, data: u64, arguments: GpuPtr) void
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
     self.gpu.backend.cmdPushConstantsCompute(self.handle, data);
-    self.gpu.backend.cmdDispatchIndirect(self.handle, @enumFromInt(arguments.vk_buffer), 0);
+    self.gpu.backend.cmdDispatchIndirect(self.handle, @fromBackingInt(@intCast(arguments.vk_buffer)), 0);
 }
 pub fn bindIndexBuffer(self: *CommandBuffer, indices: GpuPtr, format: IndexFormat) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.gpu.backend.cmdBindIndexBuffer(self.handle, @enumFromInt(indices.vk_buffer), 0, format);
+    self.gpu.backend.cmdBindIndexBuffer(self.handle, @fromBackingInt(@intCast(indices.vk_buffer)), 0, format);
 }
 pub fn bindVertexBuffer(self: *CommandBuffer, binding: u32, buf: GpuPtr, offset: u64) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.gpu.backend.cmdBindVertexBuffer(self.handle, binding, @enumFromInt(buf.vk_buffer), offset);
+    self.gpu.backend.cmdBindVertexBuffer(self.handle, binding, @fromBackingInt(@intCast(buf.vk_buffer)), offset);
 }
 pub fn setShaders(self: *CommandBuffer, vert: Shader, frag: Shader) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
@@ -271,7 +271,7 @@ pub fn endRendering(self: *CommandBuffer) void {
 pub fn memCopy(self: *CommandBuffer, dst: GpuPtr, src: GpuPtr, bytes: u64) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.gpu.backend.cmdMemCopy(self.handle, @enumFromInt(src.vk_buffer), @enumFromInt(dst.vk_buffer), bytes);
+    self.gpu.backend.cmdMemCopy(self.handle, @fromBackingInt(@intCast(src.vk_buffer)), @fromBackingInt(@intCast(dst.vk_buffer)), bytes);
 }
 pub fn setVertexInput(self: *CommandBuffer, bindings: []const VertexBinding, attributes: []const VertexAttribute) void {
     self.gpu.backend.cmdSetVertexInput(self.handle, bindings, attributes);
@@ -279,10 +279,10 @@ pub fn setVertexInput(self: *CommandBuffer, bindings: []const VertexBinding, att
 pub fn copyToTexture(self: *CommandBuffer, tex: Texture, src: GpuPtr, region: TextureRegion) void {
     const zone = tracy.Zone.begin(.{ .src = @src() });
     defer zone.end();
-    self.gpu.backend.cmdCopyToTexture(self.handle, tex.handle, @enumFromInt(src.vk_buffer), region);
+    self.gpu.backend.cmdCopyToTexture(self.handle, tex.handle, @fromBackingInt(@intCast(src.vk_buffer)), region);
 }
 pub fn copyFromTexture(self: *CommandBuffer, tex: Texture, dst: GpuPtr, region: TextureRegion) void {
-    self.gpu.backend.cmdCopyFromTexture(self.handle, tex.handle, @enumFromInt(dst.vk_buffer), region);
+    self.gpu.backend.cmdCopyFromTexture(self.handle, tex.handle, @fromBackingInt(@intCast(dst.vk_buffer)), region);
 }
 
 pub fn blitTextureHandle(

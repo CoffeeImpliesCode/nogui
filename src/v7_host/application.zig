@@ -85,7 +85,7 @@ pub const ManagedWindow = struct {
     }
 
     pub fn requestTitle(self: *ManagedWindow, title: [:0]const u8) !void {
-        const copy = try self.gpa.dupeZ(u8, title);
+        const copy = try self.gpa.dupeSentinel(u8, title, 0);
         errdefer self.gpa.free(copy);
         try self.native.sdl.setTitle(copy);
         self.gpa.free(self.title);
@@ -727,7 +727,7 @@ pub const Application = struct {
         }
         try self.native_windows.ensureUnusedCapacity(self.gpa, 1);
         if (self.free_slot == null) try self.slots.ensureUnusedCapacity(self.gpa, 1);
-        const title = try self.gpa.dupeZ(u8, options.title);
+        const title = try self.gpa.dupeSentinel(u8, options.title, 0);
         errdefer self.gpa.free(title);
         const props: sdl3.video.Window.CreateProperties = .{
             .title = title,
@@ -1313,7 +1313,7 @@ pub const Application = struct {
             // query above holds: the event happened, and the loop survives it.
             self.displays.put(info) catch |err| std.log.warn(
                 "display snapshot cannot record display {d}: {s}",
-                .{ @intFromEnum(info.id), @errorName(err) },
+                .{ @backingInt(info.id), @errorName(err) },
             );
         } else {
             self.displays.remove(target);

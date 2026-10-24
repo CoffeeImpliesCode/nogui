@@ -92,9 +92,9 @@ fn measureCacheHash(key: MeasureCacheKey) u64 {
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.known_border_width.value));
     hash = mixMeasureCacheHash(hash, @intFromBool(key.known_border_height.present));
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.known_border_height.value));
-    hash = mixMeasureCacheHash(hash, @intFromEnum(key.available_width.tag));
+    hash = mixMeasureCacheHash(hash, @backingInt(key.available_width.tag));
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.available_width.value));
-    hash = mixMeasureCacheHash(hash, @intFromEnum(key.available_height.tag));
+    hash = mixMeasureCacheHash(hash, @backingInt(key.available_height.tag));
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.available_height.value));
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.request_available_width));
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.request_available_height));
@@ -102,15 +102,15 @@ fn measureCacheHash(key: MeasureCacheKey) u64 {
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.percentage_width.value));
     hash = mixMeasureCacheHash(hash, @intFromBool(key.percentage_height.present));
     hash = mixMeasureCacheHash(hash, measureCacheFloatHash(key.percentage_height.value));
-    hash = mixMeasureCacheHash(hash, @intFromEnum(key.width_mode));
-    hash = mixMeasureCacheHash(hash, @intFromEnum(key.height_mode));
-    hash = mixMeasureCacheHash(hash, @intFromEnum(key.sizing_mode));
-    hash = mixMeasureCacheHash(hash, if (key.parent_display) |value| @intFromEnum(value) + 1 else 0);
+    hash = mixMeasureCacheHash(hash, @backingInt(key.width_mode));
+    hash = mixMeasureCacheHash(hash, @backingInt(key.height_mode));
+    hash = mixMeasureCacheHash(hash, @backingInt(key.sizing_mode));
+    hash = mixMeasureCacheHash(hash, if (key.parent_display) |value| @backingInt(value) + 1 else 0);
     hash = mixMeasureCacheHash(hash, @intFromBool(key.allow_auto_track_stretch));
     hash = mixMeasureCacheHash(hash, @intFromBool(key.deferred_percentage_style.width));
     hash = mixMeasureCacheHash(hash, @intFromBool(key.deferred_percentage_style.height));
     hash = mixMeasureCacheHash(hash, @intFromPtr(key.text_request));
-    return mixMeasureCacheHash(hash, @intFromEnum(key.writing_mode));
+    return mixMeasureCacheHash(hash, @backingInt(key.writing_mode));
 }
 
 const MeasurementCache = struct {
@@ -4447,13 +4447,13 @@ test "baseline maps propagate allocation failure" {
     defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .spacer = .{} },
-        .parent = @enumFromInt(2),
+        .parent = @fromBackingInt(@intCast(2)),
         .style = .{ .grid_align_self = .baseline },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .column = .{} },
         .parent = .root,
         .style = .{ .grid_align_items = .baseline },

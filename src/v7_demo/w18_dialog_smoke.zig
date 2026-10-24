@@ -183,7 +183,7 @@ const observed_value: u32 = 41;
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -832,7 +832,7 @@ fn preferencesPhase(gpa: std.mem.Allocator, io: Io, report: *Reporter) !void {
             base,
             agrees,
         });
-        if (!agrees and builtin.os.tag == .linux) return error.BasePathDisagreesWithExecutable;
+        if (!agrees and builtin.target.os.tag == .linux) return error.BasePathDisagreesWithExecutable;
     } else {
         try report.emit("native: base path: <null>\n", .{});
     }
@@ -1037,13 +1037,13 @@ fn menuPhase(gpa: std.mem.Allocator, session: *nogui.Session, report: *Reporter)
     var tree = nogui.WidgetTree.init(gpa);
     defer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = focus_id,
         .parent = .root,
         .kind = .{ .label = .{ .text = "focus" } },
     });
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = other_id,
         .parent = .root,
         .kind = .{ .label = .{ .text = "other" } },
@@ -1353,9 +1353,9 @@ const LaunchRecord = struct {
 
     host_deliveries: u32 = 0,
     scheme_deliveries: u32 = 0,
-    host_bytes: [capacity]u8 = [_]u8{0} ** capacity,
+    host_bytes: [capacity]u8 = @splat(0),
     host_len: usize = 0,
-    scheme_bytes: [capacity]u8 = [_]u8{0} ** capacity,
+    scheme_bytes: [capacity]u8 = @splat(0),
     scheme_len: usize = 0,
 };
 
@@ -2111,8 +2111,8 @@ fn parentRun(
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer if (gpa_state.deinit() == .leak) @panic("W18 dialog smoke leaked owned memory");
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer if (gpa_state.deinit() != 0) @panic("W18 dialog smoke leaked owned memory");
     const gpa = gpa_state.allocator();
 
     var io_impl: Io.Threaded = .init(gpa, .{});

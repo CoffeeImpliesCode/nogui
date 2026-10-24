@@ -76,13 +76,13 @@ fn makeTree(gpa: std.mem.Allocator, parent: WidgetId, child: WidgetId) !WidgetTr
     var tree = WidgetTree.init(gpa);
     errdefer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = child,
-        .parent = @enumFromInt(1),
+        .parent = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "child" } },
     });
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = parent,
         .parent = .root,
         .kind = .{ .label = .{ .text = "parent" } },
@@ -302,7 +302,7 @@ test "api-w10 nearest eligible context wins, disabled context blocks fallback" {
     ));
     try session.read(Controller, controller.weak(), @as(u8, 1), Check.run);
     try session.update(Controller, controller.weak(), @as(u8, 8), Set.run);
-    tree.node(@enumFromInt(1)).?.interaction.disabled = true;
+    tree.node(@fromBackingInt(@intCast(1))).?.interaction.disabled = true;
     var path = key_context.Path.init(&tree, child);
     try std.testing.expect((@as(key_context.Scope, .app)).eql(path.next().?));
     try std.testing.expect(path.next() == null);

@@ -69,8 +69,8 @@ fn directTree(
     parent: *const text.TextInput,
     child: ?*const text.TextInput,
 ) !struct { parent: FrameNodeId, child: FrameNodeId } {
-    const parent_id: FrameNodeId = @enumFromInt(1);
-    const child_id: FrameNodeId = @enumFromInt(2);
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = "child" } },
@@ -137,9 +137,9 @@ test "re-parenting republishes the resolved record and a repeat layout does not"
     var tree = WidgetTree.init(allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const child_id: FrameNodeId = @enumFromInt(3);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = "child" } },
@@ -191,9 +191,9 @@ test "authored per-node text input is never rewritten by resolution" {
 
     const shared: text.TextInput = .{ .style = .{ .font_fields = .{ .size = 12 } } };
     const other: text.TextInput = .{ .style = .{ .font_fields = .{ .size = 18 } } };
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const parent_id: FrameNodeId = @enumFromInt(3);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = first_id,
         .kind = .{ .label = .{ .text = "one" } },
@@ -233,7 +233,7 @@ test "a failed text measurement refuses layout and leaves the tree unchanged" {
     var tree = WidgetTree.init(arena.allocator());
     defer tree.deinit();
     var provider: RecordingProvider = .{};
-    const label_id: FrameNodeId = @enumFromInt(1);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = label_id,
         .kind = .{ .label = .{ .text = "measured" } },

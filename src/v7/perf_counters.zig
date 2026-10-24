@@ -1,7 +1,7 @@
 const std = @import("std");
 const v7_options = @import("v7_options");
 
-const counter_count = std.meta.fields(Counter).len;
+const counter_count = @typeInfo(Counter).@"enum".field_names.len;
 
 pub const Counter = enum {
     measure_requests,
@@ -22,16 +22,16 @@ pub const Counter = enum {
 };
 
 pub const Counters = struct {
-    values: [std.meta.fields(Counter).len]u64 = .{0} ** counter_count,
+    values: [counter_count]u64 = @splat(0),
     overflowed: bool = false,
 
     pub fn reset(self: *Counters) void {
-        self.values = .{0} ** counter_count;
+        self.values = @splat(0);
         self.overflowed = false;
     }
 
     pub fn add(self: *Counters, counter: Counter, amount: u64) void {
-        const index = @intFromEnum(counter);
+        const index = @backingInt(counter);
         const current = self.values[index];
         if (std.math.maxInt(u64) - current < amount) {
             self.overflowed = true;
@@ -47,17 +47,17 @@ pub const Counters = struct {
 };
 
 pub const Snapshot = struct {
-    values: [std.meta.fields(Counter).len]u64,
+    values: [counter_count]u64,
 
     pub fn value(self: *const Snapshot, counter: Counter) u64 {
-        return self.values[@intFromEnum(counter)];
+        return self.values[@backingInt(counter)];
     }
 
     pub fn writeJson(self: *const Snapshot, writer: anytype) !void {
         try writer.writeByte('{');
-        inline for (std.meta.fields(Counter), 0..) |field, index| {
+        inline for (@typeInfo(Counter).@"enum".field_names, 0..) |name, index| {
             if (index != 0) try writer.writeByte(',');
-            try writer.print("\"{s}\":{d}", .{ field.name, self.values[index] });
+            try writer.print("\"{s}\":{d}", .{ name, self.values[index] });
         }
         try writer.writeByte('}');
     }
@@ -98,7 +98,7 @@ pub fn Sink(comptime enabled: bool) type {
 pub const CounterSink: type = Sink(v7_options.perf_counters);
 
 comptime {
-    std.debug.assert(std.meta.fields(Counter).len == 15);
+    std.debug.assert(counter_count == 15);
     std.debug.assert(@sizeOf(Sink(false)) == 0);
     std.debug.assert(@sizeOf(Sink(true)) == @sizeOf(*Counters));
 }
@@ -130,23 +130,23 @@ test "perf counters snapshot survives reset" {
     const snapshot = try counters.snapshot();
     counters.reset();
     try std.testing.expectEqual(@as(u64, 9), snapshot.value(.measure_requests));
-    try std.testing.expectEqual(@as(u64, 0), counters.values[@intFromEnum(Counter.measure_requests)]);
+    try std.testing.expectEqual(@as(u64, 0), counters.values[@backingInt(Counter.measure_requests)]);
 }
 
 test "perf counters accept exact maximum before overflow" {
     var counters: Counters = .{};
-    counters.values[@intFromEnum(Counter.measure_requests)] = std.math.maxInt(u64) - 2;
+    counters.values[@backingInt(Counter.measure_requests)] = std.math.maxInt(u64) - 2;
     counters.add(.measure_requests, 2);
     try std.testing.expect(!counters.overflowed);
     try std.testing.expectEqual(
         std.math.maxInt(u64),
-        counters.values[@intFromEnum(Counter.measure_requests)],
+        counters.values[@backingInt(Counter.measure_requests)],
     );
     counters.add(.measure_requests, 1);
     try std.testing.expect(counters.overflowed);
     try std.testing.expectEqual(
         std.math.maxInt(u64),
-        counters.values[@intFromEnum(Counter.measure_requests)],
+        counters.values[@backingInt(Counter.measure_requests)],
     );
 }
 
@@ -154,7 +154,7 @@ test "enabled perf sink forwards additions" {
     var counters: Counters = .{};
     var sink = Sink(true).init(&counters);
     sink.add(.harfbuzz_shapes, 4);
-    try std.testing.expectEqual(@as(u64, 4), counters.values[@intFromEnum(Counter.harfbuzz_shapes)]);
+    try std.testing.expectEqual(@as(u64, 4), counters.values[@backingInt(Counter.harfbuzz_shapes)]);
 }
 
 test "perf counters reset clears values and overflow" {
@@ -162,16 +162,16 @@ test "perf counters reset clears values and overflow" {
     counters.add(.measure_requests, 9);
     counters.overflowed = true;
     counters.reset();
-    try std.testing.expectEqual(@as(u64, 0), counters.values[@intFromEnum(Counter.measure_requests)]);
+    try std.testing.expectEqual(@as(u64, 0), counters.values[@backingInt(Counter.measure_requests)]);
     try std.testing.expect(!counters.overflowed);
 }
 
 test "perf counters reject overflow without writing" {
     var counters: Counters = .{};
-    counters.values[@intFromEnum(Counter.measure_requests)] = std.math.maxInt(u64);
+    counters.values[@backingInt(Counter.measure_requests)] = std.math.maxInt(u64);
     counters.add(.measure_requests, 1);
     try std.testing.expect(counters.overflowed);
-    try std.testing.expectEqual(std.math.maxInt(u64), counters.values[@intFromEnum(Counter.measure_requests)]);
+    try std.testing.expectEqual(std.math.maxInt(u64), counters.values[@backingInt(Counter.measure_requests)]);
     try std.testing.expectError(error.CounterOverflow, counters.snapshot());
 }
 
@@ -179,5 +179,5 @@ test "disabled perf sink is zero-sized and inert" {
     var counters: Counters = .{};
     var sink = Sink(false).init(&counters);
     sink.add(.measure_requests, 5);
-    try std.testing.expectEqual(@as(u64, 0), counters.values[@intFromEnum(Counter.measure_requests)]);
+    try std.testing.expectEqual(@as(u64, 0), counters.values[@backingInt(Counter.measure_requests)]);
 }

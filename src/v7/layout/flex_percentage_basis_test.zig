@@ -45,7 +45,7 @@ test "measureNatural resolves flex percentages from request basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .row = .{} },
@@ -86,7 +86,7 @@ test "measureNatural preserves indefinite edges across a definite basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .row = .{} },
@@ -158,7 +158,7 @@ test "measureNatural distinguishes an indefinite edge basis from zero" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .row = .{} },

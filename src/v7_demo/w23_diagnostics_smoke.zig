@@ -36,7 +36,7 @@ const diagnostics = @import("nogui_host").diagnostics;
 
 const Reporter = struct {
     io: Io,
-    buffer: [1024]u8 = [_]u8{0} ** 1024,
+    buffer: [1024]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         // The buffer is reused for every line, so formatting into it is a
@@ -64,7 +64,7 @@ fn subpixelText(order: ?diagnostics.SubpixelOrder) []const u8 {
 
 pub fn main(init: std.process.Init) !void {
     _ = init;
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
     defer loader.close();
 
     // The backend allocates through this allocator, so a leak here is this
-    // run's own and is reported by the DebugAllocator at teardown.
+    // run's own and is reported by the SafeAllocator at teardown.
     var gpu = try noapi.Gpu.init(.{
         .app_name = "w23-diagnostics-smoke",
         .validation = false,

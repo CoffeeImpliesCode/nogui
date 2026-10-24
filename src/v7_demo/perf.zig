@@ -151,7 +151,7 @@ pub const FrameSample = struct {
             .cpu_submit_present_ns = 0,
             .cpu_compute_ns = 0,
             .mechanisms = if (v7_options.perf_counters)
-                .{ .values = .{0} ** std.meta.fields(perf_counters.Counter).len }
+                perf_counters.Snapshot{ .values = @splat(0) }
             else {},
             .slop_ns = 0,
         };
@@ -713,7 +713,7 @@ test "perf recorder computes non-overlapping CPU capacity" {
         .cpu_submit_present_ns = 40,
         .cpu_compute_ns = 100,
         .mechanisms = if (v7_options.perf_counters)
-            .{ .values = .{0} ** std.meta.fields(perf_counters.Counter).len }
+            perf_counters.Snapshot{ .values = @splat(0) }
         else {},
         .slop_ns = 0,
     };
@@ -731,7 +731,7 @@ test "perf recorder rejects present slop above submit duration" {
         .cpu_compute_ns = 0,
         .cpu_present_slop_ns = 4,
         .mechanisms = if (v7_options.perf_counters)
-            .{ .values = .{0} ** std.meta.fields(perf_counters.Counter).len }
+            perf_counters.Snapshot{ .values = @splat(0) }
         else {},
         .slop_ns = 0,
     };

@@ -960,7 +960,7 @@ test "api-w10 detaching releases borrowed shortcuts even when the field refuses 
     try std.testing.expectError(error.FieldCapacityExceeded, fields.app.detachShortcuts());
     try std.testing.expect(fields.app.shortcuts == null);
     try std.testing.expect(fields.app.nextShortcutDeadline() == null);
-    try fields.expectField(fields.first, "x" ** 48, 0);
+    try fields.expectField(fields.first, &@as([48]u8, @splat('x')), 0);
 
     _ = try fields.app.handle(.{ .key_down = .{ .key = .tab } });
     try fields.expectFocus(ids.second);

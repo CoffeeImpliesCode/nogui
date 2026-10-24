@@ -117,7 +117,7 @@ const Entry = struct {
     payload_bytes: usize = 0,
     pin_count: usize = 0,
     intrinsic_metrics: ?IntrinsicMetrics = null,
-    flow_memos: [flow_slot_capacity]FlowMemo = [_]FlowMemo{.{}} ** flow_slot_capacity,
+    flow_memos: [flow_slot_capacity]FlowMemo = @splat(.{}),
     flow_next_slot: u8 = 0,
     bucket_next: SlotIndex = no_slot,
     lru_previous: SlotIndex = no_slot,
@@ -287,8 +287,8 @@ pub const Cache = struct {
     pub fn init(gpa: std.mem.Allocator) Cache {
         var cache: Cache = .{
             .gpa = gpa,
-            .entries = [_]Entry{.{}} ** entry_capacity,
-            .buckets = [_]SlotIndex{no_slot} ** bucket_capacity,
+            .entries = @splat(.{}),
+            .buckets = @splat(no_slot),
             .free_head = 0,
         };
         for (&cache.entries, 0..) |*entry, index| {
@@ -690,8 +690,8 @@ fn hashKey(font_key: FontKey, text: []const u8) u64 {
     hasher.update(std.mem.asBytes(&font_key.fallback_digest));
     hasher.update(std.mem.asBytes(&font_key.weight));
     hasher.update(std.mem.asBytes(&font_key.style));
-    const direction: u8 = @intFromEnum(font_key.direction);
-    const script: u32 = @intFromEnum(font_key.script);
+    const direction: u8 = @backingInt(font_key.direction);
+    const script: u32 = @backingInt(font_key.script);
     hasher.update(std.mem.asBytes(&direction));
     hasher.update(std.mem.asBytes(&font_key.paragraph_direction));
     hasher.update(std.mem.asBytes(&script));

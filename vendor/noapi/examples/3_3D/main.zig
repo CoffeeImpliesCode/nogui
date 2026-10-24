@@ -239,12 +239,12 @@ pub fn main(init: std.process.Init) !void {
         const key_state = sdl3.keyboard.getState();
         var move_dir: [3]f32 = .{ 0, 0, 0 };
         if (right_click_pressed) {
-            if (key_state[@intFromEnum(sdl3.Scancode.w)]) move_dir[0] += 1; // forward  +X
-            if (key_state[@intFromEnum(sdl3.Scancode.s)]) move_dir[0] -= 1; // backward -X
-            if (key_state[@intFromEnum(sdl3.Scancode.a)]) move_dir[1] += 1; // left     +Y
-            if (key_state[@intFromEnum(sdl3.Scancode.d)]) move_dir[1] -= 1; // right    -Y
-            if (key_state[@intFromEnum(sdl3.Scancode.e)]) move_dir[2] += 1; // up       +Z
-            if (key_state[@intFromEnum(sdl3.Scancode.q)]) move_dir[2] -= 1; // down     -Z
+            if (key_state[@backingInt(sdl3.Scancode.w)]) move_dir[0] += 1; // forward  +X
+            if (key_state[@backingInt(sdl3.Scancode.s)]) move_dir[0] -= 1; // backward -X
+            if (key_state[@backingInt(sdl3.Scancode.a)]) move_dir[1] += 1; // left     +Y
+            if (key_state[@backingInt(sdl3.Scancode.d)]) move_dir[1] -= 1; // right    -Y
+            if (key_state[@backingInt(sdl3.Scancode.e)]) move_dir[2] += 1; // up       +Z
+            if (key_state[@backingInt(sdl3.Scancode.q)]) move_dir[2] -= 1; // down     -Z
         }
 
         // Normalize horizontal movement (XY plane).

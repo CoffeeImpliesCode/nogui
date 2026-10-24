@@ -28,7 +28,7 @@
 //!                       mounted windows instead of only against a run that
 //!                       happened to fail. Zero disables it. See "the owner"
 //!                       below. It touches nothing outside this process.
-//!   --pointer-watch    arm the REAL pointer watch, so an outside agent can
+//!   --pointer-watch    arm the REAL pointer watch, so an operator can
 //!                       move a real pointer across the watched window and
 //!                       this run reports what SDL's own queue delivered. It
 //!                       observes `--scale-watch-ms` as well as `--hold-ms`:
@@ -85,7 +85,7 @@
 //!     rather than by a label on a line;
 //!   * it builds nothing, moves nothing and clicks nothing. Nothing outside
 //!     this process is touched: the pointer that produces the events is moved
-//!     by an outside agent, on its own display, while this run only holds its
+//!     by an operator, on their own display, while this run only holds its
 //!     windows up and reports;
 //!   * it is opt-in. Off is the default, and with it off not one line of this
 //!     binary's output changes.
@@ -96,7 +96,7 @@
 //! obeys, and the `--hold-ms` hold. With a scale watch armed, the watch
 //! attaches at the committed baseline BEFORE that deadline and its drain runs
 //! in front of `Application.step` inside the scale pump, so a pointer an
-//! outside agent moves while the output is still at its baseline scale is
+//! operator moves while the output is still at its baseline scale is
 //! counted as REAL ingress instead of being lost between pumps. The observed
 //! transition moves the watch into its second phase and says so on one
 //! `PTR real phase` line carrying the freshly committed rectangle, the live
@@ -170,7 +170,7 @@
 //! deliberately: the run opens N real windows, reports that they are live,
 //! and returns an error. The unwind then has to close them, unmount and
 //! release each App, and get back to an empty session — and the
-//! `DebugAllocator` at the top of `main` is what says whether it did. The run
+//! `SafeAllocator` at the top of `main` is what says whether it did. The run
 //! exits non-zero and prints NO leak report exactly when that unwind is
 //! correct.
 //!
@@ -274,7 +274,7 @@ pub const Pane = struct {
     name: []const u8,
     observed: u32 = 0,
     committed: u32 = 0,
-    label_buf: [48]u8 = [_]u8{0} ** 48,
+    label_buf: [48]u8 = @splat(0),
     label_len: usize = 0,
     /// This window's background, painted as a node so the per-window colour
     /// identity survives into real pixels.
@@ -327,7 +327,7 @@ const CandidateGeometry = struct {
 const WindowSlot = struct {
     /// The title this slot was opened with, exactly as the host was given it.
     /// The report prints it beside `name` because the two answer different
-    /// questions and an outside agent has to be able to tie this run's window
+    /// questions and an operator has to be able to tie this run's window
     /// to a surface the COMPOSITOR lists — and the compositor lists titles,
     /// not slot names. A borrowed slice with static lifetime: it comes from
     /// the `specs` literal and outlives every slot.
@@ -1072,17 +1072,17 @@ fn resolveCandidate(slot: *WindowSlot, out: *const nogui.FrameOutput) void {
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
     /// A second, much smaller buffer for the optional values a line formats
     /// inline (`<err>`, a scale, a position). It is separate from `buffer`
     /// so an argument that borrows it can still be passed to `emit`.
-    scratch: [64]u8 = [_]u8{0} ** 64,
+    scratch: [64]u8 = @splat(0),
     /// A third buffer, for the rare line that formats TWO optional values
     /// inline at once — the pointer summary names a first and a last point.
     /// Separate from `scratch` for the same reason `scratch` is separate from
     /// `buffer`: an argument that borrows one of them cannot be passed while
     /// the other is being written.
-    tail: [64]u8 = [_]u8{0} ** 64,
+    tail: [64]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         // The buffer is reused for every line, so formatting into it is a
@@ -1231,7 +1231,7 @@ fn emitScale(report: *Reporter, label: []const u8, value: ScaleReading) !void {
             " committed={d} presented={d}\n",
         .{
             label,
-            @intFromEnum(value.display),
+            @backingInt(value.display),
             value.display_scale,
             if (value.snapshot_scale) |scale|
                 std.fmt.bufPrint(&report.scratch, "{d:.3}", .{scale}) catch "<err>"
@@ -1631,7 +1631,7 @@ fn drainHostEvents(
     try emitIngress(smoke, report, active, batch);
 }
 
-/// Everything an outside agent needs to AIM a real pointer at the committed
+/// Everything an operator needs to AIM a real pointer at the committed
 /// probe, read live rather than from the last observed snapshot: the output
 /// scale the platform reports right now, the window's logical and pixel
 /// extents right now, and the committed rectangle right now. A sweep that
@@ -1687,7 +1687,7 @@ fn readPointerAim(report: *Reporter, watch: IngressWatch) !PointerAim {
 /// a driver that pairs a commanded aim with a sample could pair the aim with an
 /// origin and fit its mapping to a point the compositor never sent.
 ///
-/// `window_title` is the title the host was given at the open, so an agent can
+/// `window_title` is the title the host was given at the open, so an operator can
 /// tie this line to a surface the COMPOSITOR lists. The compositor lists
 /// titles; `window_name` is this run's own slot name and nothing outside this
 /// file has ever heard of it.
@@ -1750,7 +1750,7 @@ fn emitIngress(
 /// Print the one `PTR real armed` line, over the phase the caller has already
 /// set in `Smoke.pointer_phase`.
 ///
-/// It is the line an outside agent waits for before it moves any pointer: the
+/// It is the line an operator waits for before they move any pointer: the
 /// watch exists but nothing has been counted yet, so every later sample is
 /// attributable to a motion that came after this point. Its head is
 /// `PTR real armed`, not `PTR real`, so a driver keyed on the sample head
@@ -1761,7 +1761,7 @@ fn emitIngress(
 /// It also carries `window_title`, the title the host was given at the open,
 /// under the SAME spelling the samples use. It is there for the one thing
 /// `window_name` cannot do: name this window to a COMPOSITOR, which lists
-/// titles and has never heard of this run's slot names. Without it an agent
+/// titles and has never heard of this run's slot names. Without it an operator
 /// cannot say which of the client's two windows it is aiming at.
 ///
 /// Both arming sites go through here, so a hold-only run and a scale-watch run
@@ -1803,7 +1803,7 @@ fn emitPointerArmed(smoke: *Smoke, report: *Reporter, watch: IngressWatch) !void
 /// see rather than the total a reader has to subtract: `earlier_phase_motion`
 /// is the finished phase and `ingress_motion` the whole run. The line carries
 /// the fresh committed rectangle and the live window and output extents,
-/// because an outside agent that is about to aim a pointer needs the numbers
+/// because an operator that is about to aim a pointer needs the numbers
 /// the NEW scale produced, and it cannot derive them from the baseline it was
 /// handed earlier.
 fn enterPointerPhase(
@@ -2473,11 +2473,11 @@ fn settleTasksOrDie(session: *Session, gate: *std.atomic.Value(bool), rounds: us
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    // The DebugAllocator is this run's leak oracle. A leak in the cleanup
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    // The SafeAllocator is this run's leak oracle. A leak in the cleanup
     // owner below is printed AND fails the run, so an unwind that forgot
     // something cannot pass silently.
-    defer std.debug.assert(gpa_state.deinit() == .ok);
+    defer std.debug.assert(gpa_state.deinit() == 0);
     const gpa = gpa_state.allocator();
 
     var io_impl: Io.Threaded = .init(gpa, .{});
@@ -2557,7 +2557,7 @@ pub fn main(init: std.process.Init) !void {
     // The pointer watch has exactly one window to observe in, and this run
     // already owns exactly two windows of its own: the `--scale-watch-ms`
     // scale watch and the `--hold-ms` hold. Either one is a real window for an
-    // outside agent to move a pointer across while both windows are up, and
+    // operator to move a pointer across while both windows are up, and
     // with a scale watch the watch counts through BOTH phases of the
     // transition. Asked for with neither, the watch would arm, sit through
     // the rest of the scenario with both windows closing, and report a count
@@ -2726,7 +2726,7 @@ pub fn main(init: std.process.Init) !void {
         try report.emit(
             "display {d}: primary={} full={d}x{d} work={d}x{d} scale={d:.3} position={s}\n",
             .{
-                @intFromEnum(info.id),
+                @backingInt(info.id),
                 info.primary,
                 info.full_bounds.size.width,
                 info.full_bounds.size.height,
@@ -2893,7 +2893,7 @@ pub fn main(init: std.process.Init) !void {
         // failure inside this loop leaves behind, and the one the cleanup
         // owner above has to survive. Nothing outside this process is
         // touched: no file, no socket, no permission, no second display. The
-        // run then leaves through that one owner, and the DebugAllocator at
+        // run then leaves through that one owner, and the SafeAllocator at
         // the top of `main` is what says whether it released everything.
         if (run.opened == fail_after_open) {
             try report.emit(
@@ -3130,7 +3130,7 @@ pub fn main(init: std.process.Init) !void {
         try emitScale(&report, "scale baseline", baseline);
         try emitCandidate(&report, "candidate baseline", before);
         // The REAL pointer watch attaches HERE, on the committed baseline and
-        // BEFORE the one deadline below, so a pointer an outside agent moves
+        // BEFORE the one deadline below, so a pointer an operator moves
         // while the output is still at its baseline scale is already counted
         // when the scale pump takes over. Section 5 arms it instead when this
         // run asked for no scale watch, and does nothing at all when a scale
@@ -3159,7 +3159,7 @@ pub fn main(init: std.process.Init) !void {
                 " baseline_image={d}x{d} deadline_ms={d}\n",
             .{
                 watched.name,
-                @intFromEnum(baseline.display),
+                @backingInt(baseline.display),
                 scale_watch_ms,
                 baseline.display_scale,
                 baseline.ratio[0],
@@ -3204,7 +3204,7 @@ pub fn main(init: std.process.Init) !void {
         // The observed transition is the phase boundary for the REAL pointer
         // watch, and the only place in this file where the phase changes. The
         // line carries the freshly committed rectangle and the live window and
-        // output extents an outside agent needs in order to aim at the NEW
+        // output extents an operator needs in order to aim at the NEW
         // scale, and the drain keeps running for the rest of the run, so the
         // second phase is counted against this boundary rather than against a
         // second clock. The phase argument is read before the call sets it.
@@ -3333,7 +3333,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ── 4. hold every window up for an external compositor capture ──
     // The pointer watch arms HERE when no scale watch already owns it: both
-    // windows are up, the production loop is pumping, and an outside agent can
+    // windows are up, the production loop is pumping, and an operator can
     // move a real pointer across them for the whole hold. A run with a scale
     // watch attached it in section 3b instead, and this section then only
     // carries that same watch into the hold, where its drain keeps counting

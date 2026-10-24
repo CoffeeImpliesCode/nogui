@@ -5,7 +5,7 @@ pub const FrameNodeId = enum(u32) {
     _,
 
     pub fn index(self: FrameNodeId) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 

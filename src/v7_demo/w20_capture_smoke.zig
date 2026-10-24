@@ -121,7 +121,7 @@ const Exit = enum(u8) {
 /// that hands a verdict to a shell; every other one in this file speaks
 /// `Exit`, so the conversion lives in exactly one place.
 fn exitCode(verdict: Exit) u8 {
-    return @intFromEnum(verdict);
+    return @backingInt(verdict);
 }
 
 const usage_text =
@@ -169,7 +169,7 @@ const poll_interval = Io.Duration.fromMilliseconds(4);
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
     /// Where the report goes. Null sends it to stdout, which is what every
     /// run does. A test points it at its own buffer so a claim this file
     /// makes can be checked instead of only printed.
@@ -192,7 +192,7 @@ const Reporter = struct {
 const Names = struct {
     /// Long enough for the thirteen option names, their separators and the
     /// brackets around them.
-    buffer: [256]u8 = [_]u8{0} ** 256,
+    buffer: [256]u8 = @splat(0),
     len: usize = 0,
 
     /// The closing bracket is written with every name, so a list is always
@@ -317,7 +317,7 @@ const Options = struct {
     parent_window: []const u8 = "",
     frame_out: ?[]const u8 = null,
     owner_loss: bool = false,
-    seen: [native_options.len]bool = [_]bool{false} ** native_options.len,
+    seen: [native_options.len]bool = @splat(false),
 
     fn note(self: *Options, name: []const u8) void {
         for (native_options, 0..) |candidate, index| {
@@ -1056,8 +1056,8 @@ fn runCaptureArm(
             "multiple={} parent_window=\"{s}\"\n",
         .{
             request.sources.bits,
-            @intFromEnum(request.cursor_mode),
-            @intFromEnum(request.persistence),
+            @backingInt(request.cursor_mode),
+            @backingInt(request.persistence),
             request.multiple,
             request.parent_window,
         },
@@ -1335,7 +1335,7 @@ fn runOwnerLossArm(
 }
 
 pub fn main(init: std.process.Init) !u8 {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -1408,7 +1408,7 @@ pub fn main(init: std.process.Init) !u8 {
 /// through the session's own release path, which is the only path that
 /// leaves the provider's accounting honest.
 const FramePool = struct {
-    bytes: [4096]u8 = [_]u8{0} ** 4096,
+    bytes: [4096]u8 = @splat(0),
     live: u32 = 0,
     released: u32 = 0,
 

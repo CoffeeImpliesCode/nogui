@@ -69,14 +69,14 @@ fn makeTree(gpa: std.mem.Allocator) !widget.WidgetTree {
     var tree = widget.WidgetTree.init(gpa);
     errdefer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @as(FrameNodeId, @enumFromInt(1)),
+        .id = @as(FrameNodeId, @fromBackingInt(@intCast(1))),
         .widget_id = source,
         .kind = .{ .button = .{ .label = "Source" } },
         .parent = .root,
         .rect = .{ .w = 40, .h = 30 },
     });
     try tree.nodes.append(gpa, .{
-        .id = @as(FrameNodeId, @enumFromInt(2)),
+        .id = @as(FrameNodeId, @fromBackingInt(@intCast(2))),
         .widget_id = destination,
         .kind = .{ .button = .{ .label = "Destination" } },
         .parent = .root,

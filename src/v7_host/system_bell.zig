@@ -141,7 +141,7 @@ fn initBackend(window: sdl3.video.Window) Backend {
     // analysed is an entry point that is never referenced, which is what keeps
     // a foreign target from failing to link on a symbol it has no definition
     // for.
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         // The driver decides, not the window properties. `dummy` and `offscreen`
         // publish no native handle at all, so reading properties first would
         // report the same answer without saying why, and a driver that did
@@ -151,8 +151,8 @@ fn initBackend(window: sdl3.video.Window) Backend {
         if (std.mem.eql(u8, driver, "wayland")) return waylandBackend(window);
         return .unsupported;
     }
-    if (comptime builtin.os.tag == .macos) return .macos;
-    if (comptime builtin.os.tag == .windows) return .windows;
+    if (comptime builtin.target.os.tag == .macos) return .macos;
+    if (comptime builtin.target.os.tag == .windows) return .windows;
     return .unsupported;
 }
 
@@ -497,7 +497,7 @@ fn waylandInit(window: sdl3.video.Window) WaylandError!Wayland {
 }
 
 fn waylandRing(self: *const Wayland) Result {
-    if (comptime builtin.os.tag != .linux) return .provider_failed;
+    if (comptime builtin.target.os.tag != .linux) return .provider_failed;
     const api = &self.api;
     // A display the compositor has stopped serving answers nothing, and its
     // error is permanent: a request sent now would never be delivered.
@@ -539,7 +539,7 @@ fn macosRing() Result {
     // call below, never emits a reference to it, and so never fails to link on
     // a symbol that target has no definition for. The same rule is why
     // `macos/native.zig` guards each call into its shim.
-    if (comptime builtin.os.tag != .macos) return .provider_failed;
+    if (comptime builtin.target.os.tag != .macos) return .provider_failed;
     NSBeep();
     // There is no result to read. The request reached the audio system, and
     // whether that system makes a sound is its answer, not this one's.
@@ -547,7 +547,7 @@ fn macosRing() Result {
 }
 
 fn windowsRing() Result {
-    if (comptime builtin.os.tag != .windows) return .provider_failed;
+    if (comptime builtin.target.os.tag != .windows) return .provider_failed;
     // Non-zero means the sound played, or that a user policy silenced it. Zero
     // means the request itself was refused, which is a provider fault and not a
     // ring.

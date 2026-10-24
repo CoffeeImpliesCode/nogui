@@ -400,12 +400,12 @@ const TestCounter = struct {
     }
 };
 
-const button_id: FrameNodeId = @enumFromInt(10);
-const label_id: FrameNodeId = @enumFromInt(11);
-const no_handler_id: FrameNodeId = @enumFromInt(12);
-const orphan_button_id: FrameNodeId = @enumFromInt(13);
-const owner_id: FrameNodeId = @enumFromInt(1);
-const orphan_owner_id: FrameNodeId = @enumFromInt(99);
+const button_id: FrameNodeId = @fromBackingInt(@intCast(10));
+const label_id: FrameNodeId = @fromBackingInt(@intCast(11));
+const no_handler_id: FrameNodeId = @fromBackingInt(@intCast(12));
+const orphan_button_id: FrameNodeId = @fromBackingInt(@intCast(13));
+const owner_id: FrameNodeId = @fromBackingInt(@intCast(1));
+const orphan_owner_id: FrameNodeId = @fromBackingInt(@intCast(99));
 const button_key: WidgetId = .{ .owner = 42, .slot = 10, .generation = 1 };
 const label_key: WidgetId = .{ .owner = 42, .slot = 11, .generation = 1 };
 const no_handler_key: WidgetId = .{ .owner = 42, .slot = 12, .generation = 1 };
@@ -537,7 +537,7 @@ test "sliderSet: maps a click x linearly and clamps" {
     defer tree.deinit();
 
     var volume: f32 = 0.5;
-    const slider_id: FrameNodeId = @enumFromInt(20);
+    const slider_id: FrameNodeId = @fromBackingInt(@intCast(20));
     try tree.nodes.append(std.testing.allocator, .{
         .id = slider_id,
         .kind = .{ .slider = .{ .label = "vol", .value = &volume, .min = 0, .max = 1 } },
@@ -563,7 +563,7 @@ test "sliderSet: maps through a non-zero [min, max] range" {
     defer tree.deinit();
 
     var gain: f32 = 0;
-    const slider_id: FrameNodeId = @enumFromInt(21);
+    const slider_id: FrameNodeId = @fromBackingInt(@intCast(21));
     try tree.nodes.append(std.testing.allocator, .{
         .id = slider_id,
         .kind = .{ .slider = .{ .label = "gain", .value = &gain, .min = 2, .max = 6 } },
@@ -582,8 +582,8 @@ test "sliderSet: resolves the absolute rect through a padded+bordered parent" {
     defer tree.deinit();
 
     var volume: f32 = 0.5;
-    const col_id: FrameNodeId = @enumFromInt(40);
-    const slider_id: FrameNodeId = @enumFromInt(41);
+    const col_id: FrameNodeId = @fromBackingInt(@intCast(40));
+    const slider_id: FrameNodeId = @fromBackingInt(@intCast(41));
     // Slider sits at (0,0) inside the column's content box; the column is
     // at the surface origin with border.left=2 and padding left/top=10.
     try tree.nodes.append(std.testing.allocator, .{
@@ -628,7 +628,7 @@ test "sliderSet: non-slider and missing nodes return false, value untouched" {
     defer tree.deinit();
 
     var volume: f32 = 0.5;
-    const nope_id: FrameNodeId = @enumFromInt(30);
+    const nope_id: FrameNodeId = @fromBackingInt(@intCast(30));
     try tree.nodes.append(std.testing.allocator, .{
         .id = nope_id,
         .kind = .{ .label = .{ .text = "nope" } },
@@ -637,9 +637,9 @@ test "sliderSet: non-slider and missing nodes return false, value untouched" {
     });
 
     try std.testing.expect(!sliderSet(&tree, nope_id, 25, visualBorderRect(&tree, nope_id)));
-    try std.testing.expect(!sliderSet(&tree, @enumFromInt(999), 25, .{ .w = 100 }));
+    try std.testing.expect(!sliderSet(&tree, @fromBackingInt(@intCast(999)), 25, .{ .w = 100 }));
     // And a slider with a zero-size rect never writes.
-    const zero_id: FrameNodeId = @enumFromInt(31);
+    const zero_id: FrameNodeId = @fromBackingInt(@intCast(31));
     try tree.nodes.append(std.testing.allocator, .{
         .id = zero_id,
         .kind = .{ .slider = .{ .label = "z", .value = &volume, .min = 0, .max = 1 } },
@@ -666,10 +666,10 @@ test "semantic activate toggles controls and selects radio options" {
     var checked = false;
     var enabled = false;
     var selected: ?u32 = null;
-    const checkbox_id: FrameNodeId = @enumFromInt(51);
-    const switch_id: FrameNodeId = @enumFromInt(52);
-    const first_radio_id: FrameNodeId = @enumFromInt(53);
-    const second_radio_id: FrameNodeId = @enumFromInt(54);
+    const checkbox_id: FrameNodeId = @fromBackingInt(@intCast(51));
+    const switch_id: FrameNodeId = @fromBackingInt(@intCast(52));
+    const first_radio_id: FrameNodeId = @fromBackingInt(@intCast(53));
+    const second_radio_id: FrameNodeId = @fromBackingInt(@intCast(54));
     try tree.nodes.append(std.testing.allocator, .{
         .id = checkbox_id,
         .widget_id = .{ .owner = 42, .slot = 51, .generation = 1 },
@@ -714,8 +714,8 @@ test "api-w08 hidden ancestor blocks semantic activation and slider mutation" {
     var counter: TestCounter = .{};
     var h = try Harness.init(&counter);
     defer h.deinit();
-    const hidden_id: FrameNodeId = @enumFromInt(30);
-    const slider_id: FrameNodeId = @enumFromInt(31);
+    const hidden_id: FrameNodeId = @fromBackingInt(@intCast(30));
+    const slider_id: FrameNodeId = @fromBackingInt(@intCast(31));
     var slider_value: f32 = 0;
     try h.tree.appendNode(.{
         .id = hidden_id,

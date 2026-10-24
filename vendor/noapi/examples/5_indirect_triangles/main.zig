@@ -201,7 +201,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Set vertex input: one binding with position (vec3)
         cmd.setVertexInput(&.{.{ .binding = 0, .stride = @sizeOf([3]f32), .input_rate = 0 }}, &.{
-            .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 0 },
+            .{ .location = 0, .binding = 0, .format = @backingInt(vk.Format.r32g32b32_sfloat), .offset = 0 },
         });
         cmd.bindVertexBuffer(0, vert_buf, 0);
 

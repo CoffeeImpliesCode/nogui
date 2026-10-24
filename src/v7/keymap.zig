@@ -142,7 +142,7 @@ const Ranked = struct {
             return self.context_rank < other.context_rank;
         }
         if (self.source != other.source) return self.source == .user;
-        return @intFromEnum(self.id) > @intFromEnum(other.id);
+        return @backingInt(self.id) > @backingInt(other.id);
     }
 };
 
@@ -218,7 +218,7 @@ pub const Keymap = struct {
         errdefer self.allocator.free(label_owned);
         var cursor: usize = 0;
         var entry: Entry = .{
-            .id = @enumFromInt(self.next_id),
+            .id = @fromBackingInt(@intCast(self.next_id)),
             .source = binding.source,
             .context = copyString(storage, &cursor, binding.context),
             // SAFETY: the loop below writes entry.strokes[0..length].

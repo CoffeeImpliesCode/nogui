@@ -6,8 +6,8 @@ const widget = @import("widget.zig");
 const FrameNodeId = @import("id.zig").FrameNodeId;
 const WidgetId = @import("id.zig").WidgetId;
 
-const outer_id: FrameNodeId = @enumFromInt(1);
-const inner_id: FrameNodeId = @enumFromInt(2);
+const outer_id: FrameNodeId = @fromBackingInt(@intCast(1));
+const inner_id: FrameNodeId = @fromBackingInt(@intCast(2));
 const outer_key: WidgetId = .{ .owner = 10, .slot = 1, .generation = 1 };
 const inner_key: WidgetId = .{ .owner = 10, .slot = 2, .generation = 1 };
 const window: u64 = 42;
@@ -237,7 +237,7 @@ test "api-w15 stable scroll handle targets the rebuilt committed tree" {
     var prior_state: widget.ScrollState = .{ .max_offset = .{ 0, 100 } };
     var next_state: widget.ScrollState = .{ .max_offset = .{ 0, 300 } };
     try appendScroller(&retired, outer_id, .root, outer_key, &prior_state, .vertical, .{ 100, 80 }, .{ 100, 180 });
-    const rebuilt_id: FrameNodeId = @enumFromInt(99);
+    const rebuilt_id: FrameNodeId = @fromBackingInt(@intCast(99));
     try appendScroller(&current, rebuilt_id, .root, outer_key, &next_state, .vertical, .{ 100, 80 }, .{ 100, 380 });
     const stable = handle(outer_key);
     try std.testing.expectEqual([2]f32{ 0, 300 }, scroll.resolve(&current, window, stable).?.max_offset);
@@ -245,7 +245,7 @@ test "api-w15 stable scroll handle targets the rebuilt committed tree" {
     try std.testing.expectEqual([2]f32{ 0, 250 }, next_state.offset);
     try std.testing.expectEqual([2]f32{ 0, 0 }, prior_state.offset);
 
-    const hidden_parent: FrameNodeId = @enumFromInt(100);
+    const hidden_parent: FrameNodeId = @fromBackingInt(@intCast(100));
     try current.appendNode(.{
         .id = hidden_parent,
         .kind = .{ .column = .{} },

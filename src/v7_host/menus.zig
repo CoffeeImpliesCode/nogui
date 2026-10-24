@@ -302,7 +302,7 @@ pub const MenuActionBridge = struct {
 /// Install through `macos.menus.Adapter` or `windows.menus.Adapter`; those
 /// adapters own native resources and route actions through the live context.
 pub fn hasNativeGlobalMenu() bool {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .macos => macos_native.available,
         .windows => windows_menus.hasNativeGlobalMenu(),
         else => false,
@@ -328,7 +328,7 @@ pub const DockMenu = struct {
 
 /// Native Dock-menu or jump-list support. Publication can still be refused.
 pub fn hasDockMenuSupport() bool {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .macos => macos_native.available,
         .windows => windows_root.isApplicable(),
         else => false,
@@ -432,15 +432,15 @@ test "menu action bridge evaluates enabled state based on focused context" {
     defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = widget_parent,
         .parent = .root,
         .kind = .{ .label = .{ .text = "parent" } },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = widget_child,
-        .parent = @enumFromInt(1),
+        .parent = @fromBackingInt(@intCast(1)),
         .kind = .{ .label = .{ .text = "child" } },
     });
 

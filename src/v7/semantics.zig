@@ -142,7 +142,7 @@ pub fn nodeId(owner: WidgetId, scope: Scope) NodeId {
     std.mem.writeInt(u64, bytes[0..8], owner.owner, .little);
     std.mem.writeInt(u32, bytes[8..12], owner.slot, .little);
     std.mem.writeInt(u32, bytes[12..16], owner.generation, .little);
-    bytes[16] = @intFromEnum(scope);
+    bytes[16] = @backingInt(scope);
     return awayFromReserved(std.hash.Wyhash.hash(0x5E4D_0000, &bytes));
 }
 

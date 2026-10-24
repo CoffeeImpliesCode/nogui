@@ -179,7 +179,7 @@ const ProxyPtr = *wayland.Proxy;
 /// returned. A missing id reads as a word, so no reader has to tell it apart
 /// from a zero one.
 const WireText = struct {
-    text: [16]u8 = "unavailable".* ++ [_]u8{0} ** 5,
+    text: [16]u8 = "unavailable".* ++ @as([5]u8, @splat(0)),
     len: usize = "unavailable".len,
 
     fn of(id: ?u32) WireText {
@@ -481,7 +481,7 @@ fn scanGlobals(api: WaylandApi, display: DisplayPtr) !RegistryScan {
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -2936,7 +2936,7 @@ fn runKeyboardArm(
     var accepted: u32 = 0;
     var committed: u32 = 0;
     for (order) |step| {
-        const marshalled: u32 = @intFromEnum(step.value());
+        const marshalled: u32 = @backingInt(step.value());
         const before_commit = layer.machine.committed_count;
         const refusal: ?[]const u8 = if (layer.setKeyboardInteractivity(step.value())) |_|
             null
@@ -3054,7 +3054,7 @@ fn runKeyboardArm(
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

@@ -1355,9 +1355,9 @@ test "api-w23 a refresh pairs each command row with its own state" {
 
 /// What one refresh walk produced, in the order it produced it.
 const Collected = struct {
-    labels: [8][]const u8 = [_][]const u8{""} ** 8,
-    enabled: [8]bool = [_]bool{false} ** 8,
-    checked: [8]bool = [_]bool{false} ** 8,
+    labels: [8][]const u8 = @splat(""),
+    enabled: [8]bool = @splat(false),
+    checked: [8]bool = @splat(false),
     count: usize = 0,
     /// Whether every visit arrived under the identifier the previous one used
     /// plus one. A walk that kept the separators would break it on the first
@@ -1420,7 +1420,7 @@ test "api-w23 a windows route keeps routing after the caller's bar is gone" {
     var tree = nogui.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = document,
         .parent = .root,
         .kind = .{ .label = .{ .text = "document" } },
@@ -1616,13 +1616,13 @@ test "api-w23 a windows route keeps the model's own overrides" {
     // purpose: it reports the row as enabled and unchecked. That is what makes
     // the two halves of a route separable, and it is what `evaluate` produces
     // for a bar whose overrides the caller set on a DIFFERENT pass.
-    var routes = [_]Route{.{ .item = .{
+    var routes: [2]Route = @splat(.{ .item = .{
         .id = 0,
         .label = "",
         .enabled = false,
         .checked = false,
         .kind = .action,
-    }, .explicit_enabled = null, .explicit_checked = null, .parent = parent, .position = 0 }} ** 2;
+    }, .explicit_enabled = null, .explicit_checked = null, .parent = parent, .position = 0 });
     var used: usize = 0;
     _ = storeRoute(&routes, &used, model, live, parent, 3);
 

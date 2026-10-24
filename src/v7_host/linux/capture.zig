@@ -271,7 +271,7 @@ pub const Provider = struct {
             request.sources.bits,
             request.multiple,
             cursorModeOnWire(request.cursor_mode),
-            @intFromEnum(request.persistence),
+            @backingInt(request.persistence),
             request.restore_token,
         ) catch |err| {
             self.sink.state(self.sink.ctx, .failed, capture.classifyFailure(err));
@@ -397,9 +397,9 @@ test "api-w20 a cursor mode this tree asks for reaches the portal as the bit it 
     // The portal advertises the modes it can draw as the bits one, two and
     // four, and refuses a request carrying anything else, so a request that
     // carried this tree's own numbering would be refused rather than honoured.
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(cursorModeOnWire(.embedded)));
-    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(cursorModeOnWire(.hidden)));
-    try std.testing.expectEqual(@as(u32, 4), @intFromEnum(cursorModeOnWire(.metadata)));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(cursorModeOnWire(.embedded)));
+    try std.testing.expectEqual(@as(u32, 1), @backingInt(cursorModeOnWire(.hidden)));
+    try std.testing.expectEqual(@as(u32, 4), @backingInt(cursorModeOnWire(.metadata)));
 }
 
 // -- Session ownership regressions -----------------------------------------

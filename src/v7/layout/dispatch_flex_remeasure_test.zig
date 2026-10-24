@@ -70,12 +70,12 @@ test "flex bridge remeasures mixed block after main-axis shrink" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const inner_flex_id: FrameNodeId = @enumFromInt(3);
-    const mixed_block_id: FrameNodeId = @enumFromInt(4);
-    const sibling_id: FrameNodeId = @enumFromInt(5);
-    const root_id: FrameNodeId = @enumFromInt(6);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const inner_flex_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const mixed_block_id: FrameNodeId = @fromBackingInt(@intCast(4));
+    const sibling_id: FrameNodeId = @fromBackingInt(@intCast(5));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(6));
 
     try appendNode(
         &tree,

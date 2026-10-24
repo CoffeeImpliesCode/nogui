@@ -397,7 +397,7 @@ const Options = struct {
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
     checks: u32 = 0,
     failures: u32 = 0,
 
@@ -562,8 +562,8 @@ const ordinary_commit: []const u8 = " é";
 /// The two action bits a text node must carry for the native seam to be
 /// reachable at all: the core refuses any action whose bit is clear.
 const text_action_mask: u32 =
-    (@as(u32, 1) << @intFromEnum(semantics.Action.replace_selected_text)) |
-    (@as(u32, 1) << @intFromEnum(semantics.Action.set_text_selection));
+    (@as(u32, 1) << @backingInt(semantics.Action.replace_selected_text)) |
+    (@as(u32, 1) << @backingInt(semantics.Action.set_text_selection));
 
 /// The longest prefix of `value` that fits in `room` and ends on a codepoint
 /// boundary. A field never stores half a character, so a value too long for
@@ -661,7 +661,7 @@ fn snapToCodepoint(value: []const u8, asked: usize) usize {
 /// API speak; the published tree and the annotator convert them to the core's
 /// byte offsets in one place each, so the two never drift.
 const Field = struct {
-    buffer: [field_capacity]u8 = [_]u8{0} ** field_capacity,
+    buffer: [field_capacity]u8 = @splat(0),
     len: usize = 0,
     selection: text_input.Selection = .{},
     /// The preedit a composition is holding. Null means no composition is
@@ -669,7 +669,7 @@ const Field = struct {
     marked: ?text_input.Utf16Range = null,
     /// One UTF-8 byte length per character of the live value, so the platform
     /// can address the run in the characters it counts.
-    lengths: [field_capacity]u8 = [_]u8{0} ** field_capacity,
+    lengths: [field_capacity]u8 = @splat(0),
     characters: usize = 0,
     /// Committed replacements, from any door. One edit moves this once, so a
     /// screen-reader edit and a keystroke are the same number rather than two
@@ -927,7 +927,7 @@ const Panel = struct {
     checked: bool = false,
     /// The synthetic document this window owns. Fixed storage, because the
     /// model outlives every frame arena.
-    document: [max_document_len]u8 = [_]u8{0} ** max_document_len,
+    document: [max_document_len]u8 = @splat(0),
     document_len: usize = 0,
     field: Field = .{},
     /// How the last routed action arrived. The effect is the same method
@@ -1030,7 +1030,7 @@ const PanelView = struct {
     annotated: PanelCopy = .{},
     /// The status line, copied out of the frame arena because the arena dies
     /// with the frame.
-    note: [192]u8 = [_]u8{0} ** 192,
+    note: [192]u8 = @splat(0),
     note_len: usize = 0,
     /// In-app dispatches that ran, counted by action name. A click and a menu
     /// command both land on `add_row`; only this counter says a WIDGET was
@@ -1275,12 +1275,12 @@ const FieldShape = struct {
     /// the run sits in inside it.
     box: geometry.WindowRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     line_height: f32 = 0,
-    positions: [field_capacity]f32 = [_]f32{0} ** field_capacity,
-    widths: [field_capacity]f32 = [_]f32{0} ** field_capacity,
+    positions: [field_capacity]f32 = @splat(0),
+    widths: [field_capacity]f32 = @splat(0),
     /// The byte offset each character starts at, in the model's own bytes.
     /// The platform addresses the run in characters, so a caret index has to
     /// become a byte offset somewhere, and this is that one place.
-    offsets: [field_capacity]usize = [_]usize{0} ** field_capacity,
+    offsets: [field_capacity]usize = @splat(0),
     characters: usize = 0,
     /// The byte the run ends at. It is the one boundary `offsets` cannot
     /// name, because a full table has no slot past its last character.
@@ -1942,17 +1942,17 @@ const PanelCopy = struct {
     /// name of the last one, carried across with the rest of the model.
     system_actions: u32 = 0,
     last_system_action: []const u8 = route_none,
-    document: [max_document_len]u8 = [_]u8{0} ** max_document_len,
+    document: [max_document_len]u8 = @splat(0),
     document_len: usize = 0,
     /// The field's live bytes, and the selection the model holds in the
     /// protocol's own UTF-16 units with its direction.
-    field: [field_capacity]u8 = [_]u8{0} ** field_capacity,
+    field: [field_capacity]u8 = @splat(0),
     field_len: usize = 0,
     anchor_unit: usize = 0,
     cursor_unit: usize = 0,
     reversed: bool = false,
     /// The character table measured from those same bytes.
-    lengths: [field_capacity]u8 = [_]u8{0} ** field_capacity,
+    lengths: [field_capacity]u8 = @splat(0),
     characters: usize = 0,
 
     fn copyFrom(self: *PanelCopy, value: *const Panel) void {
@@ -2482,8 +2482,8 @@ test "api-w23 Windows field real-font hit-testing accepts empty and full-capacit
     try std.testing.expectEqual(box.x + field_inset, empty.area.x);
     try std.testing.expectEqual(field_caret_width, empty.area.w);
     try std.testing.expect(std.math.isFinite(empty.area.h) and empty.area.h > 0 and empty.area.h <= box.h);
-    const value = [_]u8{'a'} ** field_capacity;
-    const lengths = [_]u8{1} ** field_capacity;
+    const value: [field_capacity]u8 = @splat('a');
+    const lengths: [field_capacity]u8 = @splat(1);
     try shape.measure(&value, &lengths, box);
     try std.testing.expectEqual(
         @as(?usize, field_capacity),
@@ -3026,12 +3026,12 @@ test "api-w23 Windows field applies the whole-value SetValue a screen reader dri
     // changes nothing: the model keeps its bytes, its caret and its counters.
     // Storing the 192 bytes that fit would leave a value a screen reader never
     // sent, presented as the one it did.
-    const oversized = "x" ** (field_capacity + 1);
+    const oversized: [field_capacity + 1]u8 = @splat('x');
     try std.testing.expect(
         refusal(snapshot.dispatch(.{
             .id = entry.id,
             .action = .set_value,
-            .text = oversized,
+            .text = &oversized,
         }, &dispatcher, scratch)) != null,
     );
     try expectField(&context.base.session, owner, .{
@@ -3072,7 +3072,7 @@ const ResponseTrace = struct {
     actions: u32 = 0,
     closings: u32 = 0,
     last_id: notifications.NotificationId = 0,
-    last_key: [64]u8 = [_]u8{0} ** 64,
+    last_key: [64]u8 = @splat(0),
     last_key_len: usize = 0,
     last_reason: []const u8 = route_none,
     provider_lost: u32 = 0,
@@ -3710,7 +3710,7 @@ const Plan = struct {
     /// executable alone" and "this executable plus one argument" are the two
     /// invocations this binary tells apart.
     shell_argv: []const []const u8 = &.{},
-    document: [max_document_len]u8 = [_]u8{0} ** max_document_len,
+    document: [max_document_len]u8 = @splat(0),
     document_len: usize = 0,
 
     /// The synthetic document's path, inside this user's own data root.
@@ -6239,7 +6239,7 @@ fn runAccessibilityPhase(plan: *Plan) !void {
     report.expect("accessibility.the_field_published_its_box", rect != null);
     report.expect(
         "accessibility.the_field_is_published_as_a_text_node",
-        role != null and role.? == @intFromEnum(semantics.Role.text_input),
+        role != null and role.? == @backingInt(semantics.Role.text_input),
     );
     // The native seam is reachable only when the node really offers the two
     // actions that carry it: the core refuses any action whose bit is clear,
@@ -6818,7 +6818,7 @@ fn runCleanupPhase(plan: *Plan, host_state: *windows.Host) !void {
 // ── main ─────────────────────────────────
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

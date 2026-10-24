@@ -40,11 +40,11 @@ pub fn forWindow(window: sdl3.video.Window) !Info {
 }
 
 pub fn fromNative(native: sdl3.video.Display) Id {
-    return @enumFromInt(native.value);
+    return @fromBackingInt(@intCast(native.value));
 }
 
 pub fn toNative(id: Id) sdl3.video.Display {
-    return .{ .value = @intFromEnum(id) };
+    return .{ .value = @backingInt(id) };
 }
 
 /// Neither Wayland nor the SDL dummy backend provides global desktop placement.

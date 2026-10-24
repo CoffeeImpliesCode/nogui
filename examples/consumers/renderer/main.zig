@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
         return error.BorderDidNotTakeNextMaterial;
     }
     if (lowered.materials[0].extra.border_width[0] != 2 or
-        lowered.materials[0].extra.border_styles[0] != @intFromEnum(paint.BorderStyle.solid))
+        lowered.materials[0].extra.border_styles[0] != @backingInt(paint.BorderStyle.solid))
     {
         return error.MaterialLostBorderWidth;
     }

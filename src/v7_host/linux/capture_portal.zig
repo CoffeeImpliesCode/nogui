@@ -249,7 +249,7 @@ pub const ScreenCast = struct {
         try writeDictString(&b, "handle_token", token);
         try writeDictUint32(&b, "types", sources);
         try writeDictBool(&b, "multiple", multiple);
-        try writeDictUint32(&b, "cursor_mode", @intFromEnum(cursor_mode));
+        try writeDictUint32(&b, "cursor_mode", @backingInt(cursor_mode));
         if (restore_token) |t| try writeDictString(&b, "restore_token", t);
         try writeDictUint32(&b, "persist_mode", persistence);
         b.finishArray(dict);

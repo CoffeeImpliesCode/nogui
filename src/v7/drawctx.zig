@@ -272,7 +272,7 @@ fn paintStyleFromOpts(opts: anytype, defaults: ?PaintStyle) PaintStyle {
     const T = @TypeOf(opts);
     if (@hasField(T, "border_color")) {
         if (@TypeOf(opts.border_color) == paint.Color) {
-            local.border_colors = .{opts.border_color} ** 4;
+            local.border_colors = @splat(opts.border_color);
         } else {
             local.border_color = asColor(opts.border_color);
         }
@@ -711,15 +711,16 @@ pub const DrawCtx = struct {
         const V = @TypeOf(value);
         if (@typeInfo(T) != .@"struct" or @typeInfo(V) != .@"struct") return value;
         var result: T = seedTextRecord(T);
-        inline for (std.meta.fields(T)) |field| {
-            if (!@hasField(V, field.name)) continue;
-            @field(result, field.name) = asTextValue(field.type, @field(value, field.name));
+        const info = @typeInfo(T).@"struct";
+        inline for (info.field_names, info.field_types) |name, field_type| {
+            if (!@hasField(V, name)) continue;
+            @field(result, name) = asTextValue(field_type, @field(value, name));
         }
         comptime {
             // A field the record does not declare is a typo, not a default.
-            for (@typeInfo(V).@"struct".fields) |field| {
-                if (!@hasField(T, field.name)) {
-                    @compileError("unknown text option field: " ++ field.name);
+            for (@typeInfo(V).@"struct".field_names) |name| {
+                if (!@hasField(T, name)) {
+                    @compileError("unknown text option field: " ++ name);
                 }
             }
         }
@@ -751,12 +752,13 @@ pub const DrawCtx = struct {
                 if (@typeInfo(child) == .@"struct") return @as(T, asTextRecord(child, value));
             },
             .@"union" => {
-                inline for (@typeInfo(T).@"union".fields) |field| {
-                    if (!@hasField(V, field.name)) continue;
-                    if (field.type == void) return @field(T, field.name);
+                const info = @typeInfo(T).@"union";
+                inline for (info.field_names, info.field_types) |name, field_type| {
+                    if (!@hasField(V, name)) continue;
+                    if (field_type == void) return @field(T, name);
                     // SAFETY: the write below picks the union's active field, so no other field is read.
                     var result: T = undefined;
-                    @field(result, field.name) = asTextValue(field.type, @field(value, field.name));
+                    @field(result, name) = asTextValue(field_type, @field(value, name));
                     return result;
                 }
                 return value;
@@ -822,7 +824,7 @@ pub const DrawCtx = struct {
             if (self.late_nodes_remaining == 0) return error.LateSubrootLimit;
             self.late_nodes_remaining -= 1;
         }
-        const id: FrameNodeId = @enumFromInt(self.tree.next_id);
+        const id: FrameNodeId = @fromBackingInt(@intCast(self.tree.next_id));
         self.tree.next_id += 1;
 
         const parent_entry: ?ParentEntry = if (self.parent_stack.items.len == 0)
@@ -1383,7 +1385,7 @@ pub const DrawCtx = struct {
             self.component_defaults = saved_defaults;
         }
         self.component_identity = child_identity;
-        self.component_id = @enumFromInt(self.tree.next_id);
+        self.component_id = @fromBackingInt(@intCast(self.tree.next_id));
         self.tree.next_id += 1;
         if (self.registry) |reg| {
             try reg.map.put(reg.gpa, self.component_id, child_component);
@@ -1907,8 +1909,8 @@ test "DrawCtx: button owner binds to component_id, incl. inside component()" {
     // The component took the next id (3 — 2 was the root button's child
     // label); the inner button (id 4) is owned by the child component,
     // and component_id was restored afterwards.
-    const inner: FrameNodeId = @enumFromInt(4);
-    try std.testing.expectEqual(@as(FrameNodeId, @enumFromInt(3)), tree.node(inner).?.kind.button.owner);
+    const inner: FrameNodeId = @fromBackingInt(@intCast(4));
+    try std.testing.expectEqual(@as(FrameNodeId, @fromBackingInt(@intCast(3))), tree.node(inner).?.kind.button.owner);
     try std.testing.expectEqual(FrameNodeId.root, ctx.component_id);
 
     // A later button is owned by the root component again.
@@ -1938,7 +1940,7 @@ test "DrawCtx: component() draws into the current cursor" {
     // Drawn at root level: the child's node is root-level.
     // component() reserves id 1 for the child component, so its label is 2.
     try ctx.component(Child, .{ .key = .{ .static = "child" } }, &child);
-    const root_label: FrameNodeId = @enumFromInt(2);
+    const root_label: FrameNodeId = @fromBackingInt(@intCast(2));
     try std.testing.expectEqual(FrameNodeId.root, tree.node(root_label).?.parent);
 
     // Drawn inside a column: the child's node lands under the column.
@@ -1953,7 +1955,7 @@ test "DrawCtx: component() draws into the current cursor" {
     ctx2.pop();
 
     // ids: column = 1, component = 2, child label = 3.
-    const nested: FrameNodeId = @enumFromInt(3);
+    const nested: FrameNodeId = @fromBackingInt(@intCast(3));
     try std.testing.expectEqual(col, tree2.node(nested).?.parent);
     const col_node = tree2.node(col) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), col_node.children.items.len);

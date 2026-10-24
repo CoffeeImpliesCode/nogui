@@ -179,7 +179,7 @@ pub const DbusNotificationProvider = struct {
 
         const hints_offset = b.startArray(8) catch return oom;
         tryAppendHint(&b, "urgency", "y", .{
-            .byte = @intFromEnum(options.urgency),
+            .byte = @backingInt(options.urgency),
         }) catch return oom;
         if (options.category) |category| {
             tryAppendHint(&b, "category", "s", .{ .text = category }) catch return oom;

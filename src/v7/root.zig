@@ -260,7 +260,7 @@ test "root component defaults scope only the root draw" {
 const GpuLifecycleEvent = enum { init, frame, deinit };
 
 const GpuLifecycleLog = struct {
-    events: [8]GpuLifecycleEvent = .{.init} ** 8,
+    events: [8]GpuLifecycleEvent = @splat(.init),
     count: usize = 0,
 
     fn append(self: *GpuLifecycleLog, item: GpuLifecycleEvent) void {

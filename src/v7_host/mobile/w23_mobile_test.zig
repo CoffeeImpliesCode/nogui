@@ -88,9 +88,9 @@ const multibyte_anchor_byte: usize = 3;
 const multibyte_focus_byte: usize = multibyte_bytes;
 
 const replace_text: []const u8 = "hello world";
-const replace_lengths: [11]u8 = .{1} ** 11;
+const replace_lengths: [11]u8 = @splat(1);
 const replace_positions: [11]f32 = .{ 0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80 };
-const replace_widths: [11]f32 = .{8} ** 11;
+const replace_widths: [11]f32 = @splat(8);
 
 const kids_save_field = [_]NodeId{ n_save, n_field };
 const kids_field_extra = [_]NodeId{ n_field, n_extra };
@@ -444,7 +444,7 @@ const Snap = struct {
 
 /// 4096 bytes of a two-byte character repeated, so a payload the ring has to
 /// copy is real UTF-8 and the assertion afterwards is on real bytes.
-const big_payload = "ü".* ** 2048;
+const big_payload: [4096]u8 = @bitCast(@as([2048][2]u8, @splat("ü".*)));
 
 /// The model's own value buffer. Its real length IS the capacity the model
 /// reports, so a test states one number where it used to state a length and a
@@ -457,10 +457,10 @@ const Fixture = struct {
     /// Scratch handed to `Scratch`: every byte is written before the string
     /// that uses it is read, and a zeroed tail is a valid empty string. It is
     /// large enough for a 4096-byte platform edit to be composed in full.
-    buffer: [16384]u8 = [_]u8{0} ** 16384,
+    buffer: [16384]u8 = @splat(0),
     /// The model's LIVE value. Only `last_text[0..last_text_len]` is live, and
     /// `last_selection` is a position in exactly those bytes.
-    last_text: [model_capacity]u8 = [_]u8{0} ** model_capacity,
+    last_text: [model_capacity]u8 = @splat(0),
     last_text_len: usize = 0,
     last_selection: TextSelection = TextSelection.caret(0),
     text_writes: u32 = 0,
@@ -480,8 +480,8 @@ const Fixture = struct {
         // SAFETY: every field is assigned below, before this function returns
         // and before any test body reads the fixture.
         self.* = undefined;
-        self.buffer = [_]u8{0} ** 16384;
-        self.last_text = [_]u8{0} ** model_capacity;
+        self.buffer = @splat(0);
+        self.last_text = @splat(0);
         self.last_text_len = 0;
         self.last_selection = TextSelection.caret(0);
         self.text_writes = 0;
@@ -618,9 +618,9 @@ fn requestFor(adapter: *const Adapter, id: NodeId) native.platform_request {
 
 fn request(target: u64) native.platform_request {
     return .{
-        .action = @intFromEnum(Action.click),
+        .action = @backingInt(Action.click),
         .target = target,
-        .data = @intFromEnum(NativeData.none),
+        .data = @backingInt(NativeData.none),
         .value = "",
         .value_len = 0,
         .numeric_value = 0,
@@ -640,9 +640,9 @@ fn textRequest(
     focus: i64,
 ) native.platform_request {
     return .{
-        .action = @intFromEnum(action),
+        .action = @backingInt(action),
         .target = target,
-        .data = @intFromEnum(data),
+        .data = @backingInt(data),
         .value = value.ptr,
         .value_len = value.len,
         .numeric_value = 0,
@@ -953,7 +953,7 @@ const Recorder = struct {
     backs: u32 = 0,
     committed: u32 = 0,
     decision: ?lifecycle.BackDecision = null,
-    buffer: [64]u8 = [_]u8{0} ** 64,
+    buffer: [64]u8 = @splat(0),
     length: usize = 0,
 
     fn observe(context: ?*anyopaque, event: sdl_mobile.Event) void {
@@ -1605,7 +1605,7 @@ test "api-w23 a whole value the model cannot store leaves it untouched" {
     // cannot hold: five live bytes plus 8190 is 8195 against a capacity of
     // 8192. The request is refused and the model keeps what it had, because
     // a value clipped to what fits is a value no screen reader sent.
-    const ring_payload = "x" ** (model_capacity - 2);
+    const ring_payload = &@as([model_capacity - 2]u8, @splat('x'));
     fixture.adapter.deliver(textRequest(
         target,
         .replace_selected_text,
@@ -1626,7 +1626,7 @@ test "api-w23 a whole value the model cannot store leaves it untouched" {
     // And the model's own door refuses it too, with the bytes in hand rather
     // than with a payload the ring would never have carried: the value, the
     // selection and the write count are all exactly what they were.
-    const oversized = "x" ** (model_capacity + 1);
+    const oversized = &@as([model_capacity + 1]u8, @splat('x'));
     try std.testing.expect(!dispatcher.set_text.?(
         dispatcher.context,
         w_replace,
@@ -1832,9 +1832,9 @@ test "api-w23 a native id is refused rather than wrapped when the counter runs o
 }
 
 test "api-w23 a text node the platform cannot type into offers no text action" {
-    const click: u32 = 1 << @intFromEnum(Action.click);
-    const edits: u32 = (1 << @intFromEnum(Action.replace_selected_text)) |
-        (1 << @intFromEnum(Action.set_text_selection));
+    const click: u32 = 1 << @backingInt(Action.click);
+    const edits: u32 = (1 << @backingInt(Action.replace_selected_text)) |
+        (1 << @backingInt(Action.set_text_selection));
     const all = click | edits;
 
     // Android's framework applies a text edit to a virtual node for real, so
@@ -1865,13 +1865,13 @@ test "api-w23 a text node the platform cannot type into offers no text action" {
 }
 
 test "api-w23 a read-only node publishes no action that would change its value" {
-    const click: u32 = 1 << @intFromEnum(Action.click);
-    const caret: u32 = 1 << @intFromEnum(Action.set_text_selection);
-    const set_value: u32 = 1 << @intFromEnum(Action.set_value);
-    const replace: u32 = 1 << @intFromEnum(Action.replace_selected_text);
+    const click: u32 = 1 << @backingInt(Action.click);
+    const caret: u32 = 1 << @backingInt(Action.set_text_selection);
+    const set_value: u32 = 1 << @backingInt(Action.set_value);
+    const replace: u32 = 1 << @backingInt(Action.replace_selected_text);
     const edits: u32 = replace | set_value;
-    const steps: u32 = (1 << @intFromEnum(Action.increment)) |
-        (1 << @intFromEnum(Action.decrement));
+    const steps: u32 = (1 << @backingInt(Action.increment)) |
+        (1 << @backingInt(Action.decrement));
     const everything = click | caret | edits | steps;
 
     // The four writes go, whichever platform this is and whether or not a real
@@ -1952,7 +1952,7 @@ test "api-w23 a read-only node publishes no action that would change its value" 
 }
 
 test "api-w23 a node the core refuses to act on publishes no named action" {
-    const custom: u32 = 1 << @intFromEnum(Action.custom_action);
+    const custom: u32 = 1 << @backingInt(Action.custom_action);
 
     // SAFETY: `Fixture.init` assigns every field before any test reads it.
     var fixture: Fixture = undefined;

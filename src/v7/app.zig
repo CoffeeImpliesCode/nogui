@@ -874,7 +874,7 @@ pub const App = struct {
 
         self.focus_manager.reset(self.focusObserver());
         self.components.clearRetainingCapacity();
-        self.components.putAssumeCapacity(@enumFromInt(1), component);
+        self.components.putAssumeCapacity(@fromBackingInt(@intCast(1)), component);
         self.identity_registry.map.clearRetainingCapacity();
         self.identity_registry.map.putAssumeCapacity(ComponentId.root, next_mount);
         self.widget_identities.commitFrame(); // Retire old keys and bump recycled generations.
@@ -1584,7 +1584,7 @@ pub const App = struct {
         // Settling owns the tree the deferred focus_out must name, so no frame
         // may start until it finishes.
         if (self.settling) return error.FrameInProgress;
-        const root_component = self.components.get(@enumFromInt(1)) orelse
+        const root_component = self.components.get(@fromBackingInt(@intCast(1))) orelse
             return error.RootNotMounted;
         try layout.validateAvailable(surface);
         const generation = std.math.add(u64, self.frame_generation, 1) catch
@@ -1629,7 +1629,7 @@ pub const App = struct {
         const state_dir = try arena_alloc.create(StateDir);
         state_dir.* = .empty;
 
-        try staged_components.put(arena_alloc, @enumFromInt(1), root_component);
+        try staged_components.put(arena_alloc, @fromBackingInt(@intCast(1)), root_component);
         const old_root = self.identity_registry.map.get(ComponentId.root) orelse
             return error.RootNotMounted;
         try staged_mounts.map.put(arena_alloc, ComponentId.root, .{
@@ -1655,7 +1655,7 @@ pub const App = struct {
                 .window = self.window,
                 .root_model = self.root_model_weak,
             },
-            .component_id = @enumFromInt(1),
+            .component_id = @fromBackingInt(@intCast(1)),
             .component_identity = ComponentId.root,
             .frame_generation = generation,
             .state_prev = self.state_prev,
@@ -2138,7 +2138,7 @@ test "App: frame tree exposes button nodes owned by the mounted root" {
     for (out.tree.nodes.items) |n| {
         if (n.kind != .button) continue;
         found += 1;
-        try std.testing.expectEqual(@as(FrameNodeId, @enumFromInt(1)), n.kind.button.owner);
+        try std.testing.expectEqual(@as(FrameNodeId, @fromBackingInt(@intCast(1))), n.kind.button.owner);
     }
     try std.testing.expect(found >= 1);
 }
@@ -2446,9 +2446,9 @@ test "App: mouse wheel stops at the nearest scroll ancestor" {
     var inner_state: ScrollState = .{
         .max_offset = .{ 0, 100 },
     };
-    const outer_id: FrameNodeId = @enumFromInt(1);
-    const inner_id: FrameNodeId = @enumFromInt(2);
-    const child_id: FrameNodeId = @enumFromInt(3);
+    const outer_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const inner_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = child_id,

@@ -128,7 +128,7 @@ pub const Coverage = struct {
     /// this before it asks, so a dropped label is never a surprise. The tail
     /// past `dropped_len` is never read and holds a real option, so the
     /// default is never bytes no code wrote.
-    dropped: [max_dropped]Option = [_]Option{.title} ** max_dropped,
+    dropped: [max_dropped]Option = @splat(.title),
     dropped_len: usize = 0,
 
     pub fn isFull(self: Coverage) bool {

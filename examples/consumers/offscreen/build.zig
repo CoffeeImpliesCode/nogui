@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
         // ever changes its arguments, this call has to change with it.
         const sdl3_dep = dep.builder.lazyDependency("sdl3", .{
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }) orelse return;
         const sdl3_mod = requireModule(sdl3_dep, "sdl3") orelse return;
         addImport(&imports, b.allocator, "nogui_host", host_mod);
@@ -122,7 +122,7 @@ pub fn build(b: *std.Build) void {
     run.addFileArg(dep.path("shaders/quad_vert.spv"));
     run.addFileArg(dep.path("shaders/quad_frag.spv"));
     run.addFileArg(dep.path("shaders/sort_comp.spv"));
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const step = b.step("run", "Render one real windowless GPU frame and check text pixels");
     step.dependOn(&run.step);
 
@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) void {
         native_run.addFileArg(dep.path("shaders/fullscreen_vert.spv"));
         native_run.addArg("--blit-oklab");
         native_run.addFileArg(dep.path("shaders/blit_oklab.spv"));
-        if (b.args) |args| native_run.addArgs(args);
+        native_run.addPassthruArgs();
         const native_step = b.step(
             "run-native",
             "Present the same specimen into a real window and check the pixels it drew",

@@ -6,7 +6,7 @@ const WidgetId = @import("id.zig").WidgetId;
 const FrameNodeId = @import("id.zig").FrameNodeId;
 
 const owner: WidgetId = .{ .owner = 8, .slot = 1, .generation = 1 };
-const node: FrameNodeId = @enumFromInt(1);
+const node: FrameNodeId = @fromBackingInt(@intCast(1));
 fn now(raw: *anyopaque) i96 {
     const ticks: *i96 = @ptrCast(@alignCast(raw));
     return ticks.*;

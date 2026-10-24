@@ -56,8 +56,9 @@ const Scene = enum {
     strokes,
 
     fn fromName(name: []const u8) ?Scene {
-        inline for (std.meta.fields(Scene)) |field| {
-            if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+        const info = @typeInfo(Scene).@"enum";
+        inline for (info.field_names, info.field_values) |field_name, field_value| {
+            if (std.mem.eql(u8, name, field_name)) return @fromBackingInt(@intCast(field_value));
         }
         return null;
     }
@@ -502,7 +503,7 @@ fn emit(comptime format: []const u8, gpa: std.mem.Allocator, io: Io, args: anyty
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

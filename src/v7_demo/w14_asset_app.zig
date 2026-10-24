@@ -97,7 +97,7 @@ const drawcmd = nogui.drawcmd;
 /// own function-pointer type.
 const OnFrameFn = @typeInfo(@FieldType(Application.Hooks, "on_frame")).optional.child;
 const managed_window_ptr =
-    @typeInfo(@typeInfo(OnFrameFn).pointer.child).@"fn".params[2].type.?;
+    @typeInfo(@typeInfo(OnFrameFn).pointer.child).@"fn".param_types[2].?;
 
 /// The label the mounted image carries, so a committed snapshot can name the
 /// node this run put on screen.
@@ -362,7 +362,7 @@ const oklab_clear = [4]f32{ 0.20, 0.0, -0.008, 1.0 };
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -449,8 +449,8 @@ const Bindless = struct {
     gpa: std.mem.Allocator,
     heap: noapi.DescriptorHeap,
     map: std.AutoHashMapUnmanaged(noapi.TextureHandle, u32) = .empty,
-    generations: [capacity]u64 = [_]u64{1} ** capacity,
-    live: [capacity]bool = [_]bool{false} ** capacity,
+    generations: [capacity]u64 = @splat(1),
+    live: [capacity]bool = @splat(false),
 
     fn init(gpa: std.mem.Allocator, gpu: *noapi.Gpu) !Bindless {
         const heap = try gpu.descHeapCreate(capacity, 0, 1);
@@ -917,7 +917,7 @@ const Capture = struct {
     /// capture cannot let an extra wake pass.
     const capacity = 16;
 
-    samples: [capacity]Sample = [_]Sample{.{}} ** capacity,
+    samples: [capacity]Sample = @splat(.{}),
     requested: u32 = 0,
     captured: bool = false,
 
@@ -2312,7 +2312,7 @@ fn runHostAnimationArm(
     const budget_deadline_ms = sdl3.timer.getMillisecondsSinceInit() + 10_000;
     var captures: Capture = .{};
     var next_capture: Capture = .{};
-    var elapsed_at_frame: [Capture.capacity]u64 = [_]u64{0} ** Capture.capacity;
+    var elapsed_at_frame: [Capture.capacity]u64 = @splat(0);
     var committed: u32 = 0;
     var sleeps: u32 = 0;
     var waits: u32 = 0;
@@ -2468,7 +2468,7 @@ fn verdict(report: *Reporter, checks: *const Checks, tail: []const u8) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

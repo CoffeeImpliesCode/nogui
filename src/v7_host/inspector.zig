@@ -552,7 +552,7 @@ const MergeEntry = struct {
 
 fn lessEntry(_: void, a: MergeEntry, b: MergeEntry) bool {
     if (a.stamp != b.stamp) return a.stamp < b.stamp;
-    return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+    return @backingInt(a.kind) < @backingInt(b.kind);
 }
 
 fn writeJsonlRecord(writer: *std.Io.Writer, record: anytype) !void {
@@ -748,7 +748,7 @@ test "api-w24: host inspector lifecycle, selection, and stale detection" {
     var tree1 = nogui.WidgetTree.init(gpa);
     defer tree1.deinit();
     try tree1.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = target_id,
         .kind = .{ .button = .{ .label = "Inspect Target" } },
         .parent = .root,
@@ -782,7 +782,7 @@ test "api-w24: host inspector lifecycle, selection, and stale detection" {
     var tree2 = nogui.WidgetTree.init(gpa);
     defer tree2.deinit();
     try tree2.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = .{ .owner = 5, .slot = 1, .generation = 2 },
         .kind = .{ .button = .{ .label = "New Generation Target" } },
         .parent = .root,
@@ -890,7 +890,7 @@ test "api-w24: a failed capture keeps the committed frame and its selection" {
     var tree1 = nogui.WidgetTree.init(gpa);
     defer tree1.deinit();
     try tree1.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = first_id,
         .kind = .{ .button = .{ .label = "Committed" } },
         .parent = .root,
@@ -910,7 +910,7 @@ test "api-w24: a failed capture keeps the committed frame and its selection" {
     var tree2 = nogui.WidgetTree.init(gpa);
     defer tree2.deinit();
     try tree2.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = .{ .owner = 9, .slot = 1, .generation = 2 },
         .kind = .{ .button = .{ .label = "Rejected" } },
         .parent = .root,

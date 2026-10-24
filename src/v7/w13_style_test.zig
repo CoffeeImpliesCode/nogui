@@ -85,8 +85,8 @@ test "DrawCtx options keep typed pattern and theme border instead of dropping th
 test "collector orders parent and rich child before resolving their paint" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
-    const child: FrameNodeId = @enumFromInt(1);
-    const parent: FrameNodeId = @enumFromInt(2);
+    const child: FrameNodeId = @fromBackingInt(@intCast(1));
+    const parent: FrameNodeId = @fromBackingInt(@intCast(2));
     var shadows = [_]paint.Shadow{
         .{ .color = themed, .offset = .{ .x = -2, .y = 3 }, .blur = 5, .spread = 1 },
         .{ .color = blue, .blur = 2, .inset = true },
@@ -163,8 +163,8 @@ test "collector orders parent and rich child before resolving their paint" {
 test "pattern and texture fills survive node collection with authored coordinates" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
-    const pattern: FrameNodeId = @enumFromInt(1);
-    const image: FrameNodeId = @enumFromInt(2);
+    const pattern: FrameNodeId = @fromBackingInt(@intCast(1));
+    const image: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = pattern,
         .parent = .root,
@@ -208,7 +208,7 @@ test "collector rejects undersized command storage before changing its contents"
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.appendNode(.{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .parent = .root,
         .kind = .{ .button = .{ .label = "capacity" } },
         .rect = .{ .w = 10, .h = 10 },

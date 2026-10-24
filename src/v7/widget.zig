@@ -643,7 +643,7 @@ pub const WidgetTree = struct {
                 self.invalidateDenseIdLookup();
                 return;
             }
-            const node_id = @intFromEnum(node_value.id);
+            const node_id = @backingInt(node_value.id);
             maximum_id = @max(maximum_id, node_id);
             minimum_id = @min(minimum_id, node_id);
         }
@@ -684,7 +684,7 @@ pub const WidgetTree = struct {
         }
         for (self.nodes.items, 0..) |*node_value, node_index| {
             const index_u32 = std.math.cast(u32, node_index) orelse unreachable;
-            candidate[@intFromEnum(node_value.id)] = index_u32;
+            candidate[@backingInt(node_value.id)] = index_u32;
         }
 
         // Keep the previous view published until the candidate is complete.
@@ -748,7 +748,7 @@ pub const WidgetTree = struct {
     /// directly assembled trees fall back to their original linear lookup.
     pub fn nodeIndex(self: *const WidgetTree, id: FrameNodeId) ?usize {
         if (self.dense_id_index) |dense_id_index| {
-            const id_value = @intFromEnum(id);
+            const id_value = @backingInt(id);
             if (id_value < dense_id_index.len) {
                 const stored_index = dense_id_index[id_value];
                 if (stored_index != dense_absent) {
@@ -1184,8 +1184,8 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: FrameNodeId = @enumFromInt(1);
-    const id2: FrameNodeId = @enumFromInt(2);
+    const id1: FrameNodeId = @fromBackingInt(@intCast(1));
+    const id2: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = id1,
         .kind = .{ .label = .{ .text = "a" } },
@@ -1200,7 +1200,7 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
 
     try std.testing.expectEqual(id2, tree.node(id2).?.id);
     try std.testing.expectEqual(id1, tree.nodeConst(id1).?.id);
-    try std.testing.expectEqual(@as(?*WidgetNode, null), tree.node(@enumFromInt(99)));
+    try std.testing.expectEqual(@as(?*WidgetNode, null), tree.node(@fromBackingInt(@intCast(99))));
     try std.testing.expectEqual(@as(usize, 1), tree.node(id1).?.children.items.len);
     try std.testing.expectEqual(id2, tree.node(id1).?.children.items[0]);
 }
@@ -1208,8 +1208,8 @@ test "WidgetTree: indexed lookup finds live ids and rejects absent ids" {
 test "api-w02 a dense node cannot be rebound to a second stable identity" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
-    const first_node: FrameNodeId = @enumFromInt(1);
-    const second_node: FrameNodeId = @enumFromInt(2);
+    const first_node: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_node: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = first_node,
         .kind = .{ .spacer = .{} },
@@ -1240,9 +1240,9 @@ test "WidgetTree: consecutive IDs start at zero, one, or two" {
         defer tree.deinit();
 
         const ids = [_]FrameNodeId{
-            @enumFromInt(minimum_id + 2),
-            @enumFromInt(minimum_id),
-            @enumFromInt(minimum_id + 1),
+            @fromBackingInt(@intCast(minimum_id + 2)),
+            @fromBackingInt(@intCast(minimum_id)),
+            @fromBackingInt(@intCast(minimum_id + 1)),
         };
         for (ids) |id| {
             try tree.appendNode(.{
@@ -1261,11 +1261,11 @@ test "WidgetTree: consecutive IDs start at zero, one, or two" {
         var absent_id: u32 = 0;
         while (absent_id < minimum_id) : (absent_id += 1) {
             try std.testing.expectEqual(WidgetTree.dense_absent, lookup[absent_id]);
-            try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@enumFromInt(absent_id)));
+            try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@fromBackingInt(@intCast(absent_id))));
         }
         try std.testing.expectEqual(
             @as(?usize, null),
-            tree.nodeIndex(@enumFromInt(minimum_id + 3)),
+            tree.nodeIndex(@fromBackingInt(@intCast(minimum_id + 3))),
         );
     }
 }
@@ -1276,8 +1276,8 @@ test "WidgetTree: prepared lookup follows current post-order nodes" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const parent_id: FrameNodeId = @enumFromInt(1);
-    const child_id: FrameNodeId = @enumFromInt(3);
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = "child" } },
@@ -1292,7 +1292,7 @@ test "WidgetTree: prepared lookup follows current post-order nodes" {
 
     try std.testing.expectEqual(@as(?usize, 0), tree.nodeIndex(child_id));
     try std.testing.expectEqual(@as(?usize, 1), tree.nodeIndex(parent_id));
-    try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@enumFromInt(2)));
+    try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@fromBackingInt(@intCast(2))));
 
     std.mem.swap(WidgetNode, &tree.nodes.items[0], &tree.nodes.items[1]);
     try std.testing.expectEqual(@as(?usize, 1), tree.nodeIndex(child_id));
@@ -1309,7 +1309,7 @@ test "WidgetTree: sparse IDs retain absent entries inside the dense span" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const ids = [_]FrameNodeId{ @enumFromInt(4), .root, @enumFromInt(2) };
+    const ids = [_]FrameNodeId{ @fromBackingInt(@intCast(4)), .root, @fromBackingInt(@intCast(2)) };
     for (ids) |id| {
         try tree.appendNode(.{
             .id = id,
@@ -1322,7 +1322,7 @@ test "WidgetTree: sparse IDs retain absent entries inside the dense span" {
     const lookup = tree.dense_id_index.?;
     for ([_]u32{ 1, 3 }) |absent_id| {
         try std.testing.expectEqual(WidgetTree.dense_absent, lookup[absent_id]);
-        try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@enumFromInt(absent_id)));
+        try std.testing.expectEqual(@as(?usize, null), tree.nodeIndex(@fromBackingInt(@intCast(absent_id))));
     }
     for (ids, 0..) |id, node_index| {
         try std.testing.expectEqual(@as(?usize, node_index), tree.nodeIndex(id));
@@ -1335,9 +1335,9 @@ test "WidgetTree: malformed complete map remains lookup authority" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: FrameNodeId = @enumFromInt(1);
-    const id2: FrameNodeId = @enumFromInt(2);
-    const unrelated_id: FrameNodeId = @enumFromInt(3);
+    const id1: FrameNodeId = @fromBackingInt(@intCast(1));
+    const id2: FrameNodeId = @fromBackingInt(@intCast(2));
+    const unrelated_id: FrameNodeId = @fromBackingInt(@intCast(3));
     for ([_]FrameNodeId{ id1, id2 }) |id| {
         try tree.appendNode(.{
             .id = id,
@@ -1361,8 +1361,8 @@ test "WidgetTree: incomplete map scans nodes after preparation" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: FrameNodeId = @enumFromInt(1);
-    const id2: FrameNodeId = @enumFromInt(2);
+    const id1: FrameNodeId = @fromBackingInt(@intCast(1));
+    const id2: FrameNodeId = @fromBackingInt(@intCast(2));
     for ([_]FrameNodeId{ id1, id2 }) |id| {
         try tree.appendNode(.{
             .id = id,
@@ -1384,7 +1384,7 @@ test "WidgetTree: mismatched map index rejects prepared lookup" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: FrameNodeId = @enumFromInt(1);
+    const id1: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = .root,
         .kind = .{ .spacer = .{} },
@@ -1410,7 +1410,7 @@ test "WidgetTree: maximum ID remains on sparse fallback" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const maximum_id: FrameNodeId = @enumFromInt(std.math.maxInt(u32));
+    const maximum_id: FrameNodeId = @fromBackingInt(@intCast(std.math.maxInt(u32)));
     try tree.appendNode(.{
         .id = maximum_id,
         .kind = .{ .spacer = .{} },
@@ -1433,9 +1433,9 @@ test "WidgetTree: prepare allocation failure keeps lookup retryable" {
     var tree = WidgetTree.init(allocator);
     defer tree.deinit();
 
-    const id1: FrameNodeId = @enumFromInt(1);
-    const id2: FrameNodeId = @enumFromInt(2);
-    const id3: FrameNodeId = @enumFromInt(3);
+    const id1: FrameNodeId = @fromBackingInt(@intCast(1));
+    const id2: FrameNodeId = @fromBackingInt(@intCast(2));
+    const id3: FrameNodeId = @fromBackingInt(@intCast(3));
     for ([_]FrameNodeId{ id1, id2 }) |id| {
         try tree.appendNode(.{
             .id = id,
@@ -1466,8 +1466,8 @@ test "WidgetTree counters record node lookup and ancestor reads" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     tree.setCounterSink(&counters);
-    const root_id: FrameNodeId = @enumFromInt(1);
-    const child_id: FrameNodeId = @enumFromInt(2);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },
@@ -1497,10 +1497,10 @@ test "WidgetTree: malformed IDs return InvalidStyle instead of panicking" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const missing_id: FrameNodeId = @enumFromInt(99);
+    const missing_id: FrameNodeId = @fromBackingInt(@intCast(99));
     try std.testing.expectError(
         error.InvalidStyle,
-        tree.appendChild(missing_id, @enumFromInt(1)),
+        tree.appendChild(missing_id, @fromBackingInt(@intCast(1))),
     );
     try std.testing.expectError(error.InvalidStyle, contentRect(&tree, missing_id));
 }
@@ -1509,9 +1509,9 @@ test "WidgetTree: moving a node to the end reindexes shifted nodes" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: FrameNodeId = @enumFromInt(1);
-    const id2: FrameNodeId = @enumFromInt(2);
-    const id3: FrameNodeId = @enumFromInt(3);
+    const id1: FrameNodeId = @fromBackingInt(@intCast(1));
+    const id2: FrameNodeId = @fromBackingInt(@intCast(2));
+    const id3: FrameNodeId = @fromBackingInt(@intCast(3));
     for ([_]FrameNodeId{ id1, id2, id3 }) |id| {
         try tree.appendNode(.{
             .id = id,
@@ -1535,11 +1535,11 @@ test "WidgetTree: roots() returns only top-level nodes in append order" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const id1: FrameNodeId = @enumFromInt(1);
-    const id2: FrameNodeId = @enumFromInt(2);
-    const id3: FrameNodeId = @enumFromInt(3);
-    const id4: FrameNodeId = @enumFromInt(4);
-    const id5: FrameNodeId = @enumFromInt(5);
+    const id1: FrameNodeId = @fromBackingInt(@intCast(1));
+    const id2: FrameNodeId = @fromBackingInt(@intCast(2));
+    const id3: FrameNodeId = @fromBackingInt(@intCast(3));
+    const id4: FrameNodeId = @fromBackingInt(@intCast(4));
+    const id5: FrameNodeId = @fromBackingInt(@intCast(5));
 
     // Post-order: children first, then their containers.
     try tree.nodes.append(std.testing.allocator, .{ .id = id4, .kind = .{ .label = .{ .text = "c" } }, .parent = id1 });
@@ -1564,7 +1564,7 @@ test "WidgetTree: roots() with a too-small buf returns the full count, no overfl
 
     for (0..5) |i| {
         try tree.nodes.append(std.testing.allocator, .{
-            .id = @enumFromInt(@as(u32, @intCast(i + 1))),
+            .id = @fromBackingInt(@intCast(@as(u32, @intCast(i + 1)))),
             .kind = .{ .spacer = .{} },
             .parent = .root,
         });
@@ -1575,8 +1575,8 @@ test "WidgetTree: roots() with a too-small buf returns the full count, no overfl
     // Count reflects everything that would have been written.
     try std.testing.expectEqual(@as(usize, 5), count);
     // The first entries still land, in append order.
-    try std.testing.expectEqual(@as(FrameNodeId, @enumFromInt(1)), small[0].id);
-    try std.testing.expectEqual(@as(FrameNodeId, @enumFromInt(2)), small[1].id);
+    try std.testing.expectEqual(@as(FrameNodeId, @fromBackingInt(@intCast(1))), small[0].id);
+    try std.testing.expectEqual(@as(FrameNodeId, @fromBackingInt(@intCast(2))), small[1].id);
     // Writing past buf.len would trip the slice bounds check under `zig test`.
 }
 
@@ -1586,9 +1586,9 @@ test "absoluteRect: walks parent content boxes through border+padding" {
 
     // Root-level column with padding, holding a row with a border, holding
     // a label offset relative to the row's content box.
-    const col: FrameNodeId = @enumFromInt(1);
-    const row: FrameNodeId = @enumFromInt(2);
-    const label: FrameNodeId = @enumFromInt(3);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
+    const row: FrameNodeId = @fromBackingInt(@intCast(2));
+    const label: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = label,
@@ -1652,8 +1652,8 @@ test "absoluteRect: typed zero edges preserve content origin" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const parent_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const parent_style: Style = .{
         .border_inset = .{
             .top = .{ .length = 2 },
@@ -1695,8 +1695,8 @@ test "geometry: typed percentage parent edges define child absolute and visual o
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const parent_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const parent_style: Style = .{
         .display = .block,
         .size = .{
@@ -1743,8 +1743,8 @@ test "geometry: stored resolved percentage edges retain containing basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const parent_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const containing_width: f32 = 200;
     const parent_width: f32 = 100;
     const padding_fraction: f32 = 0.10;
@@ -1787,9 +1787,9 @@ test "geometry preserves nested fractional child-to-root accumulation" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const middle_id: FrameNodeId = @enumFromInt(2);
-    const outer_id: FrameNodeId = @enumFromInt(3);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const middle_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const outer_id: FrameNodeId = @fromBackingInt(@intCast(3));
     var middle_scroll: ScrollState = .{ .offset = .{ 5.89, 0.4 } };
     var outer_scroll: ScrollState = .{ .offset = .{ 7.28, 0.6 } };
 
@@ -1879,9 +1879,9 @@ test "geometry returns the accumulated prefix when a parent is missing" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const parent_id: FrameNodeId = @enumFromInt(2);
-    const missing_id: FrameNodeId = @enumFromInt(99);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const missing_id: FrameNodeId = @fromBackingInt(@intCast(99));
     var scroll_state: ScrollState = .{ .offset = .{ 2, 3 } };
 
     try tree.appendNode(.{
@@ -1927,7 +1927,7 @@ test "geometry preserves explicit root sentinel lookup semantics" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
     var root_scroll: ScrollState = .{ .offset = .{ 3, 4 } };
     try tree.appendNode(.{
         .id = child_id,
@@ -1976,7 +1976,7 @@ test "absoluteRect: root-level node is relative to the surface (0,0)" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: FrameNodeId = @enumFromInt(1);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.nodes.append(std.testing.allocator, .{
         .id = col,
         .kind = .{ .column = .{} },
@@ -2032,8 +2032,8 @@ test "visualBorderRect: scroll offset applies only to descendants" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const scroll_id: FrameNodeId = @enumFromInt(1);
-    const child_id: FrameNodeId = @enumFromInt(2);
+    const scroll_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(2));
     var scroll_state: ScrollState = .{ .offset = .{ 4, 6 } };
 
     try tree.nodes.append(std.testing.allocator, .{
@@ -2079,8 +2079,8 @@ test "pointInClipChain: rejects points outside a scrolled ancestor clip" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const clip_id: FrameNodeId = @enumFromInt(1);
-    const child_id: FrameNodeId = @enumFromInt(2);
+    const clip_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(2));
     var scroll_state: ScrollState = .{ .offset = .{ 5, 0 } };
 
     try tree.nodes.append(std.testing.allocator, .{

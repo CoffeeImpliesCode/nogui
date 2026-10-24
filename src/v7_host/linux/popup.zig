@@ -208,11 +208,11 @@ pub const PopupError = error{
 /// enum at line 188 and the `gravity` enum at line 213, which are the same nine
 /// members in the same order.
 pub fn anchorBits(anchor: Anchor) u32 {
-    return @intFromEnum(anchor);
+    return @backingInt(anchor);
 }
 
 pub fn gravityBits(gravity: Gravity) u32 {
-    return @intFromEnum(gravity);
+    return @backingInt(gravity);
 }
 
 /// The `constraint_adjustment` bitfield, `xdg-shell.xml` line 239: `slide_x` is

@@ -176,7 +176,7 @@ const pump_ms: u64 = 8;
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         // The buffer is reused for every line, so formatting into it is a
@@ -457,7 +457,7 @@ const Field = struct {
     caret_reads: u32 = 0,
     /// One UTF-8 byte length per character of the live value, so the published
     /// run is addressable in the platform's character units.
-    lengths: [256]u8 = [_]u8{0} ** 256,
+    lengths: [256]u8 = @splat(0),
     characters: usize = 0,
 
     pub fn deinit(self: *Field, _: *Session) void {
@@ -2134,7 +2134,7 @@ const Observed = struct {
 /// way to read it: the bytes borrow this buffer, so handing them out as a bare
 /// `[]const u8` would let a caller format a second line over the first.
 const Detail = struct {
-    buffer: [256]u8 = [_]u8{0} ** 256,
+    buffer: [256]u8 = @splat(0),
 
     fn text(self: *Detail, comptime fmt: []const u8, args: anytype) []const u8 {
         // A line that does not fit says so rather than half-claiming one.
@@ -2184,7 +2184,7 @@ const Run = struct {
     observer: sdl_mobile.Observer,
     publisher: semantics.Publisher,
     dispatcher: semantics.Dispatcher,
-    scratch_bytes: [scratch_size]u8 = [_]u8{0} ** scratch_size,
+    scratch_bytes: [scratch_size]u8 = @splat(0),
     /// The liveness probe every native callback in this run is gated on.
     owner: host.weak_owner.WeakOwner,
     alive: bool = true,
@@ -2814,7 +2814,7 @@ const Run = struct {
 
     fn driveFocus(self: *Run, ms: u64) !void {
         const report = self.report;
-        var occlusion_buffer: [96]u8 = [_]u8{0} ** 96;
+        var occlusion_buffer: [96]u8 = @splat(0);
         // Focus has to WAIT for a committed tree: an endpoint binds only to an
         // identity the current frame published, and a request for focus on a
         // tree that does not exist yet resolves to nothing. So the binding is
@@ -2891,8 +2891,8 @@ const Run = struct {
     }
 
     fn driveKeyboard(self: *Run, ms: u64) !void {
-        var occlusion_buffer: [96]u8 = [_]u8{0} ** 96;
-        var scratch_caret: [96]u8 = [_]u8{0} ** 96;
+        var occlusion_buffer: [96]u8 = @splat(0);
+        var scratch_caret: [96]u8 = @splat(0);
         try self.awaitPhase(struct {
             fn done(run: *Run) bool {
                 return run.observer.state().keyboard.occlusion != null;
@@ -3486,7 +3486,7 @@ fn reportOwnership(self: *Run, report: *Reporter) !void {
 
 /// Where `caretText` and `occlusionText` format, so a report line borrows a
 /// buffer this run owns rather than allocating one.
-var detail_buffer: [96]u8 = [_]u8{0} ** 96;
+var detail_buffer: [96]u8 = @splat(0);
 
 /// The buffer the semantic drain composes into. One split in two: a row name
 /// and a composed text value never need more than this together.
@@ -3836,7 +3836,7 @@ fn runNative(
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

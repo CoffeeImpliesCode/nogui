@@ -154,7 +154,7 @@ pub const TextState = struct {
     composing: bool = false,
     /// A bounded copy of the composition, so a caller can read what the IME is
     /// showing without the platform's borrowed buffer.
-    preedit: [max_preedit]u8 = [_]u8{0} ** max_preedit,
+    preedit: [max_preedit]u8 = @splat(0),
     preedit_len: usize = 0,
     /// The composition was longer than the bound. A truncated composition is
     /// reported as truncated rather than as a shorter composition, because the
@@ -682,7 +682,7 @@ test "api-w23 mobile an unmeasured keyboard is not a missing one" {
 
 test "api-w23 mobile composition is bounded and reports its own truncation" {
     var machine: Machine = .{};
-    const long = "x" ** (TextState.max_preedit + 10);
+    const long = &@as([TextState.max_preedit + 10]u8, @splat('x'));
     const change = machine.observe(.{ .composition = long }).?;
     try std.testing.expect(change.text_state.composing);
     try std.testing.expectEqual(TextState.max_preedit, machine.text.preedit_len);
@@ -700,7 +700,7 @@ test "api-w23 mobile a bounded composition copy never splits a codepoint" {
     // 255 ASCII bytes, then a three-byte codepoint: the byte bound of 256 lands
     // in the middle of it. Copying 256 raw bytes would hand the caller the
     // first two bytes of a character as if they were text.
-    const prefix = "a" ** (TextState.max_preedit - 1);
+    const prefix = &@as([TextState.max_preedit - 1]u8, @splat('a'));
     var machine: Machine = .{};
     _ = machine.observe(.{ .composition = prefix ++ "\u{20ac}tail" });
     try std.testing.expectEqual(TextState.max_preedit - 1, machine.text.preedit_len);
@@ -711,7 +711,7 @@ test "api-w23 mobile a bounded composition copy never splits a codepoint" {
 
     // A composition that ends exactly on the bound is not truncated and is not
     // shortened either, so the bound itself is not what a caller reads.
-    _ = machine.observe(.{ .composition = "b" ** TextState.max_preedit });
+    _ = machine.observe(.{ .composition = &@as([TextState.max_preedit]u8, @splat('b')) });
     try std.testing.expectEqual(TextState.max_preedit, machine.text.preedit_len);
     try std.testing.expect(!machine.text.preedit_truncated);
 

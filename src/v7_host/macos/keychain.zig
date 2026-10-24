@@ -238,12 +238,12 @@ pub const Provider = struct {
     /// Copy the query's text into NUL-terminated storage the main-thread call
     /// can read. The caller's slices may die the moment this returns.
     fn scratchQuery(self: *Provider, query: credentials.CredentialQuery) Error!OwnedQuery {
-        const service = self.allocator.dupeZ(u8, query.service) catch return error.OutOfMemory;
+        const service = self.allocator.dupeSentinel(u8, query.service, 0) catch return error.OutOfMemory;
         errdefer self.allocator.free(service);
-        const account = self.allocator.dupeZ(u8, query.account) catch return error.OutOfMemory;
+        const account = self.allocator.dupeSentinel(u8, query.account, 0) catch return error.OutOfMemory;
         errdefer self.allocator.free(account);
         if (query.collection) |collection| {
-            const group = self.allocator.dupeZ(u8, collection) catch return error.OutOfMemory;
+            const group = self.allocator.dupeSentinel(u8, collection, 0) catch return error.OutOfMemory;
             return .{ .service = service, .account = account, .group = group };
         }
         return .{ .service = service, .account = account, .group = null };

@@ -69,11 +69,11 @@ pub fn initSdl(
     var native_surface: u64 = 0;
     if (!create(
         window,
-        @ptrFromInt(@intFromEnum(gpu.instanceHandle())),
+        @ptrFromInt(@backingInt(gpu.instanceHandle())),
         null,
         &native_surface,
     )) return error.PlatformSurfaceCreationFailed;
-    const surface: vk.SurfaceKHR = @enumFromInt(native_surface);
+    const surface: vk.SurfaceKHR = @fromBackingInt(@intCast(native_surface));
     // Adoption starts here and completes inside `addWindow`, which releases
     // nothing on failure: it nulls the window's copy of the handle before
     // destroying that window, which leaves this `errdefer` the single release.

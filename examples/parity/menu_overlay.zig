@@ -354,7 +354,7 @@ pub const MenuView = struct {
     foreign_reads: u32 = 0,
     /// The model outcome of a committed drop.
     drops: u32 = 0,
-    dropped_title: [24]u8 = [_]u8{0} ** 24,
+    dropped_title: [24]u8 = @splat(0),
     dropped_len: usize = 0,
     payload_frees: u32 = 0,
     /// Cancellations caused by a revoked capture: the pointer left the window
@@ -1197,7 +1197,7 @@ pub const Scenario = struct {
     /// until the placement is folded into the committed geometry itself. It is
     /// a CPU walk of the tree the App published, not a rendered frame.
     pub fn raster(self: *Scenario) [raster_rows][raster_columns]u8 {
-        var out = [_][raster_columns]u8{[_]u8{'.'} ** raster_columns} ** raster_rows;
+        var out: [raster_rows][raster_columns]u8 = @splat(@splat('.'));
         const tree = self.app.tree_ptr orelse return out;
         const view = self.view;
 
@@ -1630,7 +1630,7 @@ pub const Step = enum {
 
     pub fn parse(text: []const u8) ?Step {
         for (names, 0..) |name, index| {
-            if (std.mem.eql(u8, name, text)) return @enumFromInt(index);
+            if (std.mem.eql(u8, name, text)) return @fromBackingInt(@intCast(index));
         }
         return null;
     }
@@ -1679,7 +1679,7 @@ pub const Options = struct {
         // The title is allocated apart, because it is the one field whose
         // declared type is a SENTINEL slice and so cannot share the plain
         // slice path below.
-        self.title = try gpa.dupeZ(u8, native_title);
+        self.title = try gpa.dupeSentinel(u8, native_title, 0);
         const fields = [_]*[]const u8{
             &self.capture_step,
             &self.quad_vert,
@@ -1706,7 +1706,7 @@ pub const Options = struct {
         if (self.only) |name| gpa.free(name);
         release(gpa, self.capture_step);
         // Freed with its SENTINEL TYPE, which `Allocator.free` turns back
-        // into the n+1 bytes `dupeZ` took. A filled title is never empty —
+        // into the n+1 bytes `dupeSentinel` took. A filled title is never empty —
         // `parseArgs` refuses `--title ""` — so an empty one is the
         // never-filled sentinel of `defaults` and owns nothing.
         if (self.title.len != 0) gpa.free(self.title);
@@ -1731,7 +1731,7 @@ fn replace(gpa: std.mem.Allocator, field: anytype, text: []const u8) !void {
     if (comptime std.meta.sentinel(@TypeOf(old)) == null) {
         field.* = try gpa.dupe(u8, text);
     } else {
-        field.* = try gpa.dupeZ(u8, text);
+        field.* = try gpa.dupeSentinel(u8, text, 0);
     }
     release(gpa, old);
 }
@@ -2539,7 +2539,7 @@ pub const Native = struct {
             try self.runStep(Step.parse(name).?);
         } else {
             for (Step.names, 0..) |_, index| {
-                try self.runStep(@enumFromInt(index));
+                try self.runStep(@fromBackingInt(@intCast(index)));
             }
         }
         try self.reportDone();
@@ -2549,7 +2549,7 @@ pub const Native = struct {
     /// then returns its error, so the process exits nonzero and the line is
     /// the last thing the controller reads.
     fn runStep(self: *Self, step: Step) !void {
-        const name = Step.names[@intFromEnum(step)];
+        const name = Step.names[@backingInt(step)];
         try self.emit("STEP {s} begin\n", .{name});
         self.execute(step) catch |err| {
             try self.emit("STEP {s} FAIL {s} claims={d}\n", .{
@@ -3377,7 +3377,7 @@ fn dragCaptured(view: *MenuView) bool {
 /// `--native` the same scene is mounted on a real owned toplevel and every
 /// step it takes is reported on stdout, one line per step.
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -3449,8 +3449,8 @@ pub fn main(init: std.process.Init) !void {
 // --- tests -----------------------------------------------------------------
 
 test "api-w16 mounted popup, routed drag and W05 tooltip on one real App" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var scenario = try Scenario.init(gpa);
@@ -3572,8 +3572,8 @@ test "api-w16 mounted popup, routed drag and W05 tooltip on one real App" {
 }
 
 test "api-w25 overlay hit order, refused drop, and a disappearing tooltip owner" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var scenario = try Scenario.init(gpa);
@@ -3685,8 +3685,8 @@ test "api-w25 overlay hit order, refused drop, and a disappearing tooltip owner"
 }
 
 test "api-w25 menu enablement follows the focused context through the action bridge" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     var scenario = try Scenario.init(gpa);

@@ -38,7 +38,7 @@ pub fn getSystemTheme() ?SystemTheme {
         else => {},
     }
 
-    if (comptime builtin.os.tag != .linux or builtin.abi.isAndroid()) return null;
+    if (comptime builtin.target.os.tag != .linux or builtin.target.abi.isAndroid()) return null;
     // A desktop portal is the only other observed appearance source.
     if (portal.readAppearanceTheme(std.heap.c_allocator) catch null) |theme| {
         return switch (theme) {
@@ -334,7 +334,7 @@ pub fn getBasePath(allocator: std.mem.Allocator) !?[]u8 {
         return owned;
     }
     // Fallback to the directory of the running executable.
-    if (comptime builtin.os.tag != .linux or builtin.abi.isAndroid()) return null;
+    if (comptime builtin.target.os.tag != .linux or builtin.target.abi.isAndroid()) return null;
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const read = std.os.linux.readlink("/proc/self/exe", &buffer, buffer.len);
     if (std.os.linux.errno(read) != .SUCCESS) return null;

@@ -75,10 +75,10 @@ test "dispatcher gives an auto-height mixed flex root its natural grid height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const grid_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     const columns = [_]style.GridTrack{.{ .fixed = 30 }};
     const rows = [_]style.GridTrack{ .{ .fixed = 12 }, .{ .fixed = 8 } };
 
@@ -116,10 +116,10 @@ test "dispatcher stretches an auto-sized grid root and keeps natural height" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const flex_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     const columns = [_]style.GridTrack{.{ .fixed = 40 }};
     const rows = [_]style.GridTrack{.auto};
 
@@ -156,9 +156,9 @@ test "dispatcher preserves concrete root height and stretches root pseudo width"
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const grid_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     const columns = [_]style.GridTrack{.{ .fixed = 24 }};
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
 
@@ -192,9 +192,9 @@ test "layoutTree dispatches a mixed auto flex root through the public facade" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const grid_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     const columns = [_]style.GridTrack{.{ .fixed = 36 }};
     const rows = [_]style.GridTrack{.{ .fixed = 18 }};
 

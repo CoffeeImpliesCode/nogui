@@ -163,9 +163,9 @@ pub const TextStyleOverride = struct {
         if (changes.font_fields.family != null and changes.font_fields.handle == null) {
             result.font_fields.handle = null;
         }
-        inline for (std.meta.fields(FontRequestOverride)) |field| {
-            if (@field(changes.font_fields, field.name)) |value| {
-                @field(result.font_fields, field.name) = value;
+        inline for (@typeInfo(FontRequestOverride).@"struct".field_names) |name| {
+            if (@field(changes.font_fields, name)) |value| {
+                @field(result.font_fields, name) = value;
             }
         }
         if (changes.foreground) |value| result.foreground = value;
@@ -186,16 +186,16 @@ pub const TextStyleOverride = struct {
         var result = self;
         if (self.font) |font| {
             var restricted_font = inherited_font;
-            inline for (std.meta.fields(FontRequestOverride), 0..) |field, index| {
+            inline for (@typeInfo(FontRequestOverride).@"struct".field_names, 0..) |name, index| {
                 if (allowed & (@as(u16, 1) << index) != 0) {
-                    @field(restricted_font, field.name) = @field(font, field.name);
+                    @field(restricted_font, name) = @field(font, name);
                 }
             }
             result.font = restricted_font;
         }
-        inline for (std.meta.fields(FontRequestOverride), 0..) |field, index| {
+        inline for (@typeInfo(FontRequestOverride).@"struct".field_names, 0..) |name, index| {
             if (allowed & (@as(u16, 1) << index) == 0) {
-                @field(result.font_fields, field.name) = null;
+                @field(result.font_fields, name) = null;
             }
         }
         if (result.foreground != null and allowed & TextOrigins.bit(.foreground) == 0) {
@@ -247,20 +247,20 @@ pub const TextField = enum(u4) {
 };
 
 comptime {
-    const slots = @typeInfo(TextField).@"enum".fields;
-    const font_fields = std.meta.fields(FontRequestOverride);
+    const slots = @typeInfo(TextField).@"enum".field_names;
+    const font_fields = @typeInfo(FontRequestOverride).@"struct".field_names;
     if (slots.len != font_fields.len + 5) {
         @compileError("TextField must mirror every authored TextStyleOverride field");
     }
-    for (font_fields, 0..) |field, index| {
-        if (!std.mem.eql(u8, slots[index].name, field.name)) {
+    for (font_fields, 0..) |name, index| {
+        if (!std.mem.eql(u8, slots[index], name)) {
             @compileError("TextField must keep the FontRequestOverride field order");
         }
     }
 }
 
 /// How many leading slots belong to the font request.
-const font_field_count = @typeInfo(TextField).@"enum".fields.len - 5;
+const font_field_count = @typeInfo(TextField).@"enum".field_names.len - 5;
 
 /// Per-field provenance of a resolved style: one bit per field per origin.
 /// Two bit masks rather than a sparse record, so the resolved `NodeText` stays
@@ -270,11 +270,11 @@ pub const TextOrigins = struct {
     defaulted: u16 = 0,
 
     /// Every declared field.
-    const all: u16 = (@as(u16, 1) << @typeInfo(TextField).@"enum".fields.len) - 1;
+    const all: u16 = (@as(u16, 1) << @typeInfo(TextField).@"enum".field_names.len) - 1;
     const font_fields: u16 = (@as(u16, 1) << font_field_count) - 1;
 
     fn bit(field: TextField) u16 {
-        return @as(u16, 1) << @intFromEnum(field);
+        return @as(u16, 1) << @backingInt(field);
     }
 
     /// True when the chain supplied this field at all, authored or defaulted.
@@ -302,8 +302,8 @@ pub const TextOrigins = struct {
     pub fn fromLayer(layer: TextStyleOverride, origin: TextOrigin) TextOrigins {
         var fields: u16 = 0;
         if (layer.font != null) fields |= font_fields;
-        inline for (std.meta.fields(FontRequestOverride), 0..) |field, index| {
-            if (@field(layer.font_fields, field.name) != null) {
+        inline for (@typeInfo(FontRequestOverride).@"struct".field_names, 0..) |name, index| {
+            if (@field(layer.font_fields, name) != null) {
                 fields |= @as(u16, 1) << index;
             }
         }
@@ -373,8 +373,8 @@ pub const ParagraphOverride = struct {
     /// Preserve unauthored fields for inheritance and the host's box policy.
     pub fn resolve(self: ParagraphOverride, changes: ParagraphOverride) ParagraphOverride {
         var result = self;
-        inline for (std.meta.fields(ParagraphOverride)) |field| {
-            if (@field(changes, field.name)) |value| @field(result, field.name) = value;
+        inline for (@typeInfo(ParagraphOverride).@"struct".field_names) |name| {
+            if (@field(changes, name)) |value| @field(result, name) = value;
         }
         return result;
     }

@@ -3,18 +3,7 @@
 const std = @import("std");
 const spotify_data = @import("spotify_data.zig");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("libavformat/avformat.h");
-    @cInclude("libavcodec/avcodec.h");
-    @cInclude("libavutil/avutil.h");
-    @cInclude("libavutil/channel_layout.h");
-    @cInclude("libavutil/dict.h");
-    @cInclude("libavutil/imgutils.h");
-    @cInclude("libavutil/samplefmt.h");
-    @cInclude("libswresample/swresample.h");
-    @cInclude("libswscale/swscale.h");
-});
+const c = @import("nogui_ffmpeg_c");
 
 pub const output_sample_rate_hz: u32 = 48_000;
 pub const output_channel_count: u8 = 2;
@@ -254,7 +243,7 @@ pub const Decoder = struct {
 
     /// Open `path` transactionally and retain an owned copy until `close`.
     pub fn open(self: *Decoder, path: []const u8) OpenError!void {
-        const next_path = try self.gpa.dupeZ(u8, path);
+        const next_path = try self.gpa.dupeSentinel(u8, path, 0);
         errdefer self.gpa.free(next_path);
 
         var next_format_context: ?*c.AVFormatContext = null;
@@ -1140,7 +1129,7 @@ pub fn probeMetadata(
     gpa: std.mem.Allocator,
     path: []const u8,
 ) ProbeError!Metadata {
-    const path_z = try gpa.dupeZ(u8, path);
+    const path_z = try gpa.dupeSentinel(u8, path, 0);
     defer gpa.free(path_z);
 
     var format_context_optional: ?*c.AVFormatContext = null;

@@ -482,26 +482,38 @@
   {
    "path": "build.zig",
    "original_sha256": "2fc80a05cbdc4821bdd86308ca06a1e5abe1e1c09792c9bc7d017e6fb04bba75",
-   "current_sha256": "85598456329ff8b87f29160bfb3247223a4a286a91219e3acb73e36dc077e0a4",
-   "reason": "Build the vendored tree as an SDL-free library: drop the sdl3 module import, declare sdl3 as a lazy dependency, add a -Dlibrary-only option that stops before the examples, register the test step first, stop installing generated documentation, and support focused unit-test filters."
+   "current_sha256": "7c36e8fdeee6c1830bd2cdc7c098f20567604a20422e739984451b84e9966644",
+   "reason": "Build the vendored tree as an SDL-free library: drop the sdl3 module import, declare sdl3 as a lazy dependency, add a -Dlibrary-only option that stops before the examples, register the test step first, stop installing generated documentation, and support focused unit-test filters. Port to Zig 0.17.0."
   },
   {
    "path": "build.zig.zon",
    "original_sha256": "3d47c675b7f189ffbd315727738090b9cd465772ab52dcbe96cfeb5ea039f73e",
-   "current_sha256": "62c6ccf3bc091d21e2ee7c5f20fe770799ba3308ccd6108ca8477819b30cdea9",
-   "reason": "Mark the sdl3 dependency lazy so the library-only build stops before it is fetched or built; include the MIT grant authorized by the owner on 2026-10-02."
+   "current_sha256": "e4bc5e3342ebf6a323c2c081b2b54f888cb2540337af991742e8abb639a28011",
+   "reason": "Mark the sdl3 dependency lazy so the library-only build stops before it is fetched or built; include the MIT grant authorized by the owner on 2026-10-02. Port to Zig 0.17.0."
+  },
+  {
+   "path": "examples/2_textures/main.zig",
+   "original_sha256": "234cf88f28e566bfa516a3aa2244854d7ce6ea8425497eed2e68116331a7669a",
+   "current_sha256": "54568e15249f17f89aecc50a53313f758a5431af94462875e6da1e6f648c72a0",
+   "reason": "Port to Zig 0.17.0."
   },
   {
    "path": "examples/3_3D/main.zig",
    "original_sha256": "2d0e6a0ac8ad5f2ce8ede48cccad2de608641e4a8cb2789a5014b9ee753c9b3c",
-   "current_sha256": "7d606db75d36d343a304a0e703bbab144cc24c8be7a627e65282fe4e4c383520",
-   "reason": "Use the drawIndexed interface that reads index format from the buffer."
+   "current_sha256": "bec0a7e714a067febaf8242c8a4a725b5d26f870740466126c4ba7492964453c",
+   "reason": "Use the drawIndexed interface that reads index format from the buffer. Port to Zig 0.17.0."
   },
   {
    "path": "examples/5_indirect_triangles/main.zig",
    "original_sha256": "c5b13d32b6d3446733166c0633d89023d8809db19c1893fd58a9cf570648420d",
-   "current_sha256": "9f67adf54763b17f79e86c3a7c1235aca2b8859e5216599bacb92e0ee7db9276",
-   "reason": "Use the drawIndexedIndirectMulti interface that reads index format from the buffer."
+   "current_sha256": "9d1a8d3638fb0e8bbc8c840671328d456d1afc11085e095efdf7043536960d05",
+   "reason": "Use the drawIndexedIndirectMulti interface that reads index format from the buffer. Port to Zig 0.17.0."
+  },
+  {
+   "path": "examples/7_deferred_async_load/main.zig",
+   "original_sha256": "4d5cbc7f652957d000dd94b4e2c898fadd55cc26fa7ba3d8b89eedf03bd4b3b5",
+   "current_sha256": "03c8cefbc2cfa455ccf03d013e8a23c16b39705d7128d45b9ba2c76bd5dc8a45",
+   "reason": "Port to Zig 0.17.0."
   },
   {
    "path": "examples/common.zig",
@@ -512,41 +524,53 @@
   {
    "path": "noapi/CommandBuffer.zig",
    "original_sha256": "587297c23be3db03ba9d5ade6e7091ef2fa1ec877e62662581bec6129e009a06",
-   "current_sha256": "f3d21f7dedb5e9b5da9c0aad077154e3324f415c35d1552db9fd8c37d9868cbf",
-   "reason": "Add the pixel_scale push constant that carries physical framebuffer pixels per logical window unit, and document screen as the logical window size."
+   "current_sha256": "30dea7bdd5a27a10858371f3167c824cb71ead59180b1e53db641a6e399e200c",
+   "reason": "Add the pixel_scale push constant that carries physical framebuffer pixels per logical window unit, and document screen as the logical window size. Port to Zig 0.17.0."
   },
   {
    "path": "noapi/Gpu.zig",
    "original_sha256": "75a1615e1b1e4425f3570b8a8e6b519ba90d51736df2ae0b440d3080488105ca",
-   "current_sha256": "f9425477d4d1c2937460e0e2922c8dc7df42ad3d41cd8eda680e0e27bd43a7c8",
-   "reason": "Add commandsCancel to discard an unsent offscreen command buffer, and reject a cancelled buffer handle in copyCommandBufferHandles."
+   "current_sha256": "25fde373e81636f469f3c2ef8933724ba3fe261f80e7d554adac5771ec2ae4b4",
+   "reason": "Add commandsCancel to discard an unsent offscreen command buffer, and reject a cancelled buffer handle in copyCommandBufferHandles. Port to Zig 0.17.0."
   },
   {
    "path": "noapi/Queue.zig",
    "original_sha256": "1f9f6916f680b64af3bdba125c5358384760d301d608494ca498bbe73309685d",
-   "current_sha256": "121e193a5de8d49e8df11b480de7db5db7eed9e501e67d6c5b9c659dfd1bc0d6",
-   "reason": "Reject a cancelled command buffer in copyCommandBufferHandles so an aborted offscreen frame cannot enter timeline submission."
+   "current_sha256": "c3c681061d8e30bd7308f1f34fa65b894121eb93346f1ce481fb6e8bc337318c",
+   "reason": "Reject a cancelled command buffer in copyCommandBufferHandles so an aborted offscreen frame cannot enter timeline submission. Port to Zig 0.17.0."
+  },
+  {
+   "path": "noapi/Shader.zig",
+   "original_sha256": "c84af8e5a88ce43040ce296ec6e6c0dacc518688166c51b69022f4c434e93dbb",
+   "current_sha256": "f44e98924c686e2b70c04f822efdf8b901bfacadc6736ccc525eb9b54c84743d",
+   "reason": "Port to Zig 0.17.0."
   },
   {
    "path": "noapi/Surface.zig",
    "original_sha256": "6b0b0497da4b41d9a40c787a27e197ad5168feae7fb864f2ad7881531a3f13b8",
-   "current_sha256": "8eebc227dbef1f2dca72b6e82861d2eee7e00305af47a1e7e0c3957c2367df2a",
-   "reason": "Add abortFrame to discard active recording. Make initSdl the sole public surface factory, using an SDL-compatible callback without exposing Vulkan handles. Release the platform surface exactly once if adoption fails."
+   "current_sha256": "a554012b1572558d7bbec9a15338e10acd67ce6c1af3ce4df0c7fd4a914fae7e",
+   "reason": "Add abortFrame to discard active recording. Make initSdl the sole public surface factory, using an SDL-compatible callback without exposing Vulkan handles. Release the platform surface exactly once if adoption fails. Port to Zig 0.17.0."
+  },
+  {
+   "path": "noapi/vk.zig",
+   "original_sha256": "ba8d3189013562be364a156e9d8e805b42f5bd17db6bc2f45c67ca7f6fa6d9c8",
+   "current_sha256": "27bc37954bb22d9a6ec315c3e72e208f9ffeca5874ea243fa95fb43f801b72e4",
+   "reason": "Port to Zig 0.17.0."
   },
   {
    "path": "noapi/VkBackend.zig",
    "original_sha256": "9e069e1b82e04a87d4d24ac3ad5aac1d390a0b294da47333c68fd8e8eb339d5f",
-   "current_sha256": "8780507d60a1f1722fafcf0d9005b54e70b460a498bdfd16dd13ec0788062018",
-   "reason": "Track per-window frame recording state and add abortFrame and commandsCancel, so an unfinished frame or an unsent offscreen command buffer is discarded instead of resubmitted and a duplicate frame call fails with FrameAlreadyActive or SurfaceFrameUnrecoverable; mirror pixel_scale in the graphics push constants with comptime layout asserts, keep command buffer ownership with the caller when submission fails, report software rasterizers through GpuInfo.software_emulation, and release partial window resources on failed surface adoption while leaving platform-surface ownership with the caller; include draw_indirect_bit alongside indirect_command_read_bit for draw_arguments hazards; report swapchain_recreated only after an actual rebuild, re-arm suboptimal acquisition, and keep every changed pixel extent pending without a two-frame resize throttle; log the bounded device-name slice rather than its zero-padded Vulkan property buffer. Additionally: cached image views are now deferred into the same pending_free drain that protects their image, instead of being destroyed eagerly while the descriptor still names them."
+   "current_sha256": "40c9c4559f3a97f31104bc476d79e9ccb183ae2569b3224a1cd93c28013dfe8f",
+   "reason": "Track per-window frame recording state and add abortFrame and commandsCancel, so an unfinished frame or an unsent offscreen command buffer is discarded instead of resubmitted and a duplicate frame call fails with FrameAlreadyActive or SurfaceFrameUnrecoverable; mirror pixel_scale in the graphics push constants with comptime layout asserts, keep command buffer ownership with the caller when submission fails, report software rasterizers through GpuInfo.software_emulation, and release partial window resources on failed surface adoption while leaving platform-surface ownership with the caller; include draw_indirect_bit alongside indirect_command_read_bit for draw_arguments hazards; report swapchain_recreated only after an actual rebuild, re-arm suboptimal acquisition, and keep every changed pixel extent pending without a two-frame resize throttle; log the bounded device-name slice rather than its zero-padded Vulkan property buffer. Additionally: cached image views are now deferred into the same pending_free drain that protects their image, instead of being destroyed eagerly while the descriptor still names them. Port to Zig 0.17.0."
   },
   {
    "path": "test/main.zig",
    "original_sha256": "a0ff738a3cb20d26f9e48bb9a9d6418f12bcb37d609c8060c725a206792eadad",
-   "current_sha256": "2ff9b1a03cf08bebabd681f30f79ae7ae778512d37d8b0424643c55da8dbab12",
-   "reason": "Use drawIndexed with buffer-owned index format and migrate every native surface creation to Surface.initSdl."
+   "current_sha256": "e1c897ca30ad15e5b6dbc872eeb5539ff2d33032ea9d57e74e1b03ce9a59d8c8",
+   "reason": "Use drawIndexed with buffer-owned index format and migrate every native surface creation to Surface.initSdl. Port to Zig 0.17.0."
   }
  ],
- "content_digest": "735d30a5d8ccd4ce5709e0cb3e06e82630d69f406815513ffc38e799a6159f1d",
+ "content_digest": "a7f734682706555be6e4073928d782d0ab0a1a59477f0e7402b6aed7e8a8205c",
  "files": [
   {
    "path": "LICENSE",
@@ -555,13 +579,13 @@
   },
   {
    "path": "build.zig",
-   "size": 12907,
-   "sha256": "85598456329ff8b87f29160bfb3247223a4a286a91219e3acb73e36dc077e0a4"
+   "size": 12773,
+   "sha256": "7c36e8fdeee6c1830bd2cdc7c098f20567604a20422e739984451b84e9966644"
   },
   {
    "path": "build.zig.zon",
-   "size": 779,
-   "sha256": "62c6ccf3bc091d21e2ee7c5f20fe770799ba3308ccd6108ca8477819b30cdea9"
+   "size": 768,
+   "sha256": "e4bc5e3342ebf6a323c2c081b2b54f888cb2540337af991742e8abb639a28011"
   },
   {
    "path": "examples/1_triangle/main.zig",
@@ -570,13 +594,13 @@
   },
   {
    "path": "examples/2_textures/main.zig",
-   "size": 8697,
-   "sha256": "234cf88f28e566bfa516a3aa2244854d7ce6ea8425497eed2e68116331a7669a"
+   "size": 8695,
+   "sha256": "54568e15249f17f89aecc50a53313f758a5431af94462875e6da1e6f648c72a0"
   },
   {
    "path": "examples/3_3D/main.zig",
-   "size": 14800,
-   "sha256": "7d606db75d36d343a304a0e703bbab144cc24c8be7a627e65282fe4e4c383520"
+   "size": 14794,
+   "sha256": "bec0a7e714a067febaf8242c8a4a725b5d26f870740466126c4ba7492964453c"
   },
   {
    "path": "examples/4_textures_advanced/main.zig",
@@ -585,8 +609,8 @@
   },
   {
    "path": "examples/5_indirect_triangles/main.zig",
-   "size": 9247,
-   "sha256": "9f67adf54763b17f79e86c3a7c1235aca2b8859e5216599bacb92e0ee7db9276"
+   "size": 9246,
+   "sha256": "9d1a8d3638fb0e8bbc8c840671328d456d1afc11085e095efdf7043536960d05"
   },
   {
    "path": "examples/6_compute_shaders/main.zig",
@@ -595,8 +619,8 @@
   },
   {
    "path": "examples/7_deferred_async_load/main.zig",
-   "size": 26259,
-   "sha256": "4d5cbc7f652957d000dd94b4e2c898fadd55cc26fa7ba3d8b89eedf03bd4b3b5"
+   "size": 26294,
+   "sha256": "03c8cefbc2cfa455ccf03d013e8a23c16b39705d7128d45b9ba2c76bd5dc8a45"
   },
   {
    "path": "examples/common.zig",
@@ -620,8 +644,8 @@
   },
   {
    "path": "noapi/CommandBuffer.zig",
-   "size": 13339,
-   "sha256": "f3d21f7dedb5e9b5da9c0aad077154e3324f415c35d1552db9fd8c37d9868cbf"
+   "size": 13508,
+   "sha256": "30dea7bdd5a27a10858371f3167c824cb71ead59180b1e53db641a6e399e200c"
   },
   {
    "path": "noapi/DepthState.zig",
@@ -650,8 +674,8 @@
   },
   {
    "path": "noapi/Gpu.zig",
-   "size": 13228,
-   "sha256": "f9425477d4d1c2937460e0e2922c8dc7df42ad3d41cd8eda680e0e27bd43a7c8"
+   "size": 13240,
+   "sha256": "25fde373e81636f469f3c2ef8933724ba3fe261f80e7d554adac5771ec2ae4b4"
   },
   {
    "path": "noapi/GpuArena.zig",
@@ -670,8 +694,8 @@
   },
   {
    "path": "noapi/Queue.zig",
-   "size": 3185,
-   "sha256": "121e193a5de8d49e8df11b480de7db5db7eed9e501e67d6c5b9c659dfd1bc0d6"
+   "size": 3198,
+   "sha256": "c3c681061d8e30bd7308f1f34fa65b894121eb93346f1ce481fb6e8bc337318c"
   },
   {
    "path": "noapi/RasterState.zig",
@@ -695,8 +719,8 @@
   },
   {
    "path": "noapi/Shader.zig",
-   "size": 1290,
-   "sha256": "c84af8e5a88ce43040ce296ec6e6c0dacc518688166c51b69022f4c434e93dbb"
+   "size": 1288,
+   "sha256": "f44e98924c686e2b70c04f822efdf8b901bfacadc6736ccc525eb9b54c84743d"
   },
   {
    "path": "noapi/ShaderHandle.zig",
@@ -705,8 +729,8 @@
   },
   {
    "path": "noapi/Surface.zig",
-   "size": 5994,
-   "sha256": "8eebc227dbef1f2dca72b6e82861d2eee7e00305af47a1e7e0c3957c2367df2a"
+   "size": 6006,
+   "sha256": "a554012b1572558d7bbec9a15338e10acd67ce6c1af3ce4df0c7fd4a914fae7e"
   },
   {
    "path": "noapi/Texture.zig",
@@ -740,8 +764,8 @@
   },
   {
    "path": "noapi/VkBackend.zig",
-   "size": 245838,
-   "sha256": "8780507d60a1f1722fafcf0d9005b54e70b460a498bdfd16dd13ec0788062018"
+   "size": 246352,
+   "sha256": "40c9c4559f3a97f31104bc476d79e9ccb183ae2569b3224a1cd93c28013dfe8f"
   },
   {
    "path": "noapi/root.zig",
@@ -750,8 +774,8 @@
   },
   {
    "path": "noapi/vk.zig",
-   "size": 2403673,
-   "sha256": "ba8d3189013562be364a156e9d8e805b42f5bd17db6bc2f45c67ca7f6fa6d9c8"
+   "size": 2403624,
+   "sha256": "27bc37954bb22d9a6ec315c3e72e208f9ffeca5874ea243fa95fb43f801b72e4"
   },
   {
    "path": "shaders/base.slang",
@@ -1010,8 +1034,8 @@
   },
   {
    "path": "test/main.zig",
-   "size": 38164,
-   "sha256": "2ff9b1a03cf08bebabd681f30f79ae7ae778512d37d8b0424643c55da8dbab12"
+   "size": 38206,
+   "sha256": "e1c897ca30ad15e5b6dbc872eeb5539ff2d33032ea9d57e74e1b03ce9a59d8c8"
   }
  ]
 }

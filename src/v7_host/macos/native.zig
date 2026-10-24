@@ -24,12 +24,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sdl3 = @import("sdl3");
 
-const c = @cImport({
-    @cInclude("nogui_macos.h");
-});
+const c = @import("nogui_macos_c");
 
-/// The shim's declarations, re-exported so the adapters above call them
-/// through one import instead of each opening its own `@cImport`.
+/// The shim's translated declarations, re-exported for the adapters.
 pub const shim = c;
 
 /// True on the target these adapters are written for. The module still
@@ -44,7 +41,7 @@ pub const shim = c;
 /// Every reference to a shim entry point therefore opens with
 /// `if (comptime !available) return ...;`, which is what keeps the call out
 /// of the object file rather than only out of the run.
-pub const available = builtin.os.tag == .macos;
+pub const available = builtin.target.os.tag == .macos;
 
 /// The typed answer every shim call produces.
 ///
@@ -294,7 +291,7 @@ pub const Scratch = struct {
     /// A NUL-terminated copy of `text`, or null for a null slice.
     pub fn nul(self: *Scratch, text: []const u8) Error!?[*:0]const u8 {
         if (text.len > max_text) return error.BadArgument;
-        return (try self.arena.allocator().dupeZ(u8, text)).ptr;
+        return (try self.arena.allocator().dupeSentinel(u8, text, 0)).ptr;
     }
 };
 

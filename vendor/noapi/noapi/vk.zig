@@ -29543,39 +29543,39 @@ pub fn CommandFlagsMixin(comptime CommandFlags: type) type {
         pub fn merge(lhs: CommandFlags, rhs: CommandFlags) CommandFlags {
             var result: CommandFlags = .{};
             @setEvalBranchQuota(10_000);
-            inline for (@typeInfo(CommandFlags).@"struct".fields) |field| {
-                @field(result, field.name) = @field(lhs, field.name) or @field(rhs, field.name);
+            inline for (@typeInfo(CommandFlags).@"struct".field_names) |name| {
+                @field(result, name) = @field(lhs, name) or @field(rhs, name);
             }
             return result;
         }
         pub fn intersect(lhs: CommandFlags, rhs: CommandFlags) CommandFlags {
             var result: CommandFlags = .{};
             @setEvalBranchQuota(10_000);
-            inline for (@typeInfo(CommandFlags).@"struct".fields) |field| {
-                @field(result, field.name) = @field(lhs, field.name) and @field(rhs, field.name);
+            inline for (@typeInfo(CommandFlags).@"struct".field_names) |name| {
+                @field(result, name) = @field(lhs, name) and @field(rhs, name);
             }
             return result;
         }
         pub fn complement(self: CommandFlags) CommandFlags {
             var result: CommandFlags = .{};
             @setEvalBranchQuota(10_000);
-            inline for (@typeInfo(CommandFlags).@"struct".fields) |field| {
-                @field(result, field.name) = !@field(self, field.name);
+            inline for (@typeInfo(CommandFlags).@"struct".field_names) |name| {
+                @field(result, name) = !@field(self, name);
             }
             return result;
         }
         pub fn subtract(lhs: CommandFlags, rhs: CommandFlags) CommandFlags {
             var result: CommandFlags = .{};
             @setEvalBranchQuota(10_000);
-            inline for (@typeInfo(CommandFlags).@"struct".fields) |field| {
-                @field(result, field.name) = @field(lhs, field.name) and !@field(rhs, field.name);
+            inline for (@typeInfo(CommandFlags).@"struct".field_names) |name| {
+                @field(result, name) = @field(lhs, name) and !@field(rhs, name);
             }
             return result;
         }
         pub fn contains(lhs: CommandFlags, rhs: CommandFlags) bool {
             @setEvalBranchQuota(10_000);
-            inline for (@typeInfo(CommandFlags).@"struct".fields) |field| {
-                if (!@field(lhs, field.name) and @field(rhs, field.name)) {
+            inline for (@typeInfo(CommandFlags).@"struct".field_names) |name| {
+                if (!@field(lhs, name) and @field(rhs, name)) {
                     return false;
                 }
             }
@@ -29592,9 +29592,9 @@ pub fn BaseWrapperWithCustomDispatch(DispatchType: type) type {
         dispatch: Dispatch,
         pub fn load(loader: anytype) Self {
             var self: Self = .{ .dispatch = .{} };
-            inline for (std.meta.fields(Dispatch)) |field| {
-                if (loader(Instance.null_handle, field.name.ptr)) |cmd_ptr| {
-                    @field(self.dispatch, field.name) = @ptrCast(cmd_ptr);
+            inline for (@typeInfo(Dispatch).@"struct".field_names) |name| {
+                if (loader(Instance.null_handle, name.ptr)) |cmd_ptr| {
+                    @field(self.dispatch, name) = @ptrCast(cmd_ptr);
                 }
             }
             return self;
@@ -29767,9 +29767,9 @@ pub fn InstanceWrapperWithCustomDispatch(DispatchType: type) type {
         dispatch: Dispatch,
         pub fn load(instance: Instance, loader: anytype) Self {
             var self: Self = .{ .dispatch = .{} };
-            inline for (std.meta.fields(Dispatch)) |field| {
-                if (loader(instance, field.name.ptr)) |cmd_ptr| {
-                    @field(self.dispatch, field.name) = @ptrCast(cmd_ptr);
+            inline for (@typeInfo(Dispatch).@"struct".field_names) |name| {
+                if (loader(instance, name.ptr)) |cmd_ptr| {
+                    @field(self.dispatch, name) = @ptrCast(cmd_ptr);
                 }
             }
             return self;
@@ -32777,9 +32777,9 @@ pub fn DeviceWrapperWithCustomDispatch(DispatchType: type) type {
         dispatch: Dispatch,
         pub fn load(device: Device, loader: anytype) Self {
             var self: Self = .{ .dispatch = .{} };
-            inline for (std.meta.fields(Dispatch)) |field| {
-                if (loader(device, field.name.ptr)) |cmd_ptr| {
-                    @field(self.dispatch, field.name) = @ptrCast(cmd_ptr);
+            inline for (@typeInfo(Dispatch).@"struct".field_names) |name| {
+                if (loader(device, name.ptr)) |cmd_ptr| {
+                    @field(self.dispatch, name) = @ptrCast(cmd_ptr);
                 }
             }
             return self;

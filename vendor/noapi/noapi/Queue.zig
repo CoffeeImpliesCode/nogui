@@ -67,7 +67,7 @@ test "task4 signaling submission wrapper accepts 64 and rejects 65 command buffe
     for (&command_buffers, 0..) |*command_buffer, index| {
         command_buffer.* = .{
             .gpu = undefined,
-            .handle = @enumFromInt(@as(u64, @intCast(index + 1))),
+            .handle = @fromBackingInt(@intCast(@as(u64, @intCast(index + 1)))),
         };
     }
 

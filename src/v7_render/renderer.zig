@@ -29,7 +29,7 @@ pub const PaintExtra = extern struct {
     size: [4]f32 = .{ 0, 0, 0, 0 },
     radii: [4]f32 = .{ 0, 0, 0, 0 },
     border_width: [4]f32 = .{ 0, 0, 0, 0 },
-    border_color: [4][4]f32 = .{.{0} ** 4} ** 4,
+    border_color: [4][4]f32 = @splat(@splat(0)),
     border_styles: [4]u32 = .{ 0, 0, 0, 0 },
     from: [4]f32 = .{ 0, 0, 0, 0 },
     to: [4]f32 = .{ 0, 0, 0, 0 },
@@ -100,7 +100,7 @@ pub const Options = struct {
 /// Public scene renderer. The raw batch and its GPU storage remain private.
 pub const Renderer = struct {
     batch: Batch9Slice,
-    paint_buffers: [3]?noapi.GpuPtr = .{null} ** 3,
+    paint_buffers: [3]?noapi.GpuPtr = @splat(null),
     /// Fixed GPU scratch is three-way ringed with noapi's in-flight frame slots.
     pub const paint_buffer_bytes = 1024 * 1024;
 
@@ -528,7 +528,7 @@ const Lowering = struct {
                         if (!std.math.isFinite(coefficient)) return error.InvalidPaint;
                     }
                 }
-                extra.mode[2] = @intFromEnum(shape.fill_rule);
+                extra.mode[2] = @backingInt(shape.fill_rule);
                 const color = fillExtra(&extra, fill);
                 if (fill == .image_pattern) extra.from[3] = record.opacity;
                 const pad: f32 = 1;
@@ -600,7 +600,7 @@ fn rectExtra(record: *const paint.PaintRecord, shape: *const paint.SceneRect) Pa
     extra.radii = shape.radii;
     for (shape.borders, 0..) |side, index| {
         extra.border_width[index] = if (side.style == .none) 0 else side.width;
-        extra.border_styles[index] = @intFromEnum(side.style);
+        extra.border_styles[index] = @backingInt(side.style);
         extra.border_color[index] = lab(side.color);
     }
     return extra;

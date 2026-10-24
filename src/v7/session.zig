@@ -1371,7 +1371,7 @@ test "cancelled reservations never run a destructor" {
     const Value = struct {
         const Self = @This();
         var calls: u32 = 0;
-        fn deinit(self: *Self, _: *Session) void {
+        pub fn deinit(self: *Self, _: *Session) void {
             calls += 1;
             self.* = undefined;
         }
@@ -1596,7 +1596,7 @@ test "erased reentrant destruction preserves a replacement owner" {
         owner: *ErasedModel,
         spawn: bool,
 
-        fn deinit(self: *Self, session: *Session) void {
+        pub fn deinit(self: *Self, session: *Session) void {
             if (self.spawn) {
                 var replacement: Self = .{ .owner = self.owner, .spawn = false };
                 var next = session.create(Self, &replacement) catch @panic("replacement failed");

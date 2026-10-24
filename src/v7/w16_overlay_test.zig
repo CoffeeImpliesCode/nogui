@@ -16,12 +16,12 @@ const back_id: WidgetId = .{ .owner = 7, .slot = 3, .generation = 1 };
 /// The ordinary control no overlay record names, and the one the published
 /// semantics tree must keep while a dismissed popup's own node goes.
 const ordinary_id: WidgetId = .{ .owner = 7, .slot = 4, .generation = 1 };
-const scroll_node: FrameNodeId = @enumFromInt(4);
-const anchor_node: FrameNodeId = @enumFromInt(1);
-const popup_node: FrameNodeId = @enumFromInt(2);
-const back_node: FrameNodeId = @enumFromInt(3);
-const inner_node: FrameNodeId = @enumFromInt(9);
-const ordinary_node: FrameNodeId = @enumFromInt(7);
+const scroll_node: FrameNodeId = @fromBackingInt(@intCast(4));
+const anchor_node: FrameNodeId = @fromBackingInt(@intCast(1));
+const popup_node: FrameNodeId = @fromBackingInt(@intCast(2));
+const back_node: FrameNodeId = @fromBackingInt(@intCast(3));
+const inner_node: FrameNodeId = @fromBackingInt(@intCast(9));
+const ordinary_node: FrameNodeId = @fromBackingInt(@intCast(7));
 /// The two nested topologies' own identities: an outer popup and a record
 /// inside it, so both directions of the nesting rule can be built.
 const outer_id: WidgetId = .{ .owner = 7, .slot = 5, .generation = 1 };
@@ -29,8 +29,8 @@ const inner_nested_id: WidgetId = .{ .owner = 7, .slot = 6, .generation = 1 };
 /// A handle no frame in this file ever publishes, so a record naming it
 /// resolves to nothing: that is the whole "unplaced" half of both cases.
 const absent_id: WidgetId = .{ .owner = 7, .slot = 9, .generation = 1 };
-const outer_node: FrameNodeId = @enumFromInt(10);
-const inner_nested_node: FrameNodeId = @enumFromInt(11);
+const outer_node: FrameNodeId = @fromBackingInt(@intCast(10));
+const inner_nested_node: FrameNodeId = @fromBackingInt(@intCast(11));
 /// The nested records' priorities, and they are INVERTED on purpose: the
 /// unplaced child is the weaker record and the placed child is the weaker one
 /// too, so neither case can be decided by priority.
@@ -667,11 +667,11 @@ fn appendPopup(tree: *widget.WidgetTree, id: FrameNodeId, handle: WidgetId, auth
     });
 }
 
-const card_node: FrameNodeId = @enumFromInt(10);
+const card_node: FrameNodeId = @fromBackingInt(@intCast(10));
 const high_id: WidgetId = .{ .owner = 9, .slot = 1, .generation = 1 };
 const low_id: WidgetId = .{ .owner = 9, .slot = 2, .generation = 1 };
-const high_node: FrameNodeId = @enumFromInt(11);
-const low_node: FrameNodeId = @enumFromInt(12);
+const high_node: FrameNodeId = @fromBackingInt(@intCast(11));
+const low_node: FrameNodeId = @fromBackingInt(@intCast(12));
 
 /// One band-test frame: an anchor, a card, and two popups built in the
 /// requested order. Storage stays post-order, the tree's invariant.
@@ -772,8 +772,8 @@ test "api-w16 equal priority gives the later registration the topmost band" {
 }
 
 const nested_id: WidgetId = .{ .owner = 9, .slot = 3, .generation = 1 };
-const nested_node: FrameNodeId = @enumFromInt(13);
-const nested_child_node: FrameNodeId = @enumFromInt(14);
+const nested_node: FrameNodeId = @fromBackingInt(@intCast(13));
+const nested_child_node: FrameNodeId = @fromBackingInt(@intCast(14));
 
 /// An outer popup containing the inner popup, with an ordinary child beside
 /// it so the inner band is compared against a node of the SAME subtree.
@@ -881,7 +881,7 @@ test "api-w16 a band spans its own authored layers and custom record bumps" {
     try appendCard(&tree, 2);
     // A custom leaf INSIDE the low popup: its own authored layer plus its
     // record bump is the highest layer that band has to contain.
-    try appendBumpElement(allocator, &tree, @enumFromInt(30), low_node, .{
+    try appendBumpElement(allocator, &tree, @fromBackingInt(@intCast(30)), low_node, .{
         .x = 2,
         .y = 2,
         .w = 16,
@@ -890,7 +890,7 @@ test "api-w16 a band spans its own authored layers and custom record bumps" {
     // A custom leaf OUTSIDE every placement with a much higher local layer.
     // It contributes to the application maximum but gets no band of its own,
     // so the placed popups still clear it.
-    try appendBumpElement(allocator, &tree, @enumFromInt(31), .root, .{
+    try appendBumpElement(allocator, &tree, @fromBackingInt(@intCast(31)), .root, .{
         .x = 0,
         .y = 0,
         .w = 10,
@@ -904,7 +904,7 @@ test "api-w16 a band spans its own authored layers and custom record bumps" {
     try resolveFrame(&frame, &tree, .{ .w = 200, .h = 200 }, &low_then_high);
 
     const unplaced = try widget.effectiveLayer(
-        tree.nodeConst(@enumFromInt(31)) orelse return error.MissingUnplacedCustom,
+        tree.nodeConst(@fromBackingInt(@intCast(31))) orelse return error.MissingUnplacedCustom,
         30,
     );
     // Its own authored layer plus its record bump, unbanded.
@@ -914,7 +914,7 @@ test "api-w16 a band spans its own authored layers and custom record bumps" {
         0,
     );
     const custom_in_band = try widget.effectiveLayer(
-        tree.nodeConst(@enumFromInt(30)) orelse return error.MissingBandedCustom,
+        tree.nodeConst(@fromBackingInt(@intCast(30))) orelse return error.MissingBandedCustom,
         4,
     );
     const high = try widget.effectiveLayer(
@@ -951,7 +951,7 @@ test "api-w16 an unplaced high custom layer stays below the placed popup" {
         .parent = .root,
         .rect = .{ .x = 10, .y = 80, .w = 25, .h = 10 },
     });
-    try appendBumpElement(allocator, &tree, @enumFromInt(32), .root, .{
+    try appendBumpElement(allocator, &tree, @fromBackingInt(@intCast(32)), .root, .{
         .x = 0,
         .y = 0,
         .w = 20,
@@ -967,7 +967,7 @@ test "api-w16 an unplaced high custom layer stays below the placed popup" {
         .clip = .window_escape,
     }};
     try resolveFrame(&frame, &tree, .{ .w = 200, .h = 200 }, &records);
-    const unplaced = tree.nodeConst(@enumFromInt(32)) orelse return error.MissingUnplacedCustom;
+    const unplaced = tree.nodeConst(@fromBackingInt(@intCast(32))) orelse return error.MissingUnplacedCustom;
     try std.testing.expect(unplaced.placement_paint == null);
     const popup = try widget.effectiveLayer(
         tree.nodeConst(low_node) orelse return error.MissingPopup,
@@ -1021,7 +1021,7 @@ test "api-w16 a custom layer bump that overflows fails the frame and keeps the c
         .parent = .root,
         .rect = .{ .x = 10, .y = 80, .w = 25, .h = 10 },
     });
-    try appendBumpElement(next_allocator, &next, @enumFromInt(33), .root, .{
+    try appendBumpElement(next_allocator, &next, @fromBackingInt(@intCast(33)), .root, .{
         .x = 0,
         .y = 0,
         .w = 20,
@@ -1269,7 +1269,7 @@ test "api-w16 a placed child overflowing its content root still owns the press" 
     try std.testing.expect(frame.hitTest(&tree, probe).? != input.hitTest(&tree, probe).?);
 }
 
-const spill_node: FrameNodeId = @enumFromInt(20);
+const spill_node: FrameNodeId = @fromBackingInt(@intCast(20));
 
 // A DORMANT record is inert for PAINT and for TOTAL input, and the stable /
 // actionable walks may not name it either: it is published to no

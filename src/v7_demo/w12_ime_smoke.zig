@@ -196,7 +196,7 @@ const window_height: u32 = 360;
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
     checks: u32 = 0,
     failures: u32 = 0,
 
@@ -3507,12 +3507,12 @@ fn nativeScenario(self: *Run, options: Options) !void {
 }
 
 fn codepoint(value: u21) sdl3.keycode.Keycode {
-    return @enumFromInt(@as(u32, value));
+    return @fromBackingInt(@intCast(@as(u32, value)));
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer if (gpa_state.deinit() == .leak) @panic("W12 IME smoke leaked");
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer if (gpa_state.deinit() != 0) @panic("W12 IME smoke leaked");
     const gpa = gpa_state.allocator();
 
     var io_impl: Io.Threaded = .init(gpa, .{});

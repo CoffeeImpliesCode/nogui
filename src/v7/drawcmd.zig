@@ -485,7 +485,7 @@ test "draw command collection counters record node comparisons" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     tree.setCounterSink(&counters);
-    const node_id: FrameNodeId = @enumFromInt(1);
+    const node_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = node_id,
         .kind = .{ .column = .{} },
@@ -546,11 +546,11 @@ test "collectDrawCmds: paint order — container before children, spacer skipped
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: FrameNodeId = @enumFromInt(1);
-    const l1: FrameNodeId = @enumFromInt(2);
-    const l2: FrameNodeId = @enumFromInt(3);
-    const btn: FrameNodeId = @enumFromInt(4);
-    const sp: FrameNodeId = @enumFromInt(5);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
+    const l1: FrameNodeId = @fromBackingInt(@intCast(2));
+    const l2: FrameNodeId = @fromBackingInt(@intCast(3));
+    const btn: FrameNodeId = @fromBackingInt(@intCast(4));
+    const sp: FrameNodeId = @fromBackingInt(@intCast(5));
 
     // Post-order append: children first, container last.
     try tree.nodes.append(std.testing.allocator, .{
@@ -610,10 +610,10 @@ test "collectDrawCmds: zero-size nodes are skipped" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: FrameNodeId = @enumFromInt(1);
-    const btn: FrameNodeId = @enumFromInt(2);
-    const zero_w: FrameNodeId = @enumFromInt(3);
-    const zero_h: FrameNodeId = @enumFromInt(4);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
+    const btn: FrameNodeId = @fromBackingInt(@intCast(2));
+    const zero_w: FrameNodeId = @fromBackingInt(@intCast(3));
+    const zero_h: FrameNodeId = @fromBackingInt(@intCast(4));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -653,9 +653,9 @@ test "collectDrawCmds: nonpositive nodes keep clip ids but emit no decorations o
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const zero_width: FrameNodeId = @enumFromInt(1);
-    const negative_height: FrameNodeId = @enumFromInt(2);
-    const clip: FrameNodeId = @enumFromInt(3);
+    const zero_width: FrameNodeId = @fromBackingInt(@intCast(1));
+    const negative_height: FrameNodeId = @fromBackingInt(@intCast(2));
+    const clip: FrameNodeId = @fromBackingInt(@intCast(3));
     const decorated_style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -713,8 +713,8 @@ test "collectDrawCmds: clipped text intersects its content box with the parent c
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const label_id: FrameNodeId = @enumFromInt(1);
-    const clip_id: FrameNodeId = @enumFromInt(2);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const clip_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = label_id,
         .kind = .{ .label = .{ .text = "clipped" } },
@@ -759,7 +759,7 @@ test "collectDrawCmds: bordered button keeps fill and physical sides in one pain
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const btn: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @fromBackingInt(@intCast(1));
     const style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -799,7 +799,7 @@ test "collectDrawCmds: resolved physical border edges reach paint without re-res
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const btn: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @fromBackingInt(@intCast(1));
     const style: Style = .{
         .border_inset = .{
             .top = .{ .percent = 0.5 },
@@ -842,8 +842,8 @@ test "collectDrawCmds: nested node under a column resolves to its absolute rect"
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const col: FrameNodeId = @enumFromInt(1);
-    const btn: FrameNodeId = @enumFromInt(2);
+    const col: FrameNodeId = @fromBackingInt(@intCast(1));
+    const btn: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -872,7 +872,7 @@ test "collectDrawCmds: authored shadow keeps its offset, color, blur, and inset"
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const btn: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @fromBackingInt(@intCast(1));
     const paint_style: PaintStyle = .{ .shadows = &.{.{
         .color = srgb(.{ 0.2, 0.3, 0.4, 0.5 }),
         .offset = .{ .x = 2, .y = 3 },
@@ -912,7 +912,7 @@ test "collectDrawCmds: layered shadow and border remain with their node's fill" 
     defer tree.deinit();
 
     // One paint record keeps every primitive of this node on one layer.
-    const btn: FrameNodeId = @enumFromInt(1);
+    const btn: FrameNodeId = @fromBackingInt(@intCast(1));
     const style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -944,7 +944,7 @@ test "collectDrawCmds: layered shadow and border remain with their node's fill" 
     try std.testing.expectEqual(@as(u32, 2), cmds[0].rect_paint.layer);
 
     // A plain (unlayered) node's cmds default to layer 0.
-    const plain: FrameNodeId = @enumFromInt(2);
+    const plain: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = plain,
         .kind = .{ .button = .{ .label = "plain" } },
@@ -963,7 +963,7 @@ test "collectDrawCmds: a border-only label emits exactly one command" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const lbl: FrameNodeId = @enumFromInt(1);
+    const lbl: FrameNodeId = @fromBackingInt(@intCast(1));
     const style: Style = .{
         .border_inset = .{
             .top = .{ .length = 1 },
@@ -997,9 +997,9 @@ test "collectDrawCmds: a content clip stamps descendants, preserves own paint, t
 
     // Post-order: children before containers. A clip-marked column holds
     // a button; a sibling button sits outside the clip.
-    const inner_btn: FrameNodeId = @enumFromInt(1);
-    const card: FrameNodeId = @enumFromInt(2);
-    const sibling_btn: FrameNodeId = @enumFromInt(3);
+    const inner_btn: FrameNodeId = @fromBackingInt(@intCast(1));
+    const card: FrameNodeId = @fromBackingInt(@intCast(2));
+    const sibling_btn: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = inner_btn,
@@ -1051,9 +1051,9 @@ test "collectDrawCmds: nested clip containers stamp the deepest enclosing clip" 
 
     // outer (clip) → inner (clip) → button. The button's cmds carry the
     // INNER clip id; both rects are appended (outer id 0, inner id 1).
-    const btn: FrameNodeId = @enumFromInt(1);
-    const inner: FrameNodeId = @enumFromInt(2);
-    const outer: FrameNodeId = @enumFromInt(3);
+    const btn: FrameNodeId = @fromBackingInt(@intCast(1));
+    const inner: FrameNodeId = @fromBackingInt(@intCast(2));
+    const outer: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.nodes.append(std.testing.allocator, .{
         .id = btn,
@@ -1097,9 +1097,9 @@ test "collectDrawCmds: scrolled descendants use visual paint and text clip coord
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const label_id: FrameNodeId = @enumFromInt(1);
-    const button_id: FrameNodeId = @enumFromInt(2);
-    const scroll_id: FrameNodeId = @enumFromInt(3);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const button_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const scroll_id: FrameNodeId = @fromBackingInt(@intCast(3));
     var scroll_state: ScrollState = .{ .offset = .{ 7, 9 } };
 
     try tree.nodes.append(std.testing.allocator, .{
@@ -1171,8 +1171,8 @@ test "collectDrawCmds: style overflow modes clip descendants without scroll stat
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: FrameNodeId = @enumFromInt(1);
-        const parent_id: FrameNodeId = @enumFromInt(2);
+        const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+        const parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
         try tree.nodes.append(std.testing.allocator, .{
             .id = child_id,
             .kind = .{ .button = .{ .label = "overflowed" } },
@@ -1244,8 +1244,8 @@ test "collectDrawCmds: mixed overflow axes retain independent GPU clips" {
         var tree = WidgetTree.init(std.testing.allocator);
         defer tree.deinit();
 
-        const child_id: FrameNodeId = @enumFromInt(1);
-        const parent_id: FrameNodeId = @enumFromInt(2);
+        const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+        const parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
         try tree.nodes.append(std.testing.allocator, .{
             .id = child_id,
             .kind = .{ .button = .{ .label = "overflowed" } },
@@ -1276,8 +1276,8 @@ test "collectDrawCmds: content overflow does not clip own decorations" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const parent_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.nodes.append(std.testing.allocator, .{
         .id = child_id,
         .kind = .{ .button = .{ .label = "child" } },
@@ -1311,7 +1311,7 @@ test "collectDrawCmdsInto reuses caller-owned storage" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .column = .{} },
         .parent = .root,
         .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 },
@@ -1345,21 +1345,21 @@ test "collectDrawCmds: control text clips leave room for each indicator" {
     var switched = false;
     var selected: ?u32 = 9;
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .kind = .{ .checkbox = .{ .label = "enabled", .value = &checked } },
         .parent = .root,
         .rect = .{ .x = 20, .y = 30, .w = 100, .h = 18 },
         .text_overflow = .clip,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .kind = .{ .switch_control = .{ .label = "active", .value = &switched } },
         .parent = .root,
         .rect = .{ .x = 200, .y = 30, .w = 100, .h = 18 },
         .text_overflow = .clip,
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(3),
+        .id = @fromBackingInt(@intCast(3)),
         .kind = .{ .radio = .{ .label = "option", .selected = &selected, .option = 9 } },
         .parent = .root,
         .rect = .{ .x = 400, .y = 30, .w = 100, .h = 18 },

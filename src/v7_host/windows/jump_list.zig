@@ -1130,7 +1130,7 @@ test "api-w23 router reaches the window that claims the action" {
     var tree = WidgetTree.init(gpa);
     defer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "child" } },
@@ -1245,7 +1245,7 @@ test "api-w23 a dead window is dropped and never handed to another" {
     var tree = WidgetTree.init(gpa);
     defer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "child" } },
@@ -1462,7 +1462,7 @@ test "api-w23 a shell launch reaches the window that published the entry" {
     var tree = WidgetTree.init(gpa);
     defer tree.deinit();
     try tree.nodes.append(gpa, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "child" } },

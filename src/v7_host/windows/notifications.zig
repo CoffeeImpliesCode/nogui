@@ -688,7 +688,7 @@ pub const Provider = struct {
         defer self.gpa.free(xml);
         const wide_xml = win.wide(self.gpa, xml) catch return .{ .provider_failed = .out_of_memory };
         defer self.gpa.free(wide_xml);
-        const tag = std.fmt.allocPrint(self.gpa, "{d}", .{id}) catch
+        const tag = self.gpa.print("{d}", .{id}) catch
             return .{ .provider_failed = .out_of_memory };
         defer self.gpa.free(tag);
         const wide_tag = win.wide(self.gpa, tag) catch return .{ .provider_failed = .out_of_memory };
@@ -751,7 +751,7 @@ pub const Provider = struct {
         if (self.is_gone) return .{ .provider_failed = .disconnected };
         if (!self.shown.contains(id)) return .refused;
 
-        const tag = std.fmt.allocPrint(self.gpa, "{d}", .{id}) catch
+        const tag = self.gpa.print("{d}", .{id}) catch
             return .{ .provider_failed = .out_of_memory };
         defer self.gpa.free(tag);
         const wide_tag = win.wide(self.gpa, tag) catch
@@ -1014,7 +1014,7 @@ pub fn decodeArgument(argument: []const u8) ?Decoded {
 }
 
 pub fn encodeArgument(gpa: std.mem.Allocator, id: NotificationId, key: []const u8) ![]u8 {
-    return std.fmt.allocPrint(gpa, "{d}|{d}|{s}", .{ id, key.len, key });
+    return gpa.print("{d}|{d}|{s}", .{ id, key.len, key });
 }
 
 /// XML text escaping for attribute values and element text. The five predefined

@@ -132,8 +132,6 @@ rec {
 
   # https://devenv.sh/packages/
   packages = with pkgs; [
-    # Zig 0.16 build and lint toolchain
-    zig_0_16
     ziglintFixed
     zig-zlint
     pkg-config
@@ -321,6 +319,13 @@ rec {
     ];
   };
 
+  enterShell = ''
+    if [ "$(zig version)" != "0.17.0" ]; then
+      echo "nogui requires Zig 0.17.0 on PATH" >&2
+      return 1
+    fi
+  '';
+
   # https://devenv.sh/languages/
   # languages.zig.enable = true;
 
@@ -328,7 +333,7 @@ rec {
     set -eu
     zig fmt --check src build.zig build.zig.zon
     zig build test check layout-check lint
-    zig build test check -Doptimize=ReleaseSafe
+    zig build test check -Doptimize=safe
     zig build --build-file vendor/noapi/build.zig test -Denable-tracy=false
     python3 -m unittest discover -s tools -p 'test_*.py'
   '';

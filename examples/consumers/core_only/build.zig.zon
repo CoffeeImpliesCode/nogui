@@ -2,7 +2,7 @@
     .name = .core_only,
     .version = "0.0.0",
     .fingerprint = 0xd23cf0655dc41faa,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .nogui = .{ .path = "../../.." },
     },

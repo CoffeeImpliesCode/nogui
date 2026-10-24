@@ -215,7 +215,7 @@ pub const MessageBuilder = struct {
 
         // 16-byte fixed header
         wire[0] = 'l'; // little-endian
-        wire[1] = @intFromEnum(self.msg_type);
+        wire[1] = @backingInt(self.msg_type);
         wire[2] = self.flags;
         wire[3] = 1; // protocol version
         std.mem.writeInt(u32, wire[4..8], @intCast(body_bytes), .little);
@@ -240,7 +240,7 @@ pub const MessageBuilder = struct {
         const pad = padLen(buf.items.len, 8);
         try buf.appendNTimes(alloc, 0, pad);
 
-        try buf.append(alloc, @intFromEnum(code));
+        try buf.append(alloc, @backingInt(code));
         try buf.append(alloc, @intCast(sig.len));
         try buf.appendSlice(alloc, sig);
         try buf.append(alloc, 0);
@@ -269,7 +269,7 @@ pub const MessageBuilder = struct {
         const pad = padLen(buf.items.len, 8);
         try buf.appendNTimes(alloc, 0, pad);
 
-        try buf.append(alloc, @intFromEnum(code));
+        try buf.append(alloc, @backingInt(code));
         try buf.append(alloc, 1); // signature length
         try buf.append(alloc, 'u');
         try buf.append(alloc, 0);
@@ -288,7 +288,7 @@ pub const MessageParser = struct {
         if (bytes[0] != 'l') return error.UnsupportedEndianness;
         const msg_type_raw = bytes[1];
         if (msg_type_raw < 1 or msg_type_raw > 4) return error.InvalidMessageType;
-        const msg_type: MessageType = @enumFromInt(msg_type_raw);
+        const msg_type: MessageType = @fromBackingInt(@intCast(msg_type_raw));
         const flags = bytes[2];
         const version = bytes[3];
         if (version != 1) return error.UnsupportedProtocolVersion;
@@ -321,7 +321,7 @@ pub const MessageParser = struct {
             const sig = fields_slice[f_idx .. f_idx + sig_len];
             f_idx += sig_len + 1; // skip null
 
-            const code: ?HeaderField = if (code_raw >= 1 and code_raw <= 9) @enumFromInt(code_raw) else null;
+            const code: ?HeaderField = if (code_raw >= 1 and code_raw <= 9) @fromBackingInt(@intCast(code_raw)) else null;
 
             if (std.mem.eql(u8, sig, "s") or std.mem.eql(u8, sig, "o")) {
                 const str_pad = padLen(f_idx, 4);
@@ -1447,7 +1447,7 @@ test "linux dbus call releases no block that still carries the body it sent" {
         // match in a released block is the body and nothing else. Searching
         // for the body rather than for zeroed bytes keeps this a statement
         // about the secret instead of about how much the call wipes.
-        const marker = [_]u8{0x5a} ** 8;
+        const marker: [8]u8 = @splat(0x5a);
 
         // A local declaration cannot name itself, so the methods say `Self`.
         const Self = @This();

@@ -52,11 +52,11 @@ const todo_contexts = [_][]const u8{todo_context};
 
 /// Physical identities come from SDL, not from a demo key table, so the
 /// headless gate and the live layout phase talk about the same key.
-const scan_g: u32 = @intFromEnum(sdl3.Scancode.g);
-const scan_h: u32 = @intFromEnum(sdl3.Scancode.h);
-const scan_x: u32 = @intFromEnum(sdl3.Scancode.x);
-const scan_space: u32 = @intFromEnum(sdl3.Scancode.space);
-const scan_return: u32 = @intFromEnum(sdl3.Scancode.return_key);
+const scan_g: u32 = @backingInt(sdl3.Scancode.g);
+const scan_h: u32 = @backingInt(sdl3.Scancode.h);
+const scan_x: u32 = @backingInt(sdl3.Scancode.x);
+const scan_space: u32 = @backingInt(sdl3.Scancode.space);
+const scan_return: u32 = @backingInt(sdl3.Scancode.return_key);
 
 const ctrl_g: keymap.Stroke = .{
     .key = .{ .physical = scan_g },

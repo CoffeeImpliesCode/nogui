@@ -24,7 +24,7 @@ const builtin = @import("builtin");
 
 pub const windows = std.os.windows;
 
-pub const is_windows = builtin.os.tag == .windows;
+pub const is_windows = builtin.target.os.tag == .windows;
 
 pub const Hwnd = windows.HWND;
 pub const Hmenu = windows.HMENU;

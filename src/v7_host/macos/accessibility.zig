@@ -48,15 +48,9 @@ const shared = @import("../accessibility.zig");
 
 /// The AccessKit C ABI, opened here rather than through the shim.
 ///
-/// The shim header declares no framework of its own, and the bridge's ABI
-/// lives in the canonical shared bridge header the whole host already links,
-/// so a second `@cImport` is what makes these declarations visible here. That
-/// header declares the five common entry points plus the two macOS ones this
-/// adapter needs (`set_view` and `add_focus_forwarder`), so each ABI is
-/// declared exactly once across the project.
-const bridge = @cImport({
-    @cInclude("nogui_accesskit_bridge.h");
-});
+/// The canonical shared bridge header declares the common entry points and the
+/// macOS adapters. The build translates it once for every host adapter.
+const bridge = @import("nogui_accesskit_c");
 
 const Error = native.Error;
 const Status = native.Status;
@@ -582,8 +576,10 @@ test "api-w23 a macos forwarder record refuses a class it cannot remember" {
     // longest name that fits and is remembered.
     ForwarderProbe.reset(true);
     var record: ForwarderRecord = .{};
-    const too_long = "x" ** class_name_limit;
-    const longest = "x" ** max_class_name_len;
+    const too_long_bytes = @as([class_name_limit]u8, @splat('x')) ++ .{0};
+    const too_long = too_long_bytes[0..class_name_limit :0];
+    const longest_bytes = @as([max_class_name_len]u8, @splat('x')) ++ .{0};
+    const longest = longest_bytes[0..max_class_name_len :0];
     try std.testing.expectError(error.BadArgument, askForwarder(&record, too_long));
     try std.testing.expect(!record.holds(too_long));
     try std.testing.expectEqual(@as(usize, 0), ForwarderProbe.calls);

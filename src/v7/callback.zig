@@ -69,13 +69,13 @@ pub fn bind(comptime callback_fn: anytype, user_data: usize) UserCallback {
         else => @compileError("callback.bind expects a function"),
     };
     comptime {
-        if (function_info.params.len != 2) {
+        if (function_info.param_types.len != 2) {
             @compileError("callback.bind expects a function with two parameters");
         }
     }
-    const owner_type = function_info.params[0].type orelse
+    const owner_type = function_info.param_types[0] orelse
         @compileError("callback.bind owner parameter must have a type");
-    const user_data_type = function_info.params[1].type orelse
+    const user_data_type = function_info.param_types[1] orelse
         @compileError("callback.bind user-data parameter must have a type");
     const return_type = function_info.return_type orelse
         @compileError("callback.bind return type must be explicit");
@@ -110,11 +110,11 @@ pub fn wrap(comptime callback_fn: anytype) *const fn (*anyopaque) void {
         else => @compileError("callback.wrap expects a function"),
     };
     comptime {
-        if (function_info.params.len != 1) {
+        if (function_info.param_types.len != 1) {
             @compileError("callback.wrap expects a function with one parameter");
         }
     }
-    const owner_type = function_info.params[0].type orelse
+    const owner_type = function_info.param_types[0] orelse
         @compileError("callback.wrap owner parameter must have a type");
     const return_type = function_info.return_type orelse
         @compileError("callback.wrap return type must be explicit");

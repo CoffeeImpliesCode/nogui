@@ -1,10 +1,7 @@
 //! W09 gate smoke — the ACTUAL `TodoApp` controls under the real `App` router.
 //!
 //! `zig build test -Dtest-filter=api-w09` covers the W09 contracts against
-//! synthesized trees (`src/v7/w09_contract_test.zig`). The Gate in
-//! `docs/superpowers/plans/2026-09-26-gpui-api-parity.md` (W09, line 373)
-//! asks for one more thing: "headless press/move/release/cancel replay and
-//! actual Todo controls". This binary is that second half. It mounts the
+//! synthesized trees (`src/v7/w09_contract_test.zig`). This binary mounts the
 //! committed demo root `ui.TodoApp`, builds real frames, and drives the real
 //! `nogui.App.handle` input path — the same entry the SDL host adapter calls.
 //! No window, no `GpuEndpoint`, no SDL, no display server.
@@ -143,7 +140,7 @@ const surface: Size = .{ .width = 1400, .height = 1800 };
 
 const Reporter = struct {
     io: Io,
-    buffer: [4096]u8 = [_]u8{0} ** 4096,
+    buffer: [4096]u8 = @splat(0),
 
     fn emit(self: *Reporter, comptime fmt: []const u8, args: anytype) !void {
         const text = try std.fmt.bufPrint(&self.buffer, fmt, args);
@@ -223,7 +220,7 @@ const Record = struct {
 const commit_bytes = 64;
 
 const Commit = struct {
-    bytes: [commit_bytes]u8 = [_]u8{0} ** commit_bytes,
+    bytes: [commit_bytes]u8 = @splat(0),
     len: u8 = 0,
 
     fn text(self: *const Commit) []const u8 {
@@ -244,7 +241,7 @@ const Probe = struct {
     records: [probe_capacity]Record,
     count: usize = 0,
     overflow: bool = false,
-    commits: [commit_capacity]Commit = [_]Commit{.{}} ** commit_capacity,
+    commits: [commit_capacity]Commit = @splat(.{}),
     commit_count: usize = 0,
     commit_overflow: bool = false,
 
@@ -312,7 +309,7 @@ const Probe = struct {
 const field_bytes = 48;
 
 const FieldMirror = struct {
-    bytes: [field_bytes]u8 = [_]u8{0} ** field_bytes,
+    bytes: [field_bytes]u8 = @splat(0),
     len: usize = 0,
 
     fn text(self: *const FieldMirror) []const u8 {
@@ -573,7 +570,7 @@ fn scenarioPointerLifecycle(rig: *Rig, report: *Reporter) !void {
         "the move left the press target: routed to node {d} instead of the inc button",
         move.target == inc,
         report,
-        .{@intFromEnum(move.target)},
+        .{@backingInt(move.target)},
     );
 
     try send(rig, .{ .mouse_up = .{ .button = .left, .x = off_target[0], .y = off_target[1] } });
@@ -629,7 +626,7 @@ fn scenarioCancel(rig: *Rig, report: *Reporter) !void {
         "the cancel was routed to node {d}, not the captured inc button",
         cancelled.target == inc,
         report,
-        .{@intFromEnum(cancelled.target)},
+        .{@backingInt(cancelled.target)},
     );
 
     try send(rig, .{ .mouse_up = .{ .button = .left, .x = point[0], .y = point[1] } });
@@ -704,7 +701,7 @@ fn scenarioSliderDrag(rig: *Rig, report: *Reporter) !void {
         "the slider release was routed to node {d}",
         released.target == slider,
         report,
-        .{@intFromEnum(released.target)},
+        .{@backingInt(released.target)},
     );
 
     // The capture ended with the release: a later move outside the track must
@@ -757,7 +754,7 @@ fn scenarioFocusedKeyUp(rig: *Rig, report: *Reporter) !void {
         "the key-up was routed to node {d}, not the focused checkbox at node {d}",
         up.target == focused_node,
         report,
-        .{ @intFromEnum(up.target), @intFromEnum(focused_node) },
+        .{ @backingInt(up.target), @backingInt(focused_node) },
     );
     try require(
         "the key-up never reached the root capture phase",
@@ -1101,7 +1098,7 @@ const no_widget: WidgetId = .{ .owner = 0, .slot = 0, .generation = 0 };
 /// syntax, which is not something a reader of this report has to decode.
 fn nodeText(node: ?FrameNodeId) ?u32 {
     const value = node orelse return null;
-    return @intFromEnum(value);
+    return @backingInt(value);
 }
 
 const NativeWindow = struct {
@@ -1635,7 +1632,7 @@ const NativeWindow = struct {
                 "device=({d:.1},{d:.1}) screen=({any},{any})\n",
             .{
                 label,
-                @intFromEnum(node),
+                @backingInt(node),
                 rect.x,
                 rect.y,
                 rect.w,
@@ -1741,7 +1738,7 @@ const NativeWindow = struct {
                     "the release was not routed to the captured \"inc\" button; it reached node {d}",
                     self.withinControl(inc, self.lastTarget(.mouse_up, .bubble) orelse .root),
                     report,
-                    .{@intFromEnum(self.lastTarget(.mouse_up, .bubble) orelse .root)},
+                    .{@backingInt(self.lastTarget(.mouse_up, .bubble) orelse .root)},
                 );
                 try report.emit(
                     "    press then release away from \"inc\": the capture carried the release, " ++
@@ -1822,7 +1819,7 @@ const NativeWindow = struct {
                     "the slider release was not routed to the slider; it reached node {d}",
                     self.withinControl(slider, self.lastTarget(.mouse_up, .bubble) orelse .root),
                     report,
-                    .{@intFromEnum(self.lastTarget(.mouse_up, .bubble) orelse .root)},
+                    .{@backingInt(self.lastTarget(.mouse_up, .bubble) orelse .root)},
                 );
                 try require(
                     "the release moved the volume to {d:.4}",
@@ -1846,7 +1843,7 @@ const NativeWindow = struct {
                     .{
                         if (geometry.slider_outside_is_left) @as(f32, 0.0) else @as(f32, 1.0),
                         volume,
-                        @intFromEnum(self.lastTarget(.mouse_move, .bubble) orelse .root),
+                        @backingInt(self.lastTarget(.mouse_move, .bubble) orelse .root),
                     },
                 );
                 break :blk Step.check_down;
@@ -1912,8 +1909,8 @@ const NativeWindow = struct {
                     self.withinControl(todo_box, self.lastTarget(.key_up, .bubble) orelse .root),
                     report,
                     .{
-                        @intFromEnum(todo_box orelse .root),
-                        @intFromEnum(self.lastTarget(.key_up, .bubble) orelse .root),
+                        @backingInt(todo_box orelse .root),
+                        @backingInt(self.lastTarget(.key_up, .bubble) orelse .root),
                     },
                 );
                 try require(
@@ -2078,7 +2075,7 @@ const NativeWindow = struct {
         for (self.records()) |record| {
             try report.emit(
                 "timeout: routed {s} phase={s} node={d} repeat={}\n",
-                .{ @tagName(record.tag), @tagName(record.phase), @intFromEnum(record.target), record.repeat },
+                .{ @tagName(record.tag), @tagName(record.phase), @backingInt(record.target), record.repeat },
             );
         }
         for (self.commits()) |commit| {
@@ -2329,7 +2326,7 @@ fn runNative(
 // --- entry ----------------------------------------------------------------
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

@@ -530,7 +530,7 @@ fn mouseButton(native: sdl3.mouse.Button) nogui.event.MouseButton {
         .middle => .middle,
         .x1 => .back,
         .x2 => .forward,
-        else => @enumFromInt(@intFromEnum(native)),
+        else => @fromBackingInt(@intCast(@backingInt(native))),
     };
 }
 
@@ -566,7 +566,7 @@ fn translateKey(key: sdl3.events.Keyboard) nogui.event.KeyEvent {
     if (named) |value| {
         logical = .{ .named = value };
     } else if (key.key) |value| {
-        const raw: u32 = @intFromEnum(value);
+        const raw: u32 = @backingInt(value);
         if (raw >= 0x20 and raw <= 0x10ffff and
             !(raw >= 0xd800 and raw <= 0xdfff))
         {
@@ -579,7 +579,7 @@ fn translateKey(key: sdl3.events.Keyboard) nogui.event.KeyEvent {
         .shift = held.shift,
         .modifiers = held,
         .physical = if (key.scancode) |scan|
-            .{ .code = @intCast(@intFromEnum(scan)) }
+            .{ .code = @intCast(@backingInt(scan)) }
         else
             null,
         .logical = logical,
@@ -715,7 +715,7 @@ test "api-w09 native keys retain physical identity, logical value, modifiers and
             try std.testing.expectEqual(nogui.event.Key.tab, result.core.key_down.key);
             try std.testing.expect(result.core.key_down.modifiers.right_shift);
             try std.testing.expectEqual(
-                @as(u32, @intFromEnum(sdl3.Scancode.a)),
+                @as(u32, @backingInt(sdl3.Scancode.a)),
                 result.core.key_down.physical.?.code,
             );
             try std.testing.expect(!result.repeat);

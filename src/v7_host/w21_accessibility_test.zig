@@ -28,7 +28,7 @@ const Fixture = struct {
     threaded: std.Io.Threaded,
     // Scratch handed to `semantics.Scratch`: every byte is written before the
     // string that uses it is read, and a zeroed tail is a valid empty string.
-    buffer: [semantics.Scratch.default_capacity]u8 = [_]u8{0} ** semantics.Scratch.default_capacity,
+    buffer: [semantics.Scratch.default_capacity]u8 = @splat(0),
     clicks: u32 = 0,
     focus_set: u32 = 0,
     number_writes: u32 = 0,
@@ -49,7 +49,7 @@ const Fixture = struct {
     /// clip — would never be reachable. The capacity is the buffer's own
     /// length, never the room left in it.
     const Model = struct {
-        bytes: [64]u8 = [_]u8{0} ** 64,
+        bytes: [64]u8 = @splat(0),
         len: usize = 0,
         selection: semantics.TextSelection = semantics.TextSelection.caret(0),
 
@@ -90,7 +90,7 @@ const Fixture = struct {
         // SAFETY: every field is assigned below, before this function returns
         // and before any test body reads the fixture.
         self.* = undefined;
-        self.buffer = [_]u8{0} ** semantics.Scratch.default_capacity;
+        self.buffer = @splat(0);
         self.clicks = 0;
         self.focus_set = 0;
         self.number_writes = 0;
@@ -314,12 +314,12 @@ const row_named_actions = [_]semantics.CustomAction{
 /// staged the tree and the publish that reads them. Owning those bytes here
 /// is what makes that shape reproducible without a window.
 const OwnedText = struct {
-    bytes: [64]u8 = [_]u8{0} ** 64,
+    bytes: [64]u8 = @splat(0),
     len: usize = 0,
-    lengths: [64]u8 = [_]u8{0} ** 64,
+    lengths: [64]u8 = @splat(0),
     characters: usize = 0,
-    positions: [64]f32 = [_]f32{0} ** 64,
-    widths: [64]f32 = [_]f32{0} ** 64,
+    positions: [64]f32 = @splat(0),
+    widths: [64]f32 = @splat(0),
     anchor: usize = 0,
     focus: usize = 0,
 
@@ -716,7 +716,7 @@ test "api-w21 a request arriving during replay is retained for the next drain" {
             // and the next drain has something to replay.
             if (self.fixture.adapter.enqueueRequest(.{
                 .id = self.document,
-                .action = @intFromEnum(semantics.Action.replace_selected_text),
+                .action = @backingInt(semantics.Action.replace_selected_text),
                 .data = .value,
                 .value = "late",
             })) self.accepted += 1;
@@ -844,7 +844,7 @@ test "api-w21 two positioned edits in one stale frame both land, in order" {
     // is the field itself.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -858,7 +858,7 @@ test "api-w21 two positioned edits in one stale frame both land, in order" {
     // refuse this edit outright.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 6,
         .focus_index = 9,
@@ -908,7 +908,7 @@ test "api-w21 a queued positioned edit survives the caller's buffer dying" {
     @memcpy(caller[0..insert.len], insert);
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -947,7 +947,7 @@ test "api-w21 an ordinary replacement follows the live edit, not the published f
     // the LIVE value at the LIVE selection — "live " plus the replacement.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .value,
         .value = "LIVE",
     }));
@@ -978,10 +978,10 @@ test "api-w21 a positioned edit past the model's capacity is refused, never clip
 
     // The replacement alone exceeds what this fixed model can hold, so the
     // composed value cannot fit either.
-    var filler: [Fixture.Model.capacity + 1]u8 = [_]u8{'x'} ** (Fixture.Model.capacity + 1);
+    var filler: [Fixture.Model.capacity + 1]u8 = @splat('x');
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -1024,10 +1024,10 @@ test "api-w21 an oversize positioned payload and a full ring both refuse" {
     // its neighbour nothing: the request queued before it still holds its
     // own bytes, not a prefix of this one.
     var oversize: [accessibility.max_payload_bytes + 1]u8 =
-        [_]u8{'q'} ** (accessibility.max_payload_bytes + 1);
+        @splat('q');
     try std.testing.expect(!fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -1038,7 +1038,7 @@ test "api-w21 an oversize positioned payload and a full ring both refuse" {
     oversize[0] = 'r';
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -1086,7 +1086,7 @@ test "api-w21 a positioned edit whose endpoints name another text is refused" {
     // Both endpoints naming another text is a splice between two values.
     try std.testing.expect(!fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -1097,7 +1097,7 @@ test "api-w21 a positioned edit whose endpoints name another text is refused" {
     // One endpoint naming another text is the same contradiction.
     try std.testing.expect(!fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.replace_selected_text),
+        .action = @backingInt(semantics.Action.replace_selected_text),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -1108,7 +1108,7 @@ test "api-w21 a positioned edit whose endpoints name another text is refused" {
     // A range on an action that is not a replacement is not an edit at all.
     try std.testing.expect(!fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_range,
         .anchor_index = 0,
         .focus_index = 0,
@@ -1244,7 +1244,7 @@ test "api-w21 text crosses the edge in characters and refuses a selection it can
     // selection keeps its direction on the way in.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 6,
         .focus_index = 1,
@@ -1260,7 +1260,7 @@ test "api-w21 text crosses the edge in characters and refuses a selection it can
     // the model is never edited at a guessed offset.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 8,
         .focus_index = 1,
@@ -1303,7 +1303,7 @@ test "api-w21 a request for a row the current tree dropped changes nothing" {
     // the main thread reaches no seam at all.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = gone,
-        .action = @intFromEnum(semantics.Action.click),
+        .action = @backingInt(semantics.Action.click),
     }));
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -1314,7 +1314,7 @@ test "api-w21 a request for a row the current tree dropped changes nothing" {
     // The row the tree does publish still selects through the list owner.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = live.id,
-        .action = @intFromEnum(semantics.Action.click),
+        .action = @backingInt(semantics.Action.click),
     }));
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -1348,7 +1348,7 @@ test "api-w21 a named action on the list owner activates it, a row request does 
     // activation reaches the model, and no row moves.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = owner.id,
-        .action = @intFromEnum(semantics.Action.custom_action),
+        .action = @backingInt(semantics.Action.custom_action),
         .data = .custom_action,
         .custom_action = action_add_row,
     }));
@@ -1361,7 +1361,7 @@ test "api-w21 a named action on the list owner activates it, a row request does 
     // is not activated in its place.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = owner.id,
-        .action = @intFromEnum(semantics.Action.custom_action),
+        .action = @backingInt(semantics.Action.custom_action),
         .data = .custom_action,
         .custom_action = action_remove_row,
     }));
@@ -1415,7 +1415,7 @@ test "api-w21 an app that states its own action set refuses the action it named"
     // made from it changes nothing at all.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = owner.id,
-        .action = @intFromEnum(semantics.Action.custom_action),
+        .action = @backingInt(semantics.Action.custom_action),
         .data = .custom_action,
         .custom_action = action_add_row,
     }));
@@ -1445,7 +1445,7 @@ test "api-w21 the bridge is handed the field's characters as a child run" {
     // The run is what a platform offers text through: without it a screen
     // reader is handed an empty box however much the app typed into it.
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(semantics.Role.text_run)),
+        @as(u8, @backingInt(semantics.Role.text_run)),
         fixture.adapter.lastRole(run).?,
     );
     try std.testing.expectEqualStrings(multibyte_text, fixture.adapter.lastValue(run).?);
@@ -1557,7 +1557,7 @@ test "api-w21 every publish pairs a value with the table that describes it" {
         fixture.adapter.lastCharacterLengths(run).?,
     );
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(semantics.Role.text_run)),
+        @as(u8, @backingInt(semantics.Role.text_run)),
         fixture.adapter.lastRole(run).?,
     );
 }
@@ -1610,7 +1610,7 @@ test "api-w21 a cleared field is published empty with a collapsed caret" {
         try std.testing.expectEqual(run, fixture.adapter.lastTextSelectionOwner(id).?);
     }
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(semantics.Role.text_run)),
+        @as(u8, @backingInt(semantics.Role.text_run)),
         fixture.adapter.lastRole(run).?,
     );
 }
@@ -1667,7 +1667,7 @@ test "api-w21 a native selection names the run it came from and reaches the mode
     // offset stays a character index and is converted on the way in.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field.id,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 6,
         .focus_index = 1,
@@ -1690,7 +1690,7 @@ test "api-w21 a native selection names the run it came from and reaches the mode
     try std.testing.expect(document_run != run);
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field.id,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 2,
         .focus_index = 2,
@@ -1700,7 +1700,7 @@ test "api-w21 a native selection names the run it came from and reaches the mode
     // One endpoint in each field is the same refusal: no text owns both.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field.id,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 2,
         .focus_index = 2,
@@ -1717,7 +1717,7 @@ test "api-w21 a native selection names the run it came from and reaches the mode
     // the request is refused instead of applied at a guessed offset.
     try std.testing.expect(fixture.adapter.enqueueRequest(.{
         .id = field.id,
-        .action = @intFromEnum(semantics.Action.set_text_selection),
+        .action = @backingInt(semantics.Action.set_text_selection),
         .data = .text_selection,
         .anchor_index = 1,
         .focus_index = 2,
@@ -1790,7 +1790,7 @@ test "api-w21 native action masks preserve sparse action codes" {
         nodes[0].actions.enable(action);
         const wire = try adapter.encodeFullSnapshot(&snapshot, .{});
         try std.testing.expectEqual(
-            @as(u32, 1) << @intCast(@intFromEnum(action)),
+            @as(u32, 1) << @intCast(@backingInt(action)),
             wire.nodes[0].actions,
         );
     }

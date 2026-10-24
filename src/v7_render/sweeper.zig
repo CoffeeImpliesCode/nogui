@@ -749,7 +749,7 @@ test "buildFillBands: 20x20 square outline" {
     // range is [-22, 0] (23 rows) and every curve appears somewhere.
     try testing.expectEqual(@as(i32, -22), bands.row_base);
     try testing.expectEqual(@as(u32, 23), bands.row_count);
-    var saw = [_]bool{false} ** 4;
+    var saw: [4]bool = @splat(false);
     for (bands.indices) |ci| saw[ci] = true;
     for (saw) |s| try testing.expect(s);
 }

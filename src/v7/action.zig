@@ -89,13 +89,13 @@ fn schemaFor(comptime T: type) Schema {
             rejectCustomDecoder(T);
             const fields = struct {
                 const values = init: {
-                    var result: [info.fields.len]Schema.Field = undefined;
-                    for (info.fields, 0..) |field, index| {
-                        if (field.is_comptime) @compileError("action JSON rejects comptime fields");
+                    var result: [info.field_names.len]Schema.Field = undefined;
+                    for (info.field_names, info.field_types, info.field_attrs, 0..) |name, field_type, attrs, index| {
+                        if (attrs.@"comptime") @compileError("action JSON rejects comptime fields");
                         result[index] = .{
-                            .name = field.name,
-                            .value = schemaFor(field.type),
-                            .required = field.default_value_ptr == null,
+                            .name = name,
+                            .value = schemaFor(field_type),
+                            .required = attrs.default_value_ptr == null,
                         };
                     }
                     break :init result;
@@ -746,7 +746,7 @@ fn decodeValue(comptime T: type, arena: std.mem.Allocator, value: std.json.Value
                     @memcpy(buffer, value.string);
                     break :blk buffer;
                 }
-                if (info.is_const) break :blk value.string;
+                if (info.attrs.@"const") break :blk value.string;
                 break :blk try arena.dupe(u8, value.string);
             }
             const source = value.array.items;
@@ -776,11 +776,11 @@ fn decodeValue(comptime T: type, arena: std.mem.Allocator, value: std.json.Value
         .@"struct" => |info| blk: {
             // SAFETY: the inline loop assigns every field or returns an error.
             var result: T = undefined;
-            inline for (info.fields) |field| {
-                if (value.object.get(field.name)) |element| {
-                    @field(result, field.name) = try decodeValue(field.type, arena, element);
-                } else if (field.default_value_ptr != null) {
-                    @field(result, field.name) = field.defaultValue().?;
+            inline for (info.field_names, info.field_types, info.field_attrs) |name, field_type, attrs| {
+                if (value.object.get(name)) |element| {
+                    @field(result, name) = try decodeValue(field_type, arena, element);
+                } else if (attrs.default_value_ptr != null) {
+                    @field(result, name) = attrs.defaultValue(field_type).?;
                 } else {
                     return error.InvalidParameters;
                 }

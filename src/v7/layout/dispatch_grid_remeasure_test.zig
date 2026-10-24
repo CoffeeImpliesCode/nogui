@@ -78,10 +78,10 @@ test "grid remeasures auto flex child at final area width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const flex_id: FrameNodeId = @enumFromInt(3);
-    const grid_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(4));
     const columns = [_]style.GridTrack{ .{ .fixed = 60 }, .{ .fixed = 40 } };
     const rows = [_]style.GridTrack{.{ .fixed = 30 }};
 

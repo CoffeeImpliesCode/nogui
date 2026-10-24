@@ -378,7 +378,7 @@ test "api-w18 url ingress dispatches once and leaves ordinary launches alone" {
         url_count: usize = 0,
         // Only the first `last_len` bytes are live, so a zeroed tail is
         // enough for a handler that never ran.
-        last_url: [128]u8 = [_]u8{0} ** 128,
+        last_url: [128]u8 = @splat(0),
         last_len: usize = 0,
         file_count: usize = 0,
 
@@ -488,13 +488,13 @@ test "api-w18 menu bridge dynamic enablement follows focus context" {
     defer tree.deinit();
 
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = sidebar_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "sidebar" } },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = editor_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "editor" } },
@@ -580,13 +580,13 @@ test "api-w18 menu tick marks follow the focused model and run no handler" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = editor_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "editor" } },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = sidebar_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "sidebar" } },
@@ -704,13 +704,13 @@ test "api-w18 menu tick marks follow an alias and expire with their owner" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = draft_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "draft" } },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = retired_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "retired" } },
@@ -830,13 +830,13 @@ test "api-w18 a system menu row follows the focused binding for enablement, mark
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = window_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "window" } },
     });
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(2),
+        .id = @fromBackingInt(@intCast(2)),
         .widget_id = document_widget,
         .parent = .root,
         .kind = .{ .label = .{ .text = "document" } },
@@ -987,7 +987,7 @@ test "api-w18 an evaluated menu still routes and reads after the caller's text i
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
     try tree.nodes.append(std.testing.allocator, .{
-        .id = @enumFromInt(1),
+        .id = @fromBackingInt(@intCast(1)),
         .widget_id = document,
         .parent = .root,
         .kind = .{ .label = .{ .text = "document" } },

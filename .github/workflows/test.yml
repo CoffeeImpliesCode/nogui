@@ -29,11 +29,11 @@ jobs:
             pkg-config
       - uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       - run: zig fmt --check src build.zig build.zig.zon
       - run: zig build test
       - run: zig build check
       - run: zig build layout-check
-      - run: zig build test check -Doptimize=ReleaseSafe
+      - run: zig build test check -Doptimize=safe
       - run: zig build --build-file vendor/noapi/build.zig test -Denable-tracy=false
       - run: python3 -m unittest discover -s tools -p 'test_*.py'

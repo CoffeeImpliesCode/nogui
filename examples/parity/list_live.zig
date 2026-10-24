@@ -1591,7 +1591,7 @@ fn parseArgs(init: std.process.Init, gpa: std.mem.Allocator) !Options {
 
 /// Drive the whole sequence, and print what each step observed.
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

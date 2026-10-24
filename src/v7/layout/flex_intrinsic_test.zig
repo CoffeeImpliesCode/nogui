@@ -243,10 +243,10 @@ test "measureNatural scopes intrinsic height to auto-sized flex container" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const nested_id: FrameNodeId = @enumFromInt(3);
-    const outer_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const nested_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const outer_id: FrameNodeId = @fromBackingInt(@intCast(4));
 
     try appendNode(&tree, first_id, nested_id, fixedItem(10, 60));
     try appendNode(&tree, second_id, nested_id, fixedItem(10, 60));
@@ -299,8 +299,8 @@ test "measureNatural defers percentage margins below intrinsic auto width" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const outer_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const outer_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     var child_style = fixedItem(10, 10);
     child_style.margin_inset.left = .{ .percent = 0.5 };
@@ -342,8 +342,8 @@ test "max-content forwards definite child cross maximum" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const container_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const container_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.appendNode(.{
         .id = child_id,
@@ -412,8 +412,8 @@ test "max-content ignores transferred cross max for contribution" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const container_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const container_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.appendNode(.{
         .id = child_id,
@@ -488,8 +488,8 @@ test "max-content uses aspect-derived preferred main with zero basis" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const container_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const container_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try appendNode(&tree, child_id, container_id, .{
         .display = .block,
@@ -545,8 +545,8 @@ test "max-content measures automatic minimum under min-content main mode" {
     var tree = WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const container_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const container_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.appendNode(.{
         .id = child_id,

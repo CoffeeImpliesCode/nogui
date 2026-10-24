@@ -341,8 +341,8 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             cmd.setVertexInput(
                 &.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }},
                 &.{
-                    .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 },
-                    .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 },
+                    .{ .location = 0, .binding = 0, .format = @backingInt(vk.Format.r32g32_sfloat), .offset = 0 },
+                    .{ .location = 1, .binding = 0, .format = @backingInt(vk.Format.r32g32b32_sfloat), .offset = 8 },
                 },
             );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
@@ -372,8 +372,8 @@ fn window1(win: *noapi.Surface, s: *SharedW1) void {
             cmd.setVertexInput(
                 &.{.{ .binding = 0, .stride = s.vertex_size, .input_rate = 0 }},
                 &.{
-                    .{ .location = 0, .binding = 0, .format = @intFromEnum(vk.Format.r32g32_sfloat), .offset = 0 },
-                    .{ .location = 1, .binding = 0, .format = @intFromEnum(vk.Format.r32g32b32_sfloat), .offset = 8 },
+                    .{ .location = 0, .binding = 0, .format = @backingInt(vk.Format.r32g32_sfloat), .offset = 0 },
+                    .{ .location = 1, .binding = 0, .format = @backingInt(vk.Format.r32g32b32_sfloat), .offset = 8 },
                 },
             );
             cmd.bindVertexBuffer(0, s.vert_buf, 0);
@@ -516,9 +516,9 @@ fn window2(win: *noapi.Surface, s: *SharedW2) void {
 fn submissionLifecycleTest(init: std.process.Init, submission_count: u32) !void {
     if (submission_count == 0) return error.InvalidSubmissionCount;
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer {
-        if (debug_allocator.deinit() != .ok) @panic("submission lifecycle allocator leak");
+        if (debug_allocator.deinit() != 0) @panic("submission lifecycle allocator leak");
     }
     const allocator = debug_allocator.allocator();
     const io = init.io;
@@ -560,7 +560,7 @@ fn submissionLifecycleTest(init: std.process.Init, submission_count: u32) !void 
         null;
     defer if (timestamp_set) |set| gpu.timestampQuerySetDestroy(set);
 
-    var slot_values = [_]u64{0} ** 3;
+    var slot_values: [3]u64 = @splat(0);
     var wrote_timestamps = false;
     var signal_value: u64 = 1;
     while (signal_value <= submission_count) : (signal_value += 1) {
@@ -614,9 +614,9 @@ fn presentTimingCapabilitySmoke(surface: *noapi.Surface) !void {
 }
 
 fn presentationFeedbackTest(init: std.process.Init, requested_mode: []const u8) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer {
-        if (debug_allocator.deinit() != .ok) @panic("presentation feedback allocator leak");
+        if (debug_allocator.deinit() != 0) @panic("presentation feedback allocator leak");
     }
     const allocator = debug_allocator.allocator();
     const io = init.io;
@@ -833,7 +833,7 @@ fn presentationFeedbackTest(init: std.process.Init, requested_mode: []const u8) 
                     pair_number,
                     total_pairs,
                     stage_bit,
-                    @intFromEnum(saved_domains[domain_index]),
+                    @backingInt(saved_domains[domain_index]),
                     saved_domain_ids[domain_index],
                 },
             );

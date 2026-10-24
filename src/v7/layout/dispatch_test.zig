@@ -70,10 +70,10 @@ test "fixed block container dispatches a nested flex container" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const flex_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     try tree.appendNode(.{
         .id = first_id,
         .kind = .{ .spacer = .{} },
@@ -125,10 +125,10 @@ test "fixed flex container dispatches a nested grid container" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const grid_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
     try tree.appendNode(.{
@@ -181,9 +181,9 @@ test "fixed grid container dispatches a nested block container" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const block_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const block_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     const columns = [_]style.GridTrack{.{ .fixed = 40 }};
     const rows = [_]style.GridTrack{.{ .fixed = 30 }};
     try tree.appendNode(.{
@@ -228,9 +228,9 @@ test "mixed border boxes stay parent-content-relative" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = leaf_id,
         .kind = .{ .spacer = .{} },
@@ -296,10 +296,10 @@ test "hidden mixed subtree is cleared once for every descendant" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const grid_id: FrameNodeId = @enumFromInt(2);
-    const hidden_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const hidden_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     try tree.appendNode(.{
         .id = leaf_id,
         .kind = .{ .spacer = .{} },
@@ -355,8 +355,8 @@ test "dispatcher rejects non-finite availability and malformed trees" {
 
     var malformed = widget.WidgetTree.init(std.testing.allocator);
     defer malformed.deinit();
-    const missing_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const missing_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try malformed.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },
@@ -374,7 +374,7 @@ test "dispatcher rejects non-finite availability and malformed trees" {
     );
     var orphaned = widget.WidgetTree.init(std.testing.allocator);
     defer orphaned.deinit();
-    const orphan_id: FrameNodeId = @enumFromInt(3);
+    const orphan_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try orphaned.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },
@@ -398,10 +398,10 @@ test "dispatcher rejects non-finite availability and malformed trees" {
 }
 
 test "dispatcher rejects duplicate node identifiers and reserved root identifiers" {
-    const duplicate_id: FrameNodeId = @enumFromInt(1);
-    const first_parent_id: FrameNodeId = @enumFromInt(2);
-    const second_parent_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const duplicate_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const first_parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const second_parent_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
 
     const cases = [_]ValidationCase{
         .{
@@ -444,10 +444,10 @@ test "dispatcher rejects duplicate node identifiers and reserved root identifier
 }
 
 test "dispatcher rejects duplicate shared mismatched and unlisted children" {
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const first_parent_id: FrameNodeId = @enumFromInt(2);
-    const second_parent_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const first_parent_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const second_parent_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
 
     const cases = [_]ValidationCase{
         .{
@@ -499,10 +499,10 @@ test "dispatcher rejects duplicate shared mismatched and unlisted children" {
 }
 
 test "dispatcher rejects self forward cyclic and rootless graphs" {
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const first_id: FrameNodeId = @enumFromInt(2);
-    const second_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
 
     const cases = [_]ValidationCase{
         .{
@@ -557,8 +557,8 @@ test "a failed layoutTree leaves the shared layout storage empty" {
 
     // A healthy first root: its flex container and label stage entries in
     // the shared measurement and text caches while they lay out.
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = first_id,
         .kind = .{ .label = .{ .text = "abc" } },
@@ -580,7 +580,7 @@ test "a failed layoutTree leaves the shared layout storage empty" {
     // A second root with a negative preferred width: the first root lays out
     // and stages cache entries, then this root fails measurement, so the
     // frame exercises the error unwind with entries staged.
-    const bad_id: FrameNodeId = @enumFromInt(3);
+    const bad_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = bad_id,
         .kind = .{ .column = .{} },

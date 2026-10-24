@@ -26,7 +26,7 @@ const TrackControl = enum(u3) {
 };
 
 fn trackControlKey(track_key_base: u64, role: TrackControl) ComponentKey {
-    return .{ .u64 = track_key_base | @intFromEnum(role) };
+    return .{ .u64 = track_key_base | @backingInt(role) };
 }
 
 const track_row_height = theme.track_row_height;

@@ -257,7 +257,7 @@ fn windowReport(
     for (live.nodes) |*entry| {
         if (entry.role != semantics.Role.button) continue;
         if (!std.mem.eql(u8, entry.name, "header")) continue;
-        report.header_role = @intFromEnum(entry.role);
+        report.header_role = @backingInt(entry.role);
         copyHeaderName(&report, entry.name);
         report.header_focusable = entry.states.focusable;
         report.header_clickable = entry.actions.has(.click);
@@ -1818,7 +1818,7 @@ fn appendReport(
         gpa,
         &inner,
         "header_role",
-        @tagName(@as(semantics.Role, @enumFromInt(report.header_role))),
+        @tagName(@as(semantics.Role, @fromBackingInt(@intCast(report.header_role)))),
     );
     try appendText(gpa, &inner, "header_name", report.headerNameSlice());
     try appendBool(gpa, &inner, "header_focusable", report.header_focusable);
@@ -2122,8 +2122,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "api-w25 one model drives two windows with independent arenas and widget ids" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     const scenario = try Scenario.init(gpa);
@@ -2223,8 +2223,8 @@ test "api-w25 one model drives two windows with independent arenas and widget id
 }
 
 test "api-w25 the shared model moves once and reaches both SDL dummy windows" {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer std.testing.expect(gpa_state.deinit() == .ok) catch {};
+    var gpa_state: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.testing.expect(gpa_state.deinit() == 0) catch {};
     const gpa = gpa_state.allocator();
 
     const headless = try runHeadless(gpa);
@@ -2247,7 +2247,7 @@ test "api-w25 the shared model moves once and reaches both SDL dummy windows" {
 
     // Both drivers published the same semantic control with the same states.
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(semantics.Role.button)),
+        @as(u8, @backingInt(semantics.Role.button)),
         headless.left.header_role,
     );
     try std.testing.expectEqualStrings("header", headless.left.headerNameSlice());

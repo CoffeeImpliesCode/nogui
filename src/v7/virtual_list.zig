@@ -188,7 +188,7 @@ pub const AllocationTotals = struct {
 /// read `totals()`. Nothing is inferred from a stored-metadata counter: these
 /// are the real `alloc` calls that reached the heap.
 ///
-/// Every call passes straight through to `inner`, so a `DebugAllocator` below
+/// Every call passes straight through to `inner`, so a `SafeAllocator` below
 /// still reports leaks and a `std.testing.allocator` still fails on them.
 pub const AllocationCounter = struct {
     inner: std.mem.Allocator,

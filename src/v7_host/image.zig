@@ -57,7 +57,7 @@ pub const DecodedImage = struct {
                 .width = self.width,
                 .height = self.height,
                 .size = self.pixels.len,
-            }} ++ [_]PlaneDescriptor{.{}} ** 3,
+            }} ++ @as([3]PlaneDescriptor, @splat(.{})),
             .plane_count = 1,
             .pixels = self.pixels.ptr,
             .release_fn = null,
@@ -271,7 +271,7 @@ pub fn decodeQoi(allocator: std.mem.Allocator, data: []const u8) !DecodedImage {
     );
     errdefer allocator.free(out_pixels);
 
-    var index = [_][4]u8{[_]u8{ 0, 0, 0, 0 }} ** 64;
+    var index: [64][4]u8 = @splat(@splat(0));
     var px = [4]u8{ 0, 0, 0, 255 };
 
     var in_pos: usize = 14;

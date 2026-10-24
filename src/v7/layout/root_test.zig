@@ -59,8 +59,8 @@ fn appendStorageRegressionTree(
     text: []const u8,
     root_style: style.Style,
 ) !void {
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .label = .{ .text = text } },
@@ -78,8 +78,8 @@ fn appendStorageRegressionTree(
 
 fn storageRegressionRects(tree: *widget.WidgetTree) !StorageRegressionRects {
     return .{
-        .root = (try testNode(tree, @enumFromInt(2))).rect,
-        .child = (try testNode(tree, @enumFromInt(1))).rect,
+        .root = (try testNode(tree, @fromBackingInt(@intCast(2)))).rect,
+        .child = (try testNode(tree, @fromBackingInt(@intCast(1)))).rect,
     };
 }
 
@@ -155,7 +155,7 @@ test "layoutTree clears shared storage between changed passes" {
         storage_measure_first,
     );
 
-    (try testNode(&tree, @enumFromInt(1))).kind = .{
+    (try testNode(&tree, @fromBackingInt(@intCast(1)))).kind = .{
         .label = .{ .text = "changed content" },
     };
     const content_changed = try layoutStorageRegression(
@@ -179,7 +179,7 @@ test "layoutTree clears shared storage between changed passes" {
         .bottom = .{ .percent = 0.1 },
         .left = .{ .percent = 0.1 },
     };
-    (try testNode(&tree, @enumFromInt(2))).style = root_style;
+    (try testNode(&tree, @fromBackingInt(@intCast(2)))).style = root_style;
     const style_changed = try layoutStorageRegression(
         &tree,
         &storage,
@@ -226,7 +226,7 @@ test "layoutTree clears shared storage between changed passes" {
     );
     try std.testing.expect(callback_changed.child.h != surface_changed.child.h);
 
-    (try testNode(&tree, @enumFromInt(2))).style.grow = std.math.nan(f32);
+    (try testNode(&tree, @fromBackingInt(@intCast(2)))).style.grow = std.math.nan(f32);
     try std.testing.expectError(
         error.InvalidStyle,
         layout.layoutTree(&tree, .{
@@ -236,7 +236,7 @@ test "layoutTree clears shared storage between changed passes" {
             .storage = &storage,
         }),
     );
-    (try testNode(&tree, @enumFromInt(2))).style.grow = 0;
+    (try testNode(&tree, @fromBackingInt(@intCast(2)))).style.grow = 0;
 
     const after_error = try layoutStorageRegression(
         &tree,
@@ -258,9 +258,9 @@ test "layoutTree preserves relative column geometry" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.appendNode(.{
         .id = first_id,
@@ -305,9 +305,9 @@ test "layoutTree dispatches a single flow root through block float layout" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const float_id: FrameNodeId = @enumFromInt(1);
-    const normal_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const float_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const normal_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
 
     try tree.appendNode(.{
         .id = float_id,
@@ -367,7 +367,7 @@ test "layoutTree measures a leaf root intrinsically" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .label = .{ .text = "leaf" } },
@@ -391,9 +391,9 @@ test "layoutTree routes nested block trees" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const label_id: FrameNodeId = @enumFromInt(1);
-    const nested_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const nested_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = label_id,
         .kind = .{ .label = .{ .text = "nested" } },
@@ -440,8 +440,8 @@ test "layoutTree preserves scroll root offsets" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .spacer = .{} },
@@ -479,8 +479,8 @@ test "layoutTree uses visible slider label height" {
     defer tree.deinit();
 
     var value: f32 = 0.5;
-    const slider_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const slider_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = slider_id,
         .kind = .{ .slider = .{
@@ -523,8 +523,8 @@ test "layoutTree caps direct label intrinsic width" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const label_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const label_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = label_id,
         .kind = .{ .label = .{ .text = "too wide" } },
@@ -562,8 +562,8 @@ test "layoutTree preserves root flex-item growth" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .column = .{} },
@@ -603,9 +603,9 @@ test "layoutTree dispatches an eligible flex root through modular flex" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = first_id,
         .kind = .{ .column = .{} },
@@ -671,10 +671,10 @@ test "layoutTree clears hidden grid subtree geometry" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const grid_id: FrameNodeId = @enumFromInt(2);
-    const hidden_id: FrameNodeId = @enumFromInt(3);
-    const root_id: FrameNodeId = @enumFromInt(4);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const hidden_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(4));
     try tree.appendNode(.{
         .id = leaf_id,
         .kind = .{ .label = .{ .text = "hidden" } },
@@ -731,9 +731,9 @@ test "layoutTree dispatches an eligible grid root through modular grid" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_id: FrameNodeId = @enumFromInt(1);
-    const second_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const first_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows = [_]style.GridTrack{.{ .fixed = 10 }};
     try tree.appendNode(.{
@@ -800,9 +800,9 @@ test "layoutTree dispatches a mixed fixed tree through the public facade" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = leaf_id,
         .kind = .{ .spacer = .{} },
@@ -867,12 +867,12 @@ test "layoutTree dispatches an eligible multi-root forest through the facade" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const first_leaf_id: FrameNodeId = @enumFromInt(1);
-    const first_flex_id: FrameNodeId = @enumFromInt(2);
-    const first_root_id: FrameNodeId = @enumFromInt(3);
-    const second_leaf_id: FrameNodeId = @enumFromInt(4);
-    const second_flex_id: FrameNodeId = @enumFromInt(5);
-    const second_root_id: FrameNodeId = @enumFromInt(6);
+    const first_leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const first_flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const first_root_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const second_leaf_id: FrameNodeId = @fromBackingInt(@intCast(4));
+    const second_flex_id: FrameNodeId = @fromBackingInt(@intCast(5));
+    const second_root_id: FrameNodeId = @fromBackingInt(@intCast(6));
     for ([_]struct {
         id: FrameNodeId,
         parent: FrameNodeId,
@@ -994,9 +994,9 @@ test "layoutTree dispatches a mixed auto-height block root" {
     var tree = widget.WidgetTree.init(std.testing.allocator);
     defer tree.deinit();
 
-    const leaf_id: FrameNodeId = @enumFromInt(1);
-    const flex_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     try tree.appendNode(.{
         .id = leaf_id,
         .kind = .{ .spacer = .{} },
@@ -1077,8 +1077,8 @@ test "layoutTree reserves RTL vertical scrollbar gutter" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .spacer = .{} },
@@ -1133,8 +1133,8 @@ test "layoutTree grows capped minmax track to natural width" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const columns = [_]style.GridTrack{.{ .minmax = .{
         .min = .{ .fixed = 10 },
         .max = .{ .fit_content = .{ .percent = 0.5 } },
@@ -1188,8 +1188,8 @@ test "layoutTree floors fit-content maximum at fixed minimum" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const columns = [_]style.GridTrack{.{ .minmax = .{
         .min = .{ .fixed = 60 },
         .max = .{ .fit_content = .{ .percent = 0.5 } },
@@ -1242,7 +1242,7 @@ test "layoutTree rejects invalid scrollbar width" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const root_id: FrameNodeId = @enumFromInt(1);
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(1));
     try tree.appendNode(.{
         .id = root_id,
         .kind = .{ .column = .{} },
@@ -1276,8 +1276,8 @@ test "layoutTree keeps content-box scrollbar outer width fixed" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .spacer = .{} },
@@ -1325,8 +1325,8 @@ test "layoutTree keeps flex content-box scrollbar outer width fixed" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .spacer = .{} },
@@ -1377,8 +1377,8 @@ test "layoutTree keeps grid content-box scrollbar outer width fixed" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     const columns = [_]style.GridTrack{.{ .fr = 1 }};
     const rows = [_]style.GridTrack{.{ .fixed = 20 }};
 
@@ -1428,8 +1428,8 @@ test "layoutTree contains scrollbar gutter inside content-box flex basis" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
     try tree.appendNode(.{
         .id = child_id,
         .kind = .{ .spacer = .{} },
@@ -1481,11 +1481,11 @@ test "layoutTree preserves padded nested scroll grid content origins" {
     defer tree.deinit();
 
     var grid_scroll_state: widget.ScrollState = .{};
-    const first_leaf_id: FrameNodeId = @enumFromInt(1);
-    const second_leaf_id: FrameNodeId = @enumFromInt(2);
-    const grid_id: FrameNodeId = @enumFromInt(3);
-    const flex_id: FrameNodeId = @enumFromInt(4);
-    const root_id: FrameNodeId = @enumFromInt(5);
+    const first_leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const second_leaf_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const grid_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const flex_id: FrameNodeId = @fromBackingInt(@intCast(4));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(5));
     const columns = [_]style.GridTrack{ .{ .fixed = 20 }, .{ .fixed = 20 } };
     const rows = [_]style.GridTrack{.{ .fixed = 100 }};
 
@@ -1651,8 +1651,8 @@ test "layoutTree measures negative RTL flex overflow from both border edges" {
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const child_id: FrameNodeId = @enumFromInt(1);
-    const root_id: FrameNodeId = @enumFromInt(2);
+    const child_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(2));
 
     try tree.appendNode(.{
         .id = child_id,
@@ -1717,11 +1717,11 @@ test "layoutTree propagates visible nested overflow but clips hidden descendants
     defer tree.deinit();
 
     var scroll_state: widget.ScrollState = .{};
-    const visible_leaf_id: FrameNodeId = @enumFromInt(1);
-    const visible_container_id: FrameNodeId = @enumFromInt(2);
-    const hidden_leaf_id: FrameNodeId = @enumFromInt(3);
-    const hidden_container_id: FrameNodeId = @enumFromInt(4);
-    const root_id: FrameNodeId = @enumFromInt(5);
+    const visible_leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const visible_container_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const hidden_leaf_id: FrameNodeId = @fromBackingInt(@intCast(3));
+    const hidden_container_id: FrameNodeId = @fromBackingInt(@intCast(4));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(5));
 
     try tree.appendNode(.{
         .id = visible_leaf_id,
@@ -1839,9 +1839,9 @@ test "layoutTree retains measured content on clipped scroll leaves" {
     var hidden_state: widget.ScrollState = .{};
     var scroll_state: widget.ScrollState = .{};
     var root_state: widget.ScrollState = .{};
-    const hidden_leaf_id: FrameNodeId = @enumFromInt(1);
-    const scroll_leaf_id: FrameNodeId = @enumFromInt(2);
-    const root_id: FrameNodeId = @enumFromInt(3);
+    const hidden_leaf_id: FrameNodeId = @fromBackingInt(@intCast(1));
+    const scroll_leaf_id: FrameNodeId = @fromBackingInt(@intCast(2));
+    const root_id: FrameNodeId = @fromBackingInt(@intCast(3));
     const text = "12345678901234567890";
 
     try tree.appendNode(.{

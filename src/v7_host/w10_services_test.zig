@@ -59,7 +59,7 @@ test "api-w10 physical shortcut label reads active SDL layout without a US key t
     const expected = sdl3.keyboard.getKeyName(logical) orelse return error.MissingKeyName;
     const owned_expected = try std.testing.allocator.dupe(u8, expected);
     defer std.testing.allocator.free(owned_expected);
-    const label = service.shortcutLabel(@intFromEnum(code), .none) orelse
+    const label = service.shortcutLabel(@backingInt(code), .none) orelse
         return error.MissingShortcutLabel;
     try std.testing.expectEqualStrings(owned_expected, label);
     const shifted: sdl3.keycode.KeyModifier = .{ .left_shift = true };
@@ -71,7 +71,7 @@ test "api-w10 physical shortcut label reads active SDL layout without a US key t
     defer std.testing.allocator.free(shifted_copy);
     try std.testing.expectEqualStrings(
         shifted_copy,
-        service.shortcutLabel(@intFromEnum(sdl3.Scancode.one), shifted) orelse
+        service.shortcutLabel(@backingInt(sdl3.Scancode.one), shifted) orelse
             return error.MissingShiftedLabel,
     );
     try std.testing.expect(service.shortcutLabel(std.math.maxInt(u32), .none) == null);

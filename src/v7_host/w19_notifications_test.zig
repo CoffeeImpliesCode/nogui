@@ -814,7 +814,7 @@ test "api-w19 dbus close answered with something that is not a frame is a protoc
             // Bytes that are not a D-Bus frame at all. A reply that cannot be
             // read is not a close the daemon accepted and not a close it
             // refused, so it is named as the protocol failure it is.
-            const garbage = [_]u8{0xaa} ** 64;
+            const garbage: [64]u8 = @splat(0xaa);
             try s_conn.sendRaw(&garbage);
         }
     };

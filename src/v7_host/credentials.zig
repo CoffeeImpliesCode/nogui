@@ -737,7 +737,7 @@ pub const MockCredentialProvider = struct {
     }
 
     fn makeKey(allocator: std.mem.Allocator, query: CredentialQuery) ![]u8 {
-        const key = try std.fmt.allocPrint(allocator, "{s}:{s}:{s}", .{
+        const key = try allocator.print("{s}:{s}:{s}", .{
             query.collection orelse "default",
             query.service,
             query.account,
