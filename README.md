@@ -101,9 +101,9 @@ See the [standalone consumers](examples/consumers/README.md) for complete packag
 ## Reference
 
 - [API guide](docs/API.md): entry points, lifetimes, and native-service limits.
-- [Core design](docs/superpowers/specs/2026-08-22-v7-canonical-design.md): identity, frame publication, and GPU lifetime.
-- [Layout design](docs/superpowers/specs/2026-08-24-taffy-functional-parity-design.md): geometry and fixture provenance.
-- [Performance protocol](docs/superpowers/specs/2026-08-30-debug-120-calibration-threshold-design.md): measurement profiles and calibration.
+- [Core design](docs/design/architecture.md): identity, frame publication, and GPU lifetime.
+- [Layout design](docs/design/layout.md): geometry and fixture provenance.
+- [Performance protocol](docs/design/performance.md): measurement profiles and calibration.
 
 `src/v7` contains the core. `src/v7_text`, `src/v7_render`, `src/v7_frame`, and
 `src/v7_host` contain the text, renderer, frame, and host modules.

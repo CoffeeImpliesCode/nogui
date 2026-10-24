@@ -4,8 +4,8 @@
 
 `nogui` exports tree construction, typed state, input, styles, layout, and component lifecycle contracts from `src/v7/root.zig`.
 The text, renderer, frame, and host modules provide separate dependency products.
-The [README](../../../README.md#use-as-a-dependency) lists these products.
-The [API guide](../../API.md) describes their public entry points and lifetimes.
+The [README](../../README.md#use-as-a-dependency) lists these products.
+The [API guide](../API.md) describes their public entry points and lifetimes.
 
 Headless App frames create no GPU runtime.
 Graphical hosts use `GpuEndpoint` and `GpuFrame` to connect component hooks to noapi.

@@ -1,5 +1,5 @@
 //! Canonical v7 module root — DrawCtx, components, and headless runtime.
-//! See docs/superpowers/specs/2026-08-22-v7-canonical-design.md.
+//! See docs/design/architecture.md.
 const std = @import("std");
 const noapi = @import("noapi");
 const perf_counters = @import("perf_counters.zig");
