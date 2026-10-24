@@ -1530,7 +1530,12 @@ test "api-w20 the entry-point table cannot be built half resolved" {
     try std.testing.expectEqual(api_info.field_names.len, pipewire.Api.symbols.len);
     // Field types are comptime data, so the walk over them is
     // unrolled rather than indexed at runtime.
-    inline for (api_info.field_names, api_info.field_types, api_info.field_attrs, pipewire.Api.symbols) |field_name, field_type, field_attrs, name| {
+    inline for (
+        api_info.field_names,
+        api_info.field_types,
+        api_info.field_attrs,
+        pipewire.Api.symbols,
+    ) |field_name, field_type, field_attrs, name| {
         try std.testing.expectEqualStrings(field_name, name);
         // A field with a default would let a table be built by omission, and
         // that omission is exactly the partial table nothing may observe.

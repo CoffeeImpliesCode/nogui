@@ -321,7 +321,10 @@ pub const MessageParser = struct {
             const sig = fields_slice[f_idx .. f_idx + sig_len];
             f_idx += sig_len + 1; // skip null
 
-            const code: ?HeaderField = if (code_raw >= 1 and code_raw <= 9) @fromBackingInt(@intCast(code_raw)) else null;
+            const code: ?HeaderField = if (code_raw >= 1 and code_raw <= 9)
+                @fromBackingInt(@intCast(code_raw))
+            else
+                null;
 
             if (std.mem.eql(u8, sig, "s") or std.mem.eql(u8, sig, "o")) {
                 const str_pad = padLen(f_idx, 4);
