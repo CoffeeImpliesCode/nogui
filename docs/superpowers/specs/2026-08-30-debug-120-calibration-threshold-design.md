@@ -1,64 +1,64 @@
-# Debug 120 FPS Calibration Threshold Design
+# Performance measurement protocol
 
-## Status
+`tools/run_v7_perf.py` uses the Python standard library.
+It records runtime identity, instrumentation profiles, raw samples, and manifest hashes.
+Measurements from different profiles must remain separate.
+CPU compute times exclude GPU waits and do not measure presentation intervals.
 
-Approved on 2026-08-30.
+## Commands and profiles
 
-### Current implementation note (2026-09-09)
+| Subcommand | Purpose |
+| --- | --- |
+| `snapshot` | Build and freeze one instrumentation profile. |
+| `calibrate` | Select warm-up frames across all scenes. |
+| `matrix` | Collect a multi-profile baseline. |
+| `pair` | Compare distinct frozen baseline and candidate manifests. |
+| `qualify` | Run the fixed qualification protocol. |
 
-`tools/run_v7_perf.py` implements the exact 12% rule, the sustained-boundary selector, and the `capped_unstable` manifest contract in this design. The Python protocol tests pass all 125 tests.
+Use the subcommand help for arguments, for example:
 
-The Debug aggregate gate passes 55 of 55 steps and 970 of 970 tests. The ReleaseSafe aggregate gate passes 48 of 48 steps and 970 of 970 tests. An offscreen smoke passes 24 frames and 20 samples with exact CPU stage sums. It records the actual GPU identity as GTX 1660 Ti, NVIDIA, vendor 4318, device 8593.
+```sh
+python3 tools/run_v7_perf.py calibrate --help
+python3 tools/run_v7_perf.py matrix --help
+```
 
-The presented smoke passes 24 ordered frames and 20 complete samples with positive intervals. It records actual driver `595.99.02`. A real Tracy capture and CSV aggregation pass with 20 sample roots.
+| Profile | Tracy | GPU timestamps | Mechanism counters |
+| --- | --- | --- | --- |
+| `clean` | false | false | false |
+| `tracy` | true | false | false |
+| `gpu` | false | true | false |
+| `mechanism` | false | false | true |
 
-Fresh calibration completed with `capped_unstable` and 2,400 warm-up frames. Only Strokes sustained the rule, at frame 1,920; the other four scenes had null boundaries. The full baseline was stopped after reported throughput near 1 FPS. Partial captures are diagnostic evidence, not an accepted baseline. No result here proves 120 FPS.
+The corresponding build options are `v7-tracy`, `v7-gpu-timestamps`, and `v7-perf-counters`.
+Use fresh output paths. The runner rejects stale or inconsistent artifacts.
+A paired comparison requires a positive, even block count.
+The qualification protocol requires 300 blocks and 1,000 frames for each of five scenes.
+Calibration does not establish a frame-rate qualification.
 
-## Problem
+## Warm-up selection
 
-The original calibration rule allowed a 2% spread between three 120-frame window medians.
-
-Five complete calibration attempts failed this rule. The attempts used default affinity, fixed affinity, and isolated CPU scopes. One attempt also moved the main codedb process away from the measurement cores.
-
-A mechanism run showed stable work counts after frame 600. The clean CPU variation came mainly from the app and layout stage. GPU execution also varied without a frame trend. The evidence does not show cache growth or a changing workload.
-
-The final exact run exceeded 2% at every clean CPU boundary. At boundary 2160, these spreads were present:
-
-- Clean CPU: 3.191%
-- GPU-profile CPU: 0.957%
-- GPU execution: 3.896%
-
-The 2% rule cannot produce a baseline on this host.
-
-A fresh 10% calibration also failed. Its last two GPU spreads were 10.869% and 10.889%. The clean CPU spreads were below 4% at those boundaries.
-
-## Decision
-
-Change the maximum spread from 2% to 12%.
-
-Keep all other calibration rules unchanged:
-
-- Use three disjoint 120-frame windows.
-- Test boundaries from frame 600 through frame 2160.
-- Use a 120-frame boundary step.
-- Require the selected boundary and all later boundaries to pass.
-- Add a 240-frame guard to the latest selected boundary.
-- Cap the warm-up at 2400 frames.
-- If any scene has no sustained boundary, use the capped-unstable fallback.
-
-The tool must use integer arithmetic. A triplet passes when:
+Calibration records 2,400 diagnostic frames per scene and profile.
+It tests boundaries from frame 600 through frame 2,160, in 120-frame steps.
+Each boundary compares three disjoint 120-frame window medians.
+The integer stability rule is:
 
 ```text
 (maximum_median - minimum_median) * 10000 <= minimum_median * 1200
 ```
 
-The 12% rule changes warm-up selection only. It does not change the 120 FPS budget or any qualification threshold.
+This permits a 12% spread.
+A zero minimum passes only when every median is zero.
+A selected boundary and all later boundaries must pass.
 
-The fallback sets the global warm-up to 2400 frames. It does not claim that the host became stable. The matrix can run, but all reports must keep the unstable status.
+If every scene has a sustained boundary, selection adds 240 guard frames to the latest boundary.
+The warm-up cannot exceed 2,400 frames.
+If any scene lacks a sustained boundary, selection uses 2,400 frames and records `capped_unstable`.
+That status records instability at the cap. It must remain visible in later reports.
+The rule selects warm-up only and does not change frame budgets.
 
-## Manifest contract
+## Manifest format
 
-The warm-up manifest must contain this required object:
+A capped manifest contains this rule:
 
 ```json
 {
@@ -77,48 +77,12 @@ The warm-up manifest must contain this required object:
 }
 ```
 
-The parser must reject a missing or different rule. `stability_status` must be `sustained` or `capped_unstable`. A capped manifest must use 2400 warm-up frames and contain at least one scene with a null boundary. The baseline report must copy the status and rule, then reference the warm-up manifest hash.
+The parser rejects missing or different rules.
+`stability_status` is `sustained` or `capped_unstable`.
+A capped manifest must use 2,400 warm-up frames and contain a scene with a null boundary.
+A sustained manifest cannot contain a null boundary.
+The baseline report copies the status and rule and references the warm-up manifest hash.
 
-Raw diagnostic files remain unchanged. Their hashes continue to identify the source measurements.
-
-## Data flow
-
-1. The calibration runner creates fresh clean and GPU diagnostic blocks.
-2. The strict raw parser validates both blocks.
-3. The calibration code computes each triplet with the 12% rule.
-4. The sustained-boundary selector returns one boundary or null for each scene.
-5. If all scenes have boundaries, the selector adds the fixed guard to the latest boundary.
-6. If any scene has a null boundary, the selector uses 2400 frames and marks the run capped-unstable.
-7. The runner writes `warmup.json` with the status, full rule, boundary spreads, and all raw hashes.
-8. The matrix validates the status and rule before it starts any process block.
-9. The baseline report copies the status and rule, then references all source hashes.
-
-A child, parser, identity, or artifact failure must not create `warmup.json`. A missing sustained boundary is not hidden as success. It creates a valid capped-unstable manifest. The matrix must not accept a malformed or old manifest.
-
-## Verification
-
-Add tests for these cases:
-
-- A spread below 12% passes.
-- A spread equal to 12% passes.
-- A spread above 12% fails.
-- A zero minimum passes only when all three medians are zero.
-- One later unstable boundary rejects an earlier stable boundary.
-- The manifest parser rejects the former 2% rule.
-- The manifest parser rejects a missing rule.
-- The matrix copies the exact accepted rule into its report.
-- A missing scene boundary selects 2400 frames and `capped_unstable`.
-- A capped manifest without a null boundary is rejected.
-- A sustained manifest with a null boundary is rejected.
-
-Run calibration from scratch after the code change. Do not reuse the five failed diagnostics as accepted data.
-
-Run the full matrix only after the new calibration writes a valid sustained or capped-unstable manifest.
-
-## Non-goals
-
-- Do not change the window size or window count.
-- Do not remove the sustained-stability requirement.
-- Do not change the 2400-frame cap.
-- Do not change frame budgets or candidate acceptance rules.
-- Do not hide host variance from the baseline report.
+A child-process, parser, runtime-identity, or artifact failure must not produce a warm-up manifest.
+A missing sustained boundary produces a valid capped-unstable manifest instead.
+Raw file hashes identify the measurements that produced the manifest.
