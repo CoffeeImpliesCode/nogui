@@ -488,8 +488,8 @@
   {
    "path": "build.zig.zon",
    "original_sha256": "3d47c675b7f189ffbd315727738090b9cd465772ab52dcbe96cfeb5ea039f73e",
-   "current_sha256": "e4bc5e3342ebf6a323c2c081b2b54f888cb2540337af991742e8abb639a28011",
-   "reason": "Mark the sdl3 dependency lazy so the library-only build stops before it is fetched or built; include the MIT grant authorized by the owner on 2026-10-02. Port to Zig 0.17.0."
+   "current_sha256": "167ee65f6514a60b99a4999ba9368c53a6385e927bc92613977ff0de053d0df9",
+   "reason": "Mark the sdl3 dependency lazy so the library-only build stops before it is fetched or built. Package the MIT license, third-party notices, and generated sky asset source. Port to Zig 0.17.0."
   },
   {
    "path": "examples/2_textures/main.zig",
@@ -512,8 +512,8 @@
   {
    "path": "examples/7_deferred_async_load/main.zig",
    "original_sha256": "4d5cbc7f652957d000dd94b4e2c898fadd55cc26fa7ba3d8b89eedf03bd4b3b5",
-   "current_sha256": "03c8cefbc2cfa455ccf03d013e8a23c16b39705d7128d45b9ba2c76bd5dc8a45",
-   "reason": "Port to Zig 0.17.0."
+   "current_sha256": "17f6dc5899c99749bb6cf8c20220d950a755e11ad4022c8ff6c075f1a086e8cb",
+   "reason": "Port to Zig 0.17.0. Load the newly authored shaders/sky.ppm asset instead of the image with unknown provenance."
   },
   {
    "path": "examples/common.zig",
@@ -570,12 +570,17 @@
    "reason": "Use drawIndexed with buffer-owned index format and migrate every native surface creation to Surface.initSdl. Port to Zig 0.17.0."
   }
  ],
- "content_digest": "a7f734682706555be6e4073928d782d0ab0a1a59477f0e7402b6aed7e8a8205c",
+ "content_digest": "3d6a848183fee51d587ce7c6b7d6cd7cad4d1efadf16b3474c402adb9641bc77",
  "files": [
   {
    "path": "LICENSE",
    "size": 1071,
    "sha256": "9061ae3e48ccfbd1841de23b3350d6f0618e72225740aad79786fc74d88035b8"
+  },
+  {
+   "path": "THIRD_PARTY_NOTICES.md",
+   "size": 2219,
+   "sha256": "a5776eee2212d443df12dce28610c71898b35d8f10064a660541f5bae429994b"
   },
   {
    "path": "build.zig",
@@ -584,8 +589,8 @@
   },
   {
    "path": "build.zig.zon",
-   "size": 768,
-   "sha256": "e4bc5e3342ebf6a323c2c081b2b54f888cb2540337af991742e8abb639a28011"
+   "size": 830,
+   "sha256": "167ee65f6514a60b99a4999ba9368c53a6385e927bc92613977ff0de053d0df9"
   },
   {
    "path": "examples/1_triangle/main.zig",
@@ -620,7 +625,7 @@
   {
    "path": "examples/7_deferred_async_load/main.zig",
    "size": 26294,
-   "sha256": "03c8cefbc2cfa455ccf03d013e8a23c16b39705d7128d45b9ba2c76bd5dc8a45"
+   "sha256": "17f6dc5899c99749bb6cf8c20220d950a755e11ad4022c8ff6c075f1a086e8cb"
   },
   {
    "path": "examples/common.zig",
@@ -863,11 +868,6 @@
    "sha256": "b50db56edb40df54f6386e9f894d89b5275111efc259651e891bc8dd5495847f"
   },
   {
-   "path": "shaders/env.ppm",
-   "size": 393278,
-   "sha256": "4ca7ab74f0f637214e4af273321994213d6edff6137e08edb1fdc1d4e936c576"
-  },
-  {
    "path": "shaders/final_pass.frag",
    "size": 3718,
    "sha256": "20a8d05dae03bb2892e6b1ca1aa4dbd4318daad5e0d0d5ea156e76aec611522f"
@@ -978,6 +978,11 @@
    "sha256": "202823fc1b73f83ccc435a48f56f7de99bd821896fb2ee056777229d9183fa60"
   },
   {
+   "path": "shaders/sky.ppm",
+   "size": 393231,
+   "sha256": "c8a88c9312610467fd1bd2942ee31aa8f85a58b84f337a3b69323d698b12ca49"
+  },
+  {
    "path": "shaders/slang.spv",
    "size": 90116,
    "sha256": "1f00431fa1e13726ef57fcc9cb3855c51d3febacf045a5251d0aea186ccaa109"
@@ -1036,6 +1041,22 @@
    "path": "test/main.zig",
    "size": 38206,
    "sha256": "e1c897ca30ad15e5b6dbc872eeb5539ff2d33032ea9d57e74e1b03ce9a59d8c8"
+  },
+  {
+   "path": "tools/gen_sky.py",
+   "size": 1058,
+   "sha256": "3bf194be909171b1bb7b7d5565a25007bc98af61dc1fd7e42ef0f016f3946ac1"
+  }
+ ],
+ "removed_files": [
+  {
+   "path": "shaders/env.ppm",
+   "original_sha256": "4ca7ab74f0f637214e4af273321994213d6edff6137e08edb1fdc1d4e936c576",
+   "reason": "Unknown source and license. Excluded from the current vendored tree and package. The upstream_files entry records the historical snapshot only.",
+   "replacement": "shaders/sky.ppm",
+   "generator": "tools/gen_sky.py",
+   "replacement_license": "MIT",
+   "replacement_copyright": "Copyright (c) 2026 Janis Gertulla"
   }
  ]
 }

@@ -639,7 +639,7 @@ fn createSolidColorTexture(gpu: *noapi.Gpu, rgba: *const [4]u8) !noapi.Texture {
 /// Load a PPM P6 file from disk and upload as a GPU texture.
 /// Returns the descriptor heap index.
 fn loadEnvMap(gpa: std.mem.Allocator, io: Io, gpu: *noapi.Gpu, pool: *DescriptorPool, samp_handle: u64) !u32 {
-    const bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/env.ppm", gpa, .unlimited);
+    const bytes = try Io.Dir.cwd().readFileAlloc(io, "shaders/sky.ppm", gpa, .unlimited);
     defer gpa.free(bytes);
 
     // Parse P6 header with optional comment lines
