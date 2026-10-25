@@ -64,6 +64,7 @@
         "build.zig.zon",
         "README.md",
         "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
         "src/main.zig",
         "src/glyph_test.zig",
         "src/InterVariable.ttf",
@@ -154,12 +155,14 @@
         "examples/consumers/offscreen/main.zig",
         "vendor/noapi-provenance.json",
         "vendor/noapi/LICENSE",
+        "vendor/noapi/THIRD_PARTY_NOTICES.md",
         "vendor/noapi/build.zig",
         "vendor/noapi/build.zig.zon",
         "vendor/noapi/noapi",
         "vendor/noapi/test",
         "vendor/noapi/examples",
         "vendor/noapi/shaders",
+        "vendor/noapi/tools/gen_sky.py",
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

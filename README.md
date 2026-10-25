@@ -117,9 +117,4 @@ Native clipboard changes, dialogs, URL launches, credentials, and capture requir
 
 ## License
 
-Original nogui code uses the [MIT license](LICENSE).
-Original vendored noapi code uses its [MIT license](vendor/noapi/LICENSE).
-Dependency and bundled-font licenses remain separate and unchanged.
-The bundled fonts retain the [Inter](src/Inter-LICENSE.txt),
-[DejaVu](src/DejaVu-LICENSE.txt), [Fira Code](src/FiraCode-LICENSE.txt), and
-[Nerd Fonts](src/NerdFonts-LICENSE.txt) notices.
+MIT, see [LICENSE](LICENSE). Third-party components keep their own licenses: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

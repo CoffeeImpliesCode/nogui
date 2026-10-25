@@ -18,6 +18,8 @@
         "build.zig",
         "build.zig.zon",
         "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "tools/gen_sky.py",
         "noapi",
         "test",
         "shaders",
