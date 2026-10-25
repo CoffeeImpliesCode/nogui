@@ -11,9 +11,11 @@ Experimental. The API is unstable, and cross-platform runtime support is incompl
 - For graphics: Vulkan headers, loader, driver, and validation layers.
 - For shader compilation: `slangc`. The demos and `check` step require it.
 - For the Linux host: Wayland/X11, libxkbcommon, udev, ALSA, libdecor, and libusb.
-- For the full demo build: FFmpeg development libraries.
-- For native accessibility: Cargo, rustc, and AT-SPI2 on Linux.
+- For the full demo build and project tests: FFmpeg development headers and libraries
+  (`libavformat`, `libavcodec`, `libavutil`, `libswresample`, and `libswscale`).
+- For native accessibility: Cargo, rustc, a C compiler, and AT-SPI2 on Linux.
 - For CPU text: FriBidi and utf8proc development libraries.
+- For SVG/JPEG rendering and tests: librsvg, Cairo, GLib/GObject, and libjpeg-turbo.
 - For tooling: Python 3, `ziglint`, and `zlint`.
 
 The package manager supplies SDL3, FreeType, HarfBuzz, and Tracy.
