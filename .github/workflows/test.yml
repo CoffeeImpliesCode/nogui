@@ -34,6 +34,16 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.17.0
+      - name: Install Slang shader compiler
+        run: |
+          curl -fL --output "$RUNNER_TEMP/slang.tar.gz" \
+            https://github.com/shader-slang/slang/releases/download/v2026.20/slang-2026.20-linux-x86_64-glibc-2.28.tar.gz
+          printf '84ebd777968caceea26b21bfd014341078be6047be6c5a963a69f984f896cebd  %s\n' \
+            "$RUNNER_TEMP/slang.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/slang"
+          tar -xzf "$RUNNER_TEMP/slang.tar.gz" -C "$RUNNER_TEMP/slang"
+          echo "$RUNNER_TEMP/slang/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/slang/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - run: zig fmt --check src build.zig build.zig.zon
       - name: Fetch native accessibility dependencies
         run: cargo fetch --locked --manifest-path src/v7_host/accesskit_bridge/Cargo.toml
