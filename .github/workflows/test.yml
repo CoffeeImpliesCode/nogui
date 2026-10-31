@@ -15,8 +15,10 @@ jobs:
             libavutil-dev \
             libdecor-0-dev \
             libfribidi-dev \
+            librsvg2-2 \
             libswresample-dev \
             libswscale-dev \
+            libturbojpeg \
             libudev-dev \
             libusb-1.0-0-dev \
             libutf8proc-dev \
@@ -33,6 +35,8 @@ jobs:
         with:
           version: 0.17.0
       - run: zig fmt --check src build.zig build.zig.zon
+      - name: Fetch native accessibility dependencies
+        run: cargo fetch --locked --manifest-path src/v7_host/accesskit_bridge/Cargo.toml
       - run: zig build test
       - run: zig build check
       - run: zig build layout-check
