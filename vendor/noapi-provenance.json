@@ -564,13 +564,19 @@
    "reason": "Track per-window frame recording state and add abortFrame and commandsCancel, so an unfinished frame or an unsent offscreen command buffer is discarded instead of resubmitted and a duplicate frame call fails with FrameAlreadyActive or SurfaceFrameUnrecoverable; mirror pixel_scale in the graphics push constants with comptime layout asserts, keep command buffer ownership with the caller when submission fails, report software rasterizers through GpuInfo.software_emulation, and release partial window resources on failed surface adoption while leaving platform-surface ownership with the caller; include draw_indirect_bit alongside indirect_command_read_bit for draw_arguments hazards; report swapchain_recreated only after an actual rebuild, re-arm suboptimal acquisition, and keep every changed pixel extent pending without a two-frame resize throttle; log the bounded device-name slice rather than its zero-padded Vulkan property buffer. Additionally: cached image views are now deferred into the same pending_free drain that protects their image, instead of being destroyed eagerly while the descriptor still names them. Port to Zig 0.17.0."
   },
   {
+   "path": "shaders/slang.spv",
+   "original_sha256": "1f00431fa1e13726ef57fcc9cb3855c51d3febacf045a5251d0aea186ccaa109",
+   "current_sha256": "b2aca6a002922c1f028796b71fab33926c58e08e76cb10a4ae540b20cd775097",
+   "reason": "Record the committed SPIR-V artifact changed by a82f8253f6dc8245925c5a6fca9e7dc06ab61ae1; retain the original upstream artifact digest in upstream_files."
+  },
+  {
    "path": "test/main.zig",
    "original_sha256": "a0ff738a3cb20d26f9e48bb9a9d6418f12bcb37d609c8060c725a206792eadad",
    "current_sha256": "e1c897ca30ad15e5b6dbc872eeb5539ff2d33032ea9d57e74e1b03ce9a59d8c8",
    "reason": "Use drawIndexed with buffer-owned index format and migrate every native surface creation to Surface.initSdl. Port to Zig 0.17.0."
   }
  ],
- "content_digest": "3d6a848183fee51d587ce7c6b7d6cd7cad4d1efadf16b3474c402adb9641bc77",
+ "content_digest": "23eed18313314d1c86c9e512643859e49a14e21a1cb87c4e52f900643b009b3b",
  "files": [
   {
    "path": "LICENSE",
@@ -985,7 +991,7 @@
   {
    "path": "shaders/slang.spv",
    "size": 90116,
-   "sha256": "1f00431fa1e13726ef57fcc9cb3855c51d3febacf045a5251d0aea186ccaa109"
+   "sha256": "b2aca6a002922c1f028796b71fab33926c58e08e76cb10a4ae540b20cd775097"
   },
   {
    "path": "shaders/tex_frag.frag",
