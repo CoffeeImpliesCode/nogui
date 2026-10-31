@@ -14,10 +14,12 @@ jobs:
             libavformat-dev \
             libavutil-dev \
             libdecor-0-dev \
+            libfribidi-dev \
             libswresample-dev \
             libswscale-dev \
             libudev-dev \
             libusb-1.0-0-dev \
+            libutf8proc-dev \
             libvulkan-dev \
             libwayland-dev \
             libx11-dev \
